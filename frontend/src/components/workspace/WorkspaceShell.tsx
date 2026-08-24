@@ -16091,6 +16091,14 @@ const draftCloseDiscardActionButtonClass =
   "inline-flex h-8 items-center justify-center rounded-full border border-[color:rgba(146,82,73,0.34)] bg-[linear-gradient(180deg,rgba(170,103,93,0.96),rgba(138,76,67,0.98))] px-3.5 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[color:rgba(255,248,244,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_8px_18px_rgba(123,70,61,0.14)] transition-[background-color,border-color,color,transform,box-shadow] duration-150 hover:border-[color:rgba(132,72,64,0.42)] hover:bg-[linear-gradient(180deg,rgba(156,91,82,0.98),rgba(126,67,60,0.98))] active:scale-[0.99] focus-visible:outline-none";
 const draftCloseCancelActionButtonClass =
   "inline-flex h-8 items-center justify-center rounded-full border border-transparent bg-transparent px-3.5 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)] transition-[color,transform] duration-150 hover:text-[var(--workspace-text-soft)] active:scale-[0.99] focus-visible:outline-none";
+const collaborationCompactPrimaryActionButtonClass = mailboxPrimaryActionButtonClass.replace(
+  "h-9 items-center justify-center rounded-full px-4 text-[0.68rem] font-medium uppercase tracking-[0.18em]",
+  "h-8 items-center justify-center rounded-full px-3.5 text-[0.66rem] font-medium uppercase tracking-[0.14em]",
+);
+const collaborationCompactTertiaryActionButtonClass =
+  "inline-flex h-8 items-center justify-center rounded-full border border-transparent bg-transparent px-3.5 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)] transition-[color,transform] duration-150 hover:text-[var(--workspace-text-soft)] active:scale-[0.99] focus-visible:outline-none";
+const collaborationCompactDisabledActionButtonClass =
+  "inline-flex h-8 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3.5 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none";
 
 function MailboxView({
   mailbox,
@@ -28815,11 +28823,17 @@ function MailboxView({
                         {activeCollaborationMessage.subject}
                       </p>
                     </div>
-                    <CloseActionButton onClick={closeCollaborationOverlay} />
+                    <button
+                      type="button"
+                      onClick={closeCollaborationOverlay}
+                      className={mailboxNavigationBackButtonClass}
+                    >
+                      Close
+                    </button>
                   </div>
 
                   <div className="mt-4 min-h-0 flex-1 overflow-y-auto pr-1">
-                    <div className="space-y-5">
+                    <div className="space-y-4">
                       {isPreStartCollaboration ? (
                         <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,var(--workspace-card),var(--workspace-card-subtle))] px-5 py-6">
                           <div className="text-[1rem] font-medium tracking-tight text-[var(--workspace-text)]">
@@ -28843,7 +28857,7 @@ function MailboxView({
                                 onClick={() =>
                                   setIsCollaborationParticipantPickerOpen((current) => !current)
                                 }
-                                className="inline-flex h-8 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3 text-[0.64rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                                className="inline-flex h-7 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 text-[0.62rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
                               >
                                 Manage participants
                               </button>
@@ -29020,7 +29034,7 @@ function MailboxView({
                               onClick={() =>
                                 setIsCollaborationInviteComposerOpen((current) => !current)
                               }
-                              className="inline-flex h-8 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                              className="inline-flex h-7 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 text-[0.62rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
                             >
                               Invite
                             </button>
@@ -29031,7 +29045,7 @@ function MailboxView({
                                 onClick={() =>
                                   setIsCollaborationActionsMenuOpen((current) => !current)
                                 }
-                                className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-faint)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                                className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-faint)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
                               >
                                 ...
                               </button>
@@ -29402,20 +29416,20 @@ function MailboxView({
                         </button>
                       ) : null}
                     </div>
-                    <div className="ml-auto flex flex-wrap items-center justify-end gap-3">
+                    <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
                       {isPreStartCollaboration ? (
                         <>
                           <button
                             type="button"
                             onClick={closeCollaborationOverlay}
-                            className="inline-flex h-10 items-center justify-center rounded-full border border-transparent bg-transparent px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition-[color,transform] duration-150 hover:text-[var(--workspace-text-soft)] active:scale-[0.99] focus-visible:outline-none"
+                            className={collaborationCompactTertiaryActionButtonClass}
                           >
                             Cancel
                           </button>
                           <button
                             type="button"
                             onClick={() => createMessageCollaboration()}
-                            className={`${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`}
+                            className={collaborationCompactPrimaryActionButtonClass}
                           >
                             Start collaboration
                           </button>
@@ -29426,7 +29440,7 @@ function MailboxView({
                           onClick={() => {
                             reopenMessageCollaboration(activeCollaborationMessage.id);
                           }}
-                          className={`${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`}
+                          className={collaborationCompactPrimaryActionButtonClass}
                         >
                           Reopen collaboration
                         </button>
@@ -29439,8 +29453,8 @@ function MailboxView({
                             disabled={!canSendCollaborationReply}
                             className={
                               canSendCollaborationReply
-                                ? `${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`
-                                : "inline-flex h-10 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
+                                ? collaborationCompactPrimaryActionButtonClass
+                                : collaborationCompactDisabledActionButtonClass
                             }
                           >
                             Send reply
@@ -29449,7 +29463,7 @@ function MailboxView({
                             <button
                               type="button"
                               onClick={closeCollaborationOverlay}
-                              className="inline-flex h-10 items-center justify-center rounded-full border border-transparent bg-transparent px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition-[color,transform] duration-150 hover:text-[var(--workspace-text-soft)] active:scale-[0.99] focus-visible:outline-none"
+                              className={collaborationCompactTertiaryActionButtonClass}
                             >
                               Cancel
                             </button>
@@ -29747,6 +29761,10 @@ function WorkbenchView({
   workspacePersistenceKey: string;
   shouldPollTeamMembers: boolean;
 }) {
+  const teamCompactPrimaryActionClass =
+    `inline-flex h-8 items-center justify-center rounded-full px-3.5 text-[0.66rem] font-medium uppercase tracking-[0.14em] ${primaryActionSurfaceClass}`;
+  const teamCompactSecondaryActionClass =
+    "inline-flex h-8 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3.5 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)] active:scale-[0.99] focus-visible:outline-none";
   const content: Record<
     WorkbenchSection,
     {
@@ -30533,7 +30551,7 @@ function WorkbenchView({
                   <button
                     type="button"
                     onClick={() => setIsInviteMemberOpen(true)}
-                    className={closeActionButtonClass}
+                    className={teamCompactPrimaryActionClass}
                   >
                     Invite member
                   </button>
@@ -30916,7 +30934,7 @@ function WorkbenchView({
                 <button
                   type="button"
                   onClick={() => setIsInviteMemberOpen(false)}
-                  className={navigationCloseBackButtonClass}
+                  className={mailboxNavigationBackButtonClass}
                 >
                   Close
                 </button>
@@ -30931,7 +30949,7 @@ function WorkbenchView({
                     <input
                       value={inviteFullName}
                       onChange={(event) => setInviteFullName(event.target.value)}
-                      className="w-full rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.9rem] leading-6 text-[var(--workspace-text-soft)] outline-none"
+                      className="w-full rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-2.5 text-[0.9rem] leading-6 text-[var(--workspace-text-soft)] outline-none"
                     />
                   </label>
 
@@ -30942,7 +30960,7 @@ function WorkbenchView({
                     <input
                       value={inviteEmail}
                       onChange={(event) => setInviteEmail(event.target.value)}
-                      className="w-full rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.9rem] leading-6 text-[var(--workspace-text-soft)] outline-none"
+                      className="w-full rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-2.5 text-[0.9rem] leading-6 text-[var(--workspace-text-soft)] outline-none"
                     />
                   </label>
                 </div>
@@ -30957,7 +30975,7 @@ function WorkbenchView({
                         key={`invite-access-${level}`}
                         type="button"
                         onClick={() => setInviteAccessLevel(level)}
-                        className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
+                        className={`inline-flex h-8 items-center justify-center rounded-full border px-3.5 text-[0.66rem] font-medium uppercase tracking-[0.14em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
                           inviteAccessLevel === level
                             ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
                             : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
@@ -30972,11 +30990,11 @@ function WorkbenchView({
                   </div>
                 </div>
 
-                <div className="mt-6 flex items-center justify-end gap-3">
+                <div className="mt-6 flex items-center justify-end gap-2">
                   <button
                     type="button"
                     onClick={() => setIsInviteMemberOpen(false)}
-                    className={subtleSecondaryActionButtonClass}
+                    className={teamCompactSecondaryActionClass}
                   >
                     Cancel
                   </button>
@@ -30986,8 +31004,8 @@ function WorkbenchView({
                     onClick={() => setActiveTeamConfirmation("invite")}
                     className={
                       canSubmitInvite
-                        ? mailboxPrimaryActionButtonClass
-                        : `${learningModalPrimaryActionButtonClass} cursor-default border-[color:rgba(66,99,69,0.3)] bg-[linear-gradient(180deg,rgba(122,150,122,0.82),rgba(88,116,90,0.82))] text-[color:rgba(251,248,242,0.92)] opacity-60 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_10px_24px_rgba(66,99,69,0.1)]`
+                        ? teamCompactPrimaryActionClass
+                        : `${teamCompactPrimaryActionClass} cursor-default border-[color:rgba(66,99,69,0.3)] bg-[linear-gradient(180deg,rgba(122,150,122,0.82),rgba(88,116,90,0.82))] text-[color:rgba(251,248,242,0.92)] opacity-60 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_10px_24px_rgba(66,99,69,0.1)]`
                     }
                   >
                     Invite
