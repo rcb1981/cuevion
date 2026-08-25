@@ -45,6 +45,145 @@ class ProbeSafetyTests(unittest.TestCase):
         self.assertEqual(report["credentials"], "not_read")
         remote.assert_not_called()
 
+    def test_exact_success_response_continues_normally(self):
+        self.raw.return_value = {"result": "OK"}
+        key = self.namespace.key("success:value")
+        self.assertEqual(self.transport.set_px(key, "synthetic", 30_000), "OK")
+        self.assertEqual(self.budget.command_count, 1)
+        self.assertEqual(self.budget.eval_count, 0)
+
+    def test_safe_storage_envelopes_have_stable_redacted_diagnostics(self):
+        cases = (
+            (
+                {"status": "unavailable", "error": {"code": "storage_unavailable"}},
+                "remote_storage_unavailable",
+            ),
+            (
+                {
+                    "status": "unavailable",
+                    "error": {"code": "storage_protocol_error"},
+                },
+                "remote_storage_protocol_error",
+            ),
+        )
+        for payload, expected in cases:
+            with self.subTest(expected=expected):
+                raw = mock.Mock(return_value=payload)
+                transport = probe.SafeProbeTransport(self.namespace, self.budget, raw)
+                with self.assertRaises(probe.ProbeError) as caught:
+                    transport.get(self.namespace.key(f"failure:{expected}"))
+                self.assertEqual(caught.exception.code, expected)
+                self.assertEqual(str(caught.exception), expected)
+
+    def test_unexpected_top_level_shape_remains_response_shape_invalid(self):
+        marker = "provider-error-body-must-not-surface"
+        self.raw.return_value = {
+            "status": "failed",
+            "providerMessage": marker,
+            "redisValue": "sensitive-value",
+        }
+        with self.assertRaises(probe.ProbeError) as caught:
+            self.transport.get(self.namespace.key("unexpected:shape"))
+        self.assertEqual(caught.exception.code, "response_shape_invalid")
+        self.assertNotIn(marker, str(caught.exception))
+        self.assertNotIn("sensitive-value", str(caught.exception))
+
+    def test_remote_storage_failures_are_inconclusive_and_skip_owner_write(self):
+        for storage_code, diagnostic in (
+            ("storage_unavailable", "remote_storage_unavailable"),
+            ("storage_protocol_error", "remote_storage_protocol_error"),
+        ):
+            observed_commands: list[list[object]] = []
+
+            def raw_factory():
+                def unavailable(command: list[object]):
+                    observed_commands.append(command)
+                    return {
+                        "status": "unavailable",
+                        "error": {"code": storage_code},
+                    }
+
+                return unavailable
+
+            with self.subTest(storage_code=storage_code):
+                report = probe._run_report(
+                    "remote",
+                    probe.ProbeNamespace(RUN_ID),
+                    raw_factory,
+                )
+                self.assertEqual(report["ownerReadVerdict"], "INCONCLUSIVE")
+                self.assertEqual(report["ownerWriteVerdict"], "INCONCLUSIVE")
+                self.assertEqual(
+                    report["transportResults"],
+                    [
+                        {
+                            "name": "transport_sanity",
+                            "category": "owner_read",
+                            "status": "FAIL",
+                            "code": diagnostic,
+                        }
+                    ],
+                )
+                self.assertEqual(report["ttlStatus"], "not_checked_no_confirmed_write")
+                self.assertEqual(report["evalCount"], 0)
+                self.assertFalse(any(command[0] == "EVAL" for command in observed_commands))
+                self.assertFalse(
+                    any(
+                        result["category"] == "owner_write"
+                        for result in report["transportResults"]
+                    )
+                )
+
+    def test_definitive_unexpected_provider_shape_is_incompatible(self):
+        marker = "remote-body-must-stay-redacted"
+
+        def raw_factory():
+            return lambda _command: {"unexpected": marker}
+
+        report = probe._run_report(
+            "remote",
+            probe.ProbeNamespace(RUN_ID),
+            raw_factory,
+        )
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertEqual(report["ownerReadVerdict"], "INCOMPATIBLE")
+        self.assertEqual(report["ownerWriteVerdict"], "INCONCLUSIVE")
+        self.assertEqual(
+            report["transportResults"][0]["code"], "response_shape_invalid"
+        )
+        self.assertNotIn(marker, rendered)
+
+    def test_cleanup_failure_cannot_override_primary_transport_inconclusive(self):
+        calls = 0
+
+        def raw_factory():
+            def raw(_command):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return {
+                        "status": "unavailable",
+                        "error": {"code": "storage_unavailable"},
+                    }
+                return {"unexpected": "cleanup-provider-body"}
+
+            return raw
+
+        report = probe._run_report(
+            "remote",
+            probe.ProbeNamespace(RUN_ID),
+            raw_factory,
+        )
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertEqual(report["ownerReadVerdict"], "INCONCLUSIVE")
+        self.assertEqual(report["ownerWriteVerdict"], "INCONCLUSIVE")
+        self.assertEqual(report["ttlStatus"], "not_checked_no_confirmed_write")
+        self.assertEqual(
+            report["cleanupStatus"],
+            "explicit_cleanup_inconclusive_ttl_fallback_active",
+        )
+        self.assertNotIn("cleanup-provider-body", rendered)
+
     def test_remote_execution_requires_both_independent_guards(self):
         with mock.patch.object(
             probe,
@@ -157,6 +296,8 @@ class ProbeSafetyTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "unapproved_eval_script")
 
     def test_key_and_command_budgets_are_hard_limits(self):
+        self.assertEqual(probe.MAX_REMOTE_COMMANDS, 160)
+        self.assertEqual(probe.MAX_REMOTE_EVAL_CALLS, 96)
         for index in range(probe.MAX_PROBE_KEYS):
             self.namespace.key(f"bounded:{index}")
         with self.assertRaises(probe.ProbeError) as caught:

@@ -117,6 +117,13 @@ _DANGEROUS_COMMANDS = frozenset(
         "SYNC",
     }
 )
+_INCONCLUSIVE_PROBE_CODES = frozenset(
+    {
+        "transport_unavailable",
+        "remote_storage_unavailable",
+        "remote_storage_protocol_error",
+    }
+)
 
 
 class ProbeError(Exception):
@@ -352,11 +359,23 @@ class SafeProbeTransport:
             payload = self._raw_transport(validated)
         except Exception:
             raise ProbeError("transport_unavailable") from None
-        if type(payload) is not dict or set(payload) != {"result"}:
-            raise ProbeError("response_shape_invalid")
-        result = payload["result"]
-        self._budget.record_result(name, result)
-        return result
+        if type(payload) is dict and set(payload) == {"result"}:
+            result = payload["result"]
+            self._budget.record_result(name, result)
+            return result
+        if type(payload) is dict and set(payload) == {"status", "error"}:
+            error = payload.get("error")
+            if (
+                payload.get("status") == "unavailable"
+                and type(error) is dict
+                and set(error) == {"code"}
+            ):
+                code = error.get("code")
+                if code == "storage_unavailable":
+                    raise ProbeError("remote_storage_unavailable")
+                if code == "storage_protocol_error":
+                    raise ProbeError("remote_storage_protocol_error")
+        raise ProbeError("response_shape_invalid")
 
     def set_px(self, key: str, value: str, ttl_milliseconds: int) -> str:
         result = self._dispatch(["SET", key, value, "PX", ttl_milliseconds])
@@ -482,6 +501,7 @@ class CompatibilityProbe:
         self.transport = transport_factory()
         self.budget = budget
         self.results: list[dict[str, str]] = []
+        self.confirmed_write = False
 
     def _case(self, name: str, category: str, callback: Callable[[], None]) -> bool:
         try:
@@ -533,23 +553,25 @@ class CompatibilityProbe:
                     self._append_race,
                 )
 
-        ttl_status = "not_checked"
-        try:
-            self._final_ttl_audit()
-            ttl_status = "bounded_or_expired"
-        except ProbeError as error:
-            ttl_status = error.code
-            read_ok = False
-            write_ok = False
-            self.results.append(
-                {"name": "final_ttl_audit", "category": "safety", "status": "FAIL", "code": error.code}
-            )
+        ttl_status = "not_checked_no_confirmed_write"
+        if self.confirmed_write:
+            try:
+                self._final_ttl_audit()
+                ttl_status = "bounded_or_expired"
+            except ProbeError as error:
+                ttl_status = error.code
+                read_ok = False
+                write_ok = False
+                self.results.append(
+                    {"name": "final_ttl_audit", "category": "safety", "status": "FAIL", "code": error.code}
+                )
         return read_ok, write_ok, ttl_status
 
     def _transport_sanity(self) -> None:
         key = self.namespace.key("transport:value")
         missing = self.namespace.key("transport:missing")
         self.transport.set_px(key, "synthetic", 30_000)
+        self.confirmed_write = True
         _assert_live_ttl(self.transport, key)
         if self.transport.get(key) != "synthetic" or self.transport.get(missing) is not None:
             raise ProbeError("transport_result_mismatch")
@@ -1200,20 +1222,53 @@ def _run_report(
     write_ok = False
     ttl_status = "not_checked"
     cleanup_status = "ttl_only"
+    cleanup_error_code: str | None = None
     try:
         read_ok, write_ok, ttl_status = probe.run()
     finally:
         try:
             safe_factory().cleanup(namespace.registered_keys())
             cleanup_status = "explicit_cleanup_succeeded_with_ttl_fallback"
-        except ProbeError:
+        except ProbeError as error:
             cleanup_status = "explicit_cleanup_inconclusive_ttl_fallback_active"
+            cleanup_error_code = error.code
             read_ok = False
             write_ok = False
 
     failures = [result["name"] for result in probe.results if result["status"] != "PASS"]
     if cleanup_status.startswith("explicit_cleanup_inconclusive"):
         failures.append("cleanup")
+    common_failure_codes = [
+        result["code"]
+        for result in probe.results
+        if result["status"] != "PASS" and result["category"] == "safety"
+    ]
+    if cleanup_error_code is not None:
+        common_failure_codes.append(cleanup_error_code)
+    owner_read_failure_codes = [
+        result["code"]
+        for result in probe.results
+        if result["status"] != "PASS" and result["category"] == "owner_read"
+    ]
+    read_failure_codes = owner_read_failure_codes or common_failure_codes
+    owner_read_verdict = (
+        "OWNER_READ_KV_COMPATIBLE"
+        if read_ok
+        else _failed_compatibility_verdict(read_failure_codes)
+    )
+    owner_write_failure_codes = [
+        result["code"]
+        for result in probe.results
+        if result["status"] != "PASS" and result["category"] == "owner_write"
+    ]
+    write_failure_codes = owner_write_failure_codes or common_failure_codes
+    owner_write_verdict = (
+        "INCONCLUSIVE"
+        if owner_read_verdict != "OWNER_READ_KV_COMPATIBLE"
+        else "OWNER_WRITE_KV_COMPATIBLE"
+        if write_ok
+        else _failed_compatibility_verdict(write_failure_codes)
+    )
     return {
         "probeVersion": PROBE_VERSION,
         "gitCommit": _git_commit(),
@@ -1222,12 +1277,8 @@ def _run_report(
         "utcStart": started_utc,
         "utcEnd": _utc_now(),
         "transportResults": probe.results,
-        "ownerReadVerdict": "OWNER_READ_KV_COMPATIBLE" if read_ok else "INCOMPATIBLE",
-        "ownerWriteVerdict": (
-            "OWNER_WRITE_KV_COMPATIBLE"
-            if write_ok
-            else "INCOMPATIBLE" if read_ok else "INCONCLUSIVE"
-        ),
+        "ownerReadVerdict": owner_read_verdict,
+        "ownerWriteVerdict": owner_write_verdict,
         "failedTests": failures,
         "responseTypes": {
             name: sorted(values) for name, values in sorted(budget.result_types.items())
@@ -1240,6 +1291,14 @@ def _run_report(
         "ttlStatus": ttl_status,
         "cleanupStatus": cleanup_status,
     }
+
+
+def _failed_compatibility_verdict(codes: list[str]) -> str:
+    return (
+        "INCONCLUSIVE"
+        if codes and all(code in _INCONCLUSIVE_PROBE_CODES for code in codes)
+        else "INCOMPATIBLE"
+    )
 
 
 def _safe_error_report(mode: str, run_id: str, code: str) -> dict[str, object]:
