@@ -10,7 +10,7 @@ The owner route accepts exactly POST. `owner_read` permits the authenticated CSR
 
 New owner records use the current account authority's canonical workspace ID. Historical email-as-workspace thread records from the inactive foundation remain decodeable only so their presence fails closed; an active Auth0 owner context cannot authorize or create such a record. Guest invitation/session schemas are not activated by Slice 1A.
 
-Slices 1B and 1C resolve the code and local-Redis proof requirements for owner append retry idempotency/recovery and durable owner rate limiting. Deployment enablement remains blocked until retention is approved and the exact EVAL/Lua/Redis-TIME/response/race/TTL behavior is verified against the production KV service. The repository's isolated real-Redis harness is required local compatibility evidence but is not a substitute for that production-KV verification.
+Slices 1B and 1C resolve the code and local-Redis proof requirements for owner append retry idempotency/recovery and durable owner rate limiting. The operator-only production-KV compatibility probe tooling now exists and is locally validated against genuine isolated Redis, but it has **not** been executed against production. Production KV compatibility therefore remains open, `owner_read` and `owner_write` remain disabled, and any production probe run requires separate explicit authorization. Deployment enablement remains blocked until retention is approved and the exact EVAL/Lua/Redis-TIME/response/race/TTL behavior is verified against the production KV service. The repository's isolated real-Redis harness is required local compatibility evidence but is not a substitute for that production-KV verification.
 
 ## Slice 1B durable owner-append idempotency
 
