@@ -49,6 +49,7 @@ _CANONICAL_UINT_RE = re.compile(r"^(?:0|[1-9][0-9]*)$")
 _RATE_LIMIT_KEY_DOMAIN = "cuevion-collaboration-v2/owner-rate-limit-key/v1"
 _CONFIGURATION_SENTINEL = object()
 _MAX_RATE_LIMIT_RECORD_BYTES = 128
+_OWNER_RATE_LIMIT_EARLY_EXPIRY_TOLERANCE_MS = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,11 +255,15 @@ def build_owner_rate_limit_key(
     return f"{V2_KEY_PREFIX}:owner-rate:{policy.name}:{digest}"
 
 
-_OWNER_RATE_LIMIT_LUA = r"""
+_OWNER_RATE_LIMIT_LUA = (
+    r"""
 if #KEYS ~= 1 or #ARGV ~= 3 then
   return cjson.encode({status='malformed'})
 end
 local MAX_SAFE = 9007199254740991
+local EARLY_EXPIRY_TOLERANCE_MS = """
+    + str(_OWNER_RATE_LIMIT_EARLY_EXPIRY_TOLERANCE_MS)
+    + r"""
 local function keyCount(value)
   local count = 0
   for _, _ in pairs(value) do count = count + 1 end
@@ -324,7 +329,10 @@ if raw then
   local ttlOk, currentTtl = pcall(redis.call, 'PTTL', KEYS[1])
   local maxTtl = math.ceil(maxDebt / 1000) + 1000
   local stateTtl = math.max(1, math.ceil(math.max(0, storedTat - now) / 1000))
-  local minimumStateTtl = math.max(1, stateTtl - 2)
+  local minimumStateTtl = math.max(
+    1,
+    stateTtl - EARLY_EXPIRY_TOLERANCE_MS
+  )
   if not ttlOk or type(currentTtl) ~= 'number' or currentTtl <= 0
     or currentTtl > maxTtl or currentTtl > stateTtl + 1
     or currentTtl < minimumStateTtl then
@@ -347,6 +355,7 @@ local writeOk = pcall(redis.call, 'SET', KEYS[1], candidate, 'PX', ttlMs)
 if not writeOk then return cjson.encode({status='unavailable'}) end
 return cjson.encode({status='allowed'})
 """
+)
 
 
 def consume_owner_rate_limit(

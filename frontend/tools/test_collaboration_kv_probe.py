@@ -4,6 +4,7 @@ import base64
 import contextlib
 import io
 import json
+import time
 import unittest
 from unittest import mock
 
@@ -346,6 +347,335 @@ class ProbeSafetyTests(unittest.TestCase):
         self.assertNotIn("probe@synthetic.invalid", rendered)
         self.assertNotIn("probe-mailbox", rendered)
         self.assertNotIn(TOKEN, rendered)
+
+
+class OwnerRateLimitRealRedisTests(unittest.TestCase):
+    @staticmethod
+    def _command(raw, command: list[object]) -> object:
+        payload = raw(command)
+        if type(payload) is not dict or set(payload) != {"result"}:
+            raise AssertionError("unexpected local Redis response")
+        return payload["result"]
+
+    def _rate(self, raw, key: str, rate_class: str) -> dict[str, object]:
+        policy = owner_rate_limit.owner_rate_limit_policy(rate_class)
+        self.assertIsNotNone(policy)
+        assert policy is not None
+        encoded = self._command(
+            raw,
+            [
+                "EVAL",
+                owner_rate_limit._OWNER_RATE_LIMIT_LUA,
+                1,
+                key,
+                str(policy.emission_interval_microseconds),
+                str(policy.burst),
+                "128",
+            ],
+        )
+        self.assertIsInstance(encoded, str)
+        result = json.loads(encoded)
+        self.assertIsInstance(result, dict)
+        return result
+
+    def _shorten(self, raw, key: str, milliseconds: int) -> None:
+        encoded_record = self._command(raw, ["GET", key])
+        self.assertIsInstance(encoded_record, str)
+        assert type(encoded_record) is str
+        record = json.loads(encoded_record)
+        server_time = self._command(raw, ["TIME"])
+        self.assertIsInstance(server_time, list)
+        assert type(server_time) is list
+        now = (int(server_time[0]) * 1_000_000) + int(server_time[1])
+        remaining_microseconds = max(0, int(record["tatUs"]) - now)
+        state_ttl = max(1, (remaining_microseconds + 999) // 1_000)
+        target = state_ttl - milliseconds
+        self.assertGreater(target, 0)
+        self.assertEqual(self._command(raw, ["PEXPIRE", key, target]), 1)
+        after = self._command(raw, ["PTTL", key])
+        self.assertIsInstance(after, int)
+        assert type(after) is int
+        self.assertGreater(after, 0)
+        self.assertLessEqual(after, target)
+
+    def _canonical_record(
+        self,
+        raw,
+        *,
+        offset_microseconds: int,
+        v_first: bool = True,
+    ) -> str:
+        server_time = self._command(raw, ["TIME"])
+        self.assertIsInstance(server_time, list)
+        assert type(server_time) is list
+        now = (int(server_time[0]) * 1_000_000) + int(server_time[1])
+        tat = str(now + offset_microseconds)
+        if v_first:
+            return '{"v":"1","tatUs":"' + tat + '"}'
+        return '{"tatUs":"' + tat + '","v":"1"}'
+
+    def _set_aligned_skew(self, raw, key: str, milliseconds: int) -> str:
+        server_time = self._command(raw, ["TIME"])
+        self.assertIsInstance(server_time, list)
+        assert type(server_time) is list
+        now_milliseconds = (int(server_time[0]) * 1_000) + (
+            int(server_time[1]) // 1_000
+        )
+        tat_milliseconds = now_milliseconds + 5_000
+        record = (
+            '{"v":"1","tatUs":"'
+            + str(tat_milliseconds * 1_000)
+            + '"}'
+        )
+        self.assertEqual(
+            self._command(raw, ["SET", key, record, "PX", 5_000]),
+            "OK",
+        )
+        self.assertEqual(
+            self._command(
+                raw,
+                ["PEXPIREAT", key, tat_milliseconds - milliseconds],
+            ),
+            1,
+        )
+        return record
+
+    def test_bounded_early_expiry_skew_uses_exact_canonical_lua(self):
+        tolerance = owner_rate_limit._OWNER_RATE_LIMIT_EARLY_EXPIRY_TOLERANCE_MS
+        self.assertEqual(tolerance, 100)
+        namespace = probe.ProbeNamespace(RUN_ID)
+        with probe.LocalRedisServer() as server:
+            raw = server.transport()
+            for skew, expected in (
+                (0, "allowed"),
+                (50, "allowed"),
+                (64, "allowed"),
+                (tolerance, "allowed"),
+                (tolerance + 50, "malformed"),
+            ):
+                with self.subTest(skew=skew):
+                    key = namespace.key(f"rate:skew:{skew}")
+                    self.assertEqual(
+                        self._rate(raw, key, owner_rate_limit.RATE_LIMIT_READ),
+                        {"status": "allowed"},
+                    )
+                    record = self._set_aligned_skew(raw, key, skew)
+                    self.assertEqual(self._command(raw, ["GET", key]), record)
+                    self.assertEqual(
+                        self._rate(raw, key, owner_rate_limit.RATE_LIMIT_READ),
+                        {"status": expected},
+                    )
+
+            long_key = namespace.key("rate:unexpectedly-long")
+            self.assertEqual(
+                self._rate(raw, long_key, owner_rate_limit.RATE_LIMIT_READ),
+                {"status": "allowed"},
+            )
+            current_ttl = self._command(raw, ["PTTL", long_key])
+            self.assertIsInstance(current_ttl, int)
+            assert type(current_ttl) is int
+            self.assertEqual(
+                self._command(raw, ["PEXPIRE", long_key, current_ttl + 25]),
+                1,
+            )
+            self.assertEqual(
+                self._rate(raw, long_key, owner_rate_limit.RATE_LIMIT_READ),
+                {"status": "malformed"},
+            )
+
+    def test_state_integrity_regressions_remain_fail_closed(self):
+        namespace = probe.ProbeNamespace(RUN_ID)
+        with probe.LocalRedisServer() as server:
+            raw = server.transport()
+
+            missing_key = namespace.key("rate:missing")
+            self.assertEqual(
+                self._rate(raw, missing_key, owner_rate_limit.RATE_LIMIT_READ),
+                {"status": "allowed"},
+            )
+            self.assertEqual(
+                self._rate(raw, missing_key, owner_rate_limit.RATE_LIMIT_READ),
+                {"status": "allowed"},
+            )
+
+            expired_key = namespace.key("rate:expired")
+            self.assertEqual(
+                self._rate(raw, expired_key, owner_rate_limit.RATE_LIMIT_READ),
+                {"status": "allowed"},
+            )
+            self.assertEqual(self._command(raw, ["PEXPIRE", expired_key, 1]), 1)
+            deadline = time.monotonic() + 1
+            while self._command(raw, ["GET", expired_key]) is not None:
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.002)
+            self.assertEqual(
+                self._rate(raw, expired_key, owner_rate_limit.RATE_LIMIT_READ),
+                {"status": "allowed"},
+            )
+
+            persistent_key = namespace.key("rate:persistent")
+            persistent_record = self._canonical_record(
+                raw,
+                offset_microseconds=5_000_000,
+            )
+            self.assertEqual(
+                self._command(raw, ["SET", persistent_key, persistent_record]),
+                "OK",
+            )
+            self.assertEqual(
+                self._rate(raw, persistent_key, owner_rate_limit.RATE_LIMIT_READ),
+                {"status": "malformed"},
+            )
+
+            malformed_records = (
+                ("not-json", "malformed"),
+                ("x" * 129, "oversized"),
+                ('{"v":"1","tatUs":"01"}', "invalid-tat"),
+            )
+            for record, label in malformed_records:
+                with self.subTest(record=label):
+                    key = namespace.key(f"rate:{label}")
+                    self.assertEqual(
+                        self._command(raw, ["SET", key, record, "PX", 1_000]),
+                        "OK",
+                    )
+                    self.assertEqual(
+                        self._rate(raw, key, owner_rate_limit.RATE_LIMIT_READ),
+                        {"status": "malformed"},
+                    )
+                    self.assertEqual(self._command(raw, ["GET", key]), record)
+
+            future_key = namespace.key("rate:future-debt")
+            future_record = self._canonical_record(
+                raw,
+                offset_microseconds=15_100_000,
+            )
+            self.assertEqual(
+                self._command(raw, ["SET", future_key, future_record, "PX", 15_000]),
+                "OK",
+            )
+            self.assertEqual(
+                self._rate(raw, future_key, owner_rate_limit.RATE_LIMIT_READ),
+                {"status": "malformed"},
+            )
+
+            for v_first in (True, False):
+                with self.subTest(v_first=v_first):
+                    key = namespace.key(f"rate:canonical:{int(v_first)}")
+                    record = self._canonical_record(
+                        raw,
+                        offset_microseconds=5_000_000,
+                        v_first=v_first,
+                    )
+                    self.assertEqual(
+                        self._command(raw, ["SET", key, record, "PX", 4_950]),
+                        "OK",
+                    )
+                    self.assertEqual(
+                        self._rate(raw, key, owner_rate_limit.RATE_LIMIT_READ),
+                        {"status": "allowed"},
+                    )
+
+            noncanonical_key = namespace.key("rate:noncanonical")
+            noncanonical_record = self._canonical_record(
+                raw,
+                offset_microseconds=5_000_000,
+            ).replace(":", ": ", 1)
+            self.assertEqual(
+                self._command(
+                    raw,
+                    ["SET", noncanonical_key, noncanonical_record, "PX", 4_950],
+                ),
+                "OK",
+            )
+            self.assertEqual(
+                self._rate(raw, noncanonical_key, owner_rate_limit.RATE_LIMIT_READ),
+                {"status": "malformed"},
+            )
+
+    def test_rate_policies_and_tolerated_skew_keep_enforcement_effective(self):
+        namespace = probe.ProbeNamespace(RUN_ID)
+        with probe.LocalRedisServer() as server:
+            raw = server.transport()
+            expected_retry = {
+                owner_rate_limit.RATE_LIMIT_BOOTSTRAP: "5",
+                owner_rate_limit.RATE_LIMIT_READ: "1",
+                owner_rate_limit.RATE_LIMIT_WRITE: "2",
+            }
+            for rate_class in (
+                owner_rate_limit.RATE_LIMIT_BOOTSTRAP,
+                owner_rate_limit.RATE_LIMIT_READ,
+                owner_rate_limit.RATE_LIMIT_WRITE,
+            ):
+                with self.subTest(rate_class=rate_class):
+                    policy = owner_rate_limit.owner_rate_limit_policy(rate_class)
+                    self.assertIsNotNone(policy)
+                    assert policy is not None
+                    key = namespace.key(f"rate:policy:{rate_class}")
+                    for _ in range(policy.burst):
+                        self.assertEqual(
+                            self._rate(raw, key, rate_class),
+                            {"status": "allowed"},
+                        )
+                    self.assertEqual(
+                        self._rate(raw, key, rate_class),
+                        {
+                            "status": "limited",
+                            "retryAfter": expected_retry[rate_class],
+                        },
+                    )
+                    if rate_class == owner_rate_limit.RATE_LIMIT_READ:
+                        self._shorten(raw, key, 64)
+                        self.assertEqual(
+                            self._rate(raw, key, rate_class),
+                            {"status": "limited", "retryAfter": "1"},
+                        )
+                        time.sleep(0.60)
+                        self.assertEqual(
+                            self._rate(raw, key, rate_class),
+                            {"status": "allowed"},
+                        )
+
+    def test_redis_command_failures_and_time_shapes_remain_closed(self):
+        namespace = probe.ProbeNamespace(RUN_ID)
+        for command_name, expected, needs_state in (
+            ("SET", "unavailable", False),
+            ("GET", "unavailable", False),
+            ("PTTL", "malformed", True),
+        ):
+            with self.subTest(command=command_name), probe.LocalRedisServer() as server:
+                raw = server.transport()
+                key = namespace.key(f"rate:failure:{command_name.lower()}")
+                if needs_state:
+                    self.assertEqual(
+                        self._rate(raw, key, owner_rate_limit.RATE_LIMIT_READ),
+                        {"status": "allowed"},
+                    )
+                self.assertEqual(
+                    self._command(
+                        raw,
+                        ["ACL", "SETUSER", "default", f"-{command_name.lower()}"],
+                    ),
+                    "OK",
+                )
+                self.assertEqual(
+                    self._rate(raw, key, owner_rate_limit.RATE_LIMIT_READ),
+                    {"status": expected},
+                )
+
+        for label, command_renames in (
+            ("unavailable", (("TIME", ""),)),
+            ("malformed", (("TIME", "ORIGINALTIME"), ("PING", "TIME"))),
+        ):
+            with self.subTest(time_shape=label), probe.LocalRedisServer(
+                command_renames=command_renames,
+            ) as server:
+                raw = server.transport()
+                key = namespace.key(f"rate:time:{label}")
+                self.assertEqual(
+                    self._rate(raw, key, owner_rate_limit.RATE_LIMIT_READ),
+                    {"status": "unavailable"},
+                )
 
 
 class ProbeLocalCompatibilityTests(unittest.TestCase):

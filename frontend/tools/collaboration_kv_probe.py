@@ -1049,8 +1049,31 @@ class _RespClient:
 class LocalRedisServer:
     """Fresh, isolated Redis process used only by explicit local mode."""
 
-    def __init__(self, executable: str = "/usr/local/bin/redis-server") -> None:
+    def __init__(
+        self,
+        executable: str = "/usr/local/bin/redis-server",
+        *,
+        command_renames: tuple[tuple[str, str], ...] = (),
+    ) -> None:
+        if (
+            type(command_renames) is not tuple
+            or any(
+                type(pair) is not tuple
+                or len(pair) != 2
+                or any(
+                    type(value) is not str
+                    or (
+                        value != ""
+                        and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", value) is None
+                    )
+                    for value in pair
+                )
+                for pair in command_renames
+            )
+        ):
+            raise ProbeError("invalid_local_redis_configuration")
         self.executable = executable
+        self.command_renames = command_renames
         self._tempdir: tempfile.TemporaryDirectory[str] | None = None
         self._process: subprocess.Popen | None = None
         self.socket_path = ""
@@ -1060,26 +1083,28 @@ class LocalRedisServer:
             raise ProbeError("local_redis_unavailable")
         self._tempdir = tempfile.TemporaryDirectory(prefix="cuevion-kv-probe-", dir="/tmp")
         self.socket_path = os.path.join(self._tempdir.name, "redis.sock")
+        arguments = [
+            self.executable,
+            "--port",
+            "0",
+            "--unixsocket",
+            self.socket_path,
+            "--unixsocketperm",
+            "700",
+            "--dir",
+            self._tempdir.name,
+            "--save",
+            "",
+            "--appendonly",
+            "no",
+            "--protected-mode",
+            "yes",
+        ]
+        for original, replacement in self.command_renames:
+            arguments.extend(("--rename-command", original, replacement))
+        arguments.extend(("--loglevel", "warning"))
         self._process = subprocess.Popen(
-            [
-                self.executable,
-                "--port",
-                "0",
-                "--unixsocket",
-                self.socket_path,
-                "--unixsocketperm",
-                "700",
-                "--dir",
-                self._tempdir.name,
-                "--save",
-                "",
-                "--appendonly",
-                "no",
-                "--protected-mode",
-                "yes",
-                "--loglevel",
-                "warning",
-            ],
+            arguments,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
