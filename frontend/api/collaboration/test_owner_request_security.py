@@ -22,6 +22,8 @@ from .owner_request_security import (
     OwnerSecurityConfiguration,
     OwnerSecurityError,
     VerifiedOwnerAuthentication,
+    derive_mailbox_allowlist_entry,
+    derive_owner_allowlist_entry,
     issue_owner_csrf_token,
     mailbox_is_allowlisted,
     normalize_owner_security_failure,
@@ -260,6 +262,11 @@ class PublicSurfaceAndClaimsTests(unittest.TestCase):
                 "OwnerSecurityConfiguration",
                 "OwnerSecurityError",
                 "parse_owner_security_configuration",
+                "parse_allowlist_hmac_key",
+                "derive_owner_allowlist_entry",
+                "derive_mailbox_allowlist_entry",
+                "valid_allowlist_owner_identity",
+                "valid_allowlist_mailbox_id",
                 "parse_trusted_owner_origin",
                 "validate_owner_mutation_origin",
                 "parse_owner_csrf_header",
@@ -1419,6 +1426,27 @@ class AllowlistTests(unittest.TestCase):
         miss = _configuration()
         self.assertIs(owner_is_allowlisted(self.context, miss), False)
         self.assertIs(mailbox_is_allowlisted(self.context, MAILBOX_ID, miss), False)
+
+    def test_public_derivation_helpers_match_existing_independent_vectors(self):
+        self.assertEqual(
+            derive_owner_allowlist_entry(
+                ALLOWLIST_KEY,
+                self.context.issuer,
+                self.context.authentication_version,
+                self.context.subject,
+            ),
+            self.owner_match,
+        )
+        self.assertEqual(
+            derive_mailbox_allowlist_entry(
+                ALLOWLIST_KEY,
+                self.context.issuer,
+                self.context.authentication_version,
+                self.context.subject,
+                MAILBOX_ID,
+            ),
+            self.mailbox_match,
+        )
 
     def test_full_allowlist_is_compared_without_early_return(self):
         entries = (

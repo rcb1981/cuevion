@@ -2,6 +2,29 @@
 
 Collaboration v2 remains frontend-inactive and guest/external-inactive. Slice 1A adds one owner-only server route at `/api/collaboration/owner`, but it defaults closed and imports the owner application graph only after `CUEVION_COLLAB_V2_HTTP_MODE` is exactly `owner_read` or `owner_write`. No frontend currently calls it. Legacy v1 remains separately default-closed and is never a fallback.
 
+## Slice 1E offline rollout allowlist operations
+
+**OFFLINE OWNER/MAILBOX ALLOWLIST GENERATION TOOLING — RESOLVED IN CODE.**
+The operator-only `tools.collaboration_allowlist` command validates a closed,
+bounded identity input and reuses the canonical production derivation to emit
+only sorted deployment-ready owner and mailbox digest lists. It is outside the
+API route tree, has no handler, makes no network call, persists nothing, and
+does not read or update Vercel configuration. Dry-run requires no secret;
+generate mode accepts the allowlist key only through its dedicated process
+environment variable.
+
+**CARDINALITY / ROTATION / ROLLBACK PROCEDURE — DOCUMENTED FOR PRIVATE BETA.**
+`tools/COLLABORATION_ALLOWLIST_RUNBOOK.md` sets hard generation limits of 25
+owners and 50 total mailboxes, while the initial rollout remains one owner plus
+only explicitly selected test mailboxes. Because the allowlist design has no
+previous-key fallback, the key and both matching digest lists must be deployed
+and rolled back together.
+
+This local tooling proof does not generate the actual production allowlist
+secret or production digests, does not configure Vercel, does not execute the
+production KV probe, and does not authorize `owner_read`. The HTTP mode remains
+absent/off.
+
 ## Slice 1A authenticated owner boundary
 
 The owner route accepts exactly POST. `owner_read` permits the authenticated CSRF bootstrap and read operation; `owner_write` additionally permits create, shared owner reply, and internal owner note. Every non-bootstrap operation requires the existing short-lived owner-CSRF token, and every request requires the exact configured production Origin, duplicate-preserving header validation, a bounded Content-Length before body read, and a closed strict-JSON operation schema.
@@ -40,9 +63,11 @@ Local genuine-Redis tests prove the exact burst boundary, refill, independent cl
 
 - Verify the exact production KV `EVAL`, Lua `cjson`, Redis `TIME`, response-shape, concurrency/race, and TTL behavior with genuine competing clients.
 - Define and approve retention, deletion, privacy, legal, and operational policy.
-- Approve the offline rollout-allowlist generation/deployment procedure and its operational cardinality bound.
+- Generate the actual production allowlist HMAC secret through approved secret management, then generate and review the matching production owner and mailbox digest lists offline.
+- Configure the matched allowlist key and both digest lists in Vercel through a separately authorized change.
 - Complete the security and import suites currently blocked by the known local `cryptography` environment limitation; do not report them as passing until they run.
 - Migrate and separately review the frontend before any owner activation.
+- Keep `owner_read` and `owner_write` disabled until every production and review blocker is closed.
 - Design and review Team authorization separately.
 - Keep guest/external Collaboration inactive until its own activation review.
 

@@ -465,11 +465,18 @@ def parse_trusted_owner_origin(value: object) -> str:
 
 
 def _parse_secret_key(value: object) -> bytes:
-    if type(value) is not str:
+    try:
+        return parse_allowlist_hmac_key(value)
+    except ValueError:
         _raise_security("invalid_configuration")
+
+
+def parse_allowlist_hmac_key(value: object) -> bytes:
+    """Decode one canonical unpadded base64url key of at least 32 bytes."""
+
     decoded = _decode_canonical_base64url(value)
     if decoded is None or len(decoded) < 32:
-        _raise_security("invalid_configuration")
+        raise ValueError("invalid allowlist HMAC key")
     return decoded
 
 
@@ -973,6 +980,85 @@ def _allowlist_entry(
     return "v1_" + _encode_base64url(digest)
 
 
+def valid_allowlist_owner_identity(
+    issuer: object,
+    authentication_version: object,
+    subject: object,
+) -> bool:
+    return (
+        type(issuer) is str
+        and issuer.isascii()
+        and _ISSUER_RE.fullmatch(issuer) is not None
+        and type(authentication_version) is int
+        and 1 <= authentication_version <= _MAX_SAFE_INTEGER
+        and type(subject) is str
+        and subject.isascii()
+        and _SUBJECT_RE.fullmatch(subject) is not None
+    )
+
+
+def valid_allowlist_mailbox_id(mailbox_id: object) -> bool:
+    """Return whether a mailbox ID is already in canonical allowlist form."""
+
+    return (
+        type(mailbox_id) is str
+        and mailbox_id.isascii()
+        and _MAILBOX_ID_RE.fullmatch(mailbox_id) is not None
+    )
+
+
+def derive_owner_allowlist_entry(
+    key: object,
+    issuer: object,
+    authentication_version: object,
+    subject: object,
+) -> str:
+    """Derive the canonical deployment entry for one validated owner tuple."""
+
+    if (
+        type(key) is not bytes
+        or len(key) < 32
+        or not valid_allowlist_owner_identity(
+            issuer,
+            authentication_version,
+            subject,
+        )
+    ):
+        raise ValueError("invalid allowlist derivation input")
+    return _allowlist_entry(
+        key,
+        _OWNER_ALLOWLIST_DOMAIN,
+        (issuer, str(authentication_version), subject),
+    )
+
+
+def derive_mailbox_allowlist_entry(
+    key: object,
+    issuer: object,
+    authentication_version: object,
+    subject: object,
+    mailbox_id: object,
+) -> str:
+    """Derive the canonical deployment entry for one owner/mailbox tuple."""
+
+    if (
+        not valid_allowlist_mailbox_id(mailbox_id)
+        or not valid_allowlist_owner_identity(
+            issuer,
+            authentication_version,
+            subject,
+        )
+        or type(key) is not bytes
+        or len(key) < 32
+    ):
+        raise ValueError("invalid allowlist derivation input")
+    return _allowlist_entry(
+        key,
+        _MAILBOX_ALLOWLIST_DOMAIN,
+        (issuer, str(authentication_version), subject, mailbox_id),
+    )
+
+
 def _matches_all_entries(candidate: str, entries: tuple[str, ...]) -> bool:
     matched = False
     for entry in entries:
@@ -989,10 +1075,11 @@ def owner_is_allowlisted(context: object, configuration: object) -> bool:
         validated_configuration = _require_configuration(configuration)
     except OwnerSecurityError:
         return False
-    candidate = _allowlist_entry(
+    candidate = derive_owner_allowlist_entry(
         validated_configuration._allowlist_hmac_key,
-        _OWNER_ALLOWLIST_DOMAIN,
-        (context.issuer, str(context.authentication_version), context.subject),
+        context.issuer,
+        context.authentication_version,
+        context.subject,
     )
     return _matches_all_entries(candidate, validated_configuration.owner_allowlist)
 
@@ -1006,24 +1093,19 @@ def mailbox_is_allowlisted(
 
     if (
         not _is_owner_context(context)
-        or type(mailbox_id) is not str
-        or not mailbox_id.isascii()
-        or _MAILBOX_ID_RE.fullmatch(mailbox_id) is None
+        or not valid_allowlist_mailbox_id(mailbox_id)
     ):
         return False
     try:
         validated_configuration = _require_configuration(configuration)
     except OwnerSecurityError:
         return False
-    candidate = _allowlist_entry(
+    candidate = derive_mailbox_allowlist_entry(
         validated_configuration._allowlist_hmac_key,
-        _MAILBOX_ALLOWLIST_DOMAIN,
-        (
-            context.issuer,
-            str(context.authentication_version),
-            context.subject,
-            mailbox_id,
-        ),
+        context.issuer,
+        context.authentication_version,
+        context.subject,
+        mailbox_id,
     )
     return _matches_all_entries(candidate, validated_configuration.mailbox_allowlist)
 
@@ -1048,6 +1130,11 @@ __all__ = (
     "OwnerSecurityConfiguration",
     "OwnerSecurityError",
     "parse_owner_security_configuration",
+    "parse_allowlist_hmac_key",
+    "derive_owner_allowlist_entry",
+    "derive_mailbox_allowlist_entry",
+    "valid_allowlist_owner_identity",
+    "valid_allowlist_mailbox_id",
     "parse_trusted_owner_origin",
     "validate_owner_mutation_origin",
     "parse_owner_csrf_header",
