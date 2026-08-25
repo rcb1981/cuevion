@@ -15,6 +15,7 @@ from . import (
     http_adapter,
     owner_authentication,
     owner_http,
+    owner_rate_limit,
     owner_request_security,
 )
 from .owner_request_security import (
@@ -42,6 +43,7 @@ CREDENTIAL_DIGEST = base64.urlsafe_b64encode(
 IDEMPOTENCY_KEY = base64.urlsafe_b64encode(b"i" * 32).rstrip(b"=").decode("ascii")
 CSRF_KEY = b"owner-csrf-key-material-32-bytes!"
 ALLOWLIST_KEY = b"owner-allowlist-material-32-bytes"
+RATE_LIMIT_KEY = b"owner-rate-limit-material-32-bytes!"
 
 _OWNER_DOMAIN = b"cuevion/collaboration-v2/owner-allowlist/v1\x00"
 _MAILBOX_DOMAIN = b"cuevion/collaboration-v2/mailbox-allowlist/v1\x00"
@@ -71,6 +73,7 @@ def _environment(*, mailbox_id: str = MAILBOX_ID) -> dict[str, str]:
         "CUEVION_APP_ORIGIN": ORIGIN,
         "CUEVION_COLLAB_V2_OWNER_CSRF_KEY": _b64(CSRF_KEY),
         "CUEVION_COLLAB_V2_ALLOWLIST_HMAC_KEY": _b64(ALLOWLIST_KEY),
+        "CUEVION_COLLAB_V2_RATE_LIMIT_HMAC_KEY": _b64(RATE_LIMIT_KEY),
         "CUEVION_COLLAB_V2_OWNER_ALLOWLIST": _entry(
             _OWNER_DOMAIN,
             (ISSUER, "1", SUBJECT),
@@ -288,7 +291,9 @@ class OwnerAuthenticationAdapterTests(unittest.TestCase):
 class VerifiedOwnerAuthorizationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.context = _context()
-        self.configuration = parse_owner_security_configuration(_environment())
+        self.configuration = parse_owner_security_configuration(
+            owner_http._trusted_security_snapshot(_environment())
+        )
 
     def _mailbox_result(self, member, *, email: str = OWNER_EMAIL):
         return {
@@ -372,7 +377,9 @@ class VerifiedOwnerAuthorizationTests(unittest.TestCase):
     def test_unallowlisted_mailbox_fails_closed_before_mailbox_access(self):
         mailbox_resolver = mock.Mock(side_effect=AssertionError("must not resolve mailbox"))
         configuration = parse_owner_security_configuration(
-            _environment(mailbox_id="other.mailbox")
+            owner_http._trusted_security_snapshot(
+                _environment(mailbox_id="other.mailbox")
+            )
         )
         with self.assertRaises(OwnerSecurityError) as raised:
             authorization.resolve_verified_owner_collaboration_context(
@@ -396,12 +403,21 @@ class OwnerHttpBoundaryTests(unittest.TestCase):
             return_value=self.context,
         )
         self.context_patch.start()
+        self.rate_limit_patch = mock.patch.object(
+            owner_http.owner_rate_limit,
+            "consume_owner_rate_limit",
+            return_value=owner_rate_limit.OwnerRateLimitDecision("allowed"),
+        )
+        self.rate_limiter = self.rate_limit_patch.start()
 
     def tearDown(self) -> None:
+        self.rate_limit_patch.stop()
         self.context_patch.stop()
 
     def _csrf(self) -> str:
-        configuration = parse_owner_security_configuration(_environment())
+        configuration = parse_owner_security_configuration(
+            owner_http._trusted_security_snapshot(_environment())
+        )
         return issue_owner_csrf_token(
             self.context,
             configuration,
@@ -435,10 +451,12 @@ class OwnerHttpBoundaryTests(unittest.TestCase):
             "text": "Approved reply",
         }
         self.assertEqual(_invoke(_request(payload)).status, 403)
+        self.rate_limiter.assert_not_called()
 
         other_context = _context(session_id=_b64(b"z" * 32))
         with mock.patch.object(owner_http, "_resolve_context", return_value=other_context):
             self.assertEqual(_invoke(_request(payload, csrf=self._csrf())).status, 403)
+        self.rate_limiter.assert_not_called()
 
         success = {
             "message": {
@@ -554,6 +572,7 @@ class OwnerHttpBoundaryTests(unittest.TestCase):
                 with self.subTest(body=getattr(request.rfile, "getvalue", lambda: b"")()):
                     self.assertEqual(_invoke(request).status, 400)
         service.assert_not_called()
+        self.rate_limiter.assert_not_called()
 
         oversized = _Request(
             b"",
@@ -565,6 +584,7 @@ class OwnerHttpBoundaryTests(unittest.TestCase):
             guarded_reader=True,
         )
         self.assertEqual(_invoke(oversized).status, 413)
+        self.rate_limiter.assert_not_called()
 
     def test_read_and_create_use_only_verified_owner_services(self):
         csrf = self._csrf()
@@ -612,6 +632,271 @@ class OwnerHttpBoundaryTests(unittest.TestCase):
         self.assertEqual(response.status, 201)
         self.assertIs(create_service.call_args.args[0], self.context)
 
+    def test_owner_operations_use_exact_shared_rate_limit_classes(self):
+        self.rate_limiter.reset_mock()
+        self.assertEqual(_invoke(_request({"operation": "csrf"})).status, 200)
+        self.assertEqual(
+            self.rate_limiter.call_args.args[1],
+            owner_rate_limit.RATE_LIMIT_BOOTSTRAP,
+        )
+
+        csrf = self._csrf()
+        collaboration = {
+            "collaborationId": COLLABORATION_ID,
+            "mailboxId": MAILBOX_ID,
+            "state": "needs_review",
+            "createdAt": NOW * 1000,
+            "updatedAt": NOW * 1000,
+            "source": {},
+            "messages": [],
+        }
+        with mock.patch.object(
+            owner_http.application,
+            "read_v2_collaboration_for_verified_owner",
+            return_value={
+                "status": "ok",
+                "collaboration": collaboration,
+                "error": None,
+            },
+        ):
+            self.assertEqual(
+                _invoke(
+                    _request(
+                        {"operation": "read", "collaborationId": COLLABORATION_ID},
+                        csrf=csrf,
+                    )
+                ).status,
+                200,
+            )
+        self.assertEqual(
+            self.rate_limiter.call_args.args[1],
+            owner_rate_limit.RATE_LIMIT_READ,
+        )
+
+        with mock.patch.object(
+            owner_http.application,
+            "create_v2_collaboration_for_verified_owner",
+            return_value={"created": True, "collaboration": collaboration},
+        ):
+            self.assertEqual(
+                _invoke(
+                    _request(
+                        {
+                            "operation": "create",
+                            "mailboxId": MAILBOX_ID,
+                            "sourceRef": {
+                                "providerMessageId": "gmail-message-1"
+                            },
+                            "state": "needs_review",
+                        },
+                        csrf=csrf,
+                    )
+                ).status,
+                201,
+            )
+        self.assertEqual(
+            self.rate_limiter.call_args.args[1],
+            owner_rate_limit.RATE_LIMIT_WRITE,
+        )
+
+        append_result = {
+            "message": {
+                "id": "M" * 22,
+                "authorDisplayName": "Owner Person",
+                "authorRole": "Cuevion user",
+                "text": "Bounded",
+                "timestamp": NOW * 1000,
+                "visibility": "shared",
+            },
+            "updatedAt": NOW * 1000,
+        }
+        for operation, service_name in (
+            ("append_shared", "append_v2_shared_message_for_verified_owner"),
+            ("append_internal", "append_v2_internal_note_for_verified_owner"),
+        ):
+            with self.subTest(operation=operation), mock.patch.object(
+                owner_http.application,
+                service_name,
+                return_value=append_result,
+            ):
+                response = _invoke(
+                    _request(
+                        {
+                            "operation": operation,
+                            "collaborationId": COLLABORATION_ID,
+                            "text": "Bounded",
+                        },
+                        csrf=csrf,
+                        idempotency_key=IDEMPOTENCY_KEY,
+                    )
+                )
+            self.assertEqual(response.status, 200)
+            self.assertEqual(
+                self.rate_limiter.call_args.args[1],
+                owner_rate_limit.RATE_LIMIT_WRITE,
+            )
+
+    def test_rate_limited_and_unavailable_decisions_are_publicly_safe(self):
+        payload = {
+            "operation": "append_shared",
+            "collaborationId": COLLABORATION_ID,
+            "text": "Only once",
+        }
+        service = mock.Mock(side_effect=AssertionError("mutation must not run"))
+        with mock.patch.object(
+            owner_http.application,
+            "append_v2_shared_message_for_verified_owner",
+            service,
+        ):
+            self.rate_limiter.return_value = owner_rate_limit.OwnerRateLimitDecision(
+                "limited",
+                2,
+            )
+            limited = _invoke(
+                _request(
+                    payload,
+                    csrf=self._csrf(),
+                    idempotency_key=IDEMPOTENCY_KEY,
+                )
+            )
+            self.assertEqual(limited.status, 429)
+            self.assertEqual(_json(limited), {"ok": False, "error": {"code": "rate_limited"}})
+            self.assertIn(("Retry-After", "2"), limited.headers)
+
+            self.rate_limiter.return_value = owner_rate_limit.OwnerRateLimitDecision(
+                "unavailable"
+            )
+            unavailable = _invoke(
+                _request(
+                    payload,
+                    csrf=self._csrf(),
+                    idempotency_key=IDEMPOTENCY_KEY,
+                )
+            )
+            self.assertEqual(unavailable.status, 503)
+            self.assertEqual(
+                _json(unavailable),
+                {"ok": False, "error": {"code": "service_unavailable"}},
+            )
+
+            for malformed_retry in (None, 0, 61, "2", True):
+                with self.subTest(malformed_retry=malformed_retry):
+                    self.rate_limiter.return_value = (
+                        owner_rate_limit.OwnerRateLimitDecision(
+                            "limited",
+                            malformed_retry,  # type: ignore[arg-type]
+                        )
+                    )
+                    malformed = _invoke(
+                        _request(
+                            payload,
+                            csrf=self._csrf(),
+                            idempotency_key=IDEMPOTENCY_KEY,
+                        )
+                    )
+                    self.assertEqual(malformed.status, 503)
+                    self.assertEqual(
+                        _json(malformed),
+                        {
+                            "ok": False,
+                            "error": {"code": "service_unavailable"},
+                        },
+                    )
+        service.assert_not_called()
+
+    def test_read_mode_limits_bootstrap_and_read_but_never_activates_writes(self):
+        self.rate_limiter.return_value = owner_rate_limit.OwnerRateLimitDecision(
+            "limited",
+            1,
+        )
+        self.assertEqual(
+            _invoke(_request({"operation": "csrf"}), mode="owner_read").status,
+            429,
+        )
+        self.rate_limiter.reset_mock()
+        self.assertEqual(
+            _invoke(
+                _request(
+                    {"operation": "read", "collaborationId": COLLABORATION_ID},
+                    csrf=self._csrf(),
+                ),
+                mode="owner_read",
+            ).status,
+            429,
+        )
+        self.assertEqual(
+            self.rate_limiter.call_args.args[1],
+            owner_rate_limit.RATE_LIMIT_READ,
+        )
+        self.rate_limiter.reset_mock()
+        self.assertEqual(
+            _invoke(
+                _request(
+                    {
+                        "operation": "append_internal",
+                        "collaborationId": COLLABORATION_ID,
+                        "text": "No write",
+                    },
+                    csrf=self._csrf(),
+                    idempotency_key=IDEMPOTENCY_KEY,
+                ),
+                mode="owner_read",
+            ).status,
+            404,
+        )
+        self.rate_limiter.assert_not_called()
+
+    def test_missing_rate_configuration_and_untrusted_requests_fail_before_limiter(self):
+        environment = _environment()
+        environment.pop(owner_rate_limit.RATE_LIMIT_HMAC_ENV)
+        response = http_adapter.invoke_safely(
+            lambda: owner_http.owner_response(
+                _request({"operation": "csrf"}),
+                http_mode="owner_write",
+                environment=environment,
+                now=NOW,
+            ),
+            allow_method="POST",
+        )
+        self.assertEqual(response.status, 503)
+        self.rate_limiter.assert_not_called()
+
+        substituted = _environment()
+        substituted[owner_rate_limit.RATE_LIMIT_HMAC_ENV] = substituted[
+            "CUEVION_COLLAB_V2_OWNER_CSRF_KEY"
+        ]
+        response = http_adapter.invoke_safely(
+            lambda: owner_http.owner_response(
+                _request({"operation": "csrf"}),
+                http_mode="owner_write",
+                environment=substituted,
+                now=NOW,
+            ),
+            allow_method="POST",
+        )
+        self.assertEqual(response.status, 503)
+        self.rate_limiter.assert_not_called()
+
+        wrong_origin = _request({"operation": "csrf"})
+        wrong_origin.headers.pairs[0] = ("Origin", "https://evil.example")
+        self.assertEqual(_invoke(wrong_origin).status, 403)
+        self.rate_limiter.assert_not_called()
+
+        self.assertEqual(
+            _invoke(
+                _request(
+                    {
+                        "operation": "read",
+                        "collaborationId": COLLABORATION_ID,
+                        "workspaceId": OTHER_WORKSPACE_ID,
+                    },
+                    csrf=self._csrf(),
+                )
+            ).status,
+            400,
+        )
+        self.rate_limiter.assert_not_called()
+
     def test_authentication_failures_are_fixed_and_read_mode_cannot_mutate(self):
         for reason, status in (
             ("authentication_required", 401),
@@ -636,6 +921,14 @@ class OwnerHttpBoundaryTests(unittest.TestCase):
             mode="owner_read",
         )
         self.assertEqual(response.status, 404)
+        self.rate_limiter.assert_not_called()
+
+    def test_non_allowlisted_owner_is_rejected_without_consuming_budget(self):
+        with mock.patch.object(owner_http, "owner_is_allowlisted", return_value=False):
+            response = _invoke(_request({"operation": "csrf"}))
+
+        self.assertEqual(response.status, 404)
+        self.rate_limiter.assert_not_called()
 
 
 class OwnerRouteActivationTests(unittest.TestCase):

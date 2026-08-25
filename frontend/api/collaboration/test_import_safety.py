@@ -74,7 +74,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             from unittest.mock import patch
 
             {DEPLOYMENT_PATH_ASSERTIONS}
-            short_names = ("models", "redis_store", "authorization", "source_message", "guest_session", "mutations", "http_boundary", "http_adapter", "owner_request_security", "owner_authentication", "application", "owner_http")
+            short_names = ("models", "redis_store", "authorization", "source_message", "guest_session", "mutations", "http_boundary", "http_adapter", "owner_request_security", "owner_authentication", "application", "owner_rate_limit", "owner_http")
             with patch.dict(os.environ, {{}}, clear=True), patch(
                 "urllib.request.urlopen", side_effect=AssertionError("network during import")
             ), patch(
@@ -124,7 +124,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             "models", "redis_store", "authorization", "source_message",
             "guest_session", "mutations", "http_boundary", "http_adapter",
             "owner_request_security", "owner_authentication", "application",
-            "owner_http",
+            "owner_rate_limit", "owner_http",
         )
         for short_name in short_names:
             for order in ("package_first", "top_level_first"):
@@ -291,6 +291,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             "api.collaboration.owner_request_security",
             "api.collaboration.owner_authentication",
             "api.collaboration.application",
+            "api.collaboration.owner_rate_limit",
             "api.collaboration.owner_http",
             "api.user_config_store",
             "api.inboxes.mailbox_secret_store",
@@ -406,6 +407,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
                 "api.collaboration.http_boundary", "http_boundary",
                 "api.collaboration.http_adapter", "http_adapter",
                 "api.collaboration.owner_request_security", "owner_request_security",
+                "api.collaboration.owner_rate_limit", "owner_rate_limit",
                 "api.collaboration.application", "application",
             )
             assert all(name not in sys.modules for name in inactive_names)
@@ -454,6 +456,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             ("api.collaboration.http_adapter_copy", "api/collaboration/http_adapter.py"),
             ("api.collaboration.owner_request_security_copy", "api/collaboration/owner_request_security.py"),
             ("api.collaboration.owner_authentication_copy", "api/collaboration/owner_authentication.py"),
+            ("api.collaboration.owner_rate_limit_copy", "api/collaboration/owner_rate_limit.py"),
             ("api.collaboration.owner_http_copy", "api/collaboration/owner_http.py"),
             ("collaboration.owner_request_security", "api/collaboration/owner_request_security.py"),
             ("api.collaboration.application_copy", "api/collaboration/application.py"),
@@ -855,6 +858,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
                 "from guest_session", "import guest_session",
                 "from mutations", "import mutations",
                 "http_boundary", "http_adapter", "owner_request_security",
+                "owner_rate_limit",
                 "from application", "import application",
                 "collaboration.application", "resolve_internal_collaboration_context",
                 "create_v2_collaboration_for_owner",

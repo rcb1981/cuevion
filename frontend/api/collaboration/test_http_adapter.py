@@ -24,6 +24,7 @@ from .http_adapter import (
     invoke_if_http_mode,
     invoke_safely,
     json_failure,
+    json_rate_limited,
     json_success,
     normalize_boundary_error,
     parse_http_mode,
@@ -1148,6 +1149,31 @@ class ResponseTests(AdapterTestCase):
         self.assert_public_error(response, 400, "invalid_request")
         self.assert_common_json_headers(response)
 
+    def test_rate_limited_response_has_one_bounded_retry_after_header(self):
+        for retry_after in (1, 2, 60):
+            with self.subTest(retry_after=retry_after):
+                response = json_rate_limited(retry_after)
+                self.assert_public_error(response, 429, "rate_limited")
+                self.assertEqual(
+                    response.headers[:-1],
+                    (
+                        ("Content-Type", "application/json; charset=utf-8"),
+                        ("Cache-Control", "no-store"),
+                        ("X-Content-Type-Options", "nosniff"),
+                        ("Content-Length", str(len(response.body))),
+                    ),
+                )
+                self.assertEqual(response.headers[-1], ("Retry-After", str(retry_after)))
+                self.assertEqual(
+                    sum(name.lower() == "retry-after" for name, _ in response.headers),
+                    1,
+                )
+
+        for retry_after in (True, 0, 61, "2", _ExplosiveInt(2)):
+            with self.subTest(rejected=repr(retry_after)):
+                with self.assertRaises(ValueError):
+                    json_rate_limited(retry_after)
+
     def test_response_is_immutable(self):
         response = json_success({})
         with self.assertRaises(FrozenInstanceError):
@@ -1282,6 +1308,9 @@ class ResponseTests(AdapterTestCase):
                     self.assertEqual(writer.body_writes, [response.body])
 
     def test_writer_rejects_forged_responses_before_partial_write(self):
+        rate_429 = json_failure("rate_limited", status=429)
+        wrong_retry_status = json_failure("invalid_request", status=400)
+        wrong_429 = json_failure("invalid_request", status=429)
         forged = (
             PublicResponse(200, (), b"private"),
             PublicResponse(
@@ -1298,6 +1327,21 @@ class ResponseTests(AdapterTestCase):
                 204,
                 (("Content-Length", "0"), ("Access-Control-Allow-Origin", "*")),
                 b"",
+            ),
+            PublicResponse(
+                rate_429.status,
+                rate_429.headers + (("Retry-After", "0"),),
+                rate_429.body,
+            ),
+            PublicResponse(
+                wrong_retry_status.status,
+                wrong_retry_status.headers + (("Retry-After", "2"),),
+                wrong_retry_status.body,
+            ),
+            PublicResponse(
+                wrong_429.status,
+                wrong_429.headers + (("Retry-After", "2"),),
+                wrong_429.body,
             ),
         )
         for response in forged:

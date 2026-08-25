@@ -390,6 +390,22 @@ def json_failure(code: object, *, status: int) -> PublicResponse:
     return _json_response(validated_status, body)
 
 
+def json_rate_limited(retry_after_seconds: object) -> PublicResponse:
+    """Build the sole public 429 shape with one coarse Retry-After value."""
+
+    if (
+        type(retry_after_seconds) is not int
+        or not 1 <= retry_after_seconds <= 60
+    ):
+        raise ValueError("invalid Retry-After configuration")
+    response = json_failure("rate_limited", status=429)
+    return PublicResponse(
+        status=response.status,
+        headers=response.headers + (("Retry-After", str(retry_after_seconds)),),
+        body=response.body,
+    )
+
+
 def empty_success() -> PublicResponse:
     """Build the sole supported empty response: HTTP 204."""
 
@@ -495,6 +511,11 @@ def _validate_public_response(response: object) -> PublicResponse:
             and type(parsed.get("error")) is dict
             and set(parsed["error"]) == {"code"}
         ):
+            if (
+                response.status == 429
+                and parsed["error"].get("code") != "rate_limited"
+            ):
+                raise ValueError("invalid public response")
             expected = json_failure(
                 parsed["error"]["code"],
                 status=response.status,
@@ -510,6 +531,17 @@ def _validate_public_response(response: object) -> PublicResponse:
                 raise ValueError("invalid public response")
             _validate_allow_method(allow_value)
             expected_headers += (("Allow", allow_value),)
+        elif response.status == 429:
+            if len(response.headers) != len(expected_headers) + 1:
+                raise ValueError("invalid public response")
+            retry_name, retry_value = response.headers[-1]
+            if (
+                retry_name != "Retry-After"
+                or _CANONICAL_CONTENT_LENGTH_RE.fullmatch(retry_value) is None
+                or not 1 <= int(retry_value) <= 60
+            ):
+                raise ValueError("invalid public response")
+            expected_headers += (("Retry-After", retry_value),)
         if response.headers != expected_headers or response.body != expected.body:
             raise ValueError("invalid public response")
     return response
@@ -595,6 +627,7 @@ __all__ = (
     "invoke_if_http_mode",
     "invoke_safely",
     "json_failure",
+    "json_rate_limited",
     "json_success",
     "normalize_boundary_error",
     "parse_http_mode",

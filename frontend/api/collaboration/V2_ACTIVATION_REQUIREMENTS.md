@@ -10,7 +10,7 @@ The owner route accepts exactly POST. `owner_read` permits the authenticated CSR
 
 New owner records use the current account authority's canonical workspace ID. Historical email-as-workspace thread records from the inactive foundation remain decodeable only so their presence fails closed; an active Auth0 owner context cannot authorize or create such a record. Guest invitation/session schemas are not activated by Slice 1A.
 
-Slice 1B resolves the code and local-proof requirement for owner append retry idempotency/recovery. Deployment enablement remains blocked until the retention and durable rate-limit requirements are satisfied and the exact EVAL/Lua/race/TTL behavior is verified against the production KV service. The repository's isolated real-Redis harness is required local compatibility evidence but is not a substitute for that production-KV verification.
+Slices 1B and 1C resolve the code and local-Redis proof requirements for owner append retry idempotency/recovery and durable owner rate limiting. Deployment enablement remains blocked until retention is approved and the exact EVAL/Lua/Redis-TIME/response/race/TTL behavior is verified against the production KV service. The repository's isolated real-Redis harness is required local compatibility evidence but is not a substitute for that production-KV verification.
 
 ## Slice 1B durable owner-append idempotency
 
@@ -22,11 +22,35 @@ First append, outcome persistence, and thread/source TTL updates execute in one 
 
 The idempotency record has a hard maximum equal to the current 180-day thread-retention ceiling and is never written with a longer lifetime than the thread written in the same script. That mechanism is bounded and locally tested, but the production retention value remains unapproved. Local genuine-Redis tests cover sequential retry, simulated lost response, independent-process recovery, simultaneous duplicates, conflicting reuse, cross-thread reuse, ordinary stale-CAS competition, malformed records, and TTL non-refresh. Production KV compatibility and retention approval remain deployment blockers.
 
+## Slice 1C durable owner rate limiting
+
+Durable owner rate limiting is **resolved in code and local Redis only**. After exact Origin, revalidated Auth0 session, and owner allowlist validation produce a resolver-minted owner context, the server derives a keyed SHA-256 digest from only the canonical owner email and canonical workspace ID. Browser owner/workspace/mailbox fields, IP addresses, Auth0 subjects, session identifiers, collaboration IDs, source references, and idempotency keys do not select the limiter identity. Redis keys contain only the v2 cluster hash tag, one fixed class, and the digest; no raw identity or credential material is stored in a key or limiter record.
+
+The three reviewed private-beta GCRA classes are `bootstrap` for `csrf` (burst 4, one token per 5 seconds, sustained 12/minute), `read` for `read` (burst 30, one token per 500 milliseconds, sustained 120/minute), and one shared `write` budget for `create`, `append_shared`, and `append_internal` (burst 10, one token per 2 seconds, sustained 30/minute). Switching among write operations cannot select another write budget, while read and CSRF traffic do not consume it. Each allowed request adds one atomic O(1) Redis `EVAL` using Redis `TIME`; there is no process-local counter, client clock, scan, polling, or background cleanup.
+
+`CUEVION_COLLAB_V2_RATE_LIMIT_HMAC_KEY` is required only in an explicitly active owner mode. It is canonical unpadded base64url for at least 32 random bytes, has no secretless fallback, and must be cryptographically distinct from owner-CSRF current/previous keys, the rollout-allowlist key, collaboration-index current/previous keys, the mailbox encryption key, and the authentication session secret. The parser rejects a known configured secret that is malformed or equal. The rate key has no previous-key namespace: controlled rotation starts a fresh digest namespace, so at most one additional class burst can be admitted during rotation; old counters expire naturally within 20 seconds. This bounded reset is accepted for this private-beta limiter and avoids index-style migration state.
+
+The key form is `cuevion:collab:v2:{cuevion-collab-v2}:owner-rate:<class>:<64-lowercase-hex-digest>`. The closed record contains exactly string fields `v="1"` and canonical-decimal `tatUs`, is capped at 128 bytes, and is validated together with its remaining TTL. A key expires when its admitted debt refills: at most 20 seconds for bootstrap, 15 seconds for read, and 20 seconds for write. Steady-state cardinality is at most three short-lived keys per active canonical owner/workspace pair; a controlled HMAC-key rotation can temporarily leave at most three old-epoch plus three new-epoch keys for that pair, with the old set gone within 20 seconds. Malformed records, contradictory TTL/TAT state, response-shape errors, and storage outages fail closed as safe HTTP 503 without resetting the record.
+
+`csrf` is limited after trusted owner resolution and its exact body/header shape, without requiring a CSRF token. `read` is limited after CSRF and exact read shape but before collaboration or mailbox loading. Writes are limited after CSRF, active `owner_write` mode, exact operation shape, and append idempotency-header validation, but before source resolution, mailbox authority work, source/thread/index mutation, or append Lua. A denial is the fixed HTTP 429 `rate_limited` body plus one coarse `Retry-After` value from 1 through 60 seconds; it reveals no identity, key, counter, digest, or Redis detail. Same-key append retries use the normal write budget: a limited retry performs no mutation, and after refill the existing atomic idempotency path returns the exact committed result.
+
+Local genuine-Redis tests prove the exact burst boundary, refill, independent classes and owners, shared multi-client and 40-way concurrent budgets, natural TTL expiry, malformed-record and storage fail-closed behavior, absence of raw PII/secrets and `SCAN`/`KEYS`, and the rate-limit/idempotency sequence. Production KV compatibility remains unverified and this local result does not authorize activation.
+
+## Remaining activation blockers
+
+- Verify the exact production KV `EVAL`, Lua `cjson`, Redis `TIME`, response-shape, concurrency/race, and TTL behavior with genuine competing clients.
+- Define and approve retention, deletion, privacy, legal, and operational policy.
+- Approve the offline rollout-allowlist generation/deployment procedure and its operational cardinality bound.
+- Complete the security and import suites currently blocked by the known local `cryptography` environment limitation; do not report them as passing until they run.
+- Migrate and separately review the frontend before any owner activation.
+- Design and review Team authorization separately.
+- Keep guest/external Collaboration inactive until its own activation review.
+
 ## Phase 2A HTTP adapter foundation
 
 The shared `api.collaboration.http_adapter` module provides the import-safe transport boundary. It is not itself a route, exposes no `handler`, and does not import application services. `CUEVION_COLLAB_V2_HTTP_MODE` remains fail-closed to `off`; the Slice 1A owner route reads it before importing application services or reading a request body. Routes preserve duplicate raw headers through `headers.raw_items()`, validate body framing and limits before `rfile.read`, and use the centralized public response and error serialization.
 
-The frontend, v1, and guest/external behavior remain unchanged. Owner CSRF and the minimum owner application services now exist; deployment activation remains blocked on durable rate limiting, retention approval, and production KV `EVAL`, Lua, response-shape, race, and TTL evidence.
+The frontend, v1, and guest/external behavior remain unchanged. Owner CSRF, append idempotency, and durable owner rate limiting now exist with local Redis proof; deployment activation remains blocked by the requirements listed above, including retention approval and production KV evidence.
 
 ## Phase 2A owner request security foundation
 
@@ -34,18 +58,19 @@ The provider-independent `api.collaboration.owner_request_security` module conta
 
 The owner-security parser accepts only an explicitly supplied exact built-in `dict` snapshot and performs no environment read. Future deployment configuration must supply `CUEVION_APP_ORIGIN`, `CUEVION_COLLAB_V2_OWNER_CSRF_KEY`, optional rotation-only `CUEVION_COLLAB_V2_OWNER_CSRF_KEY_PREVIOUS`, `CUEVION_COLLAB_V2_ALLOWLIST_HMAC_KEY`, `CUEVION_COLLAB_V2_OWNER_ALLOWLIST`, and `CUEVION_COLLAB_V2_MAILBOX_ALLOWLIST`. Parsed owner-security configuration objects are opaque, immutable, and intentionally nonserializable; generic dataclass, pickle, copy, string, and representation paths must not disclose their internal key or allowlist material.
 
-Owner CSRF, rollout allowlist, collaboration index, guest credential, invitation credential, and future rate-limit keys must all be cryptographically distinct. Production activation requires a separately audited offline allowlist-generation and deployment procedure that never places raw identities in deployed allowlist settings, plus an explicit operational bound on allowlist cardinality. No actual key, allowlist entry, identity digest, or operational secret is documented here.
+Owner CSRF, rollout allowlist, collaboration index, guest credential, invitation credential, and rate-limit keys must all be cryptographically distinct. Production activation requires a separately audited offline allowlist-generation and deployment procedure that never places raw identities in deployed allowlist settings, plus an explicit operational bound on allowlist cardinality. No actual key, allowlist entry, identity digest, or operational secret is documented here.
 
 The owner-CSRF session-binding digest is stable within one authentication session and signing-key epoch, so tokens are linkable within that scope. That limited linkability is accepted only for same-origin, short-lived CSRF use; the token must not be repurposed as an identity, authorization, invitation, guest-session, or cross-origin credential.
 
 `OwnerRequestContext` is a resolver-minted, immutable, nonserializable request capability intended to prevent request-level confusion and accidental generic misuse. It is not a sandbox against hostile arbitrary code executing in the same Python process, which remains outside this capability boundary. The public resolver remains the only supported minting path and must eventually be backed by real reviewed authentication; current beta authentication remains unacceptable.
 
-Owner route code now uses the Origin, owner-CSRF, and owner/mailbox rollout allowlist primitives. It remains default-off. Slice 1B supplies locally proven owner-append idempotency/recovery; production enablement still requires durable rate limiting, retention approval, and production KV compatibility evidence in separately reviewed work. This slice changes no Collaboration v1 or frontend behavior and does not activate guest or external access.
+Owner route code now uses the Origin, owner-CSRF, owner/mailbox rollout allowlist, owner-append idempotency, and durable owner rate-limit primitives. It remains default-off. Production enablement still requires the explicit remaining blockers above. This slice changes no Collaboration v1 or frontend behavior and does not activate guest or external access.
 
 Activation requires all of the following in a separate change and review:
 
 - Set `CUEVION_APP_ORIGIN=https://app.cuevion.com` in production.
 - Set `CUEVION_COLLAB_INDEX_HMAC_KEY` to a cryptographically random secret of at least 32 bytes, encoded as canonical unpadded base64url. There is no secretless fallback.
+- Set `CUEVION_COLLAB_V2_RATE_LIMIT_HMAC_KEY` to a separate cryptographically random secret of at least 32 bytes, encoded as canonical unpadded base64url. Do not reuse any owner-CSRF, rollout-allowlist, collaboration-index, mailbox-encryption, authentication-session, guest, or invitation secret. There is no secretless fallback.
 - During a controlled rotation only, set `CUEVION_COLLAB_INDEX_HMAC_KEY_PREVIOUS` to the former canonical key. New indexes use the current key; reads and creates validate both namespaces and atomically migrate valid previous-key pointers. Conflicts fail closed. Remove the previous key only after migration is complete and verified.
 - Never reuse `MAILBOX_SECRET_ENCRYPTION_KEY` as either collaboration index key.
 - Confirm that the production KV supports `EVAL`, the exact multi-key atomic semantics used by the production scripts, Lua `cjson`, TTL behavior, response shapes, and failure behavior. Matching Redis Cluster slots alone is not proof of production `EVAL` compatibility.

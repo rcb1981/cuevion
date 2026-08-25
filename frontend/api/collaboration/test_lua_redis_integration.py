@@ -14,7 +14,14 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
-from . import authorization, guest_session, mutations, redis_store, source_message
+from . import (
+    authorization,
+    guest_session,
+    mutations,
+    owner_rate_limit,
+    redis_store,
+    source_message,
+)
 from .models import (
     build_v2_guest_thread_dto,
     decode_v2_wire_record,
@@ -24,6 +31,10 @@ from .models import (
     normalize_v2_source_message,
     normalize_v2_thread_record,
 )
+from .owner_request_security import (
+    VerifiedOwnerAuthentication,
+    resolve_owner_request_context,
+)
 
 SEC = 1_800_000_000
 MS = SEC * 1000
@@ -31,6 +42,46 @@ MAX_RAW_RECORD_BYTES = 262_144
 TTL_OBSERVATION_TOLERANCE_SECONDS = 1
 PTTL_OBSERVATION_TOLERANCE_MS = 2_000
 PTTL_MEASUREMENT_JITTER_MS = 100
+OWNER_RATE_LIMIT_KEY = b"real-redis-owner-rate-limit-key-01"
+
+
+def owner_rate_limit_context(
+    *,
+    owner_email: str = "owner@example.com",
+    workspace_id: str = "wsp_" + ("w" * 22),
+):
+    claims = VerifiedOwnerAuthentication(
+        issuer="https://cuevion.eu.auth0.com/",
+        authentication_version=1,
+        subject="auth0|real-redis-owner",
+        owner_email=owner_email,
+        workspace_id=workspace_id,
+        display_name="Owner",
+        session_id=base64.urlsafe_b64encode(b"s" * 32)
+        .rstrip(b"=")
+        .decode("ascii"),
+        credential_digest=base64.urlsafe_b64encode(
+            hashlib.sha256(b"real-redis-binding").digest()
+        )
+        .rstrip(b"=")
+        .decode("ascii"),
+        issued_at=SEC - 60,
+        expires_at=SEC + 3_600,
+    )
+    return resolve_owner_request_context(
+        (),
+        authentication_resolver=lambda _headers: claims,
+        now=SEC,
+    )
+
+
+def owner_rate_limit_configuration():
+    encoded = base64.urlsafe_b64encode(OWNER_RATE_LIMIT_KEY).rstrip(b"=").decode(
+        "ascii"
+    )
+    return owner_rate_limit.parse_owner_rate_limit_configuration(
+        {owner_rate_limit.RATE_LIMIT_HMAC_ENV: encoded}
+    )
 
 
 def thread_record() -> dict:
@@ -7235,6 +7286,313 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                 command_transport=self.client.transport,
             ),
         )
+
+    def test_owner_rate_limit_real_redis_boundary_refill_classes_and_ttl(self):
+        context = owner_rate_limit_context()
+        configuration = owner_rate_limit_configuration()
+
+        def consume(rate_class: str, *, client=None):
+            return owner_rate_limit.consume_owner_rate_limit(
+                context,
+                rate_class,
+                configuration,
+                command_transport=(client or self.client).transport,
+            )
+
+        read_policy = owner_rate_limit.owner_rate_limit_policy(
+            owner_rate_limit.RATE_LIMIT_READ
+        )
+        assert read_policy is not None
+        accepted = [
+            consume(owner_rate_limit.RATE_LIMIT_READ)
+            for _ in range(read_policy.burst)
+        ]
+        self.assertTrue(all(decision.status == "allowed" for decision in accepted))
+        independent_client = _RespClient(self.socket_path)
+        limited = consume(
+            owner_rate_limit.RATE_LIMIT_READ,
+            client=independent_client,
+        )
+        self.assertEqual(limited.status, "limited")
+        self.assertEqual(limited.retry_after_seconds, 1)
+
+        bootstrap_policy = owner_rate_limit.owner_rate_limit_policy(
+            owner_rate_limit.RATE_LIMIT_BOOTSTRAP
+        )
+        assert bootstrap_policy is not None
+        bootstrap_statuses = [
+            consume(owner_rate_limit.RATE_LIMIT_BOOTSTRAP).status
+            for _ in range(bootstrap_policy.burst)
+        ]
+        self.assertEqual(
+            bootstrap_statuses,
+            ["allowed"] * bootstrap_policy.burst,
+        )
+        bootstrap_limited = consume(owner_rate_limit.RATE_LIMIT_BOOTSTRAP)
+        self.assertEqual(bootstrap_limited.status, "limited")
+        self.assertEqual(bootstrap_limited.retry_after_seconds, 5)
+        self.assertEqual(
+            consume(owner_rate_limit.RATE_LIMIT_WRITE).status,
+            "allowed",
+        )
+
+        time.sleep(0.6)
+        self.assertEqual(
+            consume(owner_rate_limit.RATE_LIMIT_READ).status,
+            "allowed",
+        )
+
+        self.client.command(["FLUSHALL"])
+        self.assertEqual(
+            consume(owner_rate_limit.RATE_LIMIT_READ).status,
+            "allowed",
+        )
+        read_key = owner_rate_limit.build_owner_rate_limit_key(
+            context,
+            owner_rate_limit.RATE_LIMIT_READ,
+            configuration,
+        )
+        self.assertIsNotNone(read_key)
+        ttl = self.client.command(["PTTL", read_key])
+        self.assertGreater(ttl, 0)
+        self.assertLessEqual(ttl, 500)
+        time.sleep(0.7)
+        self.assertEqual(self.client.command(["EXISTS", read_key]), 0)
+
+    def test_owner_rate_limit_real_redis_concurrency_and_owner_independence(self):
+        context = owner_rate_limit_context()
+        other_context = owner_rate_limit_context(
+            owner_email="other@example.com",
+        )
+        configuration = owner_rate_limit_configuration()
+        write_policy = owner_rate_limit.owner_rate_limit_policy(
+            owner_rate_limit.RATE_LIMIT_WRITE
+        )
+        assert write_policy is not None
+
+        def compete(_index: int):
+            client = _RespClient(self.socket_path)
+            return owner_rate_limit.consume_owner_rate_limit(
+                context,
+                owner_rate_limit.RATE_LIMIT_WRITE,
+                configuration,
+                command_transport=client.transport,
+            ).status
+
+        with ThreadPoolExecutor(max_workers=32) as executor:
+            statuses = list(executor.map(compete, range(40)))
+        self.assertEqual(statuses.count("allowed"), write_policy.burst)
+        self.assertEqual(statuses.count("limited"), 40 - write_policy.burst)
+
+        other_statuses = [
+            owner_rate_limit.consume_owner_rate_limit(
+                other_context,
+                owner_rate_limit.RATE_LIMIT_WRITE,
+                configuration,
+                command_transport=_RespClient(self.socket_path).transport,
+            ).status
+            for _ in range(write_policy.burst)
+        ]
+        self.assertEqual(other_statuses, ["allowed"] * write_policy.burst)
+
+    def test_owner_rate_limit_real_redis_malformed_and_storage_fail_closed(self):
+        context = owner_rate_limit_context()
+        configuration = owner_rate_limit_configuration()
+        key = owner_rate_limit.build_owner_rate_limit_key(
+            context,
+            owner_rate_limit.RATE_LIMIT_WRITE,
+            configuration,
+        )
+        self.assertIsNotNone(key)
+        assert key is not None
+        self.assertNotIn(context.owner_email, key)
+        self.assertNotIn(context.workspace_id, key)
+        self.assertNotIn(
+            base64.urlsafe_b64encode(OWNER_RATE_LIMIT_KEY)
+            .rstrip(b"=")
+            .decode("ascii"),
+            key,
+        )
+
+        malformed = '{"v":"1","tatUs":"01"}'
+        self.client.command(["SET", key, malformed, "PX", "20000"])
+        rejected = owner_rate_limit.consume_owner_rate_limit(
+            context,
+            owner_rate_limit.RATE_LIMIT_WRITE,
+            configuration,
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(rejected.status, "unavailable")
+        self.assertEqual(self.client.command(["GET", key]), malformed)
+
+        server_time = self.client.command(["TIME"])
+        future_tat = (
+            int(server_time[0]) * 1_000_000
+            + int(server_time[1])
+            + 20_000_000
+        )
+        for malformed_closed_state in (
+            f'{{"v":"1","tatUs":"{future_tat}","v":"1"}}',
+            f'{{ "v":"1","tatUs":"{future_tat}"}}',
+        ):
+            with self.subTest(malformed_closed_state=malformed_closed_state):
+                self.client.command(
+                    ["SET", key, malformed_closed_state, "PX", "20000"]
+                )
+                decision = owner_rate_limit.consume_owner_rate_limit(
+                    context,
+                    owner_rate_limit.RATE_LIMIT_WRITE,
+                    configuration,
+                    command_transport=self.client.transport,
+                )
+                self.assertEqual(decision.status, "unavailable")
+                self.assertEqual(
+                    self.client.command(["GET", key]),
+                    malformed_closed_state,
+                )
+
+        conflicting_ttl_state = json.dumps(
+            {"tatUs": str(future_tat), "v": "1"},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        self.client.command(
+            ["SET", key, conflicting_ttl_state, "PX", "1000"]
+        )
+        conflicting = owner_rate_limit.consume_owner_rate_limit(
+            context,
+            owner_rate_limit.RATE_LIMIT_WRITE,
+            configuration,
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(conflicting.status, "unavailable")
+        self.assertEqual(self.client.command(["GET", key]), conflicting_ttl_state)
+
+        captured: list[list] = []
+
+        def capture(command: list):
+            captured.append(command)
+            return self.client.transport(command)
+
+        self.client.command(["DEL", key])
+        allowed = owner_rate_limit.consume_owner_rate_limit(
+            context,
+            owner_rate_limit.RATE_LIMIT_WRITE,
+            configuration,
+            command_transport=capture,
+        )
+        self.assertEqual(allowed.status, "allowed")
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0][0], "EVAL")
+        self.assertNotIn("redis.call, 'SCAN'", captured[0][1])
+        self.assertNotIn("redis.call, 'KEYS'", captured[0][1])
+        stored_record = self.client.command(["GET", key])
+        self.assertIsInstance(stored_record, str)
+        self.assertLessEqual(len(stored_record.encode("utf-8")), 128)
+        self.assertEqual(set(json.loads(stored_record)), {"v", "tatUs"})
+        self.assertNotIn(context.owner_email, stored_record)
+        self.assertNotIn(context.workspace_id, stored_record)
+        self.assertNotIn(
+            base64.urlsafe_b64encode(OWNER_RATE_LIMIT_KEY)
+            .rstrip(b"=")
+            .decode("ascii"),
+            stored_record,
+        )
+
+        unavailable = owner_rate_limit.consume_owner_rate_limit(
+            context,
+            owner_rate_limit.RATE_LIMIT_WRITE,
+            configuration,
+            command_transport=lambda _command: (_ for _ in ()).throw(
+                OSError("offline")
+            ),
+        )
+        self.assertEqual(unavailable.status, "unavailable")
+
+    def test_owner_rate_limit_real_redis_preserves_append_idempotency(self):
+        context = owner_rate_limit_context()
+        configuration = owner_rate_limit_configuration()
+        thread = self._canonical_owner_thread()
+        created = redis_store._create_v2_thread(
+            thread,
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(created.get("status"), "ok", created)
+        idempotency_key = base64.urlsafe_b64encode(b"r" * 32).rstrip(b"=").decode(
+            "ascii"
+        )
+        durable_idempotency_key = redis_store.build_v2_owner_idempotency_key(
+            idempotency_key
+        )
+        self.assertIsNotNone(durable_idempotency_key)
+        write_policy = owner_rate_limit.owner_rate_limit_policy(
+            owner_rate_limit.RATE_LIMIT_WRITE
+        )
+        assert write_policy is not None
+
+        def consume_write():
+            return owner_rate_limit.consume_owner_rate_limit(
+                context,
+                owner_rate_limit.RATE_LIMIT_WRITE,
+                configuration,
+                command_transport=self.client.transport,
+            )
+
+        for _ in range(write_policy.burst):
+            self.assertEqual(consume_write().status, "allowed")
+        self.assertEqual(consume_write().status, "limited")
+        self.assertIsNone(self.client.command(["GET", durable_idempotency_key]))
+        loaded = redis_store._load_v2_thread(
+            thread["collaborationId"],
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(loaded.get("record", {}).get("messages"), [])
+
+        time.sleep(2.1)
+        self.assertEqual(consume_write().status, "allowed")
+        committed = self._owner_append(
+            thread,
+            action="reply",
+            text="Exactly once",
+            message_id="M" * 22,
+            idempotency_key=idempotency_key,
+        )
+        self.assertEqual(committed.get("status"), "ok", committed)
+        self.assertFalse(committed.recovered)
+        committed_idempotency_raw = self.client.command(
+            ["GET", durable_idempotency_key]
+        )
+        self.assertIsInstance(committed_idempotency_raw, str)
+
+        self.assertEqual(consume_write().status, "limited")
+        after_limited_retry = redis_store._load_v2_thread(
+            thread["collaborationId"],
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(len(after_limited_retry.get("record", {})["messages"]), 1)
+        self.assertEqual(
+            self.client.command(["GET", durable_idempotency_key]),
+            committed_idempotency_raw,
+        )
+
+        time.sleep(2.1)
+        self.assertEqual(consume_write().status, "allowed")
+        recovered = self._owner_append(
+            thread,
+            action="reply",
+            text="Exactly once",
+            message_id="M" * 22,
+            idempotency_key=idempotency_key,
+        )
+        self.assertEqual(recovered.get("status"), "ok", recovered)
+        self.assertTrue(recovered.recovered)
+        self.assertEqual(recovered.message, committed.message)
+        self.assertEqual(recovered.updated_at, committed.updated_at)
+        final_thread = redis_store._load_v2_thread(
+            thread["collaborationId"],
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(len(final_thread.get("record", {})["messages"]), 1)
 
 
 if __name__ == "__main__":

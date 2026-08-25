@@ -9,11 +9,12 @@ import os
 import time
 from collections.abc import Mapping
 
-from . import application
+from . import application, owner_rate_limit
 from .http_adapter import (
     PublicResponse,
     extract_raw_headers,
     json_failure,
+    json_rate_limited,
     json_success,
     read_json_object,
     require_request_method,
@@ -80,6 +81,46 @@ def _trusted_security_snapshot(environment: Mapping[str, str]) -> dict[str, str]
     except Exception:
         raise OwnerSecurityError("invalid_configuration") from None
     return snapshot
+
+
+def _trusted_rate_limit_snapshot(environment: Mapping[str, str]) -> dict[str, str]:
+    snapshot: dict[str, str] = {}
+    try:
+        for name in owner_rate_limit.RATE_LIMIT_CONFIGURATION_NAMES:
+            if name in environment:
+                snapshot[name] = environment[name]
+    except Exception:
+        raise ValueError("invalid owner rate-limit configuration") from None
+    return snapshot
+
+
+def _rate_limit_response(
+    context: object,
+    rate_class: str,
+    configuration: object,
+) -> PublicResponse | None:
+    try:
+        decision = owner_rate_limit.consume_owner_rate_limit(
+            context,
+            rate_class,
+            configuration,
+        )
+    except Exception:
+        return json_failure("service_unavailable", status=503)
+    if (
+        type(decision) is owner_rate_limit.OwnerRateLimitDecision
+        and decision.status == "allowed"
+        and decision.retry_after_seconds is None
+    ):
+        return None
+    if (
+        type(decision) is owner_rate_limit.OwnerRateLimitDecision
+        and decision.status == "limited"
+        and type(decision.retry_after_seconds) is int
+        and 1 <= decision.retry_after_seconds <= 60
+    ):
+        return json_rate_limited(decision.retry_after_seconds)
+    return json_failure("service_unavailable", status=503)
 
 
 def _owner_failure(error: OwnerSecurityError) -> PublicResponse:
@@ -149,6 +190,14 @@ def owner_response(
         )
         if not owner_is_allowlisted(context, configuration):
             raise OwnerSecurityError("rollout_unavailable")
+        try:
+            rate_limit_configuration = (
+                owner_rate_limit.parse_owner_rate_limit_configuration(
+                    _trusted_rate_limit_snapshot(source)
+                )
+            )
+        except Exception:
+            return json_failure("service_unavailable", status=503)
 
         payload = read_json_object(
             request,
@@ -164,6 +213,13 @@ def owner_response(
             _require_exact_fields(payload, frozenset({"operation"}))
             if get_security_header(raw_headers, "x-cuevion-csrf") is not None:
                 raise BoundaryError("invalid_value", 400)
+            limited = _rate_limit_response(
+                context,
+                owner_rate_limit.RATE_LIMIT_BOOTSTRAP,
+                rate_limit_configuration,
+            )
+            if limited is not None:
+                return limited
             token, expires_at = issue_owner_csrf_token(
                 context,
                 configuration,
@@ -184,6 +240,13 @@ def owner_response(
                 payload,
                 frozenset({"operation", "collaborationId"}),
             )
+            limited = _rate_limit_response(
+                context,
+                owner_rate_limit.RATE_LIMIT_READ,
+                rate_limit_configuration,
+            )
+            if limited is not None:
+                return limited
             result = application.read_v2_collaboration_for_verified_owner(
                 context,
                 raw_headers,
@@ -209,6 +272,13 @@ def owner_response(
                     {"operation", "mailboxId", "sourceRef", "state"}
                 ),
             )
+            limited = _rate_limit_response(
+                context,
+                owner_rate_limit.RATE_LIMIT_WRITE,
+                rate_limit_configuration,
+            )
+            if limited is not None:
+                return limited
             result = application.create_v2_collaboration_for_verified_owner(
                 context,
                 raw_headers,
@@ -247,6 +317,13 @@ def owner_response(
             )
             if idempotency_key is None:
                 raise BoundaryError("invalid_value", 400)
+            limited = _rate_limit_response(
+                context,
+                owner_rate_limit.RATE_LIMIT_WRITE,
+                rate_limit_configuration,
+            )
+            if limited is not None:
+                return limited
             result = service(
                 context,
                 raw_headers,
