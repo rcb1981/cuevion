@@ -334,6 +334,61 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(key)
         return key
 
+    def test_canonical_account_workspace_is_atomic_create_read_and_cas_authority(self):
+        thread = {
+            **thread_record(),
+            "workspaceId": "wsp_" + ("w" * 22),
+        }
+        self.assertEqual(normalize_v2_thread_record(thread), thread)
+
+        created = redis_store._create_v2_thread(
+            thread,
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(created.get("status"), "ok", created)
+        self.assertTrue(created["created"])
+        duplicate = redis_store._create_v2_thread(
+            thread,
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(duplicate.get("record"), thread)
+        self.assertFalse(duplicate["created"])
+        loaded = redis_store._load_v2_thread(
+            thread["collaborationId"],
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(loaded.get("record"), thread)
+        source_loaded = redis_store._load_v2_thread_by_source(
+            thread["ownerEmail"],
+            thread["mailboxId"],
+            thread["sourceRef"],
+            workspace_id=thread["workspaceId"],
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(source_loaded.get("record"), thread)
+
+        replacement = {
+            **thread,
+            "messages": [message_record()],
+            "updatedAt": MS + 101,
+        }
+        saved = redis_store._save_v2_thread_if_expected(
+            replacement,
+            thread["updatedAt"],
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(saved.get("record"), replacement)
+        stale = redis_store._save_v2_thread_if_expected(
+            {**replacement, "updatedAt": MS + 102},
+            thread["updatedAt"],
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(stale.get("error"), {"code": "stale_thread"})
+        self._assert_retention_pair(
+            self._thread_key(thread["collaborationId"]),
+            self._source_key(thread),
+        )
+
     def _invite_keys(self, invite: dict, *, hmac_key: bytes | None = None) -> tuple[str, str, str]:
         invite_key = redis_store.build_v2_invite_key(invite["inviteId"])
         token_key = redis_store.build_v2_invite_token_key(invite["tokenHash"])

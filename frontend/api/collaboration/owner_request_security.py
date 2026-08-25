@@ -32,8 +32,9 @@ _CSRF_PURPOSE = "owner_csrf"
 _CSRF_PREFIX = "oc1"
 
 _ISSUER_RE = _re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
-_SUBJECT_RE = _re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
+_SUBJECT_RE = _re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/|\-]{0,255}$")
 _SESSION_ID_RE = _re.compile(r"^[A-Za-z0-9_-]{22,128}$")
+_WORKSPACE_ID_RE = _re.compile(r"^wsp_[A-Za-z0-9_-]{22}$")
 _BASE64URL_RE = _re.compile(r"^[A-Za-z0-9_-]+$")
 _DIGEST_RE = _re.compile(r"^[A-Za-z0-9_-]{43}$")
 _ALLOWLIST_ENTRY_RE = _re.compile(r"^v1_[A-Za-z0-9_-]{43}$")
@@ -210,6 +211,7 @@ def _valid_verified_authentication_fields(value: object) -> bool:
         )
         subject = object.__getattribute__(value, "subject")
         owner_email = object.__getattribute__(value, "owner_email")
+        workspace_id = object.__getattribute__(value, "workspace_id")
         display_name = object.__getattribute__(value, "display_name")
         session_id = object.__getattribute__(value, "session_id")
         credential_digest = object.__getattribute__(value, "credential_digest")
@@ -227,6 +229,9 @@ def _valid_verified_authentication_fields(value: object) -> bool:
         and subject.isascii()
         and _SUBJECT_RE.fullmatch(subject) is not None
         and _valid_canonical_email(owner_email)
+        and type(workspace_id) is str
+        and workspace_id.isascii()
+        and _WORKSPACE_ID_RE.fullmatch(workspace_id) is not None
         and _valid_utf8_display_name(display_name)
         and type(session_id) is str
         and session_id.isascii()
@@ -249,6 +254,7 @@ class VerifiedOwnerAuthentication:
     authentication_version: int
     subject: str
     owner_email: str
+    workspace_id: str
     display_name: str
     session_id: str
     credential_digest: str
@@ -368,7 +374,7 @@ def _new_owner_context(claims: VerifiedOwnerAuthentication) -> OwnerRequestConte
         ("authentication_version", claims.authentication_version),
         ("subject", claims.subject),
         ("owner_email", claims.owner_email),
-        ("workspace_id", claims.owner_email),
+        ("workspace_id", claims.workspace_id),
         ("display_name", claims.display_name),
         ("session_id", claims.session_id),
         ("credential_digest", claims.credential_digest),
@@ -670,7 +676,8 @@ def _is_owner_context(value: object) -> bool:
         and _SUBJECT_RE.fullmatch(subject) is not None
         and _valid_canonical_email(owner_email)
         and type(workspace_id) is str
-        and workspace_id == owner_email
+        and workspace_id.isascii()
+        and _WORKSPACE_ID_RE.fullmatch(workspace_id) is not None
         and _valid_utf8_display_name(display_name)
         and type(session_id) is str
         and session_id.isascii()

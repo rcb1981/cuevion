@@ -1,16 +1,26 @@
 # Collaboration v2 activation requirements
 
-Collaboration v2 is an inactive private-beta foundation. Its modules are not route-wired, must not be imported by the active frontend or active API routes, and must not be activated as part of security-foundation work.
+Collaboration v2 remains frontend-inactive and guest/external-inactive. Slice 1A adds one owner-only server route at `/api/collaboration/owner`, but it defaults closed and imports the owner application graph only after `CUEVION_COLLAB_V2_HTTP_MODE` is exactly `owner_read` or `owner_write`. No frontend currently calls it. Legacy v1 remains separately default-closed and is never a fallback.
 
-## Phase 2A inactive HTTP adapter
+## Slice 1A authenticated owner boundary
 
-The shared `api.collaboration.http_adapter` module now provides the import-safe transport boundary for future Collaboration v2 Python handlers. It is not a route, exposes no `handler`, and does not import application services. `CUEVION_COLLAB_V2_HTTP_MODE` remains fail-closed to `off`; no production route currently reads or activates it. Future route modules must evaluate their exact allowed mode before importing application services or reading a request body. They must preserve duplicate raw headers through `headers.raw_items()`, validate body framing and limits before `rfile.read`, and use the centralized public response and error serialization.
+The owner route accepts exactly POST. `owner_read` permits the authenticated CSRF bootstrap and read operation; `owner_write` additionally permits create, shared owner reply, and internal owner note. Every non-bootstrap operation requires the existing short-lived owner-CSRF token, and every request requires the exact configured production Origin, duplicate-preserving header validation, a bounded Content-Length before body read, and a closed strict-JSON operation schema.
 
-This Phase 2A slice activates no v1, v2, or frontend behavior. HTTP activation remains blocked on owner CSRF, atomic idempotency/recovery, durable rate limiting, missing owner and guest application services, retention approval, and production KV `EVAL`, Lua, response-shape, race, and TTL evidence.
+`api.collaboration.owner_authentication` is the sole Auth0 adapter. It maps one successfully revalidated server session plus current-account authority into `VerifiedOwnerAuthentication`: session schema version, issuer, subject, random server session ID, credential-binding digest, session creation/expiry, canonical verified email, display name, and canonical `wsp_` workspace ID. It never accepts browser identity fields or exposes the raw cookie, lookup digest, session secret, or binding digest in a public response.
 
-## Phase 2A inactive owner request security
+New owner records use the current account authority's canonical workspace ID. Historical email-as-workspace thread records from the inactive foundation remain decodeable only so their presence fails closed; an active Auth0 owner context cannot authorize or create such a record. Guest invitation/session schemas are not activated by Slice 1A.
 
-The provider-independent `api.collaboration.owner_request_security` module now contains inactive primitives for a future verified owner-authentication context, exact configured-Origin checks, stateless owner-CSRF tokens, rollout allowlist digests, and fixed failure normalization. It is not a route, exposes no `handler`, and is not imported by production routes. The current beta authentication is explicitly not accepted as verified owner authentication: a future real provider must supply a stable subject, canonical owner email, unpredictable per-login session ID, credential binding, and trusted authentication expiry before an owner request context can be resolved.
+Deployment enablement remains blocked until append retry idempotency/recovery is approved, the retention and durable rate-limit requirements are satisfied, and the exact EVAL/Lua/race/TTL behavior is verified against the production KV service. The repository's isolated real-Redis harness is required local compatibility evidence but is not a substitute for that production-KV verification.
+
+## Phase 2A HTTP adapter foundation
+
+The shared `api.collaboration.http_adapter` module provides the import-safe transport boundary. It is not itself a route, exposes no `handler`, and does not import application services. `CUEVION_COLLAB_V2_HTTP_MODE` remains fail-closed to `off`; the Slice 1A owner route reads it before importing application services or reading a request body. Routes preserve duplicate raw headers through `headers.raw_items()`, validate body framing and limits before `rfile.read`, and use the centralized public response and error serialization.
+
+The frontend, v1, and guest/external behavior remain unchanged. Owner CSRF and the minimum owner application services now exist; deployment activation remains blocked on append retry idempotency/recovery, durable rate limiting, retention approval, and production KV `EVAL`, Lua, response-shape, race, and TTL evidence.
+
+## Phase 2A owner request security foundation
+
+The provider-independent `api.collaboration.owner_request_security` module contains primitives for a verified owner-authentication context, exact configured-Origin checks, stateless owner-CSRF tokens, rollout allowlist digests, and fixed failure normalization. It is not a route and exposes no `handler`. Slice 1A supplies those claims only through the revalidated Auth0 server-session/current-account adapter; localStorage, legacy beta identity, browser JSON, and raw cookie values are not accepted.
 
 The owner-security parser accepts only an explicitly supplied exact built-in `dict` snapshot and performs no environment read. Future deployment configuration must supply `CUEVION_APP_ORIGIN`, `CUEVION_COLLAB_V2_OWNER_CSRF_KEY`, optional rotation-only `CUEVION_COLLAB_V2_OWNER_CSRF_KEY_PREVIOUS`, `CUEVION_COLLAB_V2_ALLOWLIST_HMAC_KEY`, `CUEVION_COLLAB_V2_OWNER_ALLOWLIST`, and `CUEVION_COLLAB_V2_MAILBOX_ALLOWLIST`. Parsed owner-security configuration objects are opaque, immutable, and intentionally nonserializable; generic dataclass, pickle, copy, string, and representation paths must not disclose their internal key or allowlist material.
 
@@ -20,7 +30,7 @@ The owner-CSRF session-binding digest is stable within one authentication sessio
 
 `OwnerRequestContext` is a resolver-minted, immutable, nonserializable request capability intended to prevent request-level confusion and accidental generic misuse. It is not a sandbox against hostile arbitrary code executing in the same Python process, which remains outside this capability boundary. The public resolver remains the only supported minting path and must eventually be backed by real reviewed authentication; current beta authentication remains unacceptable.
 
-Owner HTTP activation remains blocked. The Origin, owner-CSRF, and owner/mailbox rollout allowlist primitives are unused by production routes; no owner route or handler is active, and no claim is made that owner authentication or owner CSRF is implemented. Real authentication, route integration, durable rate limiting, atomic idempotency and recovery, and production KV compatibility evidence are still required in separately reviewed work. This slice changes no Collaboration v1 or frontend behavior and does not make owner routes safe to enable.
+Owner route code now uses the Origin, owner-CSRF, and owner/mailbox rollout allowlist primitives. It remains default-off. Production enablement still requires append retry idempotency/recovery, durable rate limiting, retention approval, and production KV compatibility evidence in separately reviewed work. This slice changes no Collaboration v1 or frontend behavior and does not activate guest or external access.
 
 Activation requires all of the following in a separate change and review:
 

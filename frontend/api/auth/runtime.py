@@ -64,6 +64,44 @@ class AuthenticatedMemberContext:
             raise ValueError("invalid authenticated member context")
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class AuthenticatedMemberSessionContext:
+    """Revalidated server-session facts retained for trusted server adapters."""
+
+    member: AuthenticatedMemberContext
+    authentication_version: int
+    issuer: str
+    subject: str
+    session_id: str
+    credential_digest: str
+    issued_at: int
+    expires_at: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.member) is not AuthenticatedMemberContext
+            or type(self.authentication_version) is not int
+            or self.authentication_version != session_store.SESSION_SCHEMA_VERSION
+            or type(self.issuer) is not str
+            or not self.issuer
+            or type(self.subject) is not str
+            or not self.subject
+            or type(self.session_id) is not str
+            or not self.session_id
+            or type(self.credential_digest) is not str
+            or not self.credential_digest
+            or type(self.issued_at) is not int
+            or type(self.expires_at) is not int
+            or not 0 <= self.issued_at < self.expires_at
+        ):
+            raise ValueError("invalid authenticated member session context")
+
+    def __repr__(self) -> str:
+        return "<AuthenticatedMemberSessionContext>"
+
+    __str__ = __repr__
+
+
 @dataclass(frozen=True, slots=True)
 class AuthenticatedMemberResolution:
     """Fail-closed ordinary-member resolution plus any cookie invalidation."""
@@ -83,6 +121,26 @@ class AuthenticatedMemberResolution:
             raise ValueError("invalid authenticated member resolution")
 
 
+@dataclass(frozen=True, slots=True)
+class AuthenticatedMemberSessionResolution:
+    """Fail-closed resolution retaining non-secret server-session bindings."""
+
+    outcome: MemberResolutionOutcome
+    session: AuthenticatedMemberSessionContext | None
+    set_cookies: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        authenticated = self.outcome is MemberResolutionOutcome.AUTHENTICATED
+        if (
+            type(self.outcome) is not MemberResolutionOutcome
+            or authenticated
+            != (type(self.session) is AuthenticatedMemberSessionContext)
+            or type(self.set_cookies) is not tuple
+            or any(type(cookie) is not str or not cookie for cookie in self.set_cookies)
+        ):
+            raise ValueError("invalid authenticated member session resolution")
+
+
 def _member_resolution(
     outcome: MemberResolutionOutcome,
     member: AuthenticatedMemberContext | None = None,
@@ -94,6 +152,15 @@ def _member_resolution(
         member,
         (session_store.clear_session_cookie(),) if clear_session else (),
     )
+
+
+def _member_session_resolution(
+    outcome: MemberResolutionOutcome,
+    session: AuthenticatedMemberSessionContext | None = None,
+    *,
+    set_cookies: tuple[str, ...] = (),
+) -> AuthenticatedMemberSessionResolution:
+    return AuthenticatedMemberSessionResolution(outcome, session, set_cookies)
 
 
 def _authentication_unavailable_response(
@@ -377,15 +444,15 @@ def _current_authority_member_context(
         return None
 
 
-def resolve_authenticated_member(
+def resolve_authenticated_member_session(
     raw_headers: tuple[tuple[str, str], ...],
     *,
     environment: Mapping[str, str] | None = None,
     now: int | None = None,
     session_store_factory: Callable[[Mapping[str, str]], session_store.AuthSessionStore] = session_store.build_runtime_session_store,
     authority_factory: Callable[[Mapping[str, str]], object] = account_authority.build_runtime_account_authority,
-) -> AuthenticatedMemberResolution:
-    """Resolve one ordinary member from the Auth0 server session only.
+) -> AuthenticatedMemberSessionResolution:
+    """Resolve one ordinary member and its trusted Auth0 server-session facts.
 
     HTTP boundary failures remain explicit ``HttpBoundaryError`` instances for
     route adapters. All trusted-runtime, session-store, and account-authority
@@ -396,7 +463,7 @@ def resolve_authenticated_member(
     headers = http.validate_header_pairs(raw_headers)
     session_cookie = http.read_cookie(headers, session_store.SESSION_COOKIE_NAME)
     if session_cookie is None:
-        return _member_resolution(MemberResolutionOutcome.UNAUTHENTICATED)
+        return _member_session_resolution(MemberResolutionOutcome.UNAUTHENTICATED)
 
     try:
         timestamp = int(time.time()) if now is None else now
@@ -409,7 +476,11 @@ def resolve_authenticated_member(
             now=timestamp,
         )
         if record is None:
-            return _revalidation_failed(store, lookup_digest)
+            failed = _revalidation_failed(store, lookup_digest)
+            return _member_session_resolution(
+                failed.outcome,
+                set_cookies=failed.set_cookies,
+            )
         authority_reader = authority_factory(source)
         result = authority_reader.read_current_account_by_user(
             record.user_id, record.workspace_id
@@ -418,24 +489,65 @@ def resolve_authenticated_member(
             CurrentAccountReadOutcome.UNAVAILABLE,
             CurrentAccountReadOutcome.INTERNAL_ERROR,
         ):
-            return _member_resolution(MemberResolutionOutcome.UNAVAILABLE)
+            return _member_session_resolution(MemberResolutionOutcome.UNAVAILABLE)
         authority = result.authority
         if (
             result.outcome is not CurrentAccountReadOutcome.FOUND
             or authority is None
         ):
-            return _revalidation_failed(store, lookup_digest)
+            failed = _revalidation_failed(store, lookup_digest)
+            return _member_session_resolution(
+                failed.outcome,
+                set_cookies=failed.set_cookies,
+            )
         member = _current_authority_member_context(record, authority)
         if member is None:
-            return _revalidation_failed(store, lookup_digest)
-        return _member_resolution(
+            failed = _revalidation_failed(store, lookup_digest)
+            return _member_session_resolution(
+                failed.outcome,
+                set_cookies=failed.set_cookies,
+            )
+        return _member_session_resolution(
             MemberResolutionOutcome.AUTHENTICATED,
-            member,
+            AuthenticatedMemberSessionContext(
+                member=member,
+                authentication_version=record.schema_version,
+                issuer=record.issuer,
+                subject=record.subject,
+                session_id=record.session_id,
+                credential_digest=record.binding_digest,
+                issued_at=record.created_at,
+                expires_at=record.expires_at,
+            ),
         )
     except (session_store.SessionStoreUnavailable, session_store.SessionConfigurationError):
-        return _member_resolution(MemberResolutionOutcome.UNAVAILABLE)
+        return _member_session_resolution(MemberResolutionOutcome.UNAVAILABLE)
     except Exception:
-        return _member_resolution(MemberResolutionOutcome.UNAVAILABLE)
+        return _member_session_resolution(MemberResolutionOutcome.UNAVAILABLE)
+
+
+def resolve_authenticated_member(
+    raw_headers: tuple[tuple[str, str], ...],
+    *,
+    environment: Mapping[str, str] | None = None,
+    now: int | None = None,
+    session_store_factory: Callable[[Mapping[str, str]], session_store.AuthSessionStore] = session_store.build_runtime_session_store,
+    authority_factory: Callable[[Mapping[str, str]], object] = account_authority.build_runtime_account_authority,
+) -> AuthenticatedMemberResolution:
+    """Resolve the existing frontend-safe member view from the trusted session."""
+
+    resolution = resolve_authenticated_member_session(
+        raw_headers,
+        environment=environment,
+        now=now,
+        session_store_factory=session_store_factory,
+        authority_factory=authority_factory,
+    )
+    return AuthenticatedMemberResolution(
+        resolution.outcome,
+        resolution.session.member if resolution.session is not None else None,
+        resolution.set_cookies,
+    )
 
 
 def session_response(
@@ -537,8 +649,11 @@ def logout_response(
 __all__ = (
     "AuthenticatedMemberContext",
     "AuthenticatedMemberResolution",
+    "AuthenticatedMemberSessionContext",
+    "AuthenticatedMemberSessionResolution",
     "MemberResolutionOutcome",
     "resolve_authenticated_member",
+    "resolve_authenticated_member_session",
     "login_response",
     "callback_response",
     "session_response",

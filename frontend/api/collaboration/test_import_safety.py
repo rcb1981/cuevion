@@ -74,7 +74,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             from unittest.mock import patch
 
             {DEPLOYMENT_PATH_ASSERTIONS}
-            short_names = ("models", "redis_store", "authorization", "source_message", "guest_session", "mutations", "http_boundary", "http_adapter", "owner_request_security", "application")
+            short_names = ("models", "redis_store", "authorization", "source_message", "guest_session", "mutations", "http_boundary", "http_adapter", "owner_request_security", "owner_authentication", "application", "owner_http")
             with patch.dict(os.environ, {{}}, clear=True), patch(
                 "urllib.request.urlopen", side_effect=AssertionError("network during import")
             ), patch(
@@ -123,7 +123,8 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
         short_names = (
             "models", "redis_store", "authorization", "source_message",
             "guest_session", "mutations", "http_boundary", "http_adapter",
-            "owner_request_security", "application",
+            "owner_request_security", "owner_authentication", "application",
+            "owner_http",
         )
         for short_name in short_names:
             for order in ("package_first", "top_level_first"):
@@ -262,6 +263,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             "api.auth.logout",
             "api.collaboration.thread",
             "api.collaboration.invite",
+            "api.collaboration.owner",
             "api.contact.support",
             "api.inboxes.connect-imap",
             "api.inboxes.connect-oauth",
@@ -287,7 +289,9 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             "api.collaboration.http_boundary",
             "api.collaboration.http_adapter",
             "api.collaboration.owner_request_security",
+            "api.collaboration.owner_authentication",
             "api.collaboration.application",
+            "api.collaboration.owner_http",
             "api.user_config_store",
             "api.inboxes.mailbox_secret_store",
             "api.inboxes.authenticated_gmail",
@@ -449,6 +453,8 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             ("api.collaboration.http_boundary_copy", "api/collaboration/http_boundary.py"),
             ("api.collaboration.http_adapter_copy", "api/collaboration/http_adapter.py"),
             ("api.collaboration.owner_request_security_copy", "api/collaboration/owner_request_security.py"),
+            ("api.collaboration.owner_authentication_copy", "api/collaboration/owner_authentication.py"),
+            ("api.collaboration.owner_http_copy", "api/collaboration/owner_http.py"),
             ("collaboration.owner_request_security", "api/collaboration/owner_request_security.py"),
             ("api.collaboration.application_copy", "api/collaboration/application.py"),
             ("collaboration.application", "api/collaboration/application.py"),

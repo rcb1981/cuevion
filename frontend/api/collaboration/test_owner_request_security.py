@@ -41,6 +41,7 @@ CURRENT_KEY = b"current-owner-csrf-key-material-0001"
 PREVIOUS_KEY = b"previous-owner-csrf-key-material-01"
 ALLOWLIST_KEY = b"separate-allowlist-key-material-0001"
 MAILBOX_ID = "primary.mailbox"
+WORKSPACE_ID = "wsp_" + ("w" * 22)
 
 _SIGNING_LABEL = b"cuevion/collaboration-v2/owner-csrf/signing/v1"
 _OWNER_DOMAIN = b"cuevion/collaboration-v2/owner-allowlist/v1\x00"
@@ -70,6 +71,7 @@ def _claims(**updates: object) -> VerifiedOwnerAuthentication:
         "authentication_version": 1,
         "subject": "provider:user_0123456789",
         "owner_email": "owner@example.com",
+        "workspace_id": WORKSPACE_ID,
         "display_name": "Owner Example",
         "session_id": _b64(b"session-id-entropy"),
         "credential_digest": _b64(hashlib.sha256(b"credential").digest()),
@@ -319,7 +321,7 @@ else:
         self.assertIs(type(context), OwnerRequestContext)
         self.assertFalse(hasattr(context, "__dict__"))
         self.assertEqual(context.owner_email, "owner@example.com")
-        self.assertEqual(context.workspace_id, context.owner_email)
+        self.assertEqual(context.workspace_id, WORKSPACE_ID)
         self.assertEqual(context.subject, claims.subject)
         self.assertEqual(context.session_id, claims.session_id)
         self.assertEqual(context.credential_digest, claims.credential_digest)
@@ -371,7 +373,7 @@ else:
         claims = _claims()
         context = security._new_owner_context(claims)
         self.assertIs(type(context), OwnerRequestContext)
-        self.assertEqual(context.workspace_id, claims.owner_email)
+        self.assertEqual(context.workspace_id, claims.workspace_id)
 
         class ClaimsSubclass(VerifiedOwnerAuthentication):
             pass
@@ -419,6 +421,9 @@ else:
             {"owner_email": "ownér@example.com"},
             {"owner_email": "owner@localhost"},
             {"owner_email": _StringSubclass("owner@example.com")},
+            {"workspace_id": "owner@example.com"},
+            {"workspace_id": "wsp_short"},
+            {"workspace_id": _StringSubclass(WORKSPACE_ID)},
             {"display_name": ""},
             {"display_name": "Owner\x00"},
             {"display_name": _StringSubclass("Owner")},
@@ -448,6 +453,7 @@ else:
             "authentication_version": 1,
             "subject": "provider:user_0123456789",
             "owner_email": "owner@example.com",
+            "workspace_id": WORKSPACE_ID,
             "display_name": "Owner",
             "session_id": _b64(b"session-id-entropy"),
             "credential_digest": _b64(hashlib.sha256(b"credential").digest()),

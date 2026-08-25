@@ -121,13 +121,13 @@ class StatefulV2Store:
         if pointer is None:
             return {"status": "missing"}
         target = self.get_json(args[0] + pointer)
-        expected_source = json.loads(args[3])
+        expected_source = json.loads(args[4])
         if (
             target is None
             or target.get("collaborationId") != pointer
             or target.get("ownerEmail") != args[1]
-            or target.get("workspaceId") != args[1]
-            or target.get("mailboxId") != args[2]
+            or target.get("workspaceId") != args[2]
+            or target.get("mailboxId") != args[3]
             or target.get("sourceRef") != expected_source
         ):
             return {"status": "conflict"}

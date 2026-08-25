@@ -56,6 +56,7 @@ else:
     MIN_V2_TIMESTAMP_MILLISECONDS = MIN_V2_TIMESTAMP_SECONDS * 1000
     MAX_V2_TIMESTAMP_MILLISECONDS = (MAX_V2_TIMESTAMP_SECONDS * 1000) + 999
     _V2_OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{22,128}$")
+    _V2_WORKSPACE_ID_RE = re.compile(r"^wsp_[A-Za-z0-9_-]{22}$")
     _V2_EMAIL_RE = re.compile(
         r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*@"
         r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
@@ -682,6 +683,18 @@ else:
         return normalized.lower()
 
 
+    def normalize_v2_workspace_id(value: Any) -> str | None:
+        """Accept only the canonical Auth0 account-authority workspace identity."""
+
+        return (
+            value
+            if isinstance(value, str)
+            and value.isascii()
+            and _V2_WORKSPACE_ID_RE.fullmatch(value) is not None
+            else None
+        )
+
+
     def is_v2_opaque_id(value: Any) -> bool:
         return isinstance(value, str) and bool(_V2_OPAQUE_ID_RE.fullmatch(value))
 
@@ -809,7 +822,13 @@ else:
             return None
         collaboration_id = value.get("collaborationId")
         owner_email = normalize_v2_email(value.get("ownerEmail"))
-        workspace_id = normalize_v2_email(value.get("workspaceId"))
+        canonical_workspace_id = normalize_v2_workspace_id(value.get("workspaceId"))
+        # Email-as-workspace records were produced only by the inactive foundation.
+        # They remain decodeable for fail-closed inspection, but the active owner
+        # resolver can mint only canonical ``wsp_`` authority and therefore cannot
+        # authorize or create one of these historical records.
+        historical_workspace_id = normalize_v2_email(value.get("workspaceId"))
+        workspace_id = canonical_workspace_id or historical_workspace_id
         mailbox_id = _v2_mailbox_id(value.get("mailboxId"))
         source_ref = normalize_v2_source_ref(value.get("sourceRef"))
         source_message = normalize_v2_source_message(value.get("sourceMessage"))
@@ -822,7 +841,10 @@ else:
             or not owner_email
             or value.get("ownerEmail") != owner_email
             or value.get("workspaceId") != workspace_id
-            or workspace_id != owner_email
+            or (
+                canonical_workspace_id is None
+                and historical_workspace_id != owner_email
+            )
             or not mailbox_id
             or source_ref is None
             or source_message is None

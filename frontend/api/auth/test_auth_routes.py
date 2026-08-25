@@ -418,6 +418,35 @@ class SessionAndLogoutTests(unittest.TestCase):
         )
         self.assertEqual(authority.user_calls, [(USER_ID, WORKSPACE_ID)])
 
+    def test_trusted_session_resolver_retains_only_revalidated_server_bindings(self):
+        _commands, store, headers = self._stored_session()
+        authority = FakeAuthority(user_result=_user_result())
+        resolution = runtime.resolve_authenticated_member_session(
+            headers,
+            environment=ENVIRONMENT,
+            now=NOW + 1,
+            session_store_factory=lambda _environment: store,
+            authority_factory=lambda _environment: authority,
+        )
+
+        self.assertIs(
+            resolution.outcome,
+            runtime.MemberResolutionOutcome.AUTHENTICATED,
+        )
+        trusted = resolution.session
+        self.assertIs(type(trusted), runtime.AuthenticatedMemberSessionContext)
+        self.assertEqual(trusted.member.email, EMAIL)
+        self.assertEqual(trusted.member.workspace_id, WORKSPACE_ID)
+        self.assertEqual(trusted.authentication_version, 1)
+        self.assertEqual(trusted.issuer, ISSUER)
+        self.assertEqual(trusted.subject, SUBJECT)
+        self.assertEqual(trusted.issued_at, NOW)
+        self.assertEqual(trusted.expires_at, NOW + session_store.SESSION_TTL_SECONDS)
+        self.assertEqual(len(trusted.session_id), 43)
+        self.assertEqual(len(trusted.credential_digest), 43)
+        self.assertNotIn("__Host-cuevion_session", repr(trusted))
+        self.assertNotIn(headers[-1][1], repr(trusted))
+
     def test_shared_member_resolver_ignores_unrelated_legacy_cookie(self):
         store_factory = mock.Mock(side_effect=AssertionError("must not resolve store"))
         authority_factory = mock.Mock(side_effect=AssertionError("must not read authority"))

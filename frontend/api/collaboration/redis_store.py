@@ -59,6 +59,7 @@ else:
         normalize_v2_invite_record,
         normalize_v2_source_ref,
         normalize_v2_thread_record,
+        normalize_v2_workspace_id,
     )
 
     MAX_COLLABORATION_THREAD_BATCH_SIZE = 200
@@ -1392,6 +1393,10 @@ else:
       return asciiSecurityString(value, 256, false) and value == string.lower(value)
         and string.match(value, '^[a-z0-9][a-z0-9._:-]*$') ~= nil
     end
+    local function canonicalWorkspaceId(value)
+      return asciiSecurityString(value, 26, false) and #value == 26
+        and string.match(value, '^wsp_[A-Za-z0-9_-]+$') ~= nil
+    end
     local function canonicalEmail(value)
       if not asciiSecurityString(value, 320, false) or value ~= string.lower(value) then return false end
       local at = string.find(value, '@', 1, true)
@@ -1467,7 +1472,8 @@ else:
       local updatedAt = type(value) == 'table' and integerValue(value.updatedAt) or nil
       return type(value) == 'table' and keyCount(value) == 11 and value.v == '2' and exactInteger(value.v)
         and opaqueId(value.collaborationId) and canonicalEmail(value.ownerEmail)
-        and value.workspaceId == value.ownerEmail and mailboxId(value.mailboxId)
+        and (canonicalWorkspaceId(value.workspaceId) or value.workspaceId == value.ownerEmail)
+        and mailboxId(value.mailboxId)
         and sourceValid(value.sourceRef) and sourceMessageValid(value.sourceMessage)
         and messagesValid(value.messages)
         and (value.state == 'needs_review' or value.state == 'needs_action' or value.state == 'note_only' or value.state == 'resolved')
@@ -1691,6 +1697,7 @@ else:
                 thread["ownerEmail"],
                 thread["mailboxId"],
                 thread["sourceRef"],
+                workspace_id=thread["workspaceId"],
                 command_transport=command_transport,
             )
             existing = loaded.get("record") if loaded.get("status") == "ok" else None
@@ -1921,11 +1928,11 @@ else:
     local targetTtl = redis.call('PTTL', targetKey)
     if targetTtl <= 0 then return cjson.encode({status='conflict'}) end
     local targetOk, target = decodeWire(targetRaw)
-    local sourceOk, expectedSource = decodeWire(ARGV[4])
+    local sourceOk, expectedSource = decodeWire(ARGV[5])
 if not targetOk or not sourceOk or not sourceValid(expectedSource)
   or not threadValid(target) or target.collaborationId ~= pointer
-      or target.ownerEmail ~= ARGV[2] or target.workspaceId ~= ARGV[2]
-      or target.mailboxId ~= ARGV[3] or not sourceEqual(target.sourceRef, expectedSource) then
+      or target.ownerEmail ~= ARGV[2] or target.workspaceId ~= ARGV[3]
+      or target.mailboxId ~= ARGV[4] or not sourceEqual(target.sourceRef, expectedSource) then
       return cjson.encode({status='conflict'})
     end
     if previousPointer then
@@ -1944,12 +1951,19 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         mailbox_id: str,
         source_ref: dict,
         *,
+        workspace_id: str | None = None,
         command_transport=None,
     ) -> dict:
         normalized_owner = normalize_v2_email(owner_email)
+        normalized_workspace = (
+            normalized_owner
+            if workspace_id is None or workspace_id == normalized_owner
+            else normalize_v2_workspace_id(workspace_id)
+        )
         normalized_source = normalize_v2_source_ref(source_ref)
         if (
             normalized_owner is None
+            or normalized_workspace is None
             or not isinstance(mailbox_id, str)
             or not mailbox_id.strip()
             or len(mailbox_id.strip()) > 256
@@ -1978,7 +1992,8 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         pointer = _v2_eval(
             [
                 "EVAL", _LOAD_AND_MIGRATE_V2_SOURCE_LUA, len(keys), *keys,
-                V2_THREAD_KEY_PREFIX, normalized_owner, mailbox_id.strip(),
+                V2_THREAD_KEY_PREFIX, normalized_owner, normalized_workspace,
+                mailbox_id.strip(),
                 json.dumps(normalized_source, separators=(",", ":"), sort_keys=True),
             ],
             command_transport,
@@ -1998,6 +2013,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         if (
             not isinstance(thread, dict)
             or thread.get("ownerEmail") != normalized_owner
+            or thread.get("workspaceId") != normalized_workspace
             or thread.get("mailboxId") != mailbox_id.strip()
             or thread.get("sourceRef") != normalized_source
         ):

@@ -11,6 +11,7 @@ from typing import Any
 from .authorization import (
     _is_internal_capability,
     resolve_internal_collaboration_context,
+    resolve_verified_owner_collaboration_context,
 )
 from .guest_session import (
     _is_guest_read_capability,
@@ -367,6 +368,8 @@ def _append_v2_owner_message(
     payload: object,
     *,
     required_action: str,
+    owner_context: object | None = None,
+    owner_security_configuration: object | None = None,
 ) -> dict[str, Any]:
     if required_action == "reply":
         visibility = "shared"
@@ -383,11 +386,20 @@ def _append_v2_owner_message(
     ):
         return _failure("malformed", "invalid_request")
 
-    authorized = resolve_internal_collaboration_context(
-        headers,
-        collaboration_id=collaboration_id,
-        required_action=required_action,
-    )
+    if owner_context is None:
+        authorized = resolve_internal_collaboration_context(
+            headers,
+            collaboration_id=collaboration_id,
+            required_action=required_action,
+        )
+    else:
+        authorized = resolve_verified_owner_collaboration_context(
+            owner_context,
+            headers,
+            collaboration_id=collaboration_id,
+            required_action=required_action,
+            owner_security_configuration=owner_security_configuration,
+        )
     if type(authorized) is not dict or authorized.get("status") != "ok":
         return _failure_from_result(
             authorized,
@@ -451,9 +463,48 @@ def append_v2_internal_note_for_owner(
     )
 
 
-def create_v2_collaboration_for_owner(
+def append_v2_shared_message_for_verified_owner(
+    owner_context: object,
+    headers: object,
+    collaboration_id: object,
+    payload: object,
+    *,
+    owner_security_configuration: object,
+) -> dict[str, Any]:
+    return _append_v2_owner_message(
+        headers,
+        collaboration_id,
+        payload,
+        required_action="reply",
+        owner_context=owner_context,
+        owner_security_configuration=owner_security_configuration,
+    )
+
+
+def append_v2_internal_note_for_verified_owner(
+    owner_context: object,
+    headers: object,
+    collaboration_id: object,
+    payload: object,
+    *,
+    owner_security_configuration: object,
+) -> dict[str, Any]:
+    return _append_v2_owner_message(
+        headers,
+        collaboration_id,
+        payload,
+        required_action="internal_note",
+        owner_context=owner_context,
+        owner_security_configuration=owner_security_configuration,
+    )
+
+
+def _create_v2_collaboration_for_owner(
     headers: object,
     payload: object,
+    *,
+    owner_context: object | None = None,
+    owner_security_configuration: object | None = None,
 ) -> dict[str, Any]:
     if (
         type(payload) is not dict
@@ -464,11 +515,20 @@ def create_v2_collaboration_for_owner(
         return _failure("malformed", "invalid_request")
 
     mailbox_id = payload.get("mailboxId")
-    authorized = resolve_internal_collaboration_context(
-        headers,
-        mailbox_id,
-        required_action="create",
-    )
+    if owner_context is None:
+        authorized = resolve_internal_collaboration_context(
+            headers,
+            mailbox_id,
+            required_action="create",
+        )
+    else:
+        authorized = resolve_verified_owner_collaboration_context(
+            owner_context,
+            headers,
+            mailbox_id,
+            required_action="create",
+            owner_security_configuration=owner_security_configuration,
+        )
     if type(authorized) is not dict or authorized.get("status") != "ok":
         return _failure_from_result(
             authorized,
@@ -609,15 +669,49 @@ def create_v2_collaboration_for_owner(
     }
 
 
-def read_v2_collaboration_for_owner(
+def create_v2_collaboration_for_owner(
+    headers: object,
+    payload: object,
+) -> dict[str, Any]:
+    return _create_v2_collaboration_for_owner(headers, payload)
+
+
+def create_v2_collaboration_for_verified_owner(
+    owner_context: object,
+    headers: object,
+    payload: object,
+    *,
+    owner_security_configuration: object,
+) -> dict[str, Any]:
+    return _create_v2_collaboration_for_owner(
+        headers,
+        payload,
+        owner_context=owner_context,
+        owner_security_configuration=owner_security_configuration,
+    )
+
+
+def _read_v2_collaboration_for_owner(
     headers: object,
     collaboration_id: object,
+    *,
+    owner_context: object | None = None,
+    owner_security_configuration: object | None = None,
 ) -> dict[str, Any]:
-    authorized = resolve_internal_collaboration_context(
-        headers,
-        collaboration_id=collaboration_id,
-        required_action="read",
-    )
+    if owner_context is None:
+        authorized = resolve_internal_collaboration_context(
+            headers,
+            collaboration_id=collaboration_id,
+            required_action="read",
+        )
+    else:
+        authorized = resolve_verified_owner_collaboration_context(
+            owner_context,
+            headers,
+            collaboration_id=collaboration_id,
+            required_action="read",
+            owner_security_configuration=owner_security_configuration,
+        )
 
     if type(authorized) is not dict or authorized.get("status") != "ok":
         return _failure_from_result(
@@ -639,6 +733,28 @@ def read_v2_collaboration_for_owner(
         return _failure("forbidden", "forbidden")
 
     return _success(_build_owner_thread_dto(thread))
+
+
+def read_v2_collaboration_for_owner(
+    headers: object,
+    collaboration_id: object,
+) -> dict[str, Any]:
+    return _read_v2_collaboration_for_owner(headers, collaboration_id)
+
+
+def read_v2_collaboration_for_verified_owner(
+    owner_context: object,
+    headers: object,
+    collaboration_id: object,
+    *,
+    owner_security_configuration: object,
+) -> dict[str, Any]:
+    return _read_v2_collaboration_for_owner(
+        headers,
+        collaboration_id,
+        owner_context=owner_context,
+        owner_security_configuration=owner_security_configuration,
+    )
 
 
 def read_v2_collaboration_for_guest(

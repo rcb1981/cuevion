@@ -65,6 +65,14 @@ def _resolve_authenticated_user(headers):
 def _resolve_owned_managed_inbox_record(headers, mailbox_id):
     return _shared_config_helper("resolve_owned_managed_inbox_record")(headers, mailbox_id)
 
+
+def _resolve_verified_owned_managed_inbox_record(headers, mailbox_id):
+    return _shared_config_helper("resolve_owned_managed_inbox_record")(
+        headers,
+        mailbox_id,
+        include_member_authority=True,
+    )
+
 OWNER_ONLY_ACTIONS = {
     "create",
     "issue_invite",
@@ -226,3 +234,156 @@ def resolve_internal_collaboration_context(
         "context": capability,
         "error": None,
     }
+
+
+def resolve_verified_owner_collaboration_context(
+    owner_context: object,
+    headers: object,
+    mailbox_id: object | None = None,
+    *,
+    collaboration_id: object | None = None,
+    required_action: str = "read",
+    owner_security_configuration: object,
+    mailbox_resolver=_resolve_verified_owned_managed_inbox_record,
+    thread_loader=_load_v2_thread,
+) -> dict:
+    """Mint an internal capability from exact Auth0 owner and mailbox authority."""
+
+    try:
+        owner_security = importlib.import_module(
+            "api.collaboration.owner_request_security"
+        )
+    except Exception:
+        return _failure("unavailable", "storage_unavailable")
+    if not owner_security._is_owner_context(owner_context):
+        return _failure("unauthorized", "auth_required")
+    if not owner_security.owner_is_allowlisted(
+        owner_context,
+        owner_security_configuration,
+    ):
+        raise owner_security.OwnerSecurityError("rollout_unavailable")
+    if (
+        required_action not in OWNER_ACTIONS
+        or (
+            mailbox_id is not None
+            and (
+                type(mailbox_id) is not str
+                or not mailbox_id
+                or mailbox_id != mailbox_id.strip()
+                or not mailbox_id.isascii()
+                or re.fullmatch(r"[a-z0-9][a-z0-9._:-]{0,255}", mailbox_id)
+                is None
+            )
+        )
+        or (
+            collaboration_id is not None
+            and (
+                type(collaboration_id) is not str
+                or re.fullmatch(r"[A-Za-z0-9_-]{22,128}", collaboration_id)
+                is None
+            )
+        )
+    ):
+        return _failure("malformed", "invalid_request")
+
+    thread = None
+    resolved_mailbox_id = mailbox_id
+    if collaboration_id is not None:
+        try:
+            loaded = thread_loader(collaboration_id)
+        except Exception:
+            return _failure("unavailable", "storage_unavailable")
+        if not hasattr(loaded, "get"):
+            return _failure("unavailable", "storage_unavailable")
+        if loaded.get("status") == "missing":
+            return _failure("not_found", "collaboration_not_found")
+        if loaded.get("status") in {"unavailable", "malformed"}:
+            return _failure("unavailable", "storage_unavailable")
+        thread = normalize_v2_thread_record(loaded.get("record"))
+        if (
+            loaded.get("status") != "ok"
+            or type(thread) is not dict
+            or thread.get("ownerEmail") != owner_context.owner_email
+            or thread.get("workspaceId") != owner_context.workspace_id
+            or type(thread.get("mailboxId")) is not str
+        ):
+            return _failure("forbidden", "forbidden")
+        if (
+            resolved_mailbox_id is not None
+            and thread["mailboxId"] != resolved_mailbox_id
+        ):
+            return _failure("forbidden", "forbidden")
+        resolved_mailbox_id = thread["mailboxId"]
+
+    if type(resolved_mailbox_id) is not str:
+        return _failure("malformed", "invalid_request")
+    if not owner_security.mailbox_is_allowlisted(
+        owner_context,
+        resolved_mailbox_id,
+        owner_security_configuration,
+    ):
+        raise owner_security.OwnerSecurityError("rollout_unavailable")
+
+    try:
+        owned_result = mailbox_resolver(headers, resolved_mailbox_id)
+    except Exception:
+        return _failure("unavailable", "storage_unavailable")
+    if type(owned_result) is not dict:
+        return _failure("unavailable", "storage_unavailable")
+    if owned_result.get("status") == "unauthorized":
+        return _failure("unauthorized", "auth_required")
+    if owned_result.get("status") == "not_found":
+        return _failure("not_found", "mailbox_not_found")
+    if owned_result.get("status") in {"unavailable", "malformed", "conflict"}:
+        return _failure("unavailable", "storage_unavailable")
+
+    try:
+        auth_runtime = importlib.import_module("api.auth.runtime")
+        member = owned_result.get("memberAuthority")
+        owned_user = owned_result.get("user")
+        inbox = owned_result.get("inbox")
+        member_matches = (
+            type(member) is auth_runtime.AuthenticatedMemberContext
+            and member.auth_source == "auth0"
+            and member.user_type == "member"
+            and member.email == owner_context.owner_email
+            and member.workspace_id == owner_context.workspace_id
+            and member.name == owner_context.display_name
+        )
+    except Exception:
+        return _failure("unavailable", "storage_unavailable")
+    if (
+        owned_result.get("status") != "ok"
+        or not member_matches
+        or type(owned_user) is not dict
+        or normalize_v2_email(owned_user.get("email"))
+        != owner_context.owner_email
+        or type(inbox) is not dict
+        or inbox.get("id") != resolved_mailbox_id
+    ):
+        return _failure("forbidden", "forbidden")
+
+    mailbox_value = _security_string(inbox.get("id"), 256)
+    mailbox_provider = inbox.get("provider")
+    if (
+        mailbox_value != resolved_mailbox_id
+        or not mailbox_value.isascii()
+        or mailbox_value.lower() != mailbox_value
+        or re.fullmatch(r"[a-z0-9][a-z0-9._:-]{0,255}", mailbox_value)
+        is None
+        or mailbox_provider not in {"google", "custom_imap"}
+    ):
+        return _failure("unavailable", "storage_unavailable")
+
+    capability = _InternalCollaborationCapability(
+        _INTERNAL_CAPABILITY_SENTINEL,
+        owner_context.owner_email,
+        owner_context.workspace_id,
+        mailbox_value,
+        mailbox_provider,
+        collaboration_id,
+        required_action,
+        "owner",
+        owner_context.display_name,
+    )
+    return {"status": "ok", "context": capability, "error": None}
