@@ -19,6 +19,7 @@ from .http_adapter import (
     require_request_method,
 )
 from .http_boundary import BoundaryError, get_security_header
+from .models import normalize_v2_owner_idempotency_key
 from .owner_authentication import resolve_verified_auth0_owner
 from .owner_request_security import (
     OwnerSecurityError,
@@ -61,6 +62,7 @@ _APPLICATION_FAILURES = {
     "forbidden": (404, "not_found"),
     "source_changed": (409, "conflict"),
     "stale_thread": (409, "conflict"),
+    "idempotency_conflict": (409, "conflict"),
     "storage_unavailable": (503, "service_unavailable"),
     "storage_protocol_error": (503, "service_unavailable"),
     "index_hmac_unavailable": (503, "service_unavailable"),
@@ -236,11 +238,21 @@ def owner_response(
                 if operation == "append_shared"
                 else application.append_v2_internal_note_for_verified_owner
             )
+            idempotency_key = normalize_v2_owner_idempotency_key(
+                get_security_header(
+                    raw_headers,
+                    "x-cuevion-idempotency-key",
+                    required=True,
+                )
+            )
+            if idempotency_key is None:
+                raise BoundaryError("invalid_value", 400)
             result = service(
                 context,
                 raw_headers,
                 payload.get("collaborationId"),
                 {"text": payload.get("text")},
+                idempotency_key=idempotency_key,
                 owner_security_configuration=configuration,
             )
             if (

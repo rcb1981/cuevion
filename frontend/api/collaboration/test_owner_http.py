@@ -39,6 +39,7 @@ SESSION_ID = base64.urlsafe_b64encode(b"s" * 32).rstrip(b"=").decode("ascii")
 CREDENTIAL_DIGEST = base64.urlsafe_b64encode(
     hashlib.sha256(b"credential-binding").digest()
 ).rstrip(b"=").decode("ascii")
+IDEMPOTENCY_KEY = base64.urlsafe_b64encode(b"i" * 32).rstrip(b"=").decode("ascii")
 CSRF_KEY = b"owner-csrf-key-material-32-bytes!"
 ALLOWLIST_KEY = b"owner-allowlist-material-32-bytes"
 
@@ -154,7 +155,13 @@ class _Request:
         return
 
 
-def _request(payload: dict, *, csrf: str | None = None, **kwargs) -> _Request:
+def _request(
+    payload: dict,
+    *,
+    csrf: str | None = None,
+    idempotency_key: str | None = None,
+    **kwargs,
+) -> _Request:
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     headers = [
         ("Origin", ORIGIN),
@@ -163,6 +170,8 @@ def _request(payload: dict, *, csrf: str | None = None, **kwargs) -> _Request:
     ]
     if csrf is not None:
         headers.append(("X-Cuevion-CSRF", csrf))
+    if idempotency_key is not None:
+        headers.append(("X-Cuevion-Idempotency-Key", idempotency_key))
     return _Request(body, headers=headers, **kwargs)
 
 
@@ -447,10 +456,61 @@ class OwnerHttpBoundaryTests(unittest.TestCase):
             "append_v2_shared_message_for_verified_owner",
             return_value=success,
         ) as service:
-            accepted = _invoke(_request(payload, csrf=self._csrf()))
+            accepted = _invoke(
+                _request(
+                    payload,
+                    csrf=self._csrf(),
+                    idempotency_key=IDEMPOTENCY_KEY,
+                )
+            )
         self.assertEqual(accepted.status, 200)
         service.assert_called_once()
         self.assertIs(service.call_args.args[0], self.context)
+        self.assertEqual(
+            service.call_args.kwargs["idempotency_key"],
+            IDEMPOTENCY_KEY,
+        )
+
+    def test_owner_append_requires_one_canonical_idempotency_header(self):
+        payload = {
+            "operation": "append_internal",
+            "collaborationId": COLLABORATION_ID,
+            "text": "Private note",
+        }
+        service = mock.Mock(side_effect=AssertionError("service must not run"))
+        with mock.patch.object(
+            owner_http.application,
+            "append_v2_internal_note_for_verified_owner",
+            service,
+        ):
+            missing = _invoke(_request(payload, csrf=self._csrf()))
+            self.assertEqual(missing.status, 400)
+            for malformed in (
+                "short",
+                "A" * 44,
+                ("A" * 42) + "!",
+                ("A" * 42) + "B",
+            ):
+                with self.subTest(malformed=malformed):
+                    rejected = _invoke(
+                        _request(
+                            payload,
+                            csrf=self._csrf(),
+                            idempotency_key=malformed,
+                        )
+                    )
+                    self.assertEqual(rejected.status, 400)
+
+            duplicate = _request(
+                payload,
+                csrf=self._csrf(),
+                idempotency_key=IDEMPOTENCY_KEY,
+            )
+            duplicate.headers.pairs.append(
+                ("x-cuevion-idempotency-key", IDEMPOTENCY_KEY)
+            )
+            self.assertEqual(_invoke(duplicate).status, 400)
+        service.assert_not_called()
 
     def test_strict_json_headers_body_limit_and_unknown_fields_fail_before_service(self):
         service = mock.Mock(side_effect=AssertionError("service must not run"))

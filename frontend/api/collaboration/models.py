@@ -81,6 +81,7 @@ else:
             "origin_rejected",
             "invalid_request",
             "stale_thread",
+            "idempotency_conflict",
             "stale_invitation",
             "storage_unavailable",
             "storage_protocol_error",
@@ -91,6 +92,9 @@ else:
             "already_logged_out",
             "internal_error",
         }
+    )
+    _V2_OWNER_IDEMPOTENCY_KEY_RE = re.compile(
+        r"^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$"
     )
 
 
@@ -703,6 +707,17 @@ else:
         if byte_count < 16:
             raise ValueError("v2 opaque identifiers require at least 128 bits")
         return secrets.token_urlsafe(byte_count)
+
+
+    def normalize_v2_owner_idempotency_key(value: Any) -> str | None:
+        """Accept only canonical unpadded base64url encoding of 256 bits."""
+
+        return (
+            value
+            if type(value) is str
+            and _V2_OWNER_IDEMPOTENCY_KEY_RE.fullmatch(value) is not None
+            else None
+        )
 
 
     def generate_v2_bearer_secret(byte_count: int = 32) -> str:

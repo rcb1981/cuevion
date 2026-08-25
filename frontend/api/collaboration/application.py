@@ -70,6 +70,7 @@ _CANONICAL_OWNER_MUTATION_ERROR_CODES = {
     "collaboration_not_found": "collaboration_not_found",
     "forbidden": "forbidden",
     "invalid_request": "invalid_request",
+    "idempotency_conflict": "idempotency_conflict",
     "stale_thread": "stale_thread",
     "storage_protocol_error": "storage_protocol_error",
     "storage_unavailable": "storage_unavailable",
@@ -362,6 +363,30 @@ def _append_internal_v2_message(
     )
 
 
+def _append_idempotent_v2_owner_message(
+    capability: object,
+    text: str,
+    *,
+    idempotency_key: object,
+) -> dict:
+    # This adapter is intentionally used only by the verified owner HTTP path;
+    # inactive internal/Team and guest helpers retain their existing behavior.
+    from .mutations import append_owner_v2_message_idempotently
+
+    if capability.action == "reply":
+        visibility = "shared"
+    elif capability.action == "internal_note":
+        visibility = "internal"
+    else:
+        return {"status": "error", "error": {"code": "forbidden"}}
+    return append_owner_v2_message_idempotently(
+        capability,
+        text,
+        visibility=visibility,
+        idempotency_key=idempotency_key,
+    )
+
+
 def _append_v2_owner_message(
     headers: object,
     collaboration_id: object,
@@ -370,6 +395,7 @@ def _append_v2_owner_message(
     required_action: str,
     owner_context: object | None = None,
     owner_security_configuration: object | None = None,
+    idempotency_key: object | None = None,
 ) -> dict[str, Any]:
     if required_action == "reply":
         visibility = "shared"
@@ -422,9 +448,17 @@ def _append_v2_owner_message(
     ):
         return _failure("forbidden", "forbidden")
 
-    mutated = _append_internal_v2_message(
-        capability,
-        text,
+    mutated = (
+        _append_internal_v2_message(
+            capability,
+            text,
+        )
+        if owner_context is None
+        else _append_idempotent_v2_owner_message(
+            capability,
+            text,
+            idempotency_key=idempotency_key,
+        )
     )
     dto = _owner_mutation_dto(
         mutated,
@@ -469,6 +503,7 @@ def append_v2_shared_message_for_verified_owner(
     collaboration_id: object,
     payload: object,
     *,
+    idempotency_key: object,
     owner_security_configuration: object,
 ) -> dict[str, Any]:
     return _append_v2_owner_message(
@@ -478,6 +513,7 @@ def append_v2_shared_message_for_verified_owner(
         required_action="reply",
         owner_context=owner_context,
         owner_security_configuration=owner_security_configuration,
+        idempotency_key=idempotency_key,
     )
 
 
@@ -487,6 +523,7 @@ def append_v2_internal_note_for_verified_owner(
     collaboration_id: object,
     payload: object,
     *,
+    idempotency_key: object,
     owner_security_configuration: object,
 ) -> dict[str, Any]:
     return _append_v2_owner_message(
@@ -496,6 +533,7 @@ def append_v2_internal_note_for_verified_owner(
         required_action="internal_note",
         owner_context=owner_context,
         owner_security_configuration=owner_security_configuration,
+        idempotency_key=idempotency_key,
     )
 
 

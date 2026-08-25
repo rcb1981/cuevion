@@ -6,6 +6,8 @@ if __name__ != "api.collaboration.mutations":
         "api.collaboration.mutations"
     )
 
+import hashlib
+import json
 import time
 
 from .models import (
@@ -17,11 +19,15 @@ from .models import (
     _build_v2_context_message,
     MAX_V2_SAFE_INTEGER,
     normalize_v2_thread_record,
+    normalize_v2_message_record,
+    normalize_v2_owner_idempotency_key,
 )
 from .authorization import _is_internal_capability
 from .guest_session import _is_guest_mutation_capability
 from .redis_store import (
     _V2RecordResult,
+    _V2OwnerAppendResult,
+    _append_v2_owner_message_idempotently,
     _append_v2_guest_reply_if_expected,
     _load_v2_thread,
     _save_v2_thread_if_expected,
@@ -34,6 +40,7 @@ def _failure(code: str) -> dict:
 
 _CANONICAL_MUTATION_STORAGE_ERRORS = {
     ("conflict", "stale_thread"): "stale_thread",
+    ("conflict", "idempotency_conflict"): "idempotency_conflict",
     ("expired", "session_expired"): "session_expired",
     ("forbidden", "forbidden"): "forbidden",
     ("malformed", "storage_protocol_error"): "storage_protocol_error",
@@ -209,6 +216,139 @@ def append_internal_v2_message(
         context, text, builder=builder, thread_loader=thread_loader,
         thread_saver=thread_saver, command_transport=command_transport,
     )
+
+
+def _owner_mutation_fingerprint(
+    capability: object,
+    text: str,
+    visibility: str,
+) -> str | None:
+    if (
+        not _is_internal_capability(
+            capability,
+            actions={"reply", "internal_note"},
+        )
+        or capability.actor_kind != "owner"
+        or (capability.action, visibility)
+        not in {("reply", "shared"), ("internal_note", "internal")}
+    ):
+        return None
+    canonical = {
+        "action": capability.action,
+        "actorDisplayName": capability.actor_display_name,
+        "actorKind": capability.actor_kind,
+        "collaborationId": capability.collaboration_id,
+        "domain": "cuevion-collaboration-v2/owner-append-fingerprint-v1",
+        "mailboxId": capability.mailbox_id,
+        "mailboxProvider": capability.mailbox_provider,
+        "ownerEmail": capability.owner_email,
+        "text": text,
+        "visibility": visibility,
+        "workspaceId": capability.workspace_id,
+    }
+    try:
+        encoded = json.dumps(
+            canonical,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError, RecursionError):
+        return None
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def append_owner_v2_message_idempotently(
+    context: object,
+    text: object,
+    *,
+    visibility: str,
+    idempotency_key: object,
+    thread_loader=_load_v2_thread,
+    thread_saver=_append_v2_owner_message_idempotently,
+    command_transport=None,
+) -> dict:
+    """Append or durably recover one authenticated-owner logical mutation."""
+
+    if (
+        not _is_internal_capability(
+            context,
+            actions={"reply", "internal_note"},
+        )
+        or context.actor_kind != "owner"
+        or (context.action, visibility)
+        not in {("reply", "shared"), ("internal_note", "internal")}
+    ):
+        return _failure("forbidden")
+    canonical_key = normalize_v2_owner_idempotency_key(idempotency_key)
+    if canonical_key is None:
+        return _failure("invalid_request")
+
+    thread, error = _load_scoped_thread(
+        context,
+        thread_loader=thread_loader,
+        command_transport=command_transport,
+    )
+    if error:
+        return error
+    expected = thread["updatedAt"]
+    now = max(time.time_ns() // 1_000_000, expected + 1)
+    if now > MAX_V2_SAFE_INTEGER:
+        return _failure("invalid_request")
+    message = _build_v2_context_message(
+        context,
+        text,
+        author_kind="owner",
+        visibility=visibility,
+        created_at=now,
+    )
+    if message is None:
+        return _failure("invalid_request")
+    replacement = normalize_v2_thread_record(
+        {**thread, "messages": [*thread["messages"], message], "updatedAt": now}
+    )
+    fingerprint = _owner_mutation_fingerprint(context, message["text"], visibility)
+    if replacement is None or fingerprint is None:
+        return _failure("invalid_request")
+
+    saved = thread_saver(
+        replacement,
+        expected,
+        idempotency_key=canonical_key,
+        fingerprint=fingerprint,
+        action=context.action,
+        command_transport=command_transport,
+    )
+    if type(saved) is not _V2OwnerAppendResult:
+        if type(saved) is dict:
+            return _failure(_canonical_storage_error(saved))
+        return _failure("storage_protocol_error")
+
+    committed_message = normalize_v2_message_record(saved.message)
+    if (
+        committed_message is None
+        or committed_message != saved.message
+        or committed_message["authorKind"] != "owner"
+        or committed_message["authorDisplayName"] != context.actor_display_name
+        or committed_message["text"] != message["text"]
+        or committed_message["visibility"] != visibility
+        or committed_message["createdAt"] != saved.updated_at
+    ):
+        return _failure("storage_protocol_error")
+    return {
+        "status": "ok",
+        "message": {
+            "id": committed_message["id"],
+            "authorDisplayName": committed_message["authorDisplayName"],
+            "authorRole": "Cuevion user",
+            "text": committed_message["text"],
+            "timestamp": committed_message["createdAt"],
+            "visibility": committed_message["visibility"],
+        },
+        "updatedAt": saved.updated_at,
+        "error": None,
+    }
 
 
 def append_guest_v2_reply(

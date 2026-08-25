@@ -23,6 +23,7 @@ _SECURITY_HEADER_NAMES = frozenset(
         "content-type",
         "cookie",
         "x-cuevion-csrf",
+        "x-cuevion-idempotency-key",
         "content-length",
         "transfer-encoding",
     }

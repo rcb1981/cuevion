@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import socket
@@ -333,6 +334,91 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         key = redis_store.build_v2_thread_key(collaboration_id)
         self.assertIsNotNone(key)
         return key
+
+    def _canonical_owner_thread(self, marker: str = "A") -> dict:
+        return {
+            **thread_record(),
+            "collaborationId": marker * 22,
+            "workspaceId": "wsp_" + ("w" * 22),
+            "sourceRef": {
+                "provider": "google",
+                "providerMessageId": f"gmail-{marker.lower()}",
+            },
+        }
+
+    @staticmethod
+    def _owner_fingerprint(thread: dict, action: str, text: str) -> str:
+        visibility = "shared" if action == "reply" else "internal"
+        canonical = {
+            "action": action,
+            "actorDisplayName": "Owner",
+            "actorKind": "owner",
+            "collaborationId": thread["collaborationId"],
+            "domain": "cuevion-collaboration-v2/owner-append-fingerprint-v1",
+            "mailboxId": thread["mailboxId"],
+            "mailboxProvider": "google",
+            "ownerEmail": thread["ownerEmail"],
+            "text": text,
+            "visibility": visibility,
+            "workspaceId": thread["workspaceId"],
+        }
+        return hashlib.sha256(compact_json(canonical).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _owner_candidate(
+        current: dict,
+        *,
+        action: str,
+        text: str,
+        message_id: str,
+        created_at: int | None = None,
+    ) -> dict:
+        timestamp = current["updatedAt"] + 1 if created_at is None else created_at
+        return {
+            **current,
+            "messages": [
+                *current["messages"],
+                {
+                    "id": message_id,
+                    "authorKind": "owner",
+                    "authorDisplayName": "Owner",
+                    "text": text,
+                    "visibility": "shared" if action == "reply" else "internal",
+                    "createdAt": timestamp,
+                },
+            ],
+            "updatedAt": timestamp,
+        }
+
+    def _owner_append(
+        self,
+        current: dict,
+        *,
+        action: str,
+        text: str,
+        message_id: str,
+        idempotency_key: str,
+        command_transport=None,
+        fingerprint: str | None = None,
+    ):
+        replacement = self._owner_candidate(
+            current,
+            action=action,
+            text=text,
+            message_id=message_id,
+        )
+        return redis_store._append_v2_owner_message_idempotently(
+            replacement,
+            current["updatedAt"],
+            idempotency_key=idempotency_key,
+            fingerprint=(
+                self._owner_fingerprint(current, action, text)
+                if fingerprint is None
+                else fingerprint
+            ),
+            action=action,
+            command_transport=command_transport or self.client.transport,
+        )
 
     def test_canonical_account_workspace_is_atomic_create_read_and_cas_authority(self):
         thread = {
@@ -4109,6 +4195,370 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         self.assertEqual(retry["status"], "conflict")
         final = typed_wire_json(self.client.command(["GET", redis_store.build_v2_thread_key("A" * 22)]), "thread")
         self.assertEqual(len(final["messages"]), 2)
+
+    def test_owner_idempotent_first_append_and_sequential_retry_return_one_result(self):
+        thread = self._canonical_owner_thread()
+        redis_store._create_v2_thread(thread, command_transport=self.client.transport)
+        key = base64.urlsafe_b64encode(b"i" * 32).decode("ascii").rstrip("=")
+
+        first_commands: list[list] = []
+
+        def capture_first(command):
+            first_commands.append(command)
+            return self.client.transport(command)
+
+        first = self._owner_append(
+            thread,
+            action="reply",
+            text="Canonical reply",
+            message_id="M" * 22,
+            idempotency_key=key,
+            command_transport=capture_first,
+        )
+        self.assertIs(type(first), redis_store._V2OwnerAppendResult)
+        self.assertFalse(first.recovered)
+        stored = redis_store._load_v2_thread(
+            thread["collaborationId"],
+            command_transport=self.client.transport,
+        )["record"]
+        retry = self._owner_append(
+            stored,
+            action="reply",
+            text="Canonical reply",
+            message_id="N" * 22,
+            idempotency_key=key,
+        )
+        self.assertIs(type(retry), redis_store._V2OwnerAppendResult)
+        self.assertTrue(retry.recovered)
+        self.assertEqual(retry.message, first.message)
+        self.assertEqual(retry.updated_at, first.updated_at)
+        final = redis_store._load_v2_thread(
+            thread["collaborationId"],
+            command_transport=self.client.transport,
+        )["record"]
+        self.assertEqual(len(final["messages"]), 1)
+        self.assertEqual(final["messages"][0], first.message)
+        self.assertEqual(len(first_commands), 1)
+        self.assertEqual(first_commands[0][0], "EVAL")
+        self.assertEqual(first_commands[0][2], 3)
+        self.assertTrue(
+            all(
+                redis_store.V2_CLUSTER_HASH_TAG in redis_key
+                for redis_key in first_commands[0][3:6]
+            )
+        )
+
+        idempotency_redis_key = redis_store.build_v2_owner_idempotency_key(key)
+        self.assertIsNotNone(idempotency_redis_key)
+        thread_key = self._thread_key(thread["collaborationId"])
+        before_id_ttl = self.client.command(["PTTL", idempotency_redis_key])
+        before_thread_ttl = self.client.command(["PTTL", thread_key])
+        self.assertGreater(before_id_ttl, 0)
+        self.assertLessEqual(before_id_ttl, before_thread_ttl)
+        second_retry = self._owner_append(
+            final,
+            action="reply",
+            text="Canonical reply",
+            message_id="O" * 22,
+            idempotency_key=key,
+        )
+        self.assertTrue(second_retry.recovered)
+        self.assertLessEqual(
+            self.client.command(["PTTL", idempotency_redis_key]),
+            before_id_ttl,
+        )
+        self.assertLessEqual(
+            self.client.command(["PTTL", thread_key]),
+            before_thread_ttl,
+        )
+
+    def test_owner_idempotent_lost_response_recovers_in_independent_process_client(self):
+        thread = self._canonical_owner_thread()
+        redis_store._create_v2_thread(thread, command_transport=self.client.transport)
+        key = base64.urlsafe_b64encode(b"l" * 32).decode("ascii").rstrip("=")
+
+        def commit_then_drop(command):
+            self.client.command(command)
+            return {"error": "simulated response loss"}
+
+        lost = self._owner_append(
+            thread,
+            action="internal_note",
+            text="Ambiguous note",
+            message_id="P" * 22,
+            idempotency_key=key,
+            command_transport=commit_then_drop,
+        )
+        self.assertEqual(lost.get("status"), "unavailable")
+
+        independent_client = _RespClient(self.socket_path)
+        stored = redis_store._load_v2_thread(
+            thread["collaborationId"],
+            command_transport=independent_client.transport,
+        )["record"]
+        recovered = self._owner_append(
+            stored,
+            action="internal_note",
+            text="Ambiguous note",
+            message_id="Q" * 22,
+            idempotency_key=key,
+            command_transport=independent_client.transport,
+        )
+        self.assertIs(type(recovered), redis_store._V2OwnerAppendResult)
+        self.assertTrue(recovered.recovered)
+        self.assertEqual(recovered.message["id"], "P" * 22)
+        final = redis_store._load_v2_thread(
+            thread["collaborationId"],
+            command_transport=independent_client.transport,
+        )["record"]
+        self.assertEqual(final["messages"], [recovered.message])
+
+    def test_owner_idempotent_concurrent_duplicates_commit_exactly_once(self):
+        thread = self._canonical_owner_thread()
+        redis_store._create_v2_thread(thread, command_transport=self.client.transport)
+        key = base64.urlsafe_b64encode(b"c" * 32).decode("ascii").rstrip("=")
+        barrier = threading.Barrier(2)
+
+        def contender(marker: str):
+            independent_client = _RespClient(self.socket_path)
+            barrier.wait()
+            return self._owner_append(
+                thread,
+                action="reply",
+                text="Concurrent reply",
+                message_id=marker * 22,
+                idempotency_key=key,
+                command_transport=independent_client.transport,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(contender, ("R", "S")))
+        self.assertTrue(
+            all(type(result) is redis_store._V2OwnerAppendResult for result in results)
+        )
+        self.assertEqual(sum(result.recovered for result in results), 1)
+        self.assertEqual(results[0].message, results[1].message)
+        self.assertEqual(results[0].updated_at, results[1].updated_at)
+        final = redis_store._load_v2_thread(
+            thread["collaborationId"], command_transport=self.client.transport
+        )["record"]
+        self.assertEqual(len(final["messages"]), 1)
+
+    def test_owner_idempotency_previous_hmac_record_migrates_without_ttl_extension(self):
+        old_secret = b"o" * 32
+        new_secret = b"n" * 32
+        old_encoded = base64.urlsafe_b64encode(old_secret).decode("ascii").rstrip("=")
+        new_encoded = base64.urlsafe_b64encode(new_secret).decode("ascii").rstrip("=")
+        key = base64.urlsafe_b64encode(b"h" * 32).decode("ascii").rstrip("=")
+        thread = self._canonical_owner_thread()
+
+        with patch.dict(
+            os.environ,
+            {redis_store.V2_INDEX_HMAC_ENV: old_encoded},
+            clear=False,
+        ):
+            os.environ.pop(redis_store.V2_INDEX_HMAC_PREVIOUS_ENV, None)
+            redis_store._create_v2_thread(
+                thread, command_transport=self.client.transport
+            )
+            first = self._owner_append(
+                thread,
+                action="reply",
+                text="Rotation-safe reply",
+                message_id="H" * 22,
+                idempotency_key=key,
+            )
+            self.assertEqual(first.get("status"), "ok")
+            old_id_key = redis_store.build_v2_owner_idempotency_key(
+                key, hmac_key=old_secret
+            )
+            old_ttl = self.client.command(["PTTL", old_id_key])
+
+        with patch.dict(
+            os.environ,
+            {
+                redis_store.V2_INDEX_HMAC_ENV: new_encoded,
+                redis_store.V2_INDEX_HMAC_PREVIOUS_ENV: old_encoded,
+            },
+            clear=False,
+        ):
+            # Existing create idempotency performs the authoritative source-index
+            # migration needed by all current-key CAS operations.
+            duplicate = redis_store._create_v2_thread(
+                thread, command_transport=self.client.transport
+            )
+            self.assertFalse(duplicate.created)
+            stored = redis_store._load_v2_thread(
+                thread["collaborationId"], command_transport=self.client.transport
+            )["record"]
+            recovered = self._owner_append(
+                stored,
+                action="reply",
+                text="Rotation-safe reply",
+                message_id="I" * 22,
+                idempotency_key=key,
+            )
+            self.assertTrue(recovered.recovered)
+            new_id_key = redis_store.build_v2_owner_idempotency_key(
+                key, hmac_key=new_secret
+            )
+            self.assertIsNone(self.client.command(["GET", old_id_key]))
+            self.assertIsNotNone(self.client.command(["GET", new_id_key]))
+            self.assertLessEqual(self.client.command(["PTTL", new_id_key]), old_ttl)
+
+    def test_owner_idempotency_conflict_cross_thread_and_normal_stale_cas(self):
+        first_thread = self._canonical_owner_thread("A")
+        second_thread = self._canonical_owner_thread("B")
+        redis_store._create_v2_thread(first_thread, command_transport=self.client.transport)
+        redis_store._create_v2_thread(second_thread, command_transport=self.client.transport)
+        reused_key = base64.urlsafe_b64encode(b"r" * 32).decode("ascii").rstrip("=")
+        first = self._owner_append(
+            first_thread,
+            action="reply",
+            text="Original",
+            message_id="T" * 22,
+            idempotency_key=reused_key,
+        )
+        self.assertEqual(first.get("status"), "ok")
+
+        changed_text = self._owner_append(
+            redis_store._load_v2_thread(
+                first_thread["collaborationId"],
+                command_transport=self.client.transport,
+            )["record"],
+            action="reply",
+            text="Changed",
+            message_id="U" * 22,
+            idempotency_key=reused_key,
+        )
+        self.assertEqual(changed_text.get("error"), {"code": "idempotency_conflict"})
+        cross_thread = self._owner_append(
+            second_thread,
+            action="internal_note",
+            text="Other thread",
+            message_id="V" * 22,
+            idempotency_key=reused_key,
+        )
+        self.assertEqual(cross_thread.get("error"), {"code": "idempotency_conflict"})
+
+        stale_thread = self._canonical_owner_thread("C")
+        redis_store._create_v2_thread(stale_thread, command_transport=self.client.transport)
+        barrier = threading.Barrier(2)
+
+        def distinct(marker: str):
+            independent_client = _RespClient(self.socket_path)
+            distinct_key = base64.urlsafe_b64encode(
+                marker.encode("ascii") * 32
+            ).decode("ascii").rstrip("=")
+            barrier.wait()
+            return self._owner_append(
+                stale_thread,
+                action="internal_note",
+                text=f"Distinct {marker}",
+                message_id=marker * 22,
+                idempotency_key=distinct_key,
+                command_transport=independent_client.transport,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            distinct_results = list(pool.map(distinct, ("W", "X")))
+        self.assertEqual(
+            sum(type(result) is redis_store._V2OwnerAppendResult for result in distinct_results),
+            1,
+        )
+        self.assertEqual(
+            sum(result.get("error") == {"code": "stale_thread"} for result in distinct_results),
+            1,
+        )
+        first_final = redis_store._load_v2_thread(
+            first_thread["collaborationId"], command_transport=self.client.transport
+        )["record"]
+        second_final = redis_store._load_v2_thread(
+            second_thread["collaborationId"], command_transport=self.client.transport
+        )["record"]
+        stale_final = redis_store._load_v2_thread(
+            stale_thread["collaborationId"], command_transport=self.client.transport
+        )["record"]
+        self.assertEqual(len(first_final["messages"]), 1)
+        self.assertEqual(second_final["messages"], [])
+        self.assertEqual(len(stale_final["messages"]), 1)
+
+    def test_owner_idempotency_malformed_records_and_expired_thread_fail_closed(self):
+        key = base64.urlsafe_b64encode(b"m" * 32).decode("ascii").rstrip("=")
+        thread = self._canonical_owner_thread()
+        fingerprint = self._owner_fingerprint(thread, "reply", "Safe reply")
+        valid = {
+            "action": "reply",
+            "collaborationId": thread["collaborationId"],
+            "fingerprint": fingerprint,
+            "messageId": "Y" * 22,
+            "updatedAt": str(thread["updatedAt"] + 1),
+            "v": "1",
+        }
+        variants = {
+            "unknown_field": compact_json({**valid, "extra": "forbidden"}),
+            "duplicate_field": compact_json(valid).replace(
+                '"v":"1"', '"v":"1","v":"1"', 1
+            ),
+            "invalid_integer": compact_json({**valid, "updatedAt": "01"}),
+            "invalid_message_id": compact_json({**valid, "messageId": "short"}),
+            "invalid_fingerprint": compact_json({**valid, "fingerprint": "a" * 63}),
+            "impossible_revision": compact_json(
+                {**valid, "updatedAt": "4102444801000"}
+            ),
+            "mismatched_collaboration": compact_json(
+                {**valid, "collaborationId": "Z" * 22}
+            ),
+            "missing_committed_message": compact_json(valid),
+        }
+        for label, raw_record in variants.items():
+            with self.subTest(label=label):
+                self.client.command(["FLUSHALL"])
+                redis_store._create_v2_thread(
+                    thread, command_transport=self.client.transport
+                )
+                idempotency_redis_key = redis_store.build_v2_owner_idempotency_key(key)
+                self.client.command(
+                    ["SET", idempotency_redis_key, raw_record, "EX", 120]
+                )
+                rejected = self._owner_append(
+                    thread,
+                    action="reply",
+                    text="Safe reply",
+                    message_id="Y" * 22,
+                    idempotency_key=key,
+                )
+                self.assertEqual(
+                    rejected.get("error"), {"code": "storage_protocol_error"}
+                )
+                final = redis_store._load_v2_thread(
+                    thread["collaborationId"],
+                    command_transport=self.client.transport,
+                )["record"]
+                self.assertEqual(final["messages"], [])
+
+        self.client.command(["FLUSHALL"])
+        redis_store._create_v2_thread(thread, command_transport=self.client.transport)
+        committed = self._owner_append(
+            thread,
+            action="reply",
+            text="Safe reply",
+            message_id="Y" * 22,
+            idempotency_key=key,
+        )
+        self.assertEqual(committed.get("status"), "ok")
+        self.client.command(["DEL", self._thread_key(thread["collaborationId"])])
+        missing = self._owner_append(
+            thread,
+            action="reply",
+            text="Safe reply",
+            message_id="Z" * 22,
+            idempotency_key=key,
+        )
+        self.assertEqual(missing.get("error"), {"code": "collaboration_not_found"})
+        self.assertIsNone(
+            self.client.command(["GET", self._thread_key(thread["collaborationId"])])
+        )
 
     def test_real_exchange_exchange_and_exchange_revoke_races_have_one_winner(self):
         raw_token = "t" * 43

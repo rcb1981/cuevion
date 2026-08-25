@@ -57,6 +57,8 @@ else:
         normalize_collaboration_thread_record,
         normalize_v2_email,
         normalize_v2_invite_record,
+        normalize_v2_message_record,
+        normalize_v2_owner_idempotency_key,
         normalize_v2_source_ref,
         normalize_v2_thread_record,
         normalize_v2_workspace_id,
@@ -687,6 +689,8 @@ else:
     MAX_V2_KV_RESPONSE_BYTES = 524_288
     MAX_V2_SESSION_BYTES = 16_384
     V2_THREAD_RETENTION_SECONDS = 180 * 24 * 60 * 60
+    V2_OWNER_IDEMPOTENCY_RETENTION_SECONDS = V2_THREAD_RETENTION_SECONDS
+    MAX_V2_OWNER_IDEMPOTENCY_RECORD_BYTES = 1_024
     V2_INDEX_HMAC_ENV = "CUEVION_COLLAB_INDEX_HMAC_KEY"
     V2_INDEX_HMAC_PREVIOUS_ENV = "CUEVION_COLLAB_INDEX_HMAC_KEY_PREVIOUS"
     _V2_BASE64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -717,6 +721,24 @@ else:
             if value is self:
                 raise KeyError(name)
             return value
+
+
+    @dataclass(frozen=True, slots=True)
+    class _V2OwnerAppendResult:
+        """Canonical committed owner-append outcome recovered from Redis."""
+
+        message: dict
+        updated_at: int
+        recovered: bool
+        status: str = "ok"
+
+        def get(self, name: str, default=None):
+            return {
+                "status": self.status,
+                "message": self.message,
+                "updatedAt": self.updated_at,
+                "recovered": self.recovered,
+            }.get(name, default)
 
 
     def resolve_v2_index_hmac_key(value: str | None = None) -> bytes | None:
@@ -790,6 +812,23 @@ else:
         source_digest = _v2_index_digest("source", [source], key)
         digest = _v2_index_digest("combined-source-index", [owner_digest, mailbox_id, source_digest], key)
         return f"{V2_KEY_PREFIX}:source-thread:{digest}" if digest else None
+
+
+    def build_v2_owner_idempotency_key(
+        idempotency_key: str,
+        *,
+        hmac_key: bytes | None = None,
+    ) -> str | None:
+        canonical = normalize_v2_owner_idempotency_key(idempotency_key)
+        if canonical is None:
+            return None
+        key = resolve_v2_index_hmac_key() if hmac_key is None else hmac_key
+        digest = _v2_index_digest(
+            "owner-append-idempotency",
+            [canonical],
+            key,
+        )
+        return f"{V2_KEY_PREFIX}:owner-idempotency:{digest}" if digest else None
 
 
     def build_v2_invite_key(invite_id: str) -> str | None:
@@ -2108,6 +2147,367 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
             return {"status": "conflict", "error": {"code": "stale_thread"}}
         if result.get("status") in {"malformed", "invalid_scope", "source_pointer_conflict", "oversized", "invalid_messages"}:
             return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
+        return result
+
+
+    _APPEND_V2_OWNER_IDEMPOTENT_LUA = _V2_LUA_COMMON + r"""
+    local IDEMPOTENCY_RECORD_MAX = 1024
+    local RETENTION_MAX = 15552000
+
+    local function fingerprintValid(value)
+      return type(value) == 'string' and #value == 64
+        and string.match(value, '^[0-9a-f]+$') ~= nil
+    end
+
+    local function idempotencyRecordValid(value)
+      return type(value) == 'table' and keyCount(value) == 6
+        and value.v == '1' and exactInteger(value.v)
+        and fingerprintValid(value.fingerprint)
+        and opaqueId(value.collaborationId)
+        and (value.action == 'reply' or value.action == 'internal_note')
+        and opaqueId(value.messageId)
+        and timestampMilliseconds(value.updatedAt)
+    end
+
+    local function requestedVisibility(action)
+      if action == 'reply' then return 'shared' end
+      if action == 'internal_note' then return 'internal' end
+      return nil
+    end
+
+    local threadRetention = integerValue(ARGV[3])
+    local idempotencyRetention = integerValue(ARGV[4])
+    if not threadRetention or threadRetention <= 0 or threadRetention > RETENTION_MAX
+      or not idempotencyRetention or idempotencyRetention <= 0
+      or idempotencyRetention > threadRetention
+      or not fingerprintValid(ARGV[5]) or not opaqueId(ARGV[7])
+      or not canonicalEmail(ARGV[8]) or not canonicalWorkspaceId(ARGV[9])
+      or not mailboxId(ARGV[10]) or not requestedVisibility(ARGV[11])
+      or ARGV[12] ~= requestedVisibility(ARGV[11])
+      or not displayString(ARGV[13], 256, false)
+      or not freeText(ARGV[14], 16384) then
+      return cjson.encode({status='malformed'})
+    end
+
+    local threadState, currentRaw = readString(KEYS[1], 262144)
+    if threadState == 'missing' then return cjson.encode({status='missing'}) end
+    if threadState ~= 'ok' then return cjson.encode({status='malformed'}) end
+    local currentOk, current = decodeWire(currentRaw)
+    if not currentOk or not rawTopLevelArray(currentRaw, 'messages')
+      or not threadValid(current) then return cjson.encode({status='malformed'}) end
+    if current.collaborationId ~= ARGV[7] or current.ownerEmail ~= ARGV[8]
+      or current.workspaceId ~= ARGV[9] or current.mailboxId ~= ARGV[10] then
+      return cjson.encode({status='invalid_scope'})
+    end
+
+    local pointerState, pointer = readString(KEYS[2], 128)
+    if pointerState ~= 'ok' or pointer ~= current.collaborationId then
+      return cjson.encode({status='source_pointer_conflict'})
+    end
+    if redis.call('PTTL', KEYS[1]) <= 0 or redis.call('PTTL', KEYS[2]) <= 0 then
+      return cjson.encode({status='malformed'})
+    end
+
+    local currentIdState, currentIdRaw = readString(KEYS[3], IDEMPOTENCY_RECORD_MAX)
+    if currentIdState == 'invalid' then return cjson.encode({status='idempotency_malformed'}) end
+    local previousIdState, previousIdRaw = 'missing', nil
+    if #KEYS == 4 then
+      previousIdState, previousIdRaw = readString(KEYS[4], IDEMPOTENCY_RECORD_MAX)
+      if previousIdState == 'invalid' then return cjson.encode({status='idempotency_malformed'}) end
+    end
+    if currentIdRaw and previousIdRaw and currentIdRaw ~= previousIdRaw then
+      return cjson.encode({status='idempotency_malformed'})
+    end
+    local idempotencyRaw = currentIdRaw or previousIdRaw
+    if idempotencyRaw then
+      if (currentIdRaw and redis.call('PTTL', KEYS[3]) <= 0)
+        or (previousIdRaw and redis.call('PTTL', KEYS[4]) <= 0) then
+        return cjson.encode({status='idempotency_malformed'})
+      end
+      local recordOk, record = decodeWire(idempotencyRaw)
+      if not recordOk or not idempotencyRecordValid(record) then
+        return cjson.encode({status='idempotency_malformed'})
+      end
+      if record.fingerprint ~= ARGV[5] then
+        return cjson.encode({status='idempotency_conflict'})
+      end
+      if record.collaborationId ~= ARGV[7] or record.action ~= ARGV[11] then
+        return cjson.encode({status='idempotency_malformed'})
+      end
+      local matched = nil
+      local matchCount = 0
+      for _, message in ipairs(current.messages) do
+        if message.id == record.messageId then
+          matched = message
+          matchCount = matchCount + 1
+        end
+      end
+      if matchCount ~= 1 or matched.authorKind ~= 'owner'
+        or matched.authorDisplayName ~= ARGV[13] or matched.text ~= ARGV[14]
+        or matched.visibility ~= ARGV[12] or matched.createdAt ~= record.updatedAt
+        or integerValue(current.updatedAt) < integerValue(record.updatedAt) then
+        return cjson.encode({status='idempotency_malformed'})
+      end
+      if not currentIdRaw and previousIdRaw then
+        local remaining = redis.call('PTTL', KEYS[4])
+        local threadRemaining = redis.call('PTTL', KEYS[1])
+        local sourceRemaining = redis.call('PTTL', KEYS[2])
+        if remaining <= 0 or threadRemaining <= 0 or sourceRemaining <= 0 then
+          return cjson.encode({status='idempotency_malformed'})
+        end
+        if threadRemaining < remaining then remaining = threadRemaining end
+        if sourceRemaining < remaining then remaining = sourceRemaining end
+        redis.call('PSETEX', KEYS[3], tostring(remaining), previousIdRaw)
+        redis.call('DEL', KEYS[4])
+      end
+      return cjson.encode({status='recovered', message=matched, updatedAt=record.updatedAt})
+    end
+
+    if #ARGV[2] > 262144 or #ARGV[6] > IDEMPOTENCY_RECORD_MAX
+      or not timestampMilliseconds(ARGV[1]) then
+      return cjson.encode({status='malformed'})
+    end
+    local replacementOk, replacement = decodeWire(ARGV[2])
+    local recordOk, record = decodeWire(ARGV[6])
+    if not replacementOk or not recordOk
+      or not rawTopLevelArray(ARGV[2], 'messages')
+      or not threadValid(replacement) or not idempotencyRecordValid(record) then
+      return cjson.encode({status='malformed'})
+    end
+    if current.collaborationId ~= replacement.collaborationId
+      or current.v ~= replacement.v or current.ownerEmail ~= replacement.ownerEmail
+      or current.workspaceId ~= replacement.workspaceId
+      or current.mailboxId ~= replacement.mailboxId
+      or current.createdAt ~= replacement.createdAt
+      or not sourceEqual(current.sourceRef, replacement.sourceRef)
+      or not sourceMessageEqual(current.sourceMessage, replacement.sourceMessage) then
+      return cjson.encode({status='invalid_scope'})
+    end
+    if current.updatedAt ~= ARGV[1] then return cjson.encode({status='stale'}) end
+    if integerValue(replacement.updatedAt) <= integerValue(current.updatedAt) then
+      return cjson.encode({status='nonadvancing'})
+    end
+    if #replacement.messages ~= #current.messages + 1 then
+      return cjson.encode({status='invalid_messages'})
+    end
+    for index = 1, #current.messages do
+      if not messageEqual(current.messages[index], replacement.messages[index]) then
+        return cjson.encode({status='invalid_messages'})
+      end
+    end
+    local appended = replacement.messages[#replacement.messages]
+    if appended.authorKind ~= 'owner' or appended.authorDisplayName ~= ARGV[13]
+      or appended.text ~= ARGV[14] or appended.visibility ~= ARGV[12]
+      or appended.createdAt ~= replacement.updatedAt
+      or record.fingerprint ~= ARGV[5] or record.collaborationId ~= ARGV[7]
+      or record.action ~= ARGV[11] or record.messageId ~= appended.id
+      or record.updatedAt ~= appended.createdAt then
+      return cjson.encode({status='idempotency_malformed'})
+    end
+
+    redis.call('PSETEX', KEYS[3], tostring(idempotencyRetention * 1000), ARGV[6])
+    redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+    redis.call('EXPIRE', KEYS[2], ARGV[3])
+    return cjson.encode({status='saved', message=appended, updatedAt=record.updatedAt})
+    """.strip()
+
+
+    def _owner_append_message_from_wire(
+        value: object,
+        updated_at: object,
+    ) -> tuple[dict, int] | None:
+        if (
+            type(value) is not dict
+            or set(value)
+            != {
+                "id",
+                "authorKind",
+                "authorDisplayName",
+                "text",
+                "visibility",
+                "createdAt",
+            }
+            or type(updated_at) is not str
+            or not re.fullmatch(r"(?:0|[1-9][0-9]{0,15})", updated_at)
+            or type(value.get("createdAt")) is not str
+            or value.get("createdAt") != updated_at
+        ):
+            return None
+        parsed_updated_at = int(updated_at)
+        message = normalize_v2_message_record(
+            {**value, "createdAt": parsed_updated_at}
+        )
+        if message is None or message["createdAt"] != parsed_updated_at:
+            return None
+        return message, parsed_updated_at
+
+
+    def _append_v2_owner_message_idempotently(
+        thread_record: dict,
+        expected_updated_at: int,
+        *,
+        idempotency_key: str,
+        fingerprint: str,
+        action: str,
+        command_transport=None,
+    ) -> dict:
+        thread = normalize_v2_thread_record(thread_record)
+        thread_wire = _v2_wire_json(thread, "thread") if thread is not None else None
+        canonical_key = normalize_v2_owner_idempotency_key(idempotency_key)
+        if (
+            thread is None
+            or thread_wire is None
+            or type(expected_updated_at) is not int
+            or not MIN_V2_TIMESTAMP_MILLISECONDS
+            <= expected_updated_at
+            <= MAX_V2_TIMESTAMP_MILLISECONDS
+            or canonical_key is None
+            or type(fingerprint) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
+            or action not in {"reply", "internal_note"}
+            or not thread["messages"]
+        ):
+            return {"status": "malformed", "error": {"code": "invalid_request"}}
+        appended = thread["messages"][-1]
+        expected_visibility = "shared" if action == "reply" else "internal"
+        if (
+            appended["authorKind"] != "owner"
+            or appended["visibility"] != expected_visibility
+            or appended["createdAt"] != thread["updatedAt"]
+        ):
+            return {"status": "malformed", "error": {"code": "invalid_request"}}
+
+        thread_key = build_v2_thread_key(thread["collaborationId"])
+        hmac_keys = resolve_v2_index_hmac_keys()
+        if hmac_keys is None:
+            return {
+                "status": "unavailable",
+                "error": {"code": "index_hmac_unavailable"},
+            }
+        current_hmac, previous_hmac = hmac_keys
+        source_key = build_v2_source_thread_key(
+            thread["ownerEmail"],
+            thread["mailboxId"],
+            thread["sourceRef"],
+            hmac_key=current_hmac,
+        )
+        current_idempotency_key = build_v2_owner_idempotency_key(
+            canonical_key,
+            hmac_key=current_hmac,
+        )
+        previous_idempotency_key = (
+            build_v2_owner_idempotency_key(
+                canonical_key,
+                hmac_key=previous_hmac,
+            )
+            if previous_hmac is not None
+            else None
+        )
+        if (
+            thread_key is None
+            or source_key is None
+            or current_idempotency_key is None
+            or (previous_hmac is not None and previous_idempotency_key is None)
+        ):
+            return {
+                "status": "unavailable",
+                "error": {"code": "index_hmac_unavailable"},
+            }
+
+        idempotency_record = json.dumps(
+            {
+                "action": action,
+                "collaborationId": thread["collaborationId"],
+                "fingerprint": fingerprint,
+                "messageId": appended["id"],
+                "updatedAt": str(appended["createdAt"]),
+                "v": "1",
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        keys = [thread_key, source_key, current_idempotency_key]
+        if (
+            previous_idempotency_key is not None
+            and previous_idempotency_key != current_idempotency_key
+        ):
+            keys.append(previous_idempotency_key)
+        result = _v2_eval(
+            [
+                "EVAL",
+                _APPEND_V2_OWNER_IDEMPOTENT_LUA,
+                len(keys),
+                *keys,
+                str(expected_updated_at),
+                thread_wire,
+                str(V2_THREAD_RETENTION_SECONDS),
+                str(V2_OWNER_IDEMPOTENCY_RETENTION_SECONDS),
+                fingerprint,
+                idempotency_record,
+                thread["collaborationId"],
+                thread["ownerEmail"],
+                thread["workspaceId"],
+                thread["mailboxId"],
+                action,
+                expected_visibility,
+                appended["authorDisplayName"],
+                appended["text"],
+            ],
+            command_transport,
+            response_shapes={
+                "saved": {"message", "updatedAt"},
+                "recovered": {"message", "updatedAt"},
+                "missing": set(),
+                "stale": set(),
+                "malformed": set(),
+                "invalid_scope": set(),
+                "nonadvancing": set(),
+                "source_pointer_conflict": set(),
+                "invalid_messages": set(),
+                "idempotency_malformed": set(),
+                "idempotency_conflict": set(),
+            },
+        )
+        if result.get("status") in {"saved", "recovered"}:
+            parsed = _owner_append_message_from_wire(
+                result.get("message"),
+                result.get("updatedAt"),
+            )
+            if parsed is None:
+                return {
+                    "status": "malformed",
+                    "error": {"code": "storage_protocol_error"},
+                }
+            message, updated_at = parsed
+            return _V2OwnerAppendResult(
+                message,
+                updated_at,
+                recovered=result["status"] == "recovered",
+            )
+        if result.get("status") == "missing":
+            return {
+                "status": "missing",
+                "error": {"code": "collaboration_not_found"},
+            }
+        if result.get("status") in {"stale", "nonadvancing"}:
+            return {"status": "conflict", "error": {"code": "stale_thread"}}
+        if result.get("status") == "idempotency_conflict":
+            return {
+                "status": "conflict",
+                "error": {"code": "idempotency_conflict"},
+            }
+        if result.get("status") in {
+            "malformed",
+            "invalid_scope",
+            "source_pointer_conflict",
+            "invalid_messages",
+            "idempotency_malformed",
+        }:
+            return {
+                "status": "malformed",
+                "error": {"code": "storage_protocol_error"},
+            }
         return result
 
 
