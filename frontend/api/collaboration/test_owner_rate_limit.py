@@ -69,26 +69,51 @@ class OwnerRateLimitUnitTests(unittest.TestCase):
             self.assertEqual(policy.burst, burst)
             self.assertEqual(60_000_000 // interval, per_minute)
 
-    def test_ttl_integrity_tolerances_are_explicit_and_narrow(self):
+    def test_storage_expiry_invariant_is_explicit_and_policy_bounded(self):
+        self.assertEqual(owner_rate_limit.STATE_EXPIRY_GRACE_MS, 1_000)
         self.assertEqual(
             owner_rate_limit._OWNER_RATE_LIMIT_EARLY_EXPIRY_TOLERANCE_MS,
             100,
         )
         self.assertEqual(
-            owner_rate_limit._OWNER_RATE_LIMIT_LATE_EXPIRY_TOLERANCE_MS,
-            25,
+            owner_rate_limit._OWNER_RATE_LIMIT_TTL_OBSERVATION_ALLOWANCE_MS,
+            100,
         )
         script = owner_rate_limit._OWNER_RATE_LIMIT_LUA
         self.assertIn("local EARLY_EXPIRY_TOLERANCE_MS = 100", script)
-        self.assertIn("local LATE_EXPIRY_TOLERANCE_MS = 25", script)
+        self.assertIn("local STATE_EXPIRY_GRACE_MS = 1000", script)
+        self.assertIn("local TTL_OBSERVATION_ALLOWANCE_MS = 100", script)
         self.assertIn(
             "stateTtl - EARLY_EXPIRY_TOLERANCE_MS",
             script,
         )
         self.assertIn(
-            "stateTtl + LATE_EXPIRY_TOLERANCE_MS",
+            "+ STATE_EXPIRY_GRACE_MS\n    + TTL_OBSERVATION_ALLOWANCE_MS",
             script,
         )
+        self.assertIn(
+            "+ STATE_EXPIRY_GRACE_MS\nlocal candidate",
+            script,
+        )
+        self.assertNotIn("currentTtl > stateTtl", script)
+        self.assertNotIn("LATE_EXPIRY_TOLERANCE", script)
+
+        expected_maximum_ttls = {
+            owner_rate_limit.RATE_LIMIT_BOOTSTRAP: 21_100,
+            owner_rate_limit.RATE_LIMIT_READ: 16_100,
+            owner_rate_limit.RATE_LIMIT_WRITE: 21_100,
+        }
+        for rate_class, expected_maximum in expected_maximum_ttls.items():
+            policy = owner_rate_limit.owner_rate_limit_policy(rate_class)
+            self.assertIsNotNone(policy)
+            assert policy is not None
+            maximum = (
+                (policy.emission_interval_microseconds * policy.burst + 999)
+                // 1_000
+                + owner_rate_limit.STATE_EXPIRY_GRACE_MS
+                + owner_rate_limit._OWNER_RATE_LIMIT_TTL_OBSERVATION_ALLOWANCE_MS
+            )
+            self.assertEqual(maximum, expected_maximum)
 
     def test_configuration_is_default_closed_canonical_and_opaque(self):
         for value in ({}, {owner_rate_limit.RATE_LIMIT_HMAC_ENV: "short"}):

@@ -633,7 +633,7 @@ class CompatibilityProbe:
         )
         _expect_status(result, "allowed")
         _assert_live_ttl(self.transport, expiry_key)
-        time.sleep(0.06)
+        time.sleep((owner_rate_limit.STATE_EXPIRY_GRACE_MS / 1_000) + 0.06)
         if self.transport.get(expiry_key) is not None:
             raise ProbeError("rate_key_did_not_expire")
 

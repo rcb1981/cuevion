@@ -378,15 +378,18 @@ class OwnerRateLimitRealRedisTests(unittest.TestCase):
         self.assertIsInstance(result, dict)
         return result
 
+    def _now_microseconds(self, raw) -> int:
+        server_time = self._command(raw, ["TIME"])
+        self.assertIsInstance(server_time, list)
+        assert type(server_time) is list
+        return (int(server_time[0]) * 1_000_000) + int(server_time[1])
+
     def _shorten(self, raw, key: str, milliseconds: int) -> None:
         encoded_record = self._command(raw, ["GET", key])
         self.assertIsInstance(encoded_record, str)
         assert type(encoded_record) is str
         record = json.loads(encoded_record)
-        server_time = self._command(raw, ["TIME"])
-        self.assertIsInstance(server_time, list)
-        assert type(server_time) is list
-        now = (int(server_time[0]) * 1_000_000) + int(server_time[1])
+        now = self._now_microseconds(raw)
         remaining_microseconds = max(0, int(record["tatUs"]) - now)
         state_ttl = max(1, (remaining_microseconds + 999) // 1_000)
         target = state_ttl - milliseconds
@@ -405,10 +408,7 @@ class OwnerRateLimitRealRedisTests(unittest.TestCase):
         offset_microseconds: int,
         v_first: bool = True,
     ) -> str:
-        server_time = self._command(raw, ["TIME"])
-        self.assertIsInstance(server_time, list)
-        assert type(server_time) is list
-        now = (int(server_time[0]) * 1_000_000) + int(server_time[1])
+        now = self._now_microseconds(raw)
         tat = str(now + offset_microseconds)
         if v_first:
             return '{"v":"1","tatUs":"' + tat + '"}'
@@ -454,6 +454,91 @@ class OwnerRateLimitRealRedisTests(unittest.TestCase):
         )
         return record
 
+    def test_allowed_write_adds_storage_grace_beyond_canonical_tat(self):
+        self.assertEqual(owner_rate_limit.STATE_EXPIRY_GRACE_MS, 1_000)
+        namespace = probe.ProbeNamespace(RUN_ID)
+        with probe.LocalRedisServer() as server:
+            raw = server.transport()
+            for rate_class in (
+                owner_rate_limit.RATE_LIMIT_BOOTSTRAP,
+                owner_rate_limit.RATE_LIMIT_READ,
+                owner_rate_limit.RATE_LIMIT_WRITE,
+            ):
+                with self.subTest(rate_class=rate_class):
+                    key = namespace.key(f"rate:grace:{rate_class}")
+                    self.assertEqual(
+                        self._rate(raw, key, rate_class),
+                        {"status": "allowed"},
+                    )
+                    encoded_record = self._command(raw, ["GET", key])
+                    self.assertIsInstance(encoded_record, str)
+                    assert type(encoded_record) is str
+                    record = json.loads(encoded_record)
+                    now = self._now_microseconds(raw)
+                    state_ttl = max(
+                        1,
+                        (max(0, int(record["tatUs"]) - now) + 999) // 1_000,
+                    )
+                    current_ttl = self._command(raw, ["PTTL", key])
+                    self.assertIsInstance(current_ttl, int)
+                    assert type(current_ttl) is int
+                    storage_margin = current_ttl - state_ttl
+                    self.assertGreaterEqual(storage_margin, 900)
+                    self.assertLessEqual(
+                        storage_margin,
+                        owner_rate_limit.STATE_EXPIRY_GRACE_MS,
+                    )
+
+    def test_stale_but_live_tat_is_equivalent_to_fresh_state(self):
+        namespace = probe.ProbeNamespace(RUN_ID)
+        with probe.LocalRedisServer() as server:
+            raw = server.transport()
+            key = namespace.key("rate:stale-live")
+            self.assertEqual(
+                self._rate(raw, key, owner_rate_limit.RATE_LIMIT_READ),
+                {"status": "allowed"},
+            )
+            stale_record = self._command(raw, ["GET", key])
+            self.assertIsInstance(stale_record, str)
+            assert type(stale_record) is str
+            time.sleep(0.55)
+            self.assertLessEqual(
+                int(json.loads(stale_record)["tatUs"]),
+                self._now_microseconds(raw),
+            )
+            self.assertGreater(self._command(raw, ["PTTL", key]), 0)
+
+            policy = owner_rate_limit.owner_rate_limit_policy(
+                owner_rate_limit.RATE_LIMIT_READ
+            )
+            self.assertIsNotNone(policy)
+            assert policy is not None
+            for _ in range(policy.burst):
+                self.assertEqual(
+                    self._rate(raw, key, owner_rate_limit.RATE_LIMIT_READ),
+                    {"status": "allowed"},
+                )
+            self.assertEqual(
+                self._rate(raw, key, owner_rate_limit.RATE_LIMIT_READ),
+                {"status": "limited", "retryAfter": "1"},
+            )
+
+    def test_materially_early_expiry_of_genuine_record_fails_closed(self):
+        tolerance = owner_rate_limit._OWNER_RATE_LIMIT_EARLY_EXPIRY_TOLERANCE_MS
+        namespace = probe.ProbeNamespace(RUN_ID)
+        with probe.LocalRedisServer() as server:
+            raw = server.transport()
+            key = namespace.key("rate:early-expiry-attack")
+            self.assertEqual(
+                self._rate(raw, key, owner_rate_limit.RATE_LIMIT_READ),
+                {"status": "allowed"},
+            )
+            self._shorten(raw, key, tolerance + 100)
+            self.assertEqual(
+                self._rate(raw, key, owner_rate_limit.RATE_LIMIT_READ),
+                {"status": "malformed"},
+            )
+
     def test_bounded_early_expiry_skew_uses_exact_canonical_lua(self):
         tolerance = owner_rate_limit._OWNER_RATE_LIMIT_EARLY_EXPIRY_TOLERANCE_MS
         self.assertEqual(tolerance, 100)
@@ -480,28 +565,18 @@ class OwnerRateLimitRealRedisTests(unittest.TestCase):
                         {"status": expected},
                     )
 
-    def test_bounded_late_expiry_skew_uses_exact_canonical_lua(self):
-        tolerance = owner_rate_limit._OWNER_RATE_LIMIT_LATE_EXPIRY_TOLERANCE_MS
-        self.assertEqual(tolerance, 25)
+    def test_relative_late_expiry_skew_is_not_an_integrity_invariant(self):
         namespace = probe.ProbeNamespace(RUN_ID)
         with probe.LocalRedisServer() as server:
             raw = server.transport()
-            for ttl_delta, expected in (
-                (0, "allowed"),
-                (8, "allowed"),
-                (16, "allowed"),
-                (17, "allowed"),
-                (tolerance, "allowed"),
-                (tolerance + 1, "malformed"),
-                (50, "malformed"),
-            ):
+            for ttl_delta in (0, 3, 4, 16, 17, 25, 50, 500, 1_000):
                 with self.subTest(ttl_delta=ttl_delta):
                     key = namespace.key(f"rate:late:{ttl_delta}")
                     record = self._set_aligned_ttl_delta(raw, key, ttl_delta)
                     self.assertEqual(self._command(raw, ["GET", key]), record)
                     self.assertEqual(
                         self._rate(raw, key, owner_rate_limit.RATE_LIMIT_READ),
-                        {"status": expected},
+                        {"status": "allowed"},
                     )
 
     def test_state_integrity_regressions_remain_fail_closed(self):
@@ -548,10 +623,42 @@ class OwnerRateLimitRealRedisTests(unittest.TestCase):
                 {"status": "malformed"},
             )
 
+            excessive_ttl_key = namespace.key("rate:excessive-ttl")
+            excessive_ttl_record = self._canonical_record(
+                raw,
+                offset_microseconds=5_000_000,
+            )
+            self.assertEqual(
+                self._command(
+                    raw,
+                    ["SET", excessive_ttl_key, excessive_ttl_record, "PX", 17_000],
+                ),
+                "OK",
+            )
+            self.assertEqual(
+                self._rate(
+                    raw,
+                    excessive_ttl_key,
+                    owner_rate_limit.RATE_LIMIT_READ,
+                ),
+                {"status": "malformed"},
+            )
+
+            valid_tat = json.loads(
+                self._canonical_record(raw, offset_microseconds=5_000_000)
+            )["tatUs"]
             malformed_records = (
                 ("not-json", "malformed"),
                 ("x" * 129, "oversized"),
                 ('{"v":"1","tatUs":"01"}', "invalid-tat"),
+                ('{"v":"2","tatUs":"' + valid_tat + '"}', "wrong-v"),
+                ('{"v":"1","tatUs":' + valid_tat + '}', "numeric-tat"),
+                (
+                    '{"v":"1","tatUs":"'
+                    + valid_tat
+                    + '","extra":"x"}',
+                    "wrong-field-count",
+                ),
             )
             for record, label in malformed_records:
                 with self.subTest(record=label):
@@ -614,7 +721,7 @@ class OwnerRateLimitRealRedisTests(unittest.TestCase):
                 {"status": "malformed"},
             )
 
-    def test_rate_policies_and_tolerated_skew_keep_enforcement_effective(self):
+    def test_rate_policies_and_storage_grace_keep_enforcement_effective(self):
         namespace = probe.ProbeNamespace(RUN_ID)
         with probe.LocalRedisServer() as server:
             raw = server.transport()

@@ -49,8 +49,9 @@ _CANONICAL_UINT_RE = re.compile(r"^(?:0|[1-9][0-9]*)$")
 _RATE_LIMIT_KEY_DOMAIN = "cuevion-collaboration-v2/owner-rate-limit-key/v1"
 _CONFIGURATION_SENTINEL = object()
 _MAX_RATE_LIMIT_RECORD_BYTES = 128
+STATE_EXPIRY_GRACE_MS = 1000
 _OWNER_RATE_LIMIT_EARLY_EXPIRY_TOLERANCE_MS = 100
-_OWNER_RATE_LIMIT_LATE_EXPIRY_TOLERANCE_MS = 25
+_OWNER_RATE_LIMIT_TTL_OBSERVATION_ALLOWANCE_MS = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,8 +266,11 @@ local MAX_SAFE = 9007199254740991
 local EARLY_EXPIRY_TOLERANCE_MS = """
     + str(_OWNER_RATE_LIMIT_EARLY_EXPIRY_TOLERANCE_MS)
     + r"""
-local LATE_EXPIRY_TOLERANCE_MS = """
-    + str(_OWNER_RATE_LIMIT_LATE_EXPIRY_TOLERANCE_MS)
+local STATE_EXPIRY_GRACE_MS = """
+    + str(STATE_EXPIRY_GRACE_MS)
+    + r"""
+local TTL_OBSERVATION_ALLOWANCE_MS = """
+    + str(_OWNER_RATE_LIMIT_TTL_OBSERVATION_ALLOWANCE_MS)
     + r"""
 local function keyCount(value)
   local count = 0
@@ -331,16 +335,16 @@ if raw then
     return cjson.encode({status='malformed'})
   end
   local ttlOk, currentTtl = pcall(redis.call, 'PTTL', KEYS[1])
-  local maxTtl = math.ceil(maxDebt / 1000) + 1000
+  local maxTtl = math.ceil(maxDebt / 1000)
+    + STATE_EXPIRY_GRACE_MS
+    + TTL_OBSERVATION_ALLOWANCE_MS
   local stateTtl = math.max(1, math.ceil(math.max(0, storedTat - now) / 1000))
   local minimumStateTtl = math.max(
     1,
     stateTtl - EARLY_EXPIRY_TOLERANCE_MS
   )
-  local maximumStateTtl = stateTtl + LATE_EXPIRY_TOLERANCE_MS
   if not ttlOk or type(currentTtl) ~= 'number' or currentTtl <= 0
-    or currentTtl > maxTtl or currentTtl > maximumStateTtl
-    or currentTtl < minimumStateTtl then
+    or currentTtl > maxTtl or currentTtl < minimumStateTtl then
     return cjson.encode({status='malformed'})
   end
   tat = math.max(storedTat, now)
@@ -354,6 +358,7 @@ if allowAt > now then
   return cjson.encode({status='limited', retryAfter=uintText(retryAfter)})
 end
 local ttlMs = math.max(1, math.ceil((proposedTat - now) / 1000))
+  + STATE_EXPIRY_GRACE_MS
 local candidate = cjson.encode({v='1', tatUs=uintText(proposedTat)})
 if #candidate > maxRecordBytes then return cjson.encode({status='malformed'}) end
 local writeOk = pcall(redis.call, 'SET', KEYS[1], candidate, 'PX', ttlMs)
@@ -416,6 +421,7 @@ __all__ = (
     "RATE_LIMIT_HMAC_ENV",
     "RATE_LIMIT_READ",
     "RATE_LIMIT_WRITE",
+    "STATE_EXPIRY_GRACE_MS",
     "build_owner_rate_limit_key",
     "consume_owner_rate_limit",
     "owner_rate_limit_policy",
