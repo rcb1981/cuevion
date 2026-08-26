@@ -29,13 +29,21 @@ from .http_boundary import (
 HTTP_MODE_ENVIRONMENT_NAME = "CUEVION_COLLAB_V2_HTTP_MODE"
 HTTP_MODE_OFF = "off"
 HTTP_MODES = frozenset(
-    {HTTP_MODE_OFF, "owner_read", "owner_write", "guest", "frontend"}
+    {
+        HTTP_MODE_OFF,
+        "owner_read",
+        "owner_write",
+        "allowlist_bootstrap",
+        "guest",
+        "frontend",
+    }
 )
 PUBLIC_JSON_MAXIMUM_DEPTH = 16
 
 _CANONICAL_CONTENT_LENGTH_RE = re.compile(r"^(?:0|[1-9][0-9]*)$")
 _HTTP_TOKEN_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _PUBLIC_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_ALLOWLIST_ENTRY_RE = re.compile(r"^v1_[A-Za-z0-9_-]{43}$")
 _LIST_ITERATOR_TYPE = type(iter([]))
 _BOUNDARY_PUBLIC_ERRORS = {
     ("invalid_headers", 400): ("invalid_request", 400),
@@ -377,6 +385,36 @@ def json_success(data: object, *, status: int = 200) -> PublicResponse:
     return _json_response(validated_status, body)
 
 
+def json_allowlist_bootstrap_success(
+    owner_allowlist: object,
+    mailbox_allowlist: object,
+) -> PublicResponse:
+    """Build the bootstrap route's one exact, envelope-free success object."""
+
+    if (
+        type(owner_allowlist) is not str
+        or _ALLOWLIST_ENTRY_RE.fullmatch(owner_allowlist) is None
+        or type(mailbox_allowlist) is not str
+        or _ALLOWLIST_ENTRY_RE.fullmatch(mailbox_allowlist) is None
+    ):
+        raise ValueError("invalid allowlist bootstrap success data")
+    body = json.dumps(
+        {
+            "owners": 1,
+            "mailboxes": 1,
+            "ownerDigests": 1,
+            "mailboxDigests": 1,
+            "ownerAllowlist": owner_allowlist,
+            "mailboxAllowlist": mailbox_allowlist,
+        },
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return _json_response(200, body)
+
+
 def json_failure(code: object, *, status: int) -> PublicResponse:
     """Build a failure from one trusted public code, never an error object."""
 
@@ -520,6 +558,31 @@ def _validate_public_response(response: object) -> PublicResponse:
                 parsed["error"]["code"],
                 status=response.status,
             )
+        elif (
+            response.status == 200
+            and type(parsed) is dict
+            and set(parsed)
+            == {
+                "owners",
+                "mailboxes",
+                "ownerDigests",
+                "mailboxDigests",
+                "ownerAllowlist",
+                "mailboxAllowlist",
+            }
+            and parsed.get("owners") == 1
+            and type(parsed.get("owners")) is int
+            and parsed.get("mailboxes") == 1
+            and type(parsed.get("mailboxes")) is int
+            and parsed.get("ownerDigests") == 1
+            and type(parsed.get("ownerDigests")) is int
+            and parsed.get("mailboxDigests") == 1
+            and type(parsed.get("mailboxDigests")) is int
+        ):
+            expected = json_allowlist_bootstrap_success(
+                parsed.get("ownerAllowlist"),
+                parsed.get("mailboxAllowlist"),
+            )
         else:
             raise ValueError("invalid public response")
         expected_headers = expected.headers
@@ -626,6 +689,7 @@ __all__ = (
     "extract_raw_headers",
     "invoke_if_http_mode",
     "invoke_safely",
+    "json_allowlist_bootstrap_success",
     "json_failure",
     "json_rate_limited",
     "json_success",

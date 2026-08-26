@@ -1,6 +1,6 @@
 # Collaboration v2 activation requirements
 
-Collaboration v2 remains frontend-inactive and guest/external-inactive. Slice 1A adds one owner-only server route at `/api/collaboration/owner`, but it defaults closed and imports the owner application graph only after `CUEVION_COLLAB_V2_HTTP_MODE` is exactly `owner_read` or `owner_write`. No frontend currently calls it. Legacy v1 remains separately default-closed and is never a fallback.
+Collaboration v2 remains frontend-inactive and guest/external-inactive. Slice 1A adds one owner-only server route at `/api/collaboration/owner`, but it defaults closed and imports the owner application graph only after `CUEVION_COLLAB_V2_HTTP_MODE` is exactly `owner_read` or `owner_write`. A separate temporary operator route at `/api/collaboration/allowlist_bootstrap` activates only when that mode is exactly `allowlist_bootstrap`; this value does not activate the owner route. No frontend currently calls either route. Legacy v1 remains separately default-closed and is never a fallback.
 
 ## Slice 1E offline rollout allowlist operations
 
@@ -24,6 +24,73 @@ This local tooling proof does not generate the actual production allowlist
 secret or production digests, does not configure Vercel, does not execute the
 production KV probe, and does not authorize `owner_read`. The HTTP mode remains
 absent/off.
+
+## Temporary production-runtime allowlist bootstrap
+
+The local authority tool remains the correct offline design, and its dry-run
+proves the closed selector and derivation contracts. It cannot safely execute
+against the production authority because
+`CUEVION_AUTH_SESSION_SECRET` and
+`CUEVION_AUTH_ACCOUNT_READER_DATABASE_URL` are Vercel Sensitive values. They
+are intentionally available only inside the deployed runtime and are not
+decryptable or exportable through local CLI execution. Converting, rotating,
+or duplicating either value merely to make it locally readable would weaken the
+security boundary and is forbidden.
+
+`/api/collaboration/allowlist_bootstrap` is the narrow bridge for one approved
+operator action. The route is POST-only, same-origin, canonical-host-only,
+bounded before body read, strict JSON, and duplicate-header-safe. Its body is
+exactly `{"mailboxId":"<canonical-selector>"}`. There is no list, wildcard,
+email selector, all-mailboxes mode, browser identity input, query token, body
+token, CORS relaxation, frontend caller, v1 fallback, guest activation, or Team
+change.
+
+The route first requires the exact deployed production classification
+`VERCEL_ENV=production`; preview, development, missing, or malformed values
+return not-found before the bootstrap service is imported or request headers
+are read. It is then default-closed twice. First,
+`CUEVION_COLLAB_V2_HTTP_MODE` must be exactly `allowlist_bootstrap`; `off`,
+`owner_read`, `owner_write`, and every other value return not-found without
+running the bootstrap service. Second, the request must carry one canonical
+unpadded-base64url secret of at least 32 random bytes in the dedicated
+`X-Cuevion-Allowlist-Bootstrap` header. The configured
+`CUEVION_COLLAB_V2_ALLOWLIST_BOOTSTRAP_TOKEN` must be a distinct Sensitive
+value; comparison is constant-time, and missing, malformed, duplicate, wrong,
+or unavailable token representations produce one fixed not-found response.
+The token is never logged, reflected, persisted, or accepted elsewhere.
+
+After both guards, the server reloads the existing HttpOnly Cuevion session
+from production session KV through
+`resolve_verified_auth0_owner`, revalidates the current account through the
+existing account-reader authority, and mints the same opaque owner context used
+by `owner_read`. The browser supplies no issuer, subject, authentication
+version, email, user ID, workspace ID, session ID, or session cookie value;
+the ordinary same-origin request sends the HttpOnly cookie automatically. The
+selected canonical mailbox is then checked through
+`authorization._resolve_verified_owned_managed_inbox_record`, including the
+fresh Auth0 member-authority match, exact returned inbox ID, and supported
+provider check.
+
+The runtime parses the existing
+`CUEVION_COLLAB_V2_ALLOWLIST_HMAC_KEY` contract and calls the exact production
+`derive_owner_allowlist_entry` and `derive_mailbox_allowlist_entry` functions.
+It does not copy the HMAC algorithm. Success is one envelope-free closed JSON
+object with exactly `owners`, `mailboxes`, `ownerDigests`, `mailboxDigests`,
+`ownerAllowlist`, and `mailboxAllowlist`; all four counts are one. It never
+returns raw canonical inputs or authentication, account, mailbox, session,
+database, token, or key material.
+
+The successful path performs only session/current-account/mailbox reads and
+digest derivation. It does not import or call the Collaboration application or
+mutation services, create a record or index, append a message, refresh a
+Collaboration TTL, invite a guest, write Team state, or change mailbox/account
+configuration. Existing canonical invalid-session cleanup semantics are not
+changed. The exact one-shot operational sequence and immediate deactivation
+requirements are in
+`tools/COLLABORATION_RUNTIME_ALLOWLIST_BOOTSTRAP_RUNBOOK.md`. This code and its
+synthetic tests do not claim that the bootstrap has been executed, do not
+contain a real token, key, mailbox authority, session, or digest, and do not
+change or activate Vercel production.
 
 ## Slice 1A authenticated owner boundary
 
@@ -102,9 +169,14 @@ Code-level synthetic tests prove fixed redacted failures, one-owner/one-to-five-
 
 The remaining owner-read gates are all operational and remain open:
 
-- actual production authority execution with an approved existing owner session;
-- actual production allowlist HMAC secret creation/injection under approved secret management;
-- actual production digest generation for exactly one owner and only explicitly selected test mailboxes;
+- approved one-shot execution of the temporary production-runtime bootstrap
+  from an already authenticated same-origin browser session;
+- actual production allowlist HMAC secret creation/injection under approved
+  secret management without exporting existing authentication/account-reader
+  Sensitive values;
+- actual production digest generation for exactly one owner and one explicitly
+  selected test mailbox, followed by immediate bootstrap-token removal and an
+  off-mode redeployment;
 - review of the resulting safe counts and deployment scope;
 - matched Vercel deployment of the allowlist key/lists, Origin, CSRF key, rate-limit key, and `owner_read` mode; and
 - allowed-owner, selected-mailbox, unselected-mailbox, and denied-owner activation verification.

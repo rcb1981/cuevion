@@ -124,7 +124,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             "models", "redis_store", "authorization", "source_message",
             "guest_session", "mutations", "http_boundary", "http_adapter",
             "owner_request_security", "owner_authentication", "application",
-            "owner_rate_limit", "owner_http",
+            "owner_rate_limit", "owner_http", "allowlist_bootstrap_http",
         )
         for short_name in short_names:
             for order in ("package_first", "top_level_first"):
@@ -264,6 +264,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             "api.collaboration.thread",
             "api.collaboration.invite",
             "api.collaboration.owner",
+            "api.collaboration.allowlist_bootstrap",
             "api.contact.support",
             "api.inboxes.connect-imap",
             "api.inboxes.connect-oauth",
@@ -293,6 +294,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             "api.collaboration.application",
             "api.collaboration.owner_rate_limit",
             "api.collaboration.owner_http",
+            "api.collaboration.allowlist_bootstrap_http",
             "api.user_config_store",
             "api.inboxes.mailbox_secret_store",
             "api.inboxes.authenticated_gmail",
@@ -458,6 +460,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             ("api.collaboration.owner_authentication_copy", "api/collaboration/owner_authentication.py"),
             ("api.collaboration.owner_rate_limit_copy", "api/collaboration/owner_rate_limit.py"),
             ("api.collaboration.owner_http_copy", "api/collaboration/owner_http.py"),
+            ("api.collaboration.allowlist_bootstrap_http_copy", "api/collaboration/allowlist_bootstrap_http.py"),
             ("collaboration.owner_request_security", "api/collaboration/owner_request_security.py"),
             ("api.collaboration.application_copy", "api/collaboration/application.py"),
             ("collaboration.application", "api/collaboration/application.py"),

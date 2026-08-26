@@ -23,6 +23,7 @@ from .http_adapter import (
     extract_raw_headers,
     invoke_if_http_mode,
     invoke_safely,
+    json_allowlist_bootstrap_success,
     json_failure,
     json_rate_limited,
     json_success,
@@ -395,7 +396,16 @@ class FeatureModeTests(AdapterTestCase):
     def test_every_recognized_exact_value_is_preserved(self):
         self.assertEqual(
             HTTP_MODES,
-            frozenset({"off", "owner_read", "owner_write", "guest", "frontend"}),
+            frozenset(
+                {
+                    "off",
+                    "owner_read",
+                    "owner_write",
+                    "allowlist_bootstrap",
+                    "guest",
+                    "frontend",
+                }
+            ),
         )
         for mode in HTTP_MODES:
             with self.subTest(mode=mode):
@@ -1001,6 +1011,34 @@ class ResponseTests(AdapterTestCase):
             '{"ok":true,"data":{"a":true,"z":"Grüße"}}'.encode(),
         )
         self.assert_common_json_headers(response)
+
+    def test_allowlist_bootstrap_success_is_one_exact_envelope_free_object(self):
+        owner = "v1_" + ("o" * 43)
+        mailbox = "v1_" + ("m" * 43)
+        response = json_allowlist_bootstrap_success(owner, mailbox)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(
+            json.loads(response.body),
+            {
+                "owners": 1,
+                "mailboxes": 1,
+                "ownerDigests": 1,
+                "mailboxDigests": 1,
+                "ownerAllowlist": owner,
+                "mailboxAllowlist": mailbox,
+            },
+        )
+        self.assert_common_json_headers(response)
+        self.assertEqual(
+            invoke_safely(
+                lambda: json_allowlist_bootstrap_success(owner, mailbox)
+            ),
+            response,
+        )
+        for invalid in ("", "v1_" + ("x" * 42), "raw", 1, True):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    json_allowlist_bootstrap_success(invalid, mailbox)
 
     def test_nested_exact_json_tree_is_copied_into_fresh_exact_containers(self):
         nested_dict = {
