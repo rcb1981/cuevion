@@ -96,19 +96,30 @@ Every supplied secret key must be generated through approved secret management a
 
 The canonical owner tuple comes from the revalidated server-side `AuthenticatedMemberSessionContext`: `issuer`, session schema `authenticationVersion`, and `subject`. The canonical mailbox ID comes from the current account's owned managed-inbox record. Browser localStorage, browser JSON, and the public session response are not authority; the public response deliberately omits issuer and subject.
 
-The repository has no reviewed operator identity-report command. Before rollout, an approved, access-logged Auth0/Cuevion administrative source must provide the exact tuple and explicitly selected mailbox IDs. If that source is unavailable, the smallest safe solution is a reviewed offline operator-only command or procedure that reads the same server-side session/account/mailbox authorities and emits the bounded tuple only to a protected operator channel. It must not be an HTTP introspection endpoint, must not persist the identity input, and must not weaken canonical validation.
+**CANONICAL ALLOWLIST IDENTITY SOURCING TOOLING — RESOLVED IN CODE.** The operator-only `tools.collaboration_allowlist_authority` command revalidates an opaque existing Cuevion/Auth0 session with `api.auth.runtime.resolve_authenticated_member_session`, accepts only one to five explicit canonical mailbox-ID selectors, and verifies each selector through the same `api.user_config_store.resolve_owned_managed_inbox_record(..., include_member_authority=True)` authority used by verified owner authorization. It constructs the existing `tools.collaboration_allowlist` input only in process memory and emits safe counts plus deployment digests. Default invocation is unarmed and performs no input, credential, configuration, network, database, KV, or session-store access; dry run validates selectors and import contracts without authority or secret access. The command is not an HTTP handler, route, startup import, browser bundle, or production-owner dependency.
 
-After that source is approved, the remaining owner-read gates are operational configuration: generate one new allowlist key and matching digest lists offline for exactly one owner and only explicitly selected test mailboxes; review their counts and scope; deploy the matched key/lists, Origin, CSRF key, rate-limit key, and mode through a separately authorized Vercel change; and verify allowed and denied cases. No wildcard or all-mailbox enrollment is permitted. Until then, the mode remains absent/off.
+Code-level synthetic tests prove fixed redacted failures, one-owner/one-to-five-mailbox bounds, no raw identity or secret output, byte-identical output to direct canonical allowlist generation, production-parser acceptance, positive owner/selected-mailbox checks, and denial of an unselected mailbox. This proof does not constitute a production authority execution or configuration change.
+
+The remaining owner-read gates are all operational and remain open:
+
+- actual production authority execution with an approved existing owner session;
+- actual production allowlist HMAC secret creation/injection under approved secret management;
+- actual production digest generation for exactly one owner and only explicitly selected test mailboxes;
+- review of the resulting safe counts and deployment scope;
+- matched Vercel deployment of the allowlist key/lists, Origin, CSRF key, rate-limit key, and `owner_read` mode; and
+- allowed-owner, selected-mailbox, unselected-mailbox, and denied-owner activation verification.
+
+No wildcard or all-mailbox enrollment is permitted. Until those separately authorized steps complete, the mode remains absent/off.
 
 Frontend migration is not required to configure this controlled dormant owner-read route: no frontend calls it, legacy v1 remains default-off with no fallback, and the exact owner/mailbox allowlists prevent general enrollment. Frontend migration remains a later prerequisite for a user-facing Collaboration rollout. Team authorization is not used when one revalidated owner reads their own allowlisted records; it is a later multi-user requirement. Guest/external remains separately inactive and is not part of owner-read readiness.
 
-Current owner-read classification is **GO AFTER CONFIGURATION**: there is no remaining application-code, production-KV, import-safety, retention, index-HMAC, frontend, Team, or guest blocker for this narrow mode. Canonical allowlist identity sourcing and the separately authorized matched Vercel configuration must still be completed before activation.
+Current owner-read classification is **GO AFTER CONFIGURATION**: there is no remaining application-code, canonical-identity-tooling, production-KV, import-safety, retention, index-HMAC, frontend, Team, or guest blocker for this narrow mode. Actual production authority resolution, production secret/digest generation, matched Vercel configuration, and activation verification must still be completed before activation.
 
 ## Phase 2A HTTP adapter foundation
 
 The shared `api.collaboration.http_adapter` module provides the import-safe transport boundary. It is not itself a route, exposes no `handler`, and does not import application services. `CUEVION_COLLAB_V2_HTTP_MODE` remains fail-closed to `off`; the Slice 1A owner route reads it before importing application services or reading a request body. Routes preserve duplicate raw headers through `headers.raw_items()`, validate body framing and limits before `rfile.read`, and use the centralized public response and error serialization.
 
-The frontend, v1, and guest/external behavior remain unchanged. Owner CSRF, append idempotency, durable owner rate limiting, local Redis, production-KV compatibility, and import-safety evidence are resolved. The remaining owner-read gates are the exact operational identity and configuration steps above; retention remains an owner-write concern.
+The frontend, v1, and guest/external behavior remain unchanged. Owner CSRF, append idempotency, durable owner rate limiting, local Redis, production-KV compatibility, import-safety evidence, and canonical allowlist identity sourcing tooling are resolved in code. The remaining owner-read gates are the exact production execution and configuration steps above; retention remains an owner-write concern.
 
 ## Phase 2A owner request security foundation
 
@@ -116,7 +127,7 @@ The provider-independent `api.collaboration.owner_request_security` module conta
 
 The owner-security parser accepts only an explicitly supplied exact built-in `dict` snapshot and performs no environment read. Future deployment configuration must supply `CUEVION_APP_ORIGIN`, `CUEVION_COLLAB_V2_OWNER_CSRF_KEY`, optional rotation-only `CUEVION_COLLAB_V2_OWNER_CSRF_KEY_PREVIOUS`, `CUEVION_COLLAB_V2_ALLOWLIST_HMAC_KEY`, `CUEVION_COLLAB_V2_OWNER_ALLOWLIST`, and `CUEVION_COLLAB_V2_MAILBOX_ALLOWLIST`. Parsed owner-security configuration objects are opaque, immutable, and intentionally nonserializable; generic dataclass, pickle, copy, string, and representation paths must not disclose their internal key or allowlist material.
 
-Owner CSRF, rollout allowlist, collaboration index, guest credential, invitation credential, and rate-limit keys must all be cryptographically distinct. Production activation requires a separately audited offline allowlist-generation and deployment procedure that never places raw identities in deployed allowlist settings, plus an explicit operational bound on allowlist cardinality. No actual key, allowlist entry, identity digest, or operational secret is documented here.
+Owner CSRF, rollout allowlist, collaboration index, guest credential, invitation credential, and rate-limit keys must all be cryptographically distinct. The implemented operator-only authority command preserves raw canonical identity only in process memory, reuses the existing allowlist generator, and enforces the stricter one-owner/one-to-five-mailbox execution bound. Production activation still requires separately authorized execution and deployment that never places raw identities in deployed allowlist settings. No actual key, allowlist entry, identity digest, or operational secret is documented here.
 
 The owner-CSRF session-binding digest is stable within one authentication session and signing-key epoch, so tokens are linkable within that scope. That limited linkability is accepted only for same-origin, short-lived CSRF use; the token must not be repurposed as an identity, authorization, invitation, guest-session, or cross-origin credential.
 
