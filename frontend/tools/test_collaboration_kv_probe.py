@@ -482,17 +482,18 @@ class OwnerRateLimitRealRedisTests(unittest.TestCase):
 
     def test_bounded_late_expiry_skew_uses_exact_canonical_lua(self):
         tolerance = owner_rate_limit._OWNER_RATE_LIMIT_LATE_EXPIRY_TOLERANCE_MS
-        self.assertEqual(tolerance, 10)
+        self.assertEqual(tolerance, 25)
         namespace = probe.ProbeNamespace(RUN_ID)
         with probe.LocalRedisServer() as server:
             raw = server.transport()
             for ttl_delta, expected in (
                 (0, "allowed"),
-                (3, "allowed"),
-                (4, "allowed"),
+                (8, "allowed"),
+                (16, "allowed"),
+                (17, "allowed"),
                 (tolerance, "allowed"),
                 (tolerance + 1, "malformed"),
-                (25, "malformed"),
+                (50, "malformed"),
             ):
                 with self.subTest(ttl_delta=ttl_delta):
                     key = namespace.key(f"rate:late:{ttl_delta}")
@@ -660,7 +661,7 @@ class OwnerRateLimitRealRedisTests(unittest.TestCase):
             self._set_aligned_ttl_delta(
                 raw,
                 positive_skew_key,
-                4,
+                25,
                 state_ttl_milliseconds=15_000,
             )
             self.assertEqual(

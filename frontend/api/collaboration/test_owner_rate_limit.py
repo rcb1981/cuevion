@@ -76,11 +76,11 @@ class OwnerRateLimitUnitTests(unittest.TestCase):
         )
         self.assertEqual(
             owner_rate_limit._OWNER_RATE_LIMIT_LATE_EXPIRY_TOLERANCE_MS,
-            10,
+            25,
         )
         script = owner_rate_limit._OWNER_RATE_LIMIT_LUA
         self.assertIn("local EARLY_EXPIRY_TOLERANCE_MS = 100", script)
-        self.assertIn("local LATE_EXPIRY_TOLERANCE_MS = 10", script)
+        self.assertIn("local LATE_EXPIRY_TOLERANCE_MS = 25", script)
         self.assertIn(
             "stateTtl - EARLY_EXPIRY_TOLERANCE_MS",
             script,
