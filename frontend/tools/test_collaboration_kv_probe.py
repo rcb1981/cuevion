@@ -296,6 +296,47 @@ class ProbeSafetyTests(unittest.TestCase):
             self.policy.validate(["EVAL", "return 1", 1, key])
         self.assertEqual(caught.exception.code, "unapproved_eval_script")
 
+    def test_rate_eval_arguments_remain_a_closed_exact_allowlist(self):
+        key = self.namespace.key("eval:rate")
+        self.assertEqual(probe.PROBE_RATE_EXHAUSTION_POLICY, (20_000_000, 2))
+        self.assertEqual(probe.PROBE_RATE_REFILL_POLICY, (10_000, 1))
+        approved = (
+            (5_000_000, 4),
+            (500_000, 30),
+            (2_000_000, 10),
+            probe.PROBE_RATE_EXHAUSTION_POLICY,
+            probe.PROBE_RATE_REFILL_POLICY,
+        )
+        for interval, burst in approved:
+            with self.subTest(interval=interval, burst=burst):
+                self.policy.validate(
+                    [
+                        "EVAL",
+                        owner_rate_limit._OWNER_RATE_LIMIT_LUA,
+                        1,
+                        key,
+                        str(interval),
+                        str(burst),
+                        "128",
+                    ]
+                )
+        for interval, burst in ((20_000_000, 1), (20_000_000, 3), (10_001, 1)):
+            with self.subTest(rejected=(interval, burst)), self.assertRaises(
+                probe.ProbeError
+            ) as caught:
+                self.policy.validate(
+                    [
+                        "EVAL",
+                        owner_rate_limit._OWNER_RATE_LIMIT_LUA,
+                        1,
+                        key,
+                        str(interval),
+                        str(burst),
+                        "128",
+                    ]
+                )
+            self.assertEqual(caught.exception.code, "invalid_command")
+
     def test_key_and_command_budgets_are_hard_limits(self):
         self.assertEqual(probe.MAX_REMOTE_COMMANDS, 160)
         self.assertEqual(probe.MAX_REMOTE_EVAL_CALLS, 96)
@@ -841,6 +882,9 @@ class ProbeLocalCompatibilityTests(unittest.TestCase):
         self.assertEqual(report["ownerReadVerdict"], "OWNER_READ_KV_COMPATIBLE")
         self.assertEqual(report["ownerWriteVerdict"], "OWNER_WRITE_KV_COMPATIBLE")
         self.assertEqual(report["failedTests"], [])
+        self.assertEqual(report["commandCount"], 106)
+        self.assertEqual(report["evalCount"], 37)
+        self.assertEqual(report["keyCount"], 26)
         self.assertLessEqual(report["keyCount"], probe.MAX_PROBE_KEYS)
         self.assertLessEqual(report["commandCount"], probe.MAX_REMOTE_COMMANDS)
         self.assertLessEqual(report["evalCount"], probe.MAX_REMOTE_EVAL_CALLS)
@@ -861,6 +905,60 @@ class ProbeLocalCompatibilityTests(unittest.TestCase):
         rendered = json.dumps(report, sort_keys=True)
         self.assertNotIn("probe@synthetic.invalid", rendered)
         self.assertNotIn("probe-mailbox", rendered)
+
+    def test_rate_probe_is_deterministic_with_remote_style_command_latency(self):
+        latency_seconds = 0.025
+        self.assertGreater(30 * latency_seconds, 0.5)
+        delayed_run_id = (
+            base64.urlsafe_b64encode(b"d" * 16).rstrip(b"=").decode("ascii")
+        )
+
+        with probe.LocalRedisServer() as server:
+            raw = server.transport()
+
+            def delayed_factory():
+                def delayed(command: list[object]):
+                    time.sleep(latency_seconds)
+                    return raw(command)
+
+                return delayed
+
+            old_namespace = probe.ProbeNamespace(RUN_ID)
+            old_budget = probe.ProbeBudget(time.monotonic(), remote=False)
+            old_transport = probe.SafeProbeTransport(
+                old_namespace,
+                old_budget,
+                delayed_factory(),
+            )
+            old_key = old_namespace.key("rate:old-read-burst")
+            for _ in range(30):
+                result = probe._eval_object(
+                    old_transport,
+                    owner_rate_limit._OWNER_RATE_LIMIT_LUA,
+                    [old_key],
+                    ["500000", "30", "128"],
+                )
+                probe._expect_status(result, "allowed")
+            old_final = probe._eval_object(
+                old_transport,
+                owner_rate_limit._OWNER_RATE_LIMIT_LUA,
+                [old_key],
+                ["500000", "30", "128"],
+            )
+            self.assertEqual(old_final, {"status": "allowed"})
+
+            report = probe._run_report(
+                "local",
+                probe.ProbeNamespace(delayed_run_id),
+                delayed_factory,
+            )
+
+        self.assertEqual(report["ownerReadVerdict"], "OWNER_READ_KV_COMPATIBLE")
+        self.assertEqual(report["ownerWriteVerdict"], "OWNER_WRITE_KV_COMPATIBLE")
+        self.assertEqual(report["failedTests"], [])
+        self.assertEqual(report["commandCount"], 106)
+        self.assertEqual(report["evalCount"], 37)
+        self.assertEqual(report["keyCount"], 26)
 
 
 if __name__ == "__main__":

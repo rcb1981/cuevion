@@ -4,6 +4,8 @@ Run from the frontend serverless project root with
 ``python -m tools.collaboration_kv_probe``.
 The default is a zero-network dry run. Remote execution is deliberately guarded
 and is intended only for a separately authorized operator task.
+A successful full run has an exact deterministic envelope of 106 commands,
+37 EVAL calls, and 26 ephemeral keys.
 """
 
 from __future__ import annotations
@@ -47,6 +49,10 @@ REMOTE_CONFIRM_VALUE = "EXECUTE_EPHEMERAL_COLLAB_V2_KV_PROBE"
 KV_URL_ENV = "KV_REST_API_URL"
 KV_TOKEN_ENV = "KV_REST_API_TOKEN"
 MAX_KEY_BYTES = 196
+# Probe-only policies: the long tuple makes serial exhaustion latency-safe, while
+# the short tuple keeps refill and expiry verification bounded.
+PROBE_RATE_EXHAUSTION_POLICY = (20_000_000, 2)
+PROBE_RATE_REFILL_POLICY = (10_000, 1)
 
 OWNER_READ_CASES = (
     "transport_sanity",
@@ -308,7 +314,8 @@ class ProbeCommandPolicy:
                 (5_000_000, 4),
                 (500_000, 30),
                 (2_000_000, 10),
-                (10_000, 1),
+                PROBE_RATE_EXHAUSTION_POLICY,
+                PROBE_RATE_REFILL_POLICY,
             }:
                 raise ProbeError("invalid_command")
             if math.ceil((interval * burst) / 1000) > MAX_PROBE_TTL_MILLISECONDS:
@@ -604,37 +611,61 @@ class CompatibilityProbe:
             self._rate_args(rate_class),
         )
 
+    def _probe_rate(
+        self,
+        key: str,
+        policy: tuple[int, int],
+    ) -> dict[str, object]:
+        interval, burst = policy
+        return _eval_object(
+            self.transport,
+            owner_rate_limit._OWNER_RATE_LIMIT_LUA,
+            [key],
+            [str(interval), str(burst), "128"],
+        )
+
     def _rate_limit(self) -> None:
-        key = self.namespace.key("rate:read")
-        for _ in range(30):
-            _expect_status(self._rate(key, owner_rate_limit.RATE_LIMIT_READ), "allowed")
-        limited = self._rate(key, owner_rate_limit.RATE_LIMIT_READ)
+        key = self.namespace.key("rate:exhaustion")
+        for _ in range(PROBE_RATE_EXHAUSTION_POLICY[1]):
+            _expect_status(
+                self._probe_rate(key, PROBE_RATE_EXHAUSTION_POLICY),
+                "allowed",
+            )
+        limited = self._probe_rate(key, PROBE_RATE_EXHAUSTION_POLICY)
         _expect_status(limited, "limited", {"retryAfter"})
         retry_after = limited.get("retryAfter")
-        if type(retry_after) is not str or retry_after != "1":
+        maximum_retry = math.ceil(PROBE_RATE_EXHAUSTION_POLICY[0] / 1_000_000)
+        if (
+            type(retry_after) is not str
+            or _CANONICAL_UINT_RE.fullmatch(retry_after) is None
+            or not 1 <= int(retry_after) <= maximum_retry
+        ):
             raise ProbeError("rate_retry_invalid")
         _assert_live_ttl(self.transport, key)
-        time.sleep(0.60)
-        _expect_status(self._rate(key, owner_rate_limit.RATE_LIMIT_READ), "allowed")
 
         malformed_key = self.namespace.key("rate:malformed")
         self.transport.set_px(malformed_key, "not-json", 1_000)
         _assert_live_ttl(self.transport, malformed_key)
-        _expect_status(self._rate(malformed_key, owner_rate_limit.RATE_LIMIT_READ), "malformed")
+        _expect_status(
+            self._probe_rate(malformed_key, PROBE_RATE_EXHAUSTION_POLICY),
+            "malformed",
+        )
         if self.transport.get(malformed_key) != "not-json":
             raise ProbeError("malformed_rate_state_changed")
 
-        expiry_key = self.namespace.key("rate:expiry")
-        result = _eval_object(
-            self.transport,
-            owner_rate_limit._OWNER_RATE_LIMIT_LUA,
-            [expiry_key],
-            ["10000", "1", "128"],
+        refill_key = self.namespace.key("rate:refill-expiry")
+        _expect_status(
+            self._probe_rate(refill_key, PROBE_RATE_REFILL_POLICY),
+            "allowed",
         )
-        _expect_status(result, "allowed")
-        _assert_live_ttl(self.transport, expiry_key)
+        time.sleep(0.06)
+        _expect_status(
+            self._probe_rate(refill_key, PROBE_RATE_REFILL_POLICY),
+            "allowed",
+        )
+        _assert_live_ttl(self.transport, refill_key)
         time.sleep((owner_rate_limit.STATE_EXPIRY_GRACE_MS / 1_000) + 0.06)
-        if self.transport.get(expiry_key) is not None:
+        if self.transport.get(refill_key) is not None:
             raise ProbeError("rate_key_did_not_expire")
 
     def _run_concurrent(
