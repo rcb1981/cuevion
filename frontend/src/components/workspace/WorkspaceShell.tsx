@@ -238,6 +238,15 @@ import {
   type CollaborationThread,
 } from "../../lib/collaborationApi";
 import {
+  lookupCollaborationForOwner,
+  readCollaborationForOwner,
+  type CollaborationOwnerReadDto,
+} from "../../lib/collaborationOwnerReadApi";
+import {
+  deriveCollaborationOwnerSourceLocator,
+  type CollaborationOwnerSourceLocator,
+} from "../../lib/collaborationOwnerSourceLocator";
+import {
   cancelTeamInvite,
   changeTeamMemberAccess,
   fetchPendingTeamInvites,
@@ -1613,6 +1622,23 @@ type MailMessage = Partial<MessageNoiseAssessment> & {
   behaviorSuggestion?: MailMessageBehaviorSuggestion;
   aiSuggestionBanner?: MessageSuggestionBanner;
 };
+
+type CollaborationOwnerProjectionState =
+  | { status: "idle"; identityKey: null; requestId: number }
+  | { status: "loading"; identityKey: string; requestId: number }
+  | {
+      status: "success";
+      identityKey: string;
+      requestId: number;
+      collaboration: CollaborationOwnerReadDto;
+    }
+  | {
+      status: "failure";
+      identityKey: string;
+      requestId: number;
+      failureStatus: string;
+      retryAfterSeconds?: number;
+    };
 
 const PRIORITY_SEMANTIC_NEW_INBOUND_MAX_PENDING = 256;
 
@@ -16767,6 +16793,18 @@ function MailboxView({
   >(null);
   const [activeCollaborationSourceMailboxId, setActiveCollaborationSourceMailboxId] =
     useState<InboxId | null>(null);
+  const [collaborationOwnerProjection, setCollaborationOwnerProjection] =
+    useState<CollaborationOwnerProjectionState>({
+      status: "idle",
+      identityKey: null,
+      requestId: 0,
+    });
+  const collaborationOwnerProjectionGenerationRef = useRef(0);
+  const collaborationOwnerProjectionRequestRef = useRef<{
+    identityKey: string;
+    requestId: number;
+    inFlight: boolean;
+  } | null>(null);
   const [pendingEndCollaborationMessageId, setPendingEndCollaborationMessageId] = useState<
     string | null
   >(null);
@@ -19663,6 +19701,13 @@ function MailboxView({
           collaboration: activeDraftCollaboration,
         }
       : activeStoredCollaborationMessage;
+  const activeCollaborationOwnerProjection =
+    collaborationOwnerProjection.status === "success"
+      ? collaborationOwnerProjection.collaboration
+      : null;
+  const isActiveCollaborationOwnerProjectionReadOnly = Boolean(
+    activeCollaborationOwnerProjection,
+  );
   const isPreStartCollaboration = Boolean(
     activeStoredCollaborationMessage &&
       !activeStoredCollaborationMessage.collaboration &&
@@ -20196,7 +20241,11 @@ function MailboxView({
         <button
           type="button"
           onClick={() =>
-            openCollaborationOverlay(liveMessage.id, { sourceMailboxId })
+            openCollaborationOverlay(liveMessage.id, {
+              sourceMailboxId,
+              sourceMessage: liveMessage,
+              loadOwnerProjection: true,
+            })
           }
           className={collaborationButtonClass}
           style={collaborationButtonStyle}
@@ -22086,6 +22135,137 @@ function MailboxView({
     })();
   };
 
+  const fenceCollaborationOwnerProjection = () => {
+    const requestId = collaborationOwnerProjectionGenerationRef.current + 1;
+    collaborationOwnerProjectionGenerationRef.current = requestId;
+    collaborationOwnerProjectionRequestRef.current = null;
+    setCollaborationOwnerProjection({
+      status: "idle",
+      identityKey: null,
+      requestId,
+    });
+  };
+
+  const beginCollaborationOwnerRead = (
+    messageId: string,
+    sourceMailboxId: InboxId,
+    message: MailMessage | null,
+    trustedFolder: MailFolder | null,
+  ) => {
+    const managedMailbox =
+      managedInboxes.find((candidate) => candidate.id === sourceMailboxId) ?? null;
+    const locator = deriveCollaborationOwnerSourceLocator({
+      workspaceDataMode,
+      hasAuthenticatedMemberAuthority,
+      managedMailbox,
+      sourceMailboxId,
+      trustedFolder: trustedFolder === "Inbox" ? "INBOX" : trustedFolder,
+      message,
+    });
+
+    if (!locator) {
+      fenceCollaborationOwnerProjection();
+      return;
+    }
+
+    const identityKey = JSON.stringify([
+      messageId,
+      locator.mailboxId,
+      locator.sourceRef,
+    ]);
+    const activeRequest = collaborationOwnerProjectionRequestRef.current;
+    if (activeRequest?.inFlight && activeRequest.identityKey === identityKey) {
+      return;
+    }
+
+    const requestId = collaborationOwnerProjectionGenerationRef.current + 1;
+    collaborationOwnerProjectionGenerationRef.current = requestId;
+    collaborationOwnerProjectionRequestRef.current = {
+      identityKey,
+      requestId,
+      inFlight: true,
+    };
+    setCollaborationOwnerProjection({ status: "loading", identityKey, requestId });
+
+    const isCurrentRequest = () => {
+      const currentRequest = collaborationOwnerProjectionRequestRef.current;
+      return (
+        currentRequest?.identityKey === identityKey &&
+        currentRequest.requestId === requestId
+      );
+    };
+    const commitFailure = (
+      failureStatus: string,
+      retryAfterSeconds?: number,
+    ) => {
+      if (!isCurrentRequest()) {
+        return;
+      }
+      collaborationOwnerProjectionRequestRef.current = {
+        identityKey,
+        requestId,
+        inFlight: false,
+      };
+      setCollaborationOwnerProjection({
+        status: "failure",
+        identityKey,
+        requestId,
+        failureStatus,
+        ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
+      });
+    };
+
+    void (async (trustedLocator: CollaborationOwnerSourceLocator) => {
+      const lookupResult = await lookupCollaborationForOwner(trustedLocator);
+      if (!isCurrentRequest()) {
+        return;
+      }
+      if (lookupResult.status !== "success") {
+        commitFailure(
+          lookupResult.status,
+          "retryAfterSeconds" in lookupResult
+            ? lookupResult.retryAfterSeconds
+            : undefined,
+        );
+        return;
+      }
+
+      const readResult = await readCollaborationForOwner(
+        lookupResult.collaborationId,
+      );
+      if (!isCurrentRequest()) {
+        return;
+      }
+      if (readResult.status !== "success") {
+        commitFailure(readResult.status, readResult.retryAfterSeconds);
+        return;
+      }
+      if (
+        readResult.collaboration.collaborationId !== lookupResult.collaborationId ||
+        readResult.collaboration.mailboxId !== trustedLocator.mailboxId
+      ) {
+        commitFailure("invalid_response");
+        return;
+      }
+
+      collaborationOwnerProjectionRequestRef.current = {
+        identityKey,
+        requestId,
+        inFlight: false,
+      };
+      setPendingEndCollaborationMessageId(null);
+      setIsCollaborationParticipantPickerOpen(false);
+      setIsCollaborationInviteComposerOpen(false);
+      setIsCollaborationActionsMenuOpen(false);
+      setCollaborationOwnerProjection({
+        status: "success",
+        identityKey,
+        requestId,
+        collaboration: readResult.collaboration,
+      });
+    })(locator);
+  };
+
   const openShareCollaboration = (
     messageId: string,
     sourceMessage?: MailMessage | null,
@@ -22106,7 +22286,11 @@ function MailboxView({
     const message = getMessageById(messageId, sourceMailboxId);
 
     if (message?.collaboration) {
-      openCollaborationOverlay(messageId, { sourceMailboxId });
+      openCollaborationOverlay(messageId, {
+        sourceMailboxId,
+        sourceMessage: message,
+        loadOwnerProjection: true,
+      });
       return;
     }
 
@@ -22136,12 +22320,21 @@ function MailboxView({
     setCollaborationMemberSearch("");
     setStartCollaborationInviteEmail("");
     setCollaborationNote("");
-    openCollaborationOverlay(messageId, { sourceMailboxId });
+    openCollaborationOverlay(messageId, {
+      sourceMailboxId,
+      sourceMessage: message ?? scopedSourceMessage,
+      loadOwnerProjection: true,
+    });
   };
 
   const openCollaborationOverlay = (
     messageId: string,
-    options?: { focusComposer?: boolean; sourceMailboxId?: InboxId },
+    options?: {
+      focusComposer?: boolean;
+      sourceMailboxId?: InboxId;
+      sourceMessage?: MailMessage | null;
+      loadOwnerProjection?: boolean;
+    },
   ) => {
     const sourceMailboxId = resolveCollaborationStorageMailboxId(
       messageId,
@@ -22153,7 +22346,16 @@ function MailboxView({
     );
     syncMessageFromLiveSnapshot(messageId, sourceMailboxId);
     markCollaborationSeen(messageId, sourceMailboxId);
-    const message = getMessageById(messageId, sourceMailboxId);
+    const message =
+      getMessageById(messageId, sourceMailboxId) ?? options?.sourceMessage ?? null;
+    const authoritativeLocation = message
+      ? resolveAuthoritativeMessageLocation({
+          message,
+          exactLocation: currentMessageLocationByMessage.get(message) ?? null,
+          explicitMailboxId: sourceMailboxId,
+          bareIdLocation: currentMessageLocationById[message.id] ?? null,
+        })
+      : null;
     const collaboration =
       message?.collaboration ?? draftCollaborationByMessageId[collaborationStateKey];
     const hasInternalParticipant = collaboration
@@ -22171,15 +22373,7 @@ function MailboxView({
     setSelectionState([messageId], messageId, messageId, {
       sourceMailboxId,
       sourceMessage: message,
-      sourceFolder:
-        (message
-          ? resolveAuthoritativeMessageLocation({
-              message,
-              exactLocation: currentMessageLocationByMessage.get(message) ?? null,
-              explicitMailboxId: sourceMailboxId,
-              bareIdLocation: currentMessageLocationById[message.id] ?? null,
-            })?.folder
-          : null) ?? activeFolder,
+      sourceFolder: authoritativeLocation?.folder ?? activeFolder,
     });
     setActiveCollaborationMessageId(messageId);
     setActiveCollaborationSourceMailboxId(sourceMailboxId);
@@ -22187,6 +22381,16 @@ function MailboxView({
     setContextMenuState(null);
     setDetailActionsMenuState(null);
     setIsCollaborationActionsMenuOpen(false);
+    if (options?.loadOwnerProjection) {
+      beginCollaborationOwnerRead(
+        messageId,
+        sourceMailboxId,
+        message,
+        authoritativeLocation?.folder ?? null,
+      );
+    } else {
+      fenceCollaborationOwnerProjection();
+    }
   };
 
   const clearCollaborationDraft = (
@@ -22268,6 +22472,7 @@ function MailboxView({
       clearCollaborationDraft(closingMessageId, closingSourceMailboxId);
     }
 
+    fenceCollaborationOwnerProjection();
     setActiveCollaborationMessageId(null);
     setActiveCollaborationSourceMailboxId(null);
     setCollaborationPersonIds([]);
@@ -27752,6 +27957,8 @@ function MailboxView({
                                       openCollaborationOverlay(message.id, {
                                         sourceMailboxId:
                                           collaborationStorageMailboxId,
+                                        sourceMessage: message,
+                                        loadOwnerProjection: true,
                                       });
                                     }}
                                     className="inline-flex items-center gap-1.5 text-[0.68rem] leading-5 text-[color:rgba(120,111,100,0.72)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
@@ -28811,7 +29018,8 @@ function MailboxView({
                         Collaboration
                       </h2>
                       <p className="max-w-[36rem] text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
-                        {activeCollaborationMessage.subject}
+                        {activeCollaborationOwnerProjection?.source.subject ??
+                          activeCollaborationMessage.subject}
                       </p>
                     </div>
                     <button
@@ -28825,7 +29033,124 @@ function MailboxView({
 
                   <div className="mt-4 min-h-0 flex-1 overflow-y-auto pr-1">
                     <div className="space-y-4">
-                      {isPreStartCollaboration ? (
+                      {collaborationOwnerProjection.status === "loading" ? (
+                        <div
+                          data-collaboration-owner-read-loading
+                          className="rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.78rem] leading-6 text-[var(--workspace-text-faint)]"
+                        >
+                          Checking the server collaboration…
+                        </div>
+                      ) : null}
+                      {isActiveCollaborationOwnerProjectionReadOnly &&
+                      activeCollaborationOwnerProjection ? (
+                        <section
+                          data-collaboration-owner-read-projection
+                          data-collaboration-owner-read-only="true"
+                          className="space-y-4"
+                        >
+                          <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,var(--workspace-card),var(--workspace-card-subtle))] px-5 py-5">
+                            <div className="flex flex-wrap items-center justify-between gap-3">
+                              <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                                Server collaboration · Read only
+                              </div>
+                              <span className="inline-flex rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 py-1 text-[0.62rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)]">
+                                {activeCollaborationOwnerProjection.state}
+                              </span>
+                            </div>
+                            <dl className="mt-4 grid gap-3 text-[0.78rem] leading-6 text-[var(--workspace-text-faint)] sm:grid-cols-2">
+                              <div>
+                                <dt className="font-medium text-[var(--workspace-text-soft)]">
+                                  Collaboration ID
+                                </dt>
+                                <dd className="break-all">
+                                  {activeCollaborationOwnerProjection.collaborationId}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt className="font-medium text-[var(--workspace-text-soft)]">
+                                  Mailbox ID
+                                </dt>
+                                <dd className="break-all">
+                                  {activeCollaborationOwnerProjection.mailboxId}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt className="font-medium text-[var(--workspace-text-soft)]">
+                                  Created
+                                </dt>
+                                <dd>
+                                  {formatCollaborationStatusTimestamp(
+                                    activeCollaborationOwnerProjection.createdAt,
+                                  )}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt className="font-medium text-[var(--workspace-text-soft)]">
+                                  Updated
+                                </dt>
+                                <dd>
+                                  {formatCollaborationStatusTimestamp(
+                                    activeCollaborationOwnerProjection.updatedAt,
+                                  )}
+                                </dd>
+                              </div>
+                            </dl>
+                          </div>
+
+                          <section className="space-y-3">
+                            <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                              Source
+                            </div>
+                            <div className="rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-4">
+                              <div className="text-[0.95rem] font-medium text-[var(--workspace-text)]">
+                                {activeCollaborationOwnerProjection.source.subject}
+                              </div>
+                              <div className="mt-1 text-[0.78rem] leading-6 text-[var(--workspace-text-faint)]">
+                                {activeCollaborationOwnerProjection.source.senderDisplay} · {" "}
+                                {activeCollaborationOwnerProjection.source.fromDisplay} · {" "}
+                                {activeCollaborationOwnerProjection.source.timestamp}
+                              </div>
+                              <div className="mt-3 whitespace-pre-wrap text-[0.88rem] leading-6 text-[var(--workspace-text-soft)]">
+                                {activeCollaborationOwnerProjection.source.bodyText}
+                              </div>
+                            </div>
+                          </section>
+
+                          <section className="space-y-3">
+                            <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                              Activity
+                            </div>
+                            {activeCollaborationOwnerProjection.messages.length > 0 ? (
+                              <div className="max-h-[320px] space-y-2 overflow-y-auto pr-1">
+                                {activeCollaborationOwnerProjection.messages.map((entry) => (
+                                  <div
+                                    key={entry.id}
+                                    className="rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3.5 py-2.5"
+                                  >
+                                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.78rem] leading-5 text-[var(--workspace-text-soft)]">
+                                      <span>{entry.authorDisplayName}</span>
+                                      <span>{entry.authorRole}</span>
+                                      <span className="uppercase tracking-[0.12em]">
+                                        {entry.visibility}
+                                      </span>
+                                      <span className="text-[var(--workspace-text-faint)]">
+                                        {formatCollaborationStatusTimestamp(entry.timestamp)}
+                                      </span>
+                                    </div>
+                                    <div className="mt-1 whitespace-pre-wrap text-[0.88rem] leading-6 text-[var(--workspace-text-soft)]">
+                                      {entry.text}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="rounded-[16px] bg-[var(--workspace-card)] px-4 py-3 text-[0.84rem] text-[var(--workspace-text-faint)]">
+                                No server messages.
+                              </div>
+                            )}
+                          </section>
+                        </section>
+                      ) : isPreStartCollaboration ? (
                         <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,var(--workspace-card),var(--workspace-card-subtle))] px-5 py-6">
                           <div className="text-[1rem] font-medium tracking-tight text-[var(--workspace-text)]">
                             Ready to start collaboration
@@ -29392,6 +29717,15 @@ function MailboxView({
                   </div>
 
                   <div className="mt-4 flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-[var(--workspace-border-soft)] pt-4">
+                    {isActiveCollaborationOwnerProjectionReadOnly ? (
+                      <div
+                        data-collaboration-owner-write-controls="hidden"
+                        className="text-[0.76rem] leading-6 text-[var(--workspace-text-faint)]"
+                      >
+                        Server projection is read only.
+                      </div>
+                    ) : (
+                      <>
                     <div>
                       {!isPreStartCollaboration &&
                       activeCollaborationMessage.collaboration?.state !== "resolved" &&
@@ -29462,6 +29796,8 @@ function MailboxView({
                         </>
                       ) : null}
                     </div>
+                      </>
+                    )}
                   </div>
                 </div>
               </WorkspaceModalLayer>,

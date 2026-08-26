@@ -253,7 +253,17 @@ for (const preservedCollaborationMutation of [
     `${preservedCollaborationMutation} must remain wired`,
   );
 }
-assert.equal(workspaceSource.includes("readCollaborationForOwner"), false);
+assert.equal(workspaceSource.includes("lookupCollaborationForOwner"), true);
+assert.equal(workspaceSource.includes("readCollaborationForOwner"), true);
+const collaborationOwnerReadRegion = sourceBetween(
+  workspaceSource,
+  "const beginCollaborationOwnerRead = (",
+  "const openShareCollaboration = (",
+);
+assert.equal((collaborationOwnerReadRegion.match(/lookupCollaborationForOwner\(/g) ?? []).length, 1);
+assert.equal((collaborationOwnerReadRegion.match(/readCollaborationForOwner\(/g) ?? []).length, 1);
+assert.equal(collaborationOwnerReadRegion.includes("localStorage"), false);
+assert.equal(collaborationOwnerReadRegion.includes("sessionStorage"), false);
 assert.equal(
   sourceBetween(
     workspaceSource,

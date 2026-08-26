@@ -7,6 +7,7 @@ import {
   __resetCollaborationOwnerReadApiForTests,
   COLLABORATION_OWNER_READ_ENDPOINT,
   isValidCollaborationOwnerReadId,
+  lookupCollaborationForOwner,
   readCollaborationForOwner,
 } from "./collaborationOwnerReadApi";
 
@@ -15,6 +16,10 @@ type FetchCall = { input: RequestInfo | URL; init?: RequestInit };
 const COLLABORATION_ID = "A".repeat(22);
 const MESSAGE_ID = "B".repeat(22);
 const NOW_MS = 1_800_000_000_000;
+const googleLocator = {
+  mailboxId: "mailbox-1",
+  sourceRef: { providerMessageId: "provider-message-1" },
+} as const;
 
 const collaboration = {
   collaborationId: COLLABORATION_ID,
@@ -69,6 +74,13 @@ function readResponse(value: unknown = collaboration) {
   return response(200, {
     ok: true,
     data: { collaboration: value },
+  });
+}
+
+function lookupResponse(collaborationId: unknown = COLLABORATION_ID) {
+  return response(200, {
+    ok: true,
+    data: { collaborationId },
   });
 }
 
@@ -127,6 +139,134 @@ async function run() {
         { operation: "read", collaborationId: COLLABORATION_ID },
         "csrf-secret",
       );
+    });
+
+    await test("uses the exact lookup POST contract without browser-supplied authority", async () => {
+      const calls: FetchCall[] = [];
+      installFetch([csrfResponse("csrf-secret"), lookupResponse()], calls);
+
+      assert.deepEqual(await lookupCollaborationForOwner(googleLocator), {
+        status: "success",
+        collaborationId: COLLABORATION_ID,
+      });
+      assert.equal(calls.length, 2);
+      assertExactRequest(calls[0], { operation: "csrf" });
+      assertExactRequest(
+        calls[1],
+        {
+          operation: "lookup",
+          mailboxId: "mailbox-1",
+          sourceRef: { providerMessageId: "provider-message-1" },
+        },
+        "csrf-secret",
+      );
+      const body = JSON.parse(String(calls[1].init?.body)) as Record<string, unknown>;
+      for (const forbiddenField of ["provider", "ownerEmail", "workspaceId", "collaborationId"]) {
+        assert.equal(Object.prototype.hasOwnProperty.call(body, forbiddenField), false);
+      }
+    });
+
+    await test("rejects invalid source locators before any request", async () => {
+      const calls: FetchCall[] = [];
+      installFetch([], calls);
+      const invalidLocators = [
+        { ...googleLocator, mailboxId: " mailbox-1" },
+        { ...googleLocator, sourceRef: { providerMessageId: "provider id" } },
+        { ...googleLocator, sourceRef: { providerMessageId: "provider-id", provider: "google" } },
+        { mailboxId: "mailbox-1", sourceRef: { folder: "Archive", uidValidity: "1", imapUid: "2" } },
+        { mailboxId: "mailbox-1", sourceRef: { folder: "INBOX", uidValidity: "01", imapUid: "2" } },
+      ];
+      for (const locator of invalidLocators) {
+        assert.deepEqual(
+          await lookupCollaborationForOwner(locator as typeof googleLocator),
+          { status: "invalid_source_locator" },
+        );
+      }
+      assert.equal(calls.length, 0);
+    });
+
+    await test("accepts only the exact opaque lookup success envelope", async () => {
+      const malformedPayloads = [
+        { ok: true, data: { collaborationId: "short" } },
+        { ok: true, data: { collaborationId: COLLABORATION_ID, provider: "google" } },
+        { ok: true, data: { collaborationId: COLLABORATION_ID }, extra: true },
+        { ok: true, collaborationId: COLLABORATION_ID },
+      ];
+      for (const payload of malformedPayloads) {
+        __resetCollaborationOwnerReadApiForTests();
+        const calls: FetchCall[] = [];
+        installFetch([csrfResponse("token"), response(200, payload)], calls);
+        assert.deepEqual(await lookupCollaborationForOwner(googleLocator), {
+          status: "invalid_response",
+        });
+      }
+    });
+
+    await test("shares one memory-only CSRF cache across lookup and read", async () => {
+      const calls: FetchCall[] = [];
+      installFetch([csrfResponse("shared-token"), lookupResponse(), readResponse()], calls);
+      assert.equal((await lookupCollaborationForOwner(googleLocator)).status, "success");
+      assert.equal((await readCollaborationForOwner(COLLABORATION_ID)).status, "success");
+      assert.equal(calls.length, 3);
+      assert.equal(
+        calls.filter((call) => JSON.parse(String(call.init?.body)).operation === "csrf").length,
+        1,
+      );
+    });
+
+    await test("deduplicates concurrent lookup/read CSRF bootstrap", async () => {
+      const calls: FetchCall[] = [];
+      let resolveBootstrap!: (value: Response) => void;
+      const pendingBootstrap = new Promise<Response>((resolve) => {
+        resolveBootstrap = resolve;
+      });
+      installFetch([pendingBootstrap, lookupResponse(), readResponse()], calls);
+      const lookup = lookupCollaborationForOwner(googleLocator);
+      const read = readCollaborationForOwner(COLLABORATION_ID);
+      await Promise.resolve();
+      assert.equal(calls.length, 1);
+      resolveBootstrap(csrfResponse("shared-token"));
+      await Promise.all([lookup, read]);
+      assert.equal(calls.length, 3);
+    });
+
+    await test("refreshes and retries lookup after one 403, then stops", async () => {
+      const calls: FetchCall[] = [];
+      installFetch(
+        [
+          csrfResponse("stale-token"),
+          response(403, {}),
+          csrfResponse("fresh-token"),
+          response(403, {}),
+        ],
+        calls,
+      );
+      assert.deepEqual(await lookupCollaborationForOwner(googleLocator), {
+        status: "forbidden",
+      });
+      assert.equal(calls.length, 4);
+      assert.equal(
+        calls.filter((call) => JSON.parse(String(call.init?.body)).operation === "lookup").length,
+        2,
+      );
+    });
+
+    await test("classifies lookup 401, 404, bounded 429, and 503", async () => {
+      const cases = [
+        { response: response(401, {}), expected: { status: "unauthorized" } },
+        { response: response(404, {}), expected: { status: "not_found" } },
+        {
+          response: response(429, {}, { "Retry-After": "60" }),
+          expected: { status: "rate_limited", retryAfterSeconds: 60 },
+        },
+        { response: response(503, {}), expected: { status: "unavailable" } },
+      ];
+      for (const testCase of cases) {
+        __resetCollaborationOwnerReadApiForTests();
+        const calls: FetchCall[] = [];
+        installFetch([csrfResponse("token"), testCase.response], calls);
+        assert.deepEqual(await lookupCollaborationForOwner(googleLocator), testCase.expected);
+      }
     });
 
     await test("rejects non-opaque collaboration IDs before any request", async () => {

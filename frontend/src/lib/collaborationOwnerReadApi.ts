@@ -1,3 +1,5 @@
+import type { CollaborationOwnerSourceLocator } from "./collaborationOwnerSourceLocator";
+
 export const COLLABORATION_OWNER_READ_ENDPOINT = "/api/collaboration/owner";
 
 const CSRF_REFRESH_MARGIN_SECONDS = 15;
@@ -47,6 +49,31 @@ export type CollaborationOwnerReadResult =
   | { status: "success"; collaboration: CollaborationOwnerReadDto }
   | { status: CollaborationOwnerReadFailureStatus; retryAfterSeconds?: number };
 
+export type CollaborationOwnerLookupResult =
+  | { status: "success"; collaborationId: string }
+  | { status: "invalid_source_locator" }
+  | {
+      status:
+        | "not_found"
+        | "unauthorized"
+        | "forbidden"
+        | "rate_limited"
+        | "unavailable"
+        | "invalid_response";
+      retryAfterSeconds?: number;
+    };
+
+type OwnerOperationFailure = {
+  status:
+    | "not_found"
+    | "unauthorized"
+    | "forbidden"
+    | "rate_limited"
+    | "unavailable"
+    | "invalid_response";
+  retryAfterSeconds?: number;
+};
+
 type CsrfState = {
   token: string;
   expiresAt: number;
@@ -54,7 +81,7 @@ type CsrfState = {
 
 type CsrfResult =
   | { status: "success"; csrf: CsrfState }
-  | Exclude<CollaborationOwnerReadResult, { status: "success" }>;
+  | OwnerOperationFailure;
 
 let csrfState: CsrfState | null = null;
 let csrfBootstrapPromise: Promise<CsrfResult> | null = null;
@@ -187,7 +214,7 @@ function parseRetryAfter(response: Response): number | undefined {
   return Number(value);
 }
 
-function classifyFailure(response: Response): Exclude<CollaborationOwnerReadResult, { status: "success" }> {
+function classifyFailure(response: Response): OwnerOperationFailure {
   if (response.status === 401) {
     csrfState = null;
     return { status: "unauthorized" };
@@ -269,8 +296,40 @@ async function bootstrapCsrf(): Promise<CsrfResult> {
   return pendingBootstrap;
 }
 
-async function executeRead(
-  collaborationId: string,
+function isValidSourceLocator(
+  locator: CollaborationOwnerSourceLocator,
+): boolean {
+  if (
+    !isExactRecord(locator, ["mailboxId", "sourceRef"]) ||
+    typeof locator.mailboxId !== "string" ||
+    locator.mailboxId.length === 0 ||
+    locator.mailboxId !== locator.mailboxId.trim()
+  ) {
+    return false;
+  }
+
+  const sourceRef: unknown = locator.sourceRef;
+
+  if (
+    isExactRecord(sourceRef, ["providerMessageId"]) &&
+    typeof sourceRef.providerMessageId === "string" &&
+    /^\S+$/.test(sourceRef.providerMessageId)
+  ) {
+    return true;
+  }
+
+  return (
+    isExactRecord(sourceRef, ["folder", "uidValidity", "imapUid"]) &&
+    sourceRef.folder === "INBOX" &&
+    typeof sourceRef.uidValidity === "string" &&
+    /^[1-9][0-9]*$/.test(sourceRef.uidValidity) &&
+    typeof sourceRef.imapUid === "string" &&
+    /^[1-9][0-9]*$/.test(sourceRef.imapUid)
+  );
+}
+
+async function executeOwnerOperation(
+  body: Record<string, unknown>,
   csrfToken: string,
 ): Promise<{ response: Response; payload: unknown }> {
   const response = await fetch(COLLABORATION_OWNER_READ_ENDPOINT, {
@@ -282,9 +341,75 @@ async function executeRead(
       "Content-Type": "application/json",
       "X-Cuevion-CSRF": csrfToken,
     },
-    body: JSON.stringify({ operation: "read", collaborationId }),
+    body: JSON.stringify(body),
   });
   return { response, payload: await readJson(response) };
+}
+
+async function performAuthenticatedOwnerOperation(
+  body: Record<string, unknown>,
+): Promise<{ status: "success"; payload: unknown } | OwnerOperationFailure> {
+  let csrfResult = await bootstrapCsrf();
+  if (csrfResult.status !== "success") {
+    return csrfResult;
+  }
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let operationResult: { response: Response; payload: unknown };
+    try {
+      operationResult = await executeOwnerOperation(body, csrfResult.csrf.token);
+    } catch {
+      return { status: "unavailable" };
+    }
+
+    if (operationResult.response.status === 403 && attempt === 0) {
+      csrfState = null;
+      csrfResult = await bootstrapCsrf();
+      if (csrfResult.status !== "success") {
+        return csrfResult;
+      }
+      continue;
+    }
+
+    if (!operationResult.response.ok) {
+      return classifyFailure(operationResult.response);
+    }
+
+    return { status: "success", payload: operationResult.payload };
+  }
+
+  return { status: "forbidden" };
+}
+
+export async function lookupCollaborationForOwner(
+  locator: CollaborationOwnerSourceLocator,
+): Promise<CollaborationOwnerLookupResult> {
+  if (!isValidSourceLocator(locator)) {
+    return { status: "invalid_source_locator" };
+  }
+
+  const result = await performAuthenticatedOwnerOperation({
+    operation: "lookup",
+    mailboxId: locator.mailboxId,
+    sourceRef: locator.sourceRef,
+  });
+  if (result.status !== "success") {
+    return result;
+  }
+
+  if (
+    !isExactRecord(result.payload, ["ok", "data"]) ||
+    result.payload.ok !== true ||
+    !isExactRecord(result.payload.data, ["collaborationId"]) ||
+    !isValidCollaborationOwnerReadId(result.payload.data.collaborationId)
+  ) {
+    return { status: "invalid_response" };
+  }
+
+  return {
+    status: "success",
+    collaborationId: result.payload.data.collaborationId,
+  };
 }
 
 export async function readCollaborationForOwner(
@@ -294,44 +419,23 @@ export async function readCollaborationForOwner(
     return { status: "invalid_collaboration_id" };
   }
 
-  let csrfResult = await bootstrapCsrf();
-  if (csrfResult.status !== "success") {
-    return csrfResult;
+  const result = await performAuthenticatedOwnerOperation({
+    operation: "read",
+    collaborationId,
+  });
+  if (result.status !== "success") {
+    return result;
   }
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    let readResult: { response: Response; payload: unknown };
-    try {
-      readResult = await executeRead(collaborationId, csrfResult.csrf.token);
-    } catch {
-      return { status: "unavailable" };
-    }
-
-    if (readResult.response.status === 403 && attempt === 0) {
-      csrfState = null;
-      csrfResult = await bootstrapCsrf();
-      if (csrfResult.status !== "success") {
-        return csrfResult;
-      }
-      continue;
-    }
-
-    if (!readResult.response.ok) {
-      return classifyFailure(readResult.response);
-    }
-
-    const collaboration =
-      isExactRecord(readResult.payload, ["ok", "data"]) &&
-      readResult.payload.ok === true &&
-      isExactRecord(readResult.payload.data, ["collaboration"])
-        ? parseCollaboration(readResult.payload.data.collaboration)
-        : null;
-    return collaboration
-      ? { status: "success", collaboration }
-      : { status: "invalid_response" };
-  }
-
-  return { status: "forbidden" };
+  const collaboration =
+    isExactRecord(result.payload, ["ok", "data"]) &&
+    result.payload.ok === true &&
+    isExactRecord(result.payload.data, ["collaboration"])
+      ? parseCollaboration(result.payload.data.collaboration)
+      : null;
+  return collaboration
+    ? { status: "success", collaboration }
+    : { status: "invalid_response" };
 }
 
 export function __resetCollaborationOwnerReadApiForTests() {
