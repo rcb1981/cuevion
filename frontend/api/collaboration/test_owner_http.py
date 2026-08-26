@@ -632,6 +632,152 @@ class OwnerHttpBoundaryTests(unittest.TestCase):
         self.assertEqual(response.status, 201)
         self.assertIs(create_service.call_args.args[0], self.context)
 
+    def test_lookup_has_one_exact_owner_read_contract(self):
+        csrf = self._csrf()
+        payload = {
+            "operation": "lookup",
+            "mailboxId": MAILBOX_ID,
+            "sourceRef": {"providerMessageId": "gmail-message-1"},
+        }
+        result = {
+            "status": "ok",
+            "collaborationId": COLLABORATION_ID,
+            "error": None,
+        }
+        with mock.patch.object(
+            owner_http.application,
+            "lookup_v2_collaboration_for_verified_owner",
+            return_value=result,
+        ) as service:
+            for mode in ("owner_read", "owner_write"):
+                with self.subTest(mode=mode):
+                    response = _invoke(_request(payload, csrf=csrf), mode=mode)
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(
+                        _json(response),
+                        {
+                            "ok": True,
+                            "data": {"collaborationId": COLLABORATION_ID},
+                        },
+                    )
+        self.assertEqual(service.call_count, 2)
+        for call in service.call_args_list:
+            self.assertIs(call.args[0], self.context)
+            self.assertEqual(call.args[2:], (MAILBOX_ID, payload["sourceRef"]))
+
+        with mock.patch.object(
+            owner_http.application,
+            "lookup_v2_collaboration_for_verified_owner",
+            return_value={
+                "status": "ok",
+                "collaborationId": "not-opaque",
+                "error": None,
+            },
+        ):
+            malformed = _invoke(_request(payload, csrf=csrf), mode="owner_read")
+        self.assertEqual(malformed.status, 500)
+        self.assertEqual(
+            _json(malformed),
+            {"ok": False, "error": {"code": "internal_error"}},
+        )
+
+    def test_lookup_rejects_extra_authority_fields_before_service(self):
+        csrf = self._csrf()
+        base = {
+            "operation": "lookup",
+            "mailboxId": MAILBOX_ID,
+            "sourceRef": {"providerMessageId": "gmail-message-1"},
+        }
+        service = mock.Mock(side_effect=AssertionError("service must not run"))
+        with mock.patch.object(
+            owner_http.application,
+            "lookup_v2_collaboration_for_verified_owner",
+            service,
+        ):
+            for field, value in (
+                ("ownerEmail", OWNER_EMAIL),
+                ("workspaceId", WORKSPACE_ID),
+                ("provider", "google"),
+                ("collaborationId", COLLABORATION_ID),
+                ("unexpected", "value"),
+            ):
+                with self.subTest(field=field):
+                    response = _invoke(
+                        _request({**base, field: value}, csrf=csrf),
+                        mode="owner_read",
+                    )
+                    self.assertEqual(response.status, 400)
+        service.assert_not_called()
+
+    def test_lookup_requires_origin_csrf_and_uses_read_rate_limit(self):
+        payload = {
+            "operation": "lookup",
+            "mailboxId": MAILBOX_ID,
+            "sourceRef": {"providerMessageId": "gmail-message-1"},
+        }
+        service = mock.Mock(side_effect=AssertionError("service must not run"))
+        with mock.patch.object(
+            owner_http.application,
+            "lookup_v2_collaboration_for_verified_owner",
+            service,
+        ):
+            self.assertEqual(
+                _invoke(_request(payload), mode="owner_read").status,
+                403,
+            )
+            wrong_origin = _request(payload, csrf=self._csrf())
+            wrong_origin.headers.pairs[0] = ("Origin", "https://evil.example")
+            self.assertEqual(_invoke(wrong_origin, mode="owner_read").status, 403)
+
+            self.rate_limiter.return_value = owner_rate_limit.OwnerRateLimitDecision(
+                "limited",
+                2,
+            )
+            limited = _invoke(
+                _request(payload, csrf=self._csrf()),
+                mode="owner_read",
+            )
+            self.assertEqual(limited.status, 429)
+            self.assertEqual(
+                self.rate_limiter.call_args.args[1],
+                owner_rate_limit.RATE_LIMIT_READ,
+            )
+        service.assert_not_called()
+
+    def test_lookup_failures_use_existing_public_masking(self):
+        payload = {
+            "operation": "lookup",
+            "mailboxId": MAILBOX_ID,
+            "sourceRef": {"providerMessageId": "gmail-message-1"},
+        }
+        cases = (
+            ("missing", "collaboration_not_found", 404, "not_found"),
+            ("mailbox", "mailbox_not_found", 404, "not_found"),
+            ("scope", "forbidden", 404, "not_found"),
+            ("hmac", "index_hmac_unavailable", 503, "service_unavailable"),
+            ("pointer", "storage_protocol_error", 503, "service_unavailable"),
+            ("redis", "storage_unavailable", 503, "service_unavailable"),
+        )
+        for label, code, status, public_code in cases:
+            with self.subTest(label=label), mock.patch.object(
+                owner_http.application,
+                "lookup_v2_collaboration_for_verified_owner",
+                return_value={
+                    "status": "not_found" if status == 404 else "unavailable",
+                    "collaboration": None,
+                    "error": {"code": code},
+                },
+            ):
+                response = _invoke(
+                    _request(payload, csrf=self._csrf()),
+                    mode="owner_read",
+                )
+            self.assertEqual(response.status, status)
+            self.assertEqual(
+                _json(response),
+                {"ok": False, "error": {"code": public_code}},
+            )
+
     def test_owner_operations_use_exact_shared_rate_limit_classes(self):
         self.rate_limiter.reset_mock()
         self.assertEqual(_invoke(_request({"operation": "csrf"})).status, 200)
@@ -828,23 +974,43 @@ class OwnerHttpBoundaryTests(unittest.TestCase):
             self.rate_limiter.call_args.args[1],
             owner_rate_limit.RATE_LIMIT_READ,
         )
-        self.rate_limiter.reset_mock()
-        self.assertEqual(
-            _invoke(
-                _request(
-                    {
-                        "operation": "append_internal",
-                        "collaborationId": COLLABORATION_ID,
-                        "text": "No write",
-                    },
-                    csrf=self._csrf(),
-                    idempotency_key=IDEMPOTENCY_KEY,
-                ),
-                mode="owner_read",
-            ).status,
-            404,
+        write_payloads = (
+            {
+                "operation": "create",
+                "mailboxId": MAILBOX_ID,
+                "sourceRef": {"providerMessageId": "gmail-message-1"},
+                "state": "needs_review",
+            },
+            {
+                "operation": "append_shared",
+                "collaborationId": COLLABORATION_ID,
+                "text": "No write",
+            },
+            {
+                "operation": "append_internal",
+                "collaborationId": COLLABORATION_ID,
+                "text": "No write",
+            },
         )
-        self.rate_limiter.assert_not_called()
+        for payload in write_payloads:
+            with self.subTest(operation=payload["operation"]):
+                self.rate_limiter.reset_mock()
+                self.assertEqual(
+                    _invoke(
+                        _request(
+                            payload,
+                            csrf=self._csrf(),
+                            idempotency_key=(
+                                None
+                                if payload["operation"] == "create"
+                                else IDEMPOTENCY_KEY
+                            ),
+                        ),
+                        mode="owner_read",
+                    ).status,
+                    404,
+                )
+                self.rate_limiter.assert_not_called()
 
     def test_missing_rate_configuration_and_untrusted_requests_fail_before_limiter(self):
         environment = _environment()

@@ -20,7 +20,7 @@ from .http_adapter import (
     require_request_method,
 )
 from .http_boundary import BoundaryError, get_security_header
-from .models import normalize_v2_owner_idempotency_key
+from .models import is_v2_opaque_id, normalize_v2_owner_idempotency_key
 from .owner_authentication import resolve_verified_auth0_owner
 from .owner_request_security import (
     OwnerSecurityError,
@@ -260,6 +260,37 @@ def owner_response(
                 and result.get("error") is None
             ):
                 return json_success({"collaboration": result["collaboration"]})
+            return _application_failure(result)
+
+        if operation == "lookup":
+            _require_exact_fields(
+                payload,
+                frozenset({"operation", "mailboxId", "sourceRef"}),
+            )
+            limited = _rate_limit_response(
+                context,
+                owner_rate_limit.RATE_LIMIT_READ,
+                rate_limit_configuration,
+            )
+            if limited is not None:
+                return limited
+            result = application.lookup_v2_collaboration_for_verified_owner(
+                context,
+                raw_headers,
+                payload.get("mailboxId"),
+                payload.get("sourceRef"),
+                owner_security_configuration=configuration,
+            )
+            if (
+                type(result) is dict
+                and set(result) == {"status", "collaborationId", "error"}
+                and result.get("status") == "ok"
+                and is_v2_opaque_id(result.get("collaborationId"))
+                and result.get("error") is None
+            ):
+                return json_success(
+                    {"collaborationId": result["collaborationId"]}
+                )
             return _application_failure(result)
 
         if http_mode != "owner_write":

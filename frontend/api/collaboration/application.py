@@ -33,7 +33,12 @@ from .models import (
     normalize_v2_source_ref,
     normalize_v2_thread_record,
 )
-from .redis_store import _V2RecordResult, _create_v2_thread, _load_v2_thread
+from .redis_store import (
+    _V2RecordResult,
+    _create_v2_thread,
+    _load_v2_thread,
+    _load_v2_thread_by_source,
+)
 from .source_message import resolve_source_message
 
 
@@ -727,6 +732,103 @@ def create_v2_collaboration_for_verified_owner(
         owner_context=owner_context,
         owner_security_configuration=owner_security_configuration,
     )
+
+
+def lookup_v2_collaboration_for_verified_owner(
+    owner_context: object,
+    headers: object,
+    mailbox_id: object,
+    source_locator: object,
+    *,
+    owner_security_configuration: object,
+) -> dict[str, Any]:
+    authorized = resolve_verified_owner_collaboration_context(
+        owner_context,
+        headers,
+        mailbox_id,
+        required_action="read",
+        owner_security_configuration=owner_security_configuration,
+    )
+    if type(authorized) is not dict or authorized.get("status") != "ok":
+        return _failure_from_result(
+            authorized,
+            default_status="error",
+            default_code="storage_protocol_error",
+        )
+    if (
+        set(authorized) != {"status", "context", "error"}
+        or authorized.get("error") is not None
+    ):
+        return _failure("malformed", "storage_protocol_error")
+
+    capability = authorized.get("context")
+    if (
+        not _is_internal_capability(capability, actions=frozenset({"read"}))
+        or capability.collaboration_id is not None
+        or capability.mailbox_id != mailbox_id
+    ):
+        return _failure("forbidden", "forbidden")
+
+    locator_fields = {
+        "google": {"providerMessageId"},
+        "custom_imap": {"folder", "uidValidity", "imapUid"},
+    }.get(capability.mailbox_provider)
+    if (
+        type(source_locator) is not dict
+        or locator_fields is None
+        or set(source_locator) != locator_fields
+    ):
+        return _failure("malformed", "invalid_request")
+
+    source_ref = normalize_v2_source_ref(
+        {"provider": capability.mailbox_provider, **source_locator}
+    )
+    if (
+        source_ref is None
+        or {
+            field: source_ref[field]
+            for field in locator_fields
+        }
+        != source_locator
+    ):
+        return _failure("malformed", "invalid_request")
+
+    loaded = _load_v2_thread_by_source(
+        capability.owner_email,
+        capability.mailbox_id,
+        source_ref,
+        workspace_id=capability.workspace_id,
+    )
+    if type(loaded) is not _V2RecordResult:
+        if type(loaded) is dict:
+            status = loaded.get("status")
+            error = loaded.get("error")
+            code = error.get("code") if type(error) is dict else None
+            if status == "missing" and code == "collaboration_not_found":
+                return _failure("not_found", "collaboration_not_found")
+            if status == "unavailable" and code in {
+                "index_hmac_unavailable",
+                "storage_protocol_error",
+                "storage_unavailable",
+            }:
+                return _failure("unavailable", code)
+        return _failure("unavailable", "storage_protocol_error")
+    if loaded.status != "ok" or loaded.created is not None:
+        return _failure("unavailable", "storage_protocol_error")
+
+    thread = normalize_v2_thread_record(loaded.record)
+    if thread is None:
+        return _failure("unavailable", "storage_protocol_error")
+    if not _thread_matches_create_binding(thread, capability, source_ref):
+        return _failure("forbidden", "forbidden")
+    collaboration_id = thread["collaborationId"]
+    if not is_v2_opaque_id(collaboration_id):
+        return _failure("unavailable", "storage_protocol_error")
+    return {
+        "status": "ok",
+        "collaborationId": collaboration_id,
+        "error": None,
+    }
 
 
 def _read_v2_collaboration_for_owner(

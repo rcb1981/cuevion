@@ -219,6 +219,28 @@ def _create_capability(
     return result["context"]
 
 
+def _mailbox_read_capability(provider: str = "google"):
+    result = authorization.resolve_internal_collaboration_context(
+        [("Authorization", "private-request-marker")],
+        MAILBOX_ID,
+        required_action="read",
+        user_resolver=lambda _headers: (
+            {"email": OWNER_EMAIL, "name": "Owner Person"},
+            None,
+        ),
+        mailbox_resolver=lambda _headers, mailbox_id: {
+            "status": "ok",
+            "user": {"email": OWNER_EMAIL, "name": "Owner Person"},
+            "inbox": {"id": mailbox_id, "provider": provider},
+        },
+    )
+    assert result["status"] == "ok"
+    assert authorization._is_internal_capability(
+        result["context"], actions={"read"}
+    )
+    return result["context"]
+
+
 def _create_payload(provider: str = "google", *, state: str = "needs_review") -> dict:
     source_ref = (
         {"providerMessageId": PRIVATE_SOURCE_MARKER}
@@ -2713,6 +2735,232 @@ class OwnerMutationApplicationTests(unittest.TestCase):
                 application.append_v2_internal_note_for_owner(
                     [], COLLABORATION_ID, {"text": "message"}
                 )
+
+
+class OwnerLookupApplicationTests(unittest.TestCase):
+    def test_verified_owner_lookup_derives_provider_and_returns_only_opaque_id(self):
+        headers = [("Authorization", "private-request-marker")]
+        owner_context = object()
+        security_configuration = object()
+        cases = (
+            (
+                "google",
+                {"providerMessageId": PRIVATE_SOURCE_MARKER},
+                {
+                    "provider": "google",
+                    "providerMessageId": PRIVATE_SOURCE_MARKER,
+                },
+            ),
+            (
+                "custom_imap",
+                {"folder": "INBOX", "uidValidity": "123", "imapUid": "456"},
+                {
+                    "provider": "custom_imap",
+                    "folder": "INBOX",
+                    "uidValidity": "123",
+                    "imapUid": "456",
+                },
+            ),
+        )
+
+        for provider, locator, canonical_source_ref in cases:
+            with self.subTest(provider=provider):
+                capability = _mailbox_read_capability(provider)
+                authorized = {
+                    "status": "ok",
+                    "context": capability,
+                    "error": None,
+                }
+                thread = {
+                    **_thread_record(),
+                    "sourceRef": canonical_source_ref,
+                }
+                with patch.object(
+                    application,
+                    "resolve_verified_owner_collaboration_context",
+                    return_value=authorized,
+                ) as resolver, patch.object(
+                    application,
+                    "_load_v2_thread_by_source",
+                    return_value=redis_store._V2RecordResult(thread),
+                ) as loader, patch.object(
+                    application,
+                    "resolve_source_message",
+                    side_effect=AssertionError("lookup must not fetch provider source"),
+                ) as source_resolver:
+                    result = (
+                        application.lookup_v2_collaboration_for_verified_owner(
+                            owner_context,
+                            headers,
+                            MAILBOX_ID,
+                            locator,
+                            owner_security_configuration=security_configuration,
+                        )
+                    )
+
+                self.assertEqual(
+                    result,
+                    {
+                        "status": "ok",
+                        "collaborationId": COLLABORATION_ID,
+                        "error": None,
+                    },
+                )
+                resolver.assert_called_once_with(
+                    owner_context,
+                    headers,
+                    MAILBOX_ID,
+                    required_action="read",
+                    owner_security_configuration=security_configuration,
+                )
+                loader.assert_called_once_with(
+                    OWNER_EMAIL,
+                    MAILBOX_ID,
+                    canonical_source_ref,
+                    workspace_id=OWNER_EMAIL,
+                )
+                source_resolver.assert_not_called()
+
+    def test_lookup_requires_exact_canonical_provider_specific_locator(self):
+        owner_context = object()
+        security_configuration = object()
+        cases = (
+            ("google", None),
+            ("google", {}),
+            ("google", {"provider": "google", "providerMessageId": "message-1"}),
+            ("google", {"providerMessageId": " message-1"}),
+            ("google", {"providerMessageId": "message-1", "threadId": "thread-1"}),
+            ("custom_imap", {"folder": "Archive", "uidValidity": "1", "imapUid": "2"}),
+            ("custom_imap", {"folder": "INBOX", "uidValidity": 1, "imapUid": "2"}),
+            ("custom_imap", {"folder": "INBOX", "uidValidity": "01", "imapUid": "2"}),
+            ("custom_imap", {"folder": "INBOX", "uidValidity": "1", "imapUid": "0"}),
+            (
+                "custom_imap",
+                {
+                    "provider": "custom_imap",
+                    "folder": "INBOX",
+                    "uidValidity": "1",
+                    "imapUid": "2",
+                },
+            ),
+        )
+
+        for provider, locator in cases:
+            capability = _mailbox_read_capability(provider)
+            with self.subTest(provider=provider, locator=locator), patch.object(
+                application,
+                "resolve_verified_owner_collaboration_context",
+                return_value={"status": "ok", "context": capability, "error": None},
+            ), patch.object(
+                application,
+                "_load_v2_thread_by_source",
+                side_effect=AssertionError("invalid locator must not reach storage"),
+            ) as loader:
+                result = application.lookup_v2_collaboration_for_verified_owner(
+                    owner_context,
+                    [],
+                    MAILBOX_ID,
+                    locator,
+                    owner_security_configuration=security_configuration,
+                )
+            self.assertEqual(result["error"], {"code": "invalid_request"})
+            loader.assert_not_called()
+
+    def test_lookup_masks_scope_mismatches_and_fails_closed_on_index_errors(self):
+        capability = _mailbox_read_capability("google")
+        authorized = {"status": "ok", "context": capability, "error": None}
+        locator = {"providerMessageId": PRIVATE_SOURCE_MARKER}
+        wrong_source = {
+            **_thread_record(),
+            "sourceRef": {
+                "provider": "google",
+                "providerMessageId": "different-message",
+            },
+        }
+        cases = (
+            (
+                "missing",
+                {"status": "missing", "error": {"code": "collaboration_not_found"}},
+                "not_found",
+                "collaboration_not_found",
+            ),
+            (
+                "missing-hmac",
+                {"status": "unavailable", "error": {"code": "index_hmac_unavailable"}},
+                "unavailable",
+                "index_hmac_unavailable",
+            ),
+            (
+                "storage-unavailable",
+                {"status": "unavailable", "error": {"code": "storage_unavailable"}},
+                "unavailable",
+                "storage_unavailable",
+            ),
+            (
+                "conflicting-pointer",
+                {"status": "malformed", "error": {"code": "source_pointer_conflict"}},
+                "unavailable",
+                "storage_protocol_error",
+            ),
+            (
+                "wrong-source",
+                redis_store._V2RecordResult(wrong_source),
+                "forbidden",
+                "forbidden",
+            ),
+        )
+
+        for label, loaded, expected_status, expected_code in cases:
+            with self.subTest(label=label), patch.object(
+                application,
+                "resolve_verified_owner_collaboration_context",
+                return_value=authorized,
+            ), patch.object(
+                application,
+                "_load_v2_thread_by_source",
+                return_value=loaded,
+            ):
+                result = application.lookup_v2_collaboration_for_verified_owner(
+                    object(),
+                    [],
+                    MAILBOX_ID,
+                    locator,
+                    owner_security_configuration=object(),
+                )
+            self.assertEqual(result["status"], expected_status)
+            self.assertEqual(result["error"], {"code": expected_code})
+            self.assertIsNone(result["collaboration"])
+
+    def test_lookup_preserves_mailbox_authorization_failures_before_storage(self):
+        failures = (
+            ("malformed", "invalid_request"),
+            ("unauthorized", "auth_required"),
+            ("not_found", "mailbox_not_found"),
+            ("forbidden", "forbidden"),
+        )
+        for status, code in failures:
+            with self.subTest(status=status), patch.object(
+                application,
+                "resolve_verified_owner_collaboration_context",
+                return_value={
+                    "status": status,
+                    "context": None,
+                    "error": {"code": code},
+                },
+            ), patch.object(
+                application,
+                "_load_v2_thread_by_source",
+                side_effect=AssertionError("failed authority must not reach storage"),
+            ) as loader:
+                result = application.lookup_v2_collaboration_for_verified_owner(
+                    object(),
+                    [],
+                    "INVALID MAILBOX",
+                    {"providerMessageId": "message-1"},
+                    owner_security_configuration=object(),
+                )
+            self.assertEqual(result["error"], {"code": code})
+            loader.assert_not_called()
 
 
 class OwnerReadApplicationTests(unittest.TestCase):
