@@ -227,7 +227,6 @@ assert.equal(
 );
 for (const memberApiCall of [
   "getMailboxCredentialStatuses(mailboxIds)",
-  "fetchParticipantCollaborationThreads({})",
   "workspaceAccountConfigSaveQueueRef.current?.enqueue(nextAccountConfig, {",
 ]) {
   assert.equal(
@@ -238,6 +237,48 @@ for (const memberApiCall of [
     `${memberApiCall} must require explicit Auth0 member authority`,
   );
 }
+assert.equal(workspaceSource.includes("fetchParticipantCollaborationThreads"), false);
+assert.equal(workspaceSource.includes("fetchCollaborationThreadsGetMany"), false);
+assert.equal(workspaceSource.includes("get-participant"), false);
+assert.equal(workspaceSource.includes("get-many"), false);
+for (const preservedCollaborationMutation of [
+  "createCollaborationThread(",
+  "mutateCollaborationThread(",
+  "issueCollaborationInvite(",
+  "fetchCollaborationInvite(",
+]) {
+  assert.equal(
+    workspaceSource.includes(preservedCollaborationMutation),
+    true,
+    `${preservedCollaborationMutation} must remain wired`,
+  );
+}
+assert.equal(workspaceSource.includes("readCollaborationForOwner"), false);
+assert.equal(
+  sourceBetween(
+    workspaceSource,
+    "Collaboration v2 reads cannot be scheduled",
+    "type CollaborationMailboxRequest",
+  ).includes("return;"),
+  true,
+  "bulk Collaboration reads must exit before request scheduling",
+);
+assert.equal(
+  sourceBetween(
+    workspaceSource,
+    "The disabled participant route is not an authoritative source",
+    "const participantEmail",
+  ).includes("return;"),
+  true,
+  "participant Collaboration reads must exit before polling is scheduled",
+);
+assert.equal(
+  workspaceSource.includes(
+    "collaboration: thread.collaboration as MailMessageCollaboration",
+  ),
+  true,
+  "legacy/local MailMessage.collaboration display state must remain separate",
+);
 const mailboxRefreshRegion = sourceBetween(
   workspaceSource,
   "const refreshMailboxById = async",

@@ -232,8 +232,6 @@ import {
 import {
   createCollaborationThread,
   fetchCollaborationInvite,
-  fetchParticipantCollaborationThreads,
-  fetchCollaborationThreadsGetMany,
   issueCollaborationInvite,
   mutateCollaborationInvite,
   mutateCollaborationThread,
@@ -16821,7 +16819,6 @@ function MailboxView({
     null,
   );
   const [collaborationHistoryExpanded, setCollaborationHistoryExpanded] = useState(false);
-  const lastActiveCanonicalCollaborationRefreshKeyRef = useRef<string>("");
   const [externalReviewCopyFeedback, setExternalReviewCopyFeedback] = useState("");
   const [externalInviteEmailFeedback, setExternalInviteEmailFeedback] = useState<string | null>(
     null,
@@ -19688,12 +19685,6 @@ function MailboxView({
     getStoredCanonicalCollaborationMessage(activeCollaborationMessageId);
   const activeHasStoredCanonicalCollaboration =
     hasStoredCanonicalCollaboration(activeCollaborationMessageId);
-  const directCanonicalCollaborationRefreshMessage =
-    activeStoredCollaborationMessage?.collaboration
-      ? activeStoredCollaborationMessage
-      : selectedMessage?.collaboration
-        ? selectedMessage
-        : null;
   const activeCollaborationParticipants = activeCollaborationMessage?.collaboration
     ? getCollaborationParticipants(activeCollaborationMessage.collaboration)
     : [];
@@ -19880,35 +19871,6 @@ function MailboxView({
     collaborationReplyVisibility,
     hasManualCollaborationReplyVisibility,
     hasRealInternalTeamContext,
-  ]);
-
-  useEffect(() => {
-    if (!directCanonicalCollaborationRefreshMessage) {
-      lastActiveCanonicalCollaborationRefreshKeyRef.current = "";
-      return;
-    }
-
-    const refreshStorageMailboxId =
-      activeCollaborationSourceMailboxId ?? mailbox.id;
-    const refreshKey = getCollaborationMailboxIdentityKey(
-      refreshStorageMailboxId,
-      directCanonicalCollaborationRefreshMessage,
-      currentUserId,
-    );
-
-    if (lastActiveCanonicalCollaborationRefreshKeyRef.current === refreshKey) {
-      return;
-    }
-
-    lastActiveCanonicalCollaborationRefreshKeyRef.current = refreshKey;
-    void refreshCanonicalCollaborationThreadForMessage(
-      directCanonicalCollaborationRefreshMessage,
-    );
-  }, [
-    directCanonicalCollaborationRefreshMessage?.id,
-    directCanonicalCollaborationRefreshMessage?.collaboration?.createdAt,
-    activeCollaborationSourceMailboxId,
-    mailbox.id,
   ]);
 
   useEffect(() => {
@@ -20142,28 +20104,11 @@ function MailboxView({
       return;
     }
 
-    let isRequestInFlight = false;
-
     const syncActiveCollaborationFromSnapshot = () => {
       syncMessageFromLiveSnapshot(
         activeCollaborationMessageId,
         activeCollaborationSourceMailboxId,
       );
-      const message = getMessageById(
-        activeCollaborationMessageId,
-        activeCollaborationSourceMailboxId,
-      );
-
-      if (message?.collaboration) {
-        if (isRequestInFlight) {
-          return;
-        }
-
-        isRequestInFlight = true;
-        void refreshCanonicalCollaborationThreadForMessage(message).finally(() => {
-          isRequestInFlight = false;
-        });
-      }
     };
 
     const handleVisibilityChange = () => {
@@ -21987,47 +21932,6 @@ function MailboxView({
       collaborationWorkspaceId: thread.workspaceId,
       collaborationMailboxId: thread.mailboxId,
     }), storageMailboxId);
-  };
-
-  const refreshCanonicalCollaborationThreadForMessage = async (
-    message: MailMessage,
-  ) => {
-    const collaborationStorageMailboxId = resolveCollaborationStorageMailboxId(
-      message.id,
-      null,
-      message,
-    );
-    const canonicalMessageId = getCollaborationMessageIdForMessage(message.id);
-    const canonicalMailboxId = getCollaborationMailboxIdForMessage(message.id);
-    const threadsByMessageId = await fetchCollaborationThreadsGetMany({
-      workspaceId: message.collaborationWorkspaceId ?? currentUserId,
-      mailboxId: canonicalMailboxId,
-      messageIds: [canonicalMessageId],
-      messages: [
-        {
-          id: canonicalMessageId,
-          imapUid: message.imapUid ?? undefined,
-          subject: message.subject,
-          from: message.from,
-          timestamp: message.timestamp,
-        },
-      ],
-    });
-    const thread = Object.values(threadsByMessageId).find(
-      (candidate) =>
-        candidate.mailboxId === canonicalMailboxId &&
-        candidate.messageId === canonicalMessageId,
-    );
-
-    if (!thread?.collaboration) {
-      return;
-    }
-
-    applyCanonicalCollaborationThreadToMessage(
-      message.id,
-      thread,
-      collaborationStorageMailboxId,
-    );
   };
 
   const buildCollaborationSourceMessageSnapshot = (message: MailMessage) => ({
@@ -50968,6 +50872,13 @@ export function WorkspaceShell({
       return;
     }
 
+    // Collaboration v2 reads cannot be scheduled until the frontend receives a
+    // trusted opaque collaboration ID. Preserve existing local/demo snapshots.
+    const trustedCollaborationIdProducerAvailable: boolean = false;
+    if (!trustedCollaborationIdProducerAvailable) {
+      return;
+    }
+
     type CollaborationMailboxRequest = {
       mailboxId: InboxId;
       messageIds: string[];
@@ -51041,12 +50952,9 @@ export function WorkspaceShell({
       const threadResponses = await Promise.all(
         mailboxRequests.map(async (request) => ({
           mailboxId: request.mailboxId,
-          threadsByMessageId: await fetchCollaborationThreadsGetMany({
-            workspaceId: currentWorkspaceUserId,
-            mailboxId: request.mailboxId,
-            messageIds: request.messageIds,
-            messages: request.messages,
-          }),
+          // The legacy bulk read is intentionally disabled until a trusted opaque v2 ID
+          // producer exists. Keep local/demo collaboration snapshots untouched.
+          threadsByMessageId: {} as Record<string, CollaborationThread>,
         })),
       );
 
@@ -51141,6 +51049,13 @@ export function WorkspaceShell({
       return;
     }
 
+    // The disabled participant route is not an authoritative source. Do not poll
+    // it or synthesize shared-mailbox entries from local collaboration snapshots.
+    const authoritativeParticipantReadAvailable: boolean = false;
+    if (!authoritativeParticipantReadAvailable) {
+      return;
+    }
+
     const participantEmail = authenticatedUser?.email?.trim().toLowerCase();
     if (
       !hasAuthenticatedMemberAuthority ||
@@ -51161,7 +51076,9 @@ export function WorkspaceShell({
       isRequestInFlight = true;
 
       try {
-        const threads = await fetchParticipantCollaborationThreads({});
+        // The legacy participant read is intentionally disabled. With no authoritative
+        // participant source, the synthetic shared mailbox remains empty.
+        const threads: CollaborationThread[] = [];
 
         if (cancelled || threads === null) {
           return;
