@@ -414,27 +414,41 @@ class OwnerRateLimitRealRedisTests(unittest.TestCase):
             return '{"v":"1","tatUs":"' + tat + '"}'
         return '{"tatUs":"' + tat + '","v":"1"}'
 
-    def _set_aligned_skew(self, raw, key: str, milliseconds: int) -> str:
+    def _set_aligned_ttl_delta(
+        self,
+        raw,
+        key: str,
+        ttl_delta_milliseconds: int,
+        *,
+        state_ttl_milliseconds: int = 5_000,
+    ) -> str:
         server_time = self._command(raw, ["TIME"])
         self.assertIsInstance(server_time, list)
         assert type(server_time) is list
         now_milliseconds = (int(server_time[0]) * 1_000) + (
             int(server_time[1]) // 1_000
         )
-        tat_milliseconds = now_milliseconds + 5_000
+        tat_milliseconds = now_milliseconds + state_ttl_milliseconds
         record = (
             '{"v":"1","tatUs":"'
             + str(tat_milliseconds * 1_000)
             + '"}'
         )
         self.assertEqual(
-            self._command(raw, ["SET", key, record, "PX", 5_000]),
+            self._command(
+                raw,
+                ["SET", key, record, "PX", state_ttl_milliseconds],
+            ),
             "OK",
         )
         self.assertEqual(
             self._command(
                 raw,
-                ["PEXPIREAT", key, tat_milliseconds - milliseconds],
+                [
+                    "PEXPIREAT",
+                    key,
+                    tat_milliseconds + ttl_delta_milliseconds,
+                ],
             ),
             1,
         )
@@ -451,7 +465,7 @@ class OwnerRateLimitRealRedisTests(unittest.TestCase):
                 (50, "allowed"),
                 (64, "allowed"),
                 (tolerance, "allowed"),
-                (tolerance + 50, "malformed"),
+                (tolerance + 1, "malformed"),
             ):
                 with self.subTest(skew=skew):
                     key = namespace.key(f"rate:skew:{skew}")
@@ -459,29 +473,35 @@ class OwnerRateLimitRealRedisTests(unittest.TestCase):
                         self._rate(raw, key, owner_rate_limit.RATE_LIMIT_READ),
                         {"status": "allowed"},
                     )
-                    record = self._set_aligned_skew(raw, key, skew)
+                    record = self._set_aligned_ttl_delta(raw, key, -skew)
                     self.assertEqual(self._command(raw, ["GET", key]), record)
                     self.assertEqual(
                         self._rate(raw, key, owner_rate_limit.RATE_LIMIT_READ),
                         {"status": expected},
                     )
 
-            long_key = namespace.key("rate:unexpectedly-long")
-            self.assertEqual(
-                self._rate(raw, long_key, owner_rate_limit.RATE_LIMIT_READ),
-                {"status": "allowed"},
-            )
-            current_ttl = self._command(raw, ["PTTL", long_key])
-            self.assertIsInstance(current_ttl, int)
-            assert type(current_ttl) is int
-            self.assertEqual(
-                self._command(raw, ["PEXPIRE", long_key, current_ttl + 25]),
-                1,
-            )
-            self.assertEqual(
-                self._rate(raw, long_key, owner_rate_limit.RATE_LIMIT_READ),
-                {"status": "malformed"},
-            )
+    def test_bounded_late_expiry_skew_uses_exact_canonical_lua(self):
+        tolerance = owner_rate_limit._OWNER_RATE_LIMIT_LATE_EXPIRY_TOLERANCE_MS
+        self.assertEqual(tolerance, 10)
+        namespace = probe.ProbeNamespace(RUN_ID)
+        with probe.LocalRedisServer() as server:
+            raw = server.transport()
+            for ttl_delta, expected in (
+                (0, "allowed"),
+                (3, "allowed"),
+                (4, "allowed"),
+                (tolerance, "allowed"),
+                (tolerance + 1, "malformed"),
+                (25, "malformed"),
+            ):
+                with self.subTest(ttl_delta=ttl_delta):
+                    key = namespace.key(f"rate:late:{ttl_delta}")
+                    record = self._set_aligned_ttl_delta(raw, key, ttl_delta)
+                    self.assertEqual(self._command(raw, ["GET", key]), record)
+                    self.assertEqual(
+                        self._rate(raw, key, owner_rate_limit.RATE_LIMIT_READ),
+                        {"status": expected},
+                    )
 
     def test_state_integrity_regressions_remain_fail_closed(self):
         namespace = probe.ProbeNamespace(RUN_ID)
@@ -635,6 +655,22 @@ class OwnerRateLimitRealRedisTests(unittest.TestCase):
                             self._rate(raw, key, rate_class),
                             {"status": "allowed"},
                         )
+
+            positive_skew_key = namespace.key("rate:policy:read-positive")
+            self._set_aligned_ttl_delta(
+                raw,
+                positive_skew_key,
+                4,
+                state_ttl_milliseconds=15_000,
+            )
+            self.assertEqual(
+                self._rate(
+                    raw,
+                    positive_skew_key,
+                    owner_rate_limit.RATE_LIMIT_READ,
+                ),
+                {"status": "limited", "retryAfter": "1"},
+            )
 
     def test_redis_command_failures_and_time_shapes_remain_closed(self):
         namespace = probe.ProbeNamespace(RUN_ID)

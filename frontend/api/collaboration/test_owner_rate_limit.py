@@ -69,6 +69,27 @@ class OwnerRateLimitUnitTests(unittest.TestCase):
             self.assertEqual(policy.burst, burst)
             self.assertEqual(60_000_000 // interval, per_minute)
 
+    def test_ttl_integrity_tolerances_are_explicit_and_narrow(self):
+        self.assertEqual(
+            owner_rate_limit._OWNER_RATE_LIMIT_EARLY_EXPIRY_TOLERANCE_MS,
+            100,
+        )
+        self.assertEqual(
+            owner_rate_limit._OWNER_RATE_LIMIT_LATE_EXPIRY_TOLERANCE_MS,
+            10,
+        )
+        script = owner_rate_limit._OWNER_RATE_LIMIT_LUA
+        self.assertIn("local EARLY_EXPIRY_TOLERANCE_MS = 100", script)
+        self.assertIn("local LATE_EXPIRY_TOLERANCE_MS = 10", script)
+        self.assertIn(
+            "stateTtl - EARLY_EXPIRY_TOLERANCE_MS",
+            script,
+        )
+        self.assertIn(
+            "stateTtl + LATE_EXPIRY_TOLERANCE_MS",
+            script,
+        )
+
     def test_configuration_is_default_closed_canonical_and_opaque(self):
         for value in ({}, {owner_rate_limit.RATE_LIMIT_HMAC_ENV: "short"}):
             with self.subTest(value=value), self.assertRaises(ValueError):

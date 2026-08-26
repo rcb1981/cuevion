@@ -50,6 +50,7 @@ _RATE_LIMIT_KEY_DOMAIN = "cuevion-collaboration-v2/owner-rate-limit-key/v1"
 _CONFIGURATION_SENTINEL = object()
 _MAX_RATE_LIMIT_RECORD_BYTES = 128
 _OWNER_RATE_LIMIT_EARLY_EXPIRY_TOLERANCE_MS = 100
+_OWNER_RATE_LIMIT_LATE_EXPIRY_TOLERANCE_MS = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,6 +265,9 @@ local MAX_SAFE = 9007199254740991
 local EARLY_EXPIRY_TOLERANCE_MS = """
     + str(_OWNER_RATE_LIMIT_EARLY_EXPIRY_TOLERANCE_MS)
     + r"""
+local LATE_EXPIRY_TOLERANCE_MS = """
+    + str(_OWNER_RATE_LIMIT_LATE_EXPIRY_TOLERANCE_MS)
+    + r"""
 local function keyCount(value)
   local count = 0
   for _, _ in pairs(value) do count = count + 1 end
@@ -333,8 +337,9 @@ if raw then
     1,
     stateTtl - EARLY_EXPIRY_TOLERANCE_MS
   )
+  local maximumStateTtl = stateTtl + LATE_EXPIRY_TOLERANCE_MS
   if not ttlOk or type(currentTtl) ~= 'number' or currentTtl <= 0
-    or currentTtl > maxTtl or currentTtl > stateTtl + 1
+    or currentTtl > maxTtl or currentTtl > maximumStateTtl
     or currentTtl < minimumStateTtl then
     return cjson.encode({status='malformed'})
   end
