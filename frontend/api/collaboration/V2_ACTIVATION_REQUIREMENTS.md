@@ -33,7 +33,7 @@ The owner route accepts exactly POST. `owner_read` permits the authenticated CSR
 
 New owner records use the current account authority's canonical workspace ID. Historical email-as-workspace thread records from the inactive foundation remain decodeable only so their presence fails closed; an active Auth0 owner context cannot authorize or create such a record. Guest invitation/session schemas are not activated by Slice 1A.
 
-Slices 1B and 1C resolve the code and local-Redis proof requirements for owner append retry idempotency/recovery and durable owner rate limiting. The operator-only production-KV compatibility probe tooling now exists and is locally validated against genuine isolated Redis, but it has **not** been executed against production. Production KV compatibility therefore remains open, `owner_read` and `owner_write` remain disabled, and any production probe run requires separate explicit authorization. Deployment enablement remains blocked until retention is approved and the exact EVAL/Lua/Redis-TIME/response/race/TTL behavior is verified against the production KV service. The repository's isolated real-Redis harness is required local compatibility evidence but is not a substitute for that production-KV verification.
+Slices 1B and 1C resolve the code and local-Redis proof requirements for owner append retry idempotency/recovery and durable owner rate limiting. Production-KV compatibility is also resolved: the authorized production probe at commit `799a62184fe5a41814392ab8db5440ede98182f9` returned `OWNER_READ_KV_COMPATIBLE` and `OWNER_WRITE_KV_COMPATIBLE`, no failed tests, exit zero, bounded TTLs, and successful cleanup. Its exact envelope was 106 commands, 37 `EVAL` calls, and 26 ephemeral keys. This evidence contains no production URL, token, owner identity, mailbox identifier, or secret. Both owner modes remain disabled because this reconciliation does not configure or activate them.
 
 ## Slice 1B durable owner-append idempotency
 
@@ -43,11 +43,11 @@ The server derives a collision-resistant fingerprint over the canonical owner, w
 
 First append, outcome persistence, and thread/source TTL updates execute in one single-slot Lua call. An exact retry validates the live thread and source pointer, validates the closed idempotency record, finds the one exact committed message, and returns its original ID, author, text, visibility, timestamp, and revision before considering stale CAS state. Different fingerprints conflict without mutation. Malformed records, missing/expired threads, unavailable recovery, or contradictory stored state fail closed. Recovery performs no scan and does not refresh thread, source, or idempotency TTLs.
 
-The idempotency record has a hard maximum equal to the current 180-day thread-retention ceiling and is never written with a longer lifetime than the thread written in the same script. That mechanism is bounded and locally tested, but the production retention value remains unapproved. Local genuine-Redis tests cover sequential retry, simulated lost response, independent-process recovery, simultaneous duplicates, conflicting reuse, cross-thread reuse, ordinary stale-CAS competition, malformed records, and TTL non-refresh. Production KV compatibility and retention approval remain deployment blockers.
+The idempotency record has a hard maximum equal to the current 180-day thread-retention ceiling and is never written with a longer lifetime than the thread written in the same script. That mechanism is bounded and locally tested, but the production retention value remains unapproved. Local genuine-Redis tests cover sequential retry, simulated lost response, independent-process recovery, simultaneous duplicates, conflicting reuse, cross-thread reuse, ordinary stale-CAS competition, malformed records, and TTL non-refresh. Retention approval remains an `owner_write` blocker; production-KV compatibility is resolved.
 
 ## Slice 1C durable owner rate limiting
 
-Durable owner rate limiting is **resolved in code and local Redis only**. After exact Origin, revalidated Auth0 session, and owner allowlist validation produce a resolver-minted owner context, the server derives a keyed SHA-256 digest from only the canonical owner email and canonical workspace ID. Browser owner/workspace/mailbox fields, IP addresses, Auth0 subjects, session identifiers, collaboration IDs, source references, and idempotency keys do not select the limiter identity. Redis keys contain only the v2 cluster hash tag, one fixed class, and the digest; no raw identity or credential material is stored in a key or limiter record.
+Durable owner rate limiting is **resolved in code, genuine local Redis, and the production-KV compatibility proof**. After exact Origin, revalidated Auth0 session, and owner allowlist validation produce a resolver-minted owner context, the server derives a keyed SHA-256 digest from only the canonical owner email and canonical workspace ID. Browser owner/workspace/mailbox fields, IP addresses, Auth0 subjects, session identifiers, collaboration IDs, source references, and idempotency keys do not select the limiter identity. Redis keys contain only the v2 cluster hash tag, one fixed class, and the digest; no raw identity or credential material is stored in a key or limiter record.
 
 The three reviewed private-beta GCRA classes are `bootstrap` for `csrf` (burst 4, one token per 5 seconds, sustained 12/minute), `read` for `read` (burst 30, one token per 500 milliseconds, sustained 120/minute), and one shared `write` budget for `create`, `append_shared`, and `append_internal` (burst 10, one token per 2 seconds, sustained 30/minute). Switching among write operations cannot select another write budget, while read and CSRF traffic do not consume it. Each allowed request adds one atomic O(1) Redis `EVAL` using Redis `TIME`; there is no process-local counter, client clock, scan, polling, or background cleanup.
 
@@ -57,25 +57,58 @@ The key form is `cuevion:collab:v2:{cuevion-collab-v2}:owner-rate:<class>:<64-lo
 
 `csrf` is limited after trusted owner resolution and its exact body/header shape, without requiring a CSRF token. `read` is limited after CSRF and exact read shape but before collaboration or mailbox loading. Writes are limited after CSRF, active `owner_write` mode, exact operation shape, and append idempotency-header validation, but before source resolution, mailbox authority work, source/thread/index mutation, or append Lua. A denial is the fixed HTTP 429 `rate_limited` body plus one coarse `Retry-After` value from 1 through 60 seconds; it reveals no identity, key, counter, digest, or Redis detail. Same-key append retries use the normal write budget: a limited retry performs no mutation, and after refill the existing atomic idempotency path returns the exact committed result.
 
-Local genuine-Redis tests prove the exact burst boundary, refill, independent classes and owners, shared multi-client and 40-way concurrent budgets, natural TTL expiry, malformed-record and storage fail-closed behavior, absence of raw PII/secrets and `SCAN`/`KEYS`, and the rate-limit/idempotency sequence. Production KV compatibility remains unverified and this local result does not authorize activation.
+Local genuine-Redis tests prove the exact burst boundary, refill, independent classes and owners, shared multi-client and 40-way concurrent budgets, natural TTL expiry, malformed-record and storage fail-closed behavior, absence of raw PII/secrets and `SCAN`/`KEYS`, and the rate-limit/idempotency sequence. The successful production probe independently proved the canonical Lua, Redis `TIME`, response shapes, competing-client behavior, TTL bounds, and cleanup. Neither result by itself changes production configuration or activates a route.
 
-## Remaining activation blockers
+## Owner-read activation reconciliation
 
-- Verify the exact production KV `EVAL`, Lua `cjson`, Redis `TIME`, response-shape, concurrency/race, and TTL behavior with genuine competing clients.
-- Define and approve retention, deletion, privacy, legal, and operational policy.
-- Generate the actual production allowlist HMAC secret through approved secret management, then generate and review the matching production owner and mailbox digest lists offline.
-- Configure the matched allowlist key and both digest lists in Vercel through a separately authorized change.
-- Complete the security and import suites currently blocked by the known local `cryptography` environment limitation; do not report them as passing until they run.
-- Migrate and separately review the frontend before any owner activation.
-- Keep `owner_read` and `owner_write` disabled until every production and review blocker is closed.
-- Design and review Team authorization separately.
-- Keep guest/external Collaboration inactive until its own activation review.
+This reconciliation applies only to `CUEVION_COLLAB_V2_HTTP_MODE=owner_read`. It does not activate anything and does not approve `owner_write`, Team, guest/external, or frontend migration.
+
+The former local dependency blocker is resolved. The declared-dependency environment ran `api/collaboration/test_import_safety.py` (15 passed), `api/auth/test_auth_routes.py` (21 passed), `test_legacy_collaboration_http_containment.py` (16 passed), and `api/collaboration/test_source_message.py` (15 passed). These results and the production-KV evidence above must not be listed as open blockers again unless current code materially contradicts them.
+
+### Exact `owner_read` reachability and storage effects
+
+The owner route accepts only POST. In `owner_read`, the only accepted operations are authenticated `csrf` bootstrap and CSRF-protected `read`. `create`, `append_shared`, and `append_internal` fail closed before write-rate limiting or application mutation services. Guest access and invitation exchange are not reachable.
+
+CSRF issuance is stateless. Allowed bootstrap and read requests can create or update only their short-lived security-support rate-limit keys. A read resolves the revalidated Auth0 owner, checks the owner allowlist, loads the requested thread directly by collaboration ID, derives and checks that thread's canonical mailbox ID against the mailbox allowlist, revalidates mailbox ownership, and returns the owner projection. Direct thread loading uses `GET`; it does not use a source index, create or update a thread/source record, refresh thread/source TTL, or exercise the 180-day retention value. A missing thread returns not-found and creates no Collaboration business record.
+
+The 180-day thread/source/idempotency retention concern is therefore an `owner_write` blocker, not an `owner_read` blocker. This classification does not waive any independently applicable legal or privacy rule governing access to existing records; it establishes only that `owner_read` does not create, extend, or revive those records.
+
+### Exact `owner_read` configuration
+
+A separately authorized production configuration change must supply this exact activation-specific set:
+
+- `CUEVION_APP_ORIGIN=https://app.cuevion.com`
+- `CUEVION_COLLAB_V2_OWNER_CSRF_KEY`
+- optional rotation-only `CUEVION_COLLAB_V2_OWNER_CSRF_KEY_PREVIOUS`
+- `CUEVION_COLLAB_V2_ALLOWLIST_HMAC_KEY`
+- `CUEVION_COLLAB_V2_OWNER_ALLOWLIST`
+- `CUEVION_COLLAB_V2_MAILBOX_ALLOWLIST`
+- `CUEVION_COLLAB_V2_RATE_LIMIT_HMAC_KEY`
+- `CUEVION_COLLAB_V2_HTTP_MODE=owner_read`
+
+The route also depends on the already deployed ordinary Auth0 server-session, current-account/mailbox-authority, and production KV REST configuration. `KV_REST_API_URL` and `KV_REST_API_TOKEN` remain the storage transport inputs; the successful production probe resolves compatibility, not configuration ownership.
+
+`CUEVION_COLLAB_INDEX_HMAC_KEY` is not required for `owner_read`. The read path addresses a thread directly by collaboration ID and does not resolve, create, or migrate a source index. The current index key, and optional `CUEVION_COLLAB_INDEX_HMAC_KEY_PREVIOUS` during rotation, are required for `owner_write` create/append/index behavior and later indexed operations.
+
+Every supplied secret key must be generated through approved secret management and must not be printed here. Owner-CSRF current, owner-CSRF previous when present, allowlist HMAC, and rate-limit HMAC keys must be mutually distinct. The rate-limit parser also enforces distinctness from any configured collaboration-index current/previous keys, `MAILBOX_SECRET_ENCRYPTION_KEY`, and `CUEVION_AUTH_SESSION_SECRET`. Operational review must likewise prevent reuse of the owner-CSRF or allowlist keys with those existing secrets. Guest/invitation secrets remain absent from this owner-only rollout and must be independently distinct if later introduced.
+
+### Canonical allowlist input and remaining operational gates
+
+The canonical owner tuple comes from the revalidated server-side `AuthenticatedMemberSessionContext`: `issuer`, session schema `authenticationVersion`, and `subject`. The canonical mailbox ID comes from the current account's owned managed-inbox record. Browser localStorage, browser JSON, and the public session response are not authority; the public response deliberately omits issuer and subject.
+
+The repository has no reviewed operator identity-report command. Before rollout, an approved, access-logged Auth0/Cuevion administrative source must provide the exact tuple and explicitly selected mailbox IDs. If that source is unavailable, the smallest safe solution is a reviewed offline operator-only command or procedure that reads the same server-side session/account/mailbox authorities and emits the bounded tuple only to a protected operator channel. It must not be an HTTP introspection endpoint, must not persist the identity input, and must not weaken canonical validation.
+
+After that source is approved, the remaining owner-read gates are operational configuration: generate one new allowlist key and matching digest lists offline for exactly one owner and only explicitly selected test mailboxes; review their counts and scope; deploy the matched key/lists, Origin, CSRF key, rate-limit key, and mode through a separately authorized Vercel change; and verify allowed and denied cases. No wildcard or all-mailbox enrollment is permitted. Until then, the mode remains absent/off.
+
+Frontend migration is not required to configure this controlled dormant owner-read route: no frontend calls it, legacy v1 remains default-off with no fallback, and the exact owner/mailbox allowlists prevent general enrollment. Frontend migration remains a later prerequisite for a user-facing Collaboration rollout. Team authorization is not used when one revalidated owner reads their own allowlisted records; it is a later multi-user requirement. Guest/external remains separately inactive and is not part of owner-read readiness.
+
+Current owner-read classification is **GO AFTER CONFIGURATION**: there is no remaining application-code, production-KV, import-safety, retention, index-HMAC, frontend, Team, or guest blocker for this narrow mode. Canonical allowlist identity sourcing and the separately authorized matched Vercel configuration must still be completed before activation.
 
 ## Phase 2A HTTP adapter foundation
 
 The shared `api.collaboration.http_adapter` module provides the import-safe transport boundary. It is not itself a route, exposes no `handler`, and does not import application services. `CUEVION_COLLAB_V2_HTTP_MODE` remains fail-closed to `off`; the Slice 1A owner route reads it before importing application services or reading a request body. Routes preserve duplicate raw headers through `headers.raw_items()`, validate body framing and limits before `rfile.read`, and use the centralized public response and error serialization.
 
-The frontend, v1, and guest/external behavior remain unchanged. Owner CSRF, append idempotency, and durable owner rate limiting now exist with local Redis proof; deployment activation remains blocked by the requirements listed above, including retention approval and production KV evidence.
+The frontend, v1, and guest/external behavior remain unchanged. Owner CSRF, append idempotency, durable owner rate limiting, local Redis, production-KV compatibility, and import-safety evidence are resolved. The remaining owner-read gates are the exact operational identity and configuration steps above; retention remains an owner-write concern.
 
 ## Phase 2A owner request security foundation
 
@@ -87,20 +120,17 @@ Owner CSRF, rollout allowlist, collaboration index, guest credential, invitation
 
 The owner-CSRF session-binding digest is stable within one authentication session and signing-key epoch, so tokens are linkable within that scope. That limited linkability is accepted only for same-origin, short-lived CSRF use; the token must not be repurposed as an identity, authorization, invitation, guest-session, or cross-origin credential.
 
-`OwnerRequestContext` is a resolver-minted, immutable, nonserializable request capability intended to prevent request-level confusion and accidental generic misuse. It is not a sandbox against hostile arbitrary code executing in the same Python process, which remains outside this capability boundary. The public resolver remains the only supported minting path and must eventually be backed by real reviewed authentication; current beta authentication remains unacceptable.
+`OwnerRequestContext` is a resolver-minted, immutable, nonserializable request capability intended to prevent request-level confusion and accidental generic misuse. It is not a sandbox against hostile arbitrary code executing in the same Python process, which remains outside this capability boundary. The resolver is backed by the reviewed revalidated Auth0 server-session and current-account authority path; client-provided identity remains unacceptable.
 
-Owner route code now uses the Origin, owner-CSRF, owner/mailbox rollout allowlist, owner-append idempotency, and durable owner rate-limit primitives. It remains default-off. Production enablement still requires the explicit remaining blockers above. This slice changes no Collaboration v1 or frontend behavior and does not activate guest or external access.
+Owner route code now uses the Origin, owner-CSRF, owner/mailbox rollout allowlist, owner-append idempotency, and durable owner rate-limit primitives. It remains default-off. Owner-read enablement requires the exact operational gates above. This slice changes no Collaboration v1 or frontend behavior and does not activate guest or external access.
 
-Activation requires all of the following in a separate change and review:
+`owner_write` and later indexed/guest functionality additionally require all of the following in separate changes and reviews:
 
-- Set `CUEVION_APP_ORIGIN=https://app.cuevion.com` in production.
 - Set `CUEVION_COLLAB_INDEX_HMAC_KEY` to a cryptographically random secret of at least 32 bytes, encoded as canonical unpadded base64url. There is no secretless fallback.
-- Set `CUEVION_COLLAB_V2_RATE_LIMIT_HMAC_KEY` to a separate cryptographically random secret of at least 32 bytes, encoded as canonical unpadded base64url. Do not reuse any owner-CSRF, rollout-allowlist, collaboration-index, mailbox-encryption, authentication-session, guest, or invitation secret. There is no secretless fallback.
 - During a controlled rotation only, set `CUEVION_COLLAB_INDEX_HMAC_KEY_PREVIOUS` to the former canonical key. New indexes use the current key; reads and creates validate both namespaces and atomically migrate valid previous-key pointers. Conflicts fail closed. Remove the previous key only after migration is complete and verified.
 - Never reuse `MAILBOX_SECRET_ENCRYPTION_KEY` as either collaboration index key.
-- Confirm that the production KV supports `EVAL`, the exact multi-key atomic semantics used by the production scripts, Lua `cjson`, TTL behavior, response shapes, and failure behavior. Matching Redis Cluster slots alone is not proof of production `EVAL` compatibility.
 - Preserve the literal `{cuevion-collab-v2}` Redis Cluster hash tag on every v2 thread, source index, invitation, token index, per-thread invitation index, and guest-session key. The single-slot design is intentional for private beta; sharding requires a controlled data migration and a new review.
-- Define and approve the retention policy before activation. The inactive foundation currently refreshes thread/source-index retention to 180 days and bounds invitation/session storage by their authored expirations (24 hours and 8 hours respectively). Legal, privacy, deletion, and operational retention requirements still require explicit approval.
+- Define and approve retention before enabling writes or guest/session lifecycle operations. The inactive foundation currently refreshes thread/source-index retention to 180 days and bounds invitation/session storage by their authored expirations (24 hours and 8 hours respectively). Legal, privacy, deletion, and operational retention requirements still require explicit approval for those later mutations.
 - Reissue old v1 collaboration links. They must not be interpreted as v2 invitation or guest-session credentials.
 
 Guest-session terminal states use a first-terminal-state-wins policy. An active session may become either `logged_out` or `revoked`; after that transition, its terminal status and audit timestamp are immutable. Owner invitation revocation still revokes the invitation but must preserve an already logged-out or revoked linked session. Logout must likewise preserve an already revoked session. Mixed terminal audit fields are malformed and must fail closed without writes or TTL refresh.
@@ -122,8 +152,8 @@ No route may accept dictionary-shaped or duck-typed authorization context. Inter
 
 The deployed serverless root is `frontend/`. From that root the canonical inactive-v2 identity is `api.collaboration.<module>`, and canonical shared-helper identities are `api.user_config_store` and `api.inboxes.<module>`; `imap_connect_preview` is canonical only as a top-level module. Canonical package branches use package-relative sibling imports and do not mutate `sys.path`. Short-name loads of capability-bearing v2 modules fail with an import error. The protected v1 routes' historical `models` and `redis_store` imports are the only v2-module aliases, and each forwards in either import order to the exact `api.collaboration` module object without executing the business body twice. The documented active-v1 helper aliases are `user_config_store`, `mailbox_secret_store`, `authenticated_gmail`, `authenticated_imap`, `oauth_token_store`, and `fetch-gmail`; each likewise resolves to its exact canonical module object in either import order. `oauth_token_store` is included because the canonical Gmail helper and the active OAuth callback share its mutable storage/transport globals. No dotted alias for `imap_connect_preview` is supported. Arbitrary short or dotted aliases, including the former repository-root `frontend.api...` identities, are forbidden and fail before capability classes, sentinels, caches, or stores can be instantiated.
 
-Import safety is tested in subprocesses whose working directory is exactly `frontend/`, with `PYTHONPATH` removed and the repository root absent from `sys.path`. The probes import every active Python API handler—including protected Collaboration v1 `thread.py` and `invite.py`, `download-attachment.py`, and `message-action.py`—in both relevant helper/handler orders, require no production secrets, and fail on attempted network, provider, or storage initialization. These import tests protect active v1 bootstrap compatibility only; Collaboration v2 remains inactive, and activation still requires the separate production KV `EVAL`, Lua `cjson`, response-shape, race, and TTL verification described above.
+Import safety is tested in subprocesses whose working directory is exactly `frontend/`, with `PYTHONPATH` removed and the repository root absent from `sys.path`. The probes import every active Python API handler—including protected Collaboration v1 `thread.py` and `invite.py`, `download-attachment.py`, and `message-action.py`—in both relevant helper/handler orders, require no production secrets, and fail on attempted network, provider, or storage initialization. The declared-dependency import suites and production-KV compatibility proof are both resolved; Collaboration v2 remains inactive until the separately authorized configuration step.
 
 Security-sensitive `Cookie`, `Origin`, `Content-Type`, and `X-Cuevion-CSRF` values containing comma-combined representations must be rejected before cookie parsing or storage resolution. Raw guest cookies also reject any comma and leading or trailing whitespace.
 
-Activation requires a separate read-only security review after route code exists, plus an explicit production KV compatibility test using the exact scripts and genuine competing clients. Do not infer activation approval from this inactive foundation or its local tests.
+This owner-read reconciliation is documentation and review evidence only. It does not generate secrets or allowlist digests, change Vercel, set the HTTP mode, call a production route, migrate the frontend, activate guest/Team behavior, push, or deploy.
