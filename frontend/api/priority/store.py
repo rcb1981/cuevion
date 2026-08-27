@@ -11,11 +11,15 @@ import re
 import secrets
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from .event_reference import derive_priority_hmac_key
 from .semantic_thresholds import evaluate_semantic_confidence
 from .semantic_types import SemanticAssessment, SemanticState
+
+
+if TYPE_CHECKING:
+    from .authority import PriorityMessageIdentity
 
 
 RESULT_TTL_SECONDS = 30 * 24 * 60 * 60
@@ -38,9 +42,17 @@ NEW_INBOUND_INDEX_READ_BATCH_SIZE = 6
 SEMANTIC_HYDRATION_RESULT_BATCH_SIZE = 3
 NEW_INBOUND_DISMISSAL_TTL_SECONDS = NEW_INBOUND_INDEX_TTL_SECONDS
 NEW_INBOUND_DISMISSAL_READ_BATCH_SIZE = NEW_INBOUND_INDEX_MAX_RECORDS
+WORKFLOW_STORE_SCHEMA_VERSION = 1
+WORKFLOW_TTL_SECONDS = RESULT_TTL_SECONDS
+WORKFLOW_MAX_BATCH_IDENTITIES = 64
+WORKFLOW_REDIS_READ_BATCH_SIZE = 16
+WORKFLOW_MAX_SERIALIZED_RECORD_BYTES = 2 * 1_024
+WORKFLOW_MAX_SAFE_INTEGER = 9_007_199_254_740_991
 
 _KEY_PREFIX = "cuevion:priority:semantic:v1:"
+_WORKFLOW_KEY_PREFIX = "cuevion:priority:workflow:v1:"
 _SCOPE_HMAC_INFO = b"cuevion/priority/cache-scope/v1\x00"
+_WORKFLOW_SCOPE_HMAC_INFO = b"cuevion/priority/workflow-scope/v1\x00"
 _RECORD_HMAC_INFO = b"cuevion/priority/cache-record/v1\x00"
 _NEW_INBOUND_INDEX_SCOPE_HMAC_INFO = (
     b"cuevion/priority/new-inbound-index-scope/v1\x00"
@@ -68,6 +80,7 @@ _NEGATIVE_CODES = frozenset(
     }
 )
 _CURRENT_MISMATCH_SENTINEL = "__cuevion_priority_current_mismatch__"
+_WORKFLOW_CORRUPT_SENTINEL = "__cuevion_priority_workflow_corrupt__"
 _COMMIT_RESULT_SCRIPT = (
     "if redis.call('GET',KEYS[1])==ARGV[1] and "
     "redis.call('GET',KEYS[2])==ARGV[2] then "
@@ -170,6 +183,47 @@ _MARK_CURRENT_SCRIPT = (
     "if old_time==new_time and existing~=ARGV[2] then return 0 end;"
     "end;"
     "redis.call('SET',KEYS[1],ARGV[2],'EX',ARGV[3]);return 1"
+)
+_WRITE_WORKFLOW_RECORD_SCRIPT = (
+    "local existing=redis.call('GET',KEYS[1]);local record=nil;"
+    "if existing then local ok,value=pcall(cjson.decode,existing);"
+    "if not ok or type(value)~='table' then return ARGV[9] end;"
+    "local count=0;for _ in pairs(value) do count=count+1 end;"
+    "if count~=8 or value['schemaVersion']~=tonumber(ARGV[1]) or "
+    "value['scopeDigest']~=ARGV[2] or value['identityDigest']~=ARGV[3] or "
+    "type(value['manualPriority'])~='string' or "
+    "(value['manualPriority']~='none' and value['manualPriority']~='priority' "
+    "and value['manualPriority']~='removed') or "
+    "type(value['cleared'])~='string' or "
+    "(value['cleared']~='active' and value['cleared']~='cleared') or "
+    "type(value['waiting'])~='string' or "
+    "(value['waiting']~='absent' and value['waiting']~='waiting_on_other' "
+    "and value['waiting']~='returned_reply') or "
+    "type(value['version'])~='number' or value['version']<1 or "
+    "value['version']%1~=0 or value['version']>=tonumber(ARGV[8]) or "
+    "type(value['updatedAt'])~='number' or value['updatedAt']<0 or "
+    "value['updatedAt']%1~=0 or value['updatedAt']>tonumber(ARGV[8]) "
+    "then return ARGV[9] end;record=value;else record={"
+    "schemaVersion=tonumber(ARGV[1]),scopeDigest=ARGV[2],identityDigest=ARGV[3],"
+    "manualPriority='none',cleared='active',waiting='absent',version=0,updatedAt=0};end;"
+    "local field=ARGV[4];local nextValue=ARGV[5];"
+    "if field=='manualPriority' then "
+    "if nextValue~='none' and nextValue~='priority' and nextValue~='removed' "
+    "then return ARGV[9] end;record['manualPriority']=nextValue;"
+    "elseif field=='cleared' then "
+    "if nextValue~='active' and nextValue~='cleared' then return ARGV[9] end;"
+    "record['cleared']=nextValue;elseif field=='waiting' then "
+    "if nextValue~='absent' and nextValue~='waiting_on_other' "
+    "and nextValue~='returned_reply' then return ARGV[9] end;"
+    "record['waiting']=nextValue;else return ARGV[9] end;"
+    "local clock=redis.call('TIME');local seconds=tonumber(clock[1]);"
+    "local micros=tonumber(clock[2]);if not seconds or not micros then "
+    "return ARGV[9] end;local updatedAt=seconds*1000+math.floor(micros/1000);"
+    "if updatedAt<0 or updatedAt>tonumber(ARGV[8]) then return ARGV[9] end;"
+    "record['version']=record['version']+1;record['updatedAt']=updatedAt;"
+    "local encoded=cjson.encode(record);if string.len(encoded)>tonumber(ARGV[7]) "
+    "then return ARGV[9] end;"
+    "redis.call('SET',KEYS[1],encoded,'EX',ARGV[6]);return encoded"
 )
 
 
@@ -300,6 +354,105 @@ class CachedSemanticAssessment:
 CommandTransport = Callable[[list[object]], dict[str, object]]
 
 
+class WorkflowStoreUnavailable(Exception):
+    """Value-free failure for unavailable or malformed workflow storage."""
+
+    __slots__ = ()
+
+    def __str__(self) -> str:
+        return "Priority workflow storage is unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class PriorityWorkflowScope:
+    workspace_id: str
+    user_id: str
+    mailbox_id: str
+    identity: PriorityMessageIdentity
+
+    def canonical_bytes(self) -> bytes:
+        values = (self.workspace_id, self.user_id, self.mailbox_id)
+        try:
+            identity_bytes = self.identity.canonical_bytes()
+        except Exception:
+            raise ValueError("invalid Priority workflow scope") from None
+        if (
+            any(
+                type(value) is not str
+                or not value
+                or value != value.strip()
+                or len(value) > 2_048
+                or "\x00" in value
+                or any(
+                    ord(character) < 32 or ord(character) == 127
+                    for character in value
+                )
+                for value in values
+            )
+            or type(identity_bytes) is not bytes
+            or not 1 <= len(identity_bytes) <= 20_000
+        ):
+            raise ValueError("invalid Priority workflow scope")
+        return (
+            "\x00".join(values).encode("utf-8", errors="strict")
+            + b"\x00"
+            + identity_bytes
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PriorityWorkflowRecord:
+    manual_priority: str = "none"
+    cleared: str = "active"
+    waiting: str = "absent"
+    version: int = 0
+    updated_at: int | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            self.manual_priority not in {"none", "priority", "removed"}
+            or self.cleared not in {"active", "cleared"}
+            or self.waiting not in {"absent", "waiting_on_other", "returned_reply"}
+            or type(self.version) is not int
+            or not 0 <= self.version <= WORKFLOW_MAX_SAFE_INTEGER
+            or (
+                self.updated_at is not None
+                and (
+                    type(self.updated_at) is not int
+                    or not 0 <= self.updated_at <= WORKFLOW_MAX_SAFE_INTEGER
+                )
+            )
+            or (self.version == 0) != (self.updated_at is None)
+        ):
+            raise ValueError("invalid Priority workflow record")
+
+    def to_wire_dict(
+        self,
+        scope: PriorityWorkflowScope,
+    ) -> dict[str, object]:
+        if not isinstance(scope, PriorityWorkflowScope):
+            raise ValueError("invalid Priority workflow scope")
+        return {
+            "mailboxId": scope.mailbox_id,
+            "identity": scope.identity.to_wire_dict(),
+            "manualPriority": self.manual_priority,
+            "cleared": self.cleared,
+            "waiting": self.waiting,
+            "version": self.version,
+            "updatedAt": self.updated_at,
+        }
+
+
+def derive_workflow_scope_digest(
+    secret: str,
+    scope: PriorityWorkflowScope,
+) -> str:
+    if not isinstance(scope, PriorityWorkflowScope):
+        raise ValueError("invalid Priority workflow scope")
+    key = derive_priority_hmac_key(secret, _WORKFLOW_SCOPE_HMAC_INFO)
+    return hmac.new(key, scope.canonical_bytes(), hashlib.sha256).hexdigest()
+
+
 def _valid_index_identifier(value: object, maximum: int) -> bool:
     return (
         type(value) is str
@@ -376,6 +529,122 @@ def derive_new_inbound_dismissal_digest(
 def _derive_record_digest(secret: str, label: bytes, value: bytes) -> str:
     key = derive_priority_hmac_key(secret, _RECORD_HMAC_INFO)
     return hmac.new(key, label + b"\x00" + value, hashlib.sha256).hexdigest()
+
+
+class PriorityWorkflowStore:
+    """Exact-key workflow ledger with Redis-serialized, server-timed writes."""
+
+    __slots__ = ("_transport", "_hmac_secret")
+
+    def __init__(self, command_transport: CommandTransport, *, hmac_secret: str) -> None:
+        if not callable(command_transport):
+            raise ValueError("invalid workflow command transport")
+        derive_priority_hmac_key(hmac_secret, _WORKFLOW_SCOPE_HMAC_INFO)
+        self._transport = command_transport
+        self._hmac_secret = hmac_secret
+
+    def _command(self, command: list[object]) -> object:
+        try:
+            payload = self._transport(command)
+        except Exception:
+            raise WorkflowStoreUnavailable() from None
+        if type(payload) is not dict or set(payload) != {"result"}:
+            raise WorkflowStoreUnavailable()
+        return payload["result"]
+
+    def _digests(self, scope: PriorityWorkflowScope) -> tuple[str, str]:
+        scope_digest = derive_workflow_scope_digest(self._hmac_secret, scope)
+        identity_digest = _derive_record_digest(
+            self._hmac_secret,
+            b"workflow-identity",
+            scope.canonical_bytes(),
+        )
+        return scope_digest, identity_digest
+
+    def _key(self, scope: PriorityWorkflowScope) -> str:
+        scope_digest, _identity_digest = self._digests(scope)
+        return f"{_WORKFLOW_KEY_PREFIX}record:{scope_digest}"
+
+    def read_records(
+        self,
+        scopes: tuple[PriorityWorkflowScope, ...],
+    ) -> tuple[PriorityWorkflowRecord, ...]:
+        if (
+            type(scopes) is not tuple
+            or len(scopes) > WORKFLOW_MAX_BATCH_IDENTITIES
+            or any(not isinstance(scope, PriorityWorkflowScope) for scope in scopes)
+        ):
+            raise ValueError("invalid Priority workflow batch")
+        records: list[PriorityWorkflowRecord] = []
+        for start in range(0, len(scopes), WORKFLOW_REDIS_READ_BATCH_SIZE):
+            batch = scopes[start : start + WORKFLOW_REDIS_READ_BATCH_SIZE]
+            values = self._command(["MGET", *(self._key(scope) for scope in batch)])
+            if type(values) is not list or len(values) != len(batch):
+                raise WorkflowStoreUnavailable()
+            for scope, value in zip(batch, values, strict=True):
+                if value is None:
+                    records.append(PriorityWorkflowRecord())
+                    continue
+                scope_digest, identity_digest = self._digests(scope)
+                decoded = _decode_workflow_record(
+                    value,
+                    expected_scope_digest=scope_digest,
+                    expected_identity_digest=identity_digest,
+                )
+                if decoded is None:
+                    raise WorkflowStoreUnavailable()
+                records.append(decoded)
+        return tuple(records)
+
+    def write_field(
+        self,
+        scope: PriorityWorkflowScope,
+        *,
+        field: str,
+        value: str,
+    ) -> PriorityWorkflowRecord:
+        allowed = {
+            "manualPriority": frozenset({"none", "priority", "removed"}),
+            "cleared": frozenset({"active", "cleared"}),
+            "waiting": frozenset(
+                {"absent", "waiting_on_other", "returned_reply"}
+            ),
+        }
+        if (
+            not isinstance(scope, PriorityWorkflowScope)
+            or field not in allowed
+            or type(value) is not str
+            or value not in allowed[field]
+        ):
+            raise ValueError("invalid Priority workflow write")
+        scope_digest, identity_digest = self._digests(scope)
+        result = self._command(
+            [
+                "EVAL",
+                _WRITE_WORKFLOW_RECORD_SCRIPT,
+                1,
+                self._key(scope),
+                WORKFLOW_STORE_SCHEMA_VERSION,
+                scope_digest,
+                identity_digest,
+                field,
+                value,
+                WORKFLOW_TTL_SECONDS,
+                WORKFLOW_MAX_SERIALIZED_RECORD_BYTES,
+                WORKFLOW_MAX_SAFE_INTEGER,
+                _WORKFLOW_CORRUPT_SENTINEL,
+            ]
+        )
+        if result == _WORKFLOW_CORRUPT_SENTINEL:
+            raise WorkflowStoreUnavailable()
+        decoded = _decode_workflow_record(
+            result,
+            expected_scope_digest=scope_digest,
+            expected_identity_digest=identity_digest,
+        )
+        if decoded is None:
+            raise WorkflowStoreUnavailable()
+        return decoded
 
 
 class SemanticAssessmentStore:
@@ -1141,6 +1410,70 @@ class SemanticAssessmentStore:
         return result == 1
 
 
+def _workflow_safe_integer(value: object, *, minimum: int) -> int | None:
+    if type(value) is int:
+        parsed = value
+    elif type(value) is float and math.isfinite(value) and value.is_integer():
+        parsed = int(value)
+    else:
+        return None
+    if not minimum <= parsed <= WORKFLOW_MAX_SAFE_INTEGER:
+        return None
+    return parsed
+
+
+def _decode_workflow_record(
+    value: object,
+    *,
+    expected_scope_digest: str,
+    expected_identity_digest: str,
+) -> PriorityWorkflowRecord | None:
+    if type(value) is not str:
+        return None
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeError:
+        return None
+    if len(encoded) > WORKFLOW_MAX_SERIALIZED_RECORD_BYTES:
+        return None
+    try:
+        payload = json.loads(
+            value,
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_constant,
+        )
+        if type(payload) is not dict or set(payload) != {
+            "schemaVersion",
+            "scopeDigest",
+            "identityDigest",
+            "manualPriority",
+            "cleared",
+            "waiting",
+            "version",
+            "updatedAt",
+        }:
+            return None
+        version = _workflow_safe_integer(payload["version"], minimum=1)
+        updated_at = _workflow_safe_integer(payload["updatedAt"], minimum=0)
+        if (
+            payload["schemaVersion"] != WORKFLOW_STORE_SCHEMA_VERSION
+            or payload["scopeDigest"] != expected_scope_digest
+            or payload["identityDigest"] != expected_identity_digest
+            or version is None
+            or updated_at is None
+        ):
+            return None
+        return PriorityWorkflowRecord(
+            manual_priority=payload["manualPriority"],
+            cleared=payload["cleared"],
+            waiting=payload["waiting"],
+            version=version,
+            updated_at=updated_at,
+        )
+    except Exception:
+        return None
+
+
 def _encode_result(
     *,
     scope_digest: str,
@@ -1456,6 +1789,15 @@ def build_runtime_semantic_store(*, hmac_secret: str) -> SemanticAssessmentStore
     from api.auth.session_store import build_kv_command_transport
 
     return SemanticAssessmentStore(
+        build_kv_command_transport(),
+        hmac_secret=hmac_secret,
+    )
+
+
+def build_runtime_workflow_store(*, hmac_secret: str) -> PriorityWorkflowStore:
+    from api.auth.session_store import build_kv_command_transport
+
+    return PriorityWorkflowStore(
         build_kv_command_transport(),
         hmac_secret=hmac_secret,
     )

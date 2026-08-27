@@ -121,6 +121,68 @@ class PriorityAuthority:
 
 
 @dataclass(frozen=True, slots=True)
+class PriorityMessageIdentity:
+    """Exact provider identity accepted by Priority mailbox authority."""
+
+    provider: str
+    provider_message_id: str | None = None
+    provider_folder: str | None = None
+    uid_validity: str | None = None
+    imap_uid: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.provider == "google":
+            valid = (
+                _valid_identifier(self.provider_message_id, 256)
+                and self.provider_folder is None
+                and self.uid_validity is None
+                and self.imap_uid is None
+            )
+        elif self.provider == "custom_imap":
+            valid = (
+                self.provider_message_id is None
+                and _valid_imap_folder(self.provider_folder)
+                and _valid_imap_number(self.uid_validity)
+                and _valid_imap_number(self.imap_uid)
+            )
+        else:
+            valid = False
+        if not valid:
+            raise ValueError("invalid Priority message identity")
+
+    def canonical_bytes(self) -> bytes:
+        if self.provider == "google":
+            values = (self.provider, self.provider_message_id)
+        else:
+            values = (
+                self.provider,
+                self.provider_folder,
+                self.uid_validity,
+                self.imap_uid,
+            )
+        if any(type(value) is not str for value in values):
+            raise ValueError("invalid Priority message identity")
+        return "\x00".join(values).encode("utf-8", errors="strict")
+
+    def to_wire_dict(self) -> dict[str, str]:
+        if self.provider == "google":
+            assert self.provider_message_id is not None
+            return {
+                "provider": "google",
+                "providerMessageId": self.provider_message_id,
+            }
+        assert self.provider_folder is not None
+        assert self.uid_validity is not None
+        assert self.imap_uid is not None
+        return {
+            "provider": "custom_imap",
+            "providerFolder": self.provider_folder,
+            "uidValidity": self.uid_validity,
+            "imapUid": self.imap_uid,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class AuthorizedSemanticSource:
     authority: PriorityAuthority
     conversation_id: str
@@ -138,6 +200,38 @@ def _valid_identifier(value: object, maximum: int = MAX_IDENTIFIER_CHARACTERS) -
         and 1 <= len(value) <= maximum
         and not any(ord(character) < 32 or ord(character) == 127 for character in value)
     )
+
+
+def parse_priority_message_identity(
+    value: object,
+    *,
+    expected_provider: str | None = None,
+) -> PriorityMessageIdentity:
+    """Parse only an existing provider-authoritative mailbox identity shape."""
+
+    if type(value) is not dict:
+        raise ValueError("invalid Priority message identity")
+    provider = value.get("provider")
+    if expected_provider is not None and provider != expected_provider:
+        raise ValueError("invalid Priority message identity")
+    if provider == "google" and set(value) == {"provider", "providerMessageId"}:
+        return PriorityMessageIdentity(
+            provider="google",
+            provider_message_id=value.get("providerMessageId"),
+        )
+    if provider == "custom_imap" and set(value) == {
+        "provider",
+        "providerFolder",
+        "uidValidity",
+        "imapUid",
+    }:
+        return PriorityMessageIdentity(
+            provider="custom_imap",
+            provider_folder=value.get("providerFolder"),
+            uid_validity=value.get("uidValidity"),
+            imap_uid=value.get("imapUid"),
+        )
+    raise ValueError("invalid Priority message identity")
 
 
 def _same_email(left: object, right: object) -> bool:

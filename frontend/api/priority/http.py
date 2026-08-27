@@ -64,6 +64,12 @@ def read_semantic_json_request(handler) -> tuple[tuple[tuple[str, str], ...], di
     return headers, payload
 
 
+def read_workflow_json_request(handler) -> tuple[tuple[tuple[str, str], ...], dict]:
+    """Read the dormant workflow endpoint through the same strict boundary."""
+
+    return read_semantic_json_request(handler)
+
+
 def send_semantic_json(handler, status: int, payload: dict, *, retry_after: int | None = None) -> None:
     extra_headers = ()
     if retry_after is not None:
@@ -78,6 +84,10 @@ def send_semantic_json(handler, status: int, payload: dict, *, retry_after: int 
     auth_http.send_public_response(handler, response)
 
 
+def send_workflow_json(handler, status: int, payload: dict) -> None:
+    send_semantic_json(handler, status, payload)
+
+
 def send_http_boundary_error(handler, error: auth_http.HttpBoundaryError) -> None:
     code = error.code
     message = {
@@ -85,6 +95,28 @@ def send_http_boundary_error(handler, error: auth_http.HttpBoundaryError) -> Non
         "forbidden_host": "Request host is not permitted.",
         "forbidden_origin": "Request origin is not permitted.",
         "method_not_allowed": "Use POST for semantic assessment.",
+    }.get(code, "Request is invalid.")
+    extra = (("Allow", "POST"),) if code == "method_not_allowed" else ()
+    auth_http.send_public_response(
+        handler,
+        auth_http.json_response(
+            error.status,
+            {"ok": False, "error": {"code": code, "message": message}},
+            extra_headers=extra,
+        ),
+    )
+
+
+def send_workflow_http_boundary_error(
+    handler,
+    error: auth_http.HttpBoundaryError,
+) -> None:
+    code = error.code
+    message = {
+        "ambiguous_headers": "Request headers are ambiguous.",
+        "forbidden_host": "Request host is not permitted.",
+        "forbidden_origin": "Request origin is not permitted.",
+        "method_not_allowed": "Use POST for Priority workflow authority.",
     }.get(code, "Request is invalid.")
     extra = (("Allow", "POST"),) if code == "method_not_allowed" else ()
     auth_http.send_public_response(
