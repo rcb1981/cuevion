@@ -1161,8 +1161,13 @@ async function run() {
         true,
       );
       assert.equal(
-        workspaceSource.includes("prepareSharedCollaborationMessageForOwner"),
-        false,
+        (workspaceSource.match(/prepareSharedCollaborationMessageForOwner\(/g) ?? [])
+          .length,
+        1,
+      );
+      assert.equal(
+        visibleStartRegion.includes("prepareSharedCollaborationMessageForOwner("),
+        true,
       );
 
       const writeSource = fs.readFileSync(

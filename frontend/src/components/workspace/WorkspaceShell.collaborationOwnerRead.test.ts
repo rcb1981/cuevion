@@ -36,6 +36,11 @@ try {
     "const closeCollaborationOverlay = () =>",
     "const syncCollaborationMentionState = (",
   );
+  const ownerProjectionFenceRegion = sourceBetween(
+    workspaceSource,
+    "const fenceCollaborationOwnerProjection = () =>",
+    "const beginCollaborationOwnerRead = (",
+  );
   const ownerCreateRegion = sourceBetween(
     workspaceSource,
     "const createMessageCollaboration = () =>",
@@ -49,7 +54,17 @@ try {
   const ownerInternalNoteFailureCopyRegion = sourceBetween(
     workspaceSource,
     "function getCollaborationOwnerInternalNoteFailureMessage(",
+    "function getCollaborationOwnerSharedMessageFailureMessage(",
+  );
+  const ownerSharedMessageFailureCopyRegion = sourceBetween(
+    workspaceSource,
+    "function getCollaborationOwnerSharedMessageFailureMessage(",
     "const primaryNavigationItems = [",
+  );
+  const ownerSharedMessageRegion = sourceBetween(
+    workspaceSource,
+    "const submitCollaborationOwnerSharedMessage = () =>",
+    "const submitCollaborationOwnerInternalNote = () =>",
   );
   const ownerInternalNoteRegion = sourceBetween(
     workspaceSource,
@@ -60,6 +75,11 @@ try {
     workspaceSource,
     "data-collaboration-owner-internal-note-composer",
     ") : isPreStartCollaboration ? (",
+  );
+  const ownerSharedMessageComposerRegion = sourceBetween(
+    workspaceSource,
+    "data-collaboration-owner-shared-message-composer",
+    "data-collaboration-owner-internal-note-composer",
   );
   const ownerAppendClientRegion = sourceBetween(
     ownerWriteSource,
@@ -236,6 +256,10 @@ try {
     workspaceSource.includes('data-collaboration-owner-internal-note-enabled="true"'),
     true,
   );
+  assert.equal(
+    workspaceSource.includes('data-collaboration-owner-shared-message-enabled="true"'),
+    true,
+  );
   assert.equal(workspaceSource.includes('data-collaboration-owner-read-only="true"'), false);
   assert.equal(workspaceSource.includes('data-collaboration-owner-write-controls="hidden"'), false);
   assert.equal(
@@ -277,6 +301,184 @@ try {
   assert.equal(ownerInternalNoteRegion.includes("createCollaborationThread("), false);
   assert.equal(ownerInternalNoteRegion.includes("sendGmailMessage("), false);
   assert.equal(ownerInternalNoteRegion.includes("connectInboxWithImap("), false);
+
+  assert.equal(
+    (workspaceSource.match(/prepareSharedCollaborationMessageForOwner\(/g) ?? [])
+      .length,
+    1,
+    "One new logical Shared Message must prepare exactly once",
+  );
+  assert.equal(
+    (ownerSharedMessageRegion.match(/pendingRequest\.operation\.execute\(\)/g) ?? [])
+      .length,
+    1,
+    "Submission and explicit retry must execute the retained shared operation",
+  );
+  assert.equal(ownerAppendClientRegion.includes('visibility === "internal" ? "append_internal" : "append_shared"'), true);
+  assert.equal(ownerAppendClientRegion.includes("prepareSharedCollaborationMessageForOwner("), true);
+  assert.equal(ownerSharedMessageRegion.includes("prepareInternalCollaborationMessageForOwner"), false);
+  assert.equal(ownerSharedMessageRegion.includes("append_internal"), false);
+  for (const forbiddenSharedAction of [
+    "sendCollaborationReply(",
+    "openComposeFromMessage(",
+    "buildGmailReplyContext(",
+    "buildImapReplyContext(",
+    "sendEmail(",
+    "sendGmail(",
+    "sendGmailMessage(",
+    "sendSmtp(",
+    "sendImap(",
+    "connectInboxWithImap(",
+    "Reply All",
+    "mutateCollaborationThread(",
+    "createCollaborationThread(",
+    "updateMessageById(",
+    "setMailboxStore(",
+    "setDraftCollaborationByMessageId",
+  ]) {
+    assert.equal(
+      ownerSharedMessageRegion.includes(forbiddenSharedAction),
+      false,
+      `Owner Shared Message must not use ${forbiddenSharedAction}`,
+    );
+  }
+
+  assert.equal(ownerSharedMessageRegion.includes("!collaborationOwnerSharedMessageDraft.trim()"), true);
+  assert.equal(
+    ownerSharedMessageRegion.includes(
+      "projection.collaboration.collaborationId,\n        collaborationOwnerSharedMessageDraft,",
+    ),
+    true,
+    "Shared preparation must receive the exact untrimmed draft",
+  );
+  assert.equal(
+    ownerSharedMessageRegion.includes(
+      "existingRequest.text === collaborationOwnerSharedMessageDraft",
+    ),
+    true,
+  );
+  assert.equal(ownerSharedMessageRegion.includes("existingRequest?.inFlight"), true);
+  assert.equal(ownerSharedMessageRegion.includes("request.inFlight = true"), true);
+  assert.ok(
+    ownerSharedMessageRegion.indexOf("request.inFlight = true") <
+      ownerSharedMessageRegion.indexOf("pendingRequest.operation.execute()"),
+    "Double-click fencing must be installed before the shared operation executes",
+  );
+  assert.equal(ownerSharedMessageComposerRegion.includes('status === "sending"'), true);
+  assert.equal(ownerSharedMessageComposerRegion.includes("Retry Shared Message"), true);
+  assert.equal(ownerSharedMessageComposerRegion.includes("Add Shared Message"), true);
+  assert.equal(ownerSharedMessageComposerRegion.includes("email the source-message sender"), true);
+  assert.equal(
+    ownerSharedMessageComposerRegion.includes(
+      "collaborationOwnerSharedMessageRequestRef.current = null",
+    ),
+    true,
+    "Editing a failed logical shared message must abandon its prepared operation",
+  );
+  assert.ok(
+    ownerSharedMessageRegion.indexOf('result.status !== "success"') <
+      ownerSharedMessageRegion.indexOf(
+        "collaborationOwnerSharedMessageRequestRef.current = null",
+        ownerSharedMessageRegion.indexOf('result.status !== "success"'),
+      ),
+    "A failed shared execution must retain the prepared operation until retry or edit",
+  );
+  assert.equal(
+    ownerSharedMessageRegion.includes("message.id === result.message.id"),
+    true,
+    "Committed shared server message IDs are the dedupe authority",
+  );
+  assert.equal(ownerSharedMessageRegion.includes("updatedAt: result.updatedAt"), true);
+  assert.equal(ownerSharedMessageRegion.includes("result.message"), true);
+  assert.equal(ownerSharedMessageRegion.includes("...current.collaboration"), true);
+  assert.equal(ownerSharedMessageRegion.includes("source:"), false);
+  assert.equal(ownerSharedMessageRegion.includes("state:"), false);
+  assert.equal(ownerSharedMessageRegion.includes("readCollaborationForOwner("), false);
+  assert.equal(ownerSharedMessageRegion.includes("lookupCollaborationForOwner("), false);
+  assert.equal(ownerSharedMessageRegion.includes("authorDisplayName:"), false);
+  assert.equal(ownerSharedMessageRegion.includes("authorRole:"), false);
+  assert.equal(ownerSharedMessageRegion.includes("timestamp:"), false);
+  assert.equal(ownerSharedMessageRegion.includes("visibility:"), false);
+  assert.equal(ownerSharedMessageRegion.includes("closeCollaborationOverlay("), false);
+  assert.ok(
+    ownerSharedMessageRegion.indexOf("setCollaborationOwnerProjection(") <
+      ownerSharedMessageRegion.indexOf(
+        "collaborationOwnerSharedMessageRequestRef.current = null",
+        ownerSharedMessageRegion.indexOf('result.status !== "success"'),
+      ),
+    "Shared draft and retained operation may clear only after success projection",
+  );
+
+  for (const staleFence of [
+    "collaborationOwnerSharedMessageGenerationRef.current === request.requestId",
+    "currentProjectionRequest?.identityKey === request.identityKey",
+    "currentProjectionRequest.requestId === request.projectionRequestId",
+    "currentProjectionRequest.messageId === request.messageId",
+    "currentProjectionRequest.sourceMailboxId === request.sourceMailboxId",
+    "current.collaboration.collaborationId !== pendingRequest.collaborationId",
+    "current.collaboration.mailboxId !== pendingRequest.sourceMailboxId",
+  ]) {
+    assert.equal(
+      ownerSharedMessageRegion.includes(staleFence),
+      true,
+      `Missing owner Shared Message stale fence: ${staleFence}`,
+    );
+  }
+  assert.equal(closeRegion.includes("fenceCollaborationOwnerProjection();"), true);
+  assert.equal(
+    ownerProjectionFenceRegion.includes(
+      "collaborationOwnerSharedMessageRequestRef.current = null",
+    ),
+    true,
+  );
+  assert.equal(
+    ownerProjectionFenceRegion.includes(
+      "collaborationOwnerSharedMessageGenerationRef.current += 1",
+    ),
+    true,
+  );
+  assert.equal(workspaceSource.includes("collaborationOwnerSharedMessageGenerationRef"), true);
+  assert.equal(workspaceSource.includes("collaborationOwnerInternalNoteRequestRef"), true);
+
+  for (const failureStatus of [
+    "invalid_collaboration_id",
+    "invalid_text",
+    "unauthorized",
+    "forbidden",
+    "not_found",
+    "conflict",
+    "rate_limited",
+    "service_unavailable",
+    "internal_error",
+    "invalid_response",
+    "network_failure",
+  ]) {
+    assert.equal(
+      ownerSharedMessageFailureCopyRegion.includes(`\"${failureStatus}\"`),
+      true,
+      `Missing bounded Shared Message failure copy for ${failureStatus}`,
+    );
+  }
+  assert.equal(ownerSharedMessageFailureCopyRegion.includes("404"), false);
+  assert.equal(
+    ownerSharedMessageFailureCopyRegion.includes(
+      "Shared messages are temporarily unavailable. Retry later.",
+    ),
+    true,
+  );
+
+  for (const forbiddenPersistence of [
+    "localStorage",
+    "sessionStorage",
+    "indexedDB",
+    "saveLiveInboxSnapshot(",
+  ]) {
+    assert.equal(
+      ownerSharedMessageRegion.includes(forbiddenPersistence),
+      false,
+      `Owner Shared Message must not use ${forbiddenPersistence}`,
+    );
+  }
 
   assert.equal(ownerInternalNoteRegion.includes("!collaborationOwnerInternalNoteDraft.trim()"), true);
   assert.equal(

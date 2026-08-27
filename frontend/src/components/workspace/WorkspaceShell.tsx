@@ -245,6 +245,7 @@ import {
 import {
   createCollaborationForOwner,
   prepareInternalCollaborationMessageForOwner,
+  prepareSharedCollaborationMessageForOwner,
   type CollaborationOwnerAppendOperation,
 } from "../../lib/collaborationOwnerWriteApi";
 import {
@@ -500,6 +501,40 @@ function getCollaborationOwnerInternalNoteFailureMessage(
     return "Internal notes are temporarily unavailable. Retry later.";
   }
   return "Internal notes are temporarily unavailable. Retry later.";
+}
+
+function getCollaborationOwnerSharedMessageFailureMessage(
+  failureStatus: string,
+  retryAfterSeconds?: number,
+) {
+  if (failureStatus === "invalid_text") {
+    return "This shared message cannot be added. Check its content and try again.";
+  }
+  if (failureStatus === "unauthorized") {
+    return "Sign in again to add this shared message.";
+  }
+  if (failureStatus === "forbidden") {
+    return "Shared messages are temporarily unavailable. Retry later.";
+  }
+  if (failureStatus === "conflict") {
+    return "The collaboration changed before this message could be added. Retry the message.";
+  }
+  if (failureStatus === "rate_limited") {
+    return retryAfterSeconds === undefined
+      ? "Too many collaboration requests. Retry shortly."
+      : `Too many collaboration requests. Retry in ${retryAfterSeconds} seconds.`;
+  }
+  if (
+    failureStatus === "invalid_collaboration_id" ||
+    failureStatus === "not_found" ||
+    failureStatus === "service_unavailable" ||
+    failureStatus === "internal_error" ||
+    failureStatus === "invalid_response" ||
+    failureStatus === "network_failure"
+  ) {
+    return "Shared messages are temporarily unavailable. Retry later.";
+  }
+  return "Shared messages are temporarily unavailable. Retry later.";
 }
 
 const primaryNavigationItems = [
@@ -1726,6 +1761,28 @@ type CollaborationOwnerInternalNoteState =
     };
 
 type CollaborationOwnerInternalNoteRequest = {
+  identityKey: string;
+  requestId: number;
+  projectionRequestId: number;
+  messageId: string;
+  sourceMailboxId: InboxId;
+  collaborationId: string;
+  text: string;
+  operation: CollaborationOwnerAppendOperation;
+  inFlight: boolean;
+};
+
+type CollaborationOwnerSharedMessageState =
+  | { status: "idle" }
+  | { status: "sending" }
+  | {
+      status: "failure";
+      failureStatus: string;
+      retryAfterSeconds?: number;
+      canRetry: boolean;
+    };
+
+type CollaborationOwnerSharedMessageRequest = {
   identityKey: string;
   requestId: number;
   projectionRequestId: number;
@@ -16924,6 +16981,13 @@ function MailboxView({
     useState<CollaborationOwnerInternalNoteState>({ status: "idle" });
   const collaborationOwnerInternalNoteRequestRef =
     useRef<CollaborationOwnerInternalNoteRequest | null>(null);
+  const [collaborationOwnerSharedMessageDraft, setCollaborationOwnerSharedMessageDraft] =
+    useState("");
+  const [collaborationOwnerSharedMessageState, setCollaborationOwnerSharedMessageState] =
+    useState<CollaborationOwnerSharedMessageState>({ status: "idle" });
+  const collaborationOwnerSharedMessageGenerationRef = useRef(0);
+  const collaborationOwnerSharedMessageRequestRef =
+    useRef<CollaborationOwnerSharedMessageRequest | null>(null);
   const [pendingEndCollaborationMessageId, setPendingEndCollaborationMessageId] = useState<
     string | null
   >(null);
@@ -22257,10 +22321,14 @@ function MailboxView({
   const fenceCollaborationOwnerProjection = () => {
     const requestId = collaborationOwnerProjectionGenerationRef.current + 1;
     collaborationOwnerProjectionGenerationRef.current = requestId;
+    collaborationOwnerSharedMessageGenerationRef.current += 1;
     collaborationOwnerProjectionRequestRef.current = null;
     collaborationOwnerInternalNoteRequestRef.current = null;
+    collaborationOwnerSharedMessageRequestRef.current = null;
     setCollaborationOwnerInternalNoteDraft("");
     setCollaborationOwnerInternalNoteState({ status: "idle" });
+    setCollaborationOwnerSharedMessageDraft("");
+    setCollaborationOwnerSharedMessageState({ status: "idle" });
     setCollaborationOwnerCreateState({ status: "idle" });
     setCollaborationOwnerProjection({
       status: "idle",
@@ -22520,6 +22588,10 @@ function MailboxView({
     collaborationOwnerInternalNoteRequestRef.current = null;
     setCollaborationOwnerInternalNoteDraft("");
     setCollaborationOwnerInternalNoteState({ status: "idle" });
+    collaborationOwnerSharedMessageGenerationRef.current += 1;
+    collaborationOwnerSharedMessageRequestRef.current = null;
+    setCollaborationOwnerSharedMessageDraft("");
+    setCollaborationOwnerSharedMessageState({ status: "idle" });
     if (options?.loadOwnerProjection) {
       beginCollaborationOwnerRead(
         messageId,
@@ -22962,6 +23034,143 @@ function MailboxView({
       [collaborationStateKey]: initialCollaboration.collaboration,
     }));
     setStartCollaborationInviteEmail("");
+  };
+
+  const submitCollaborationOwnerSharedMessage = () => {
+    const messageId = activeCollaborationMessageId;
+    const sourceMailboxId = activeCollaborationSourceMailboxId;
+    const projection =
+      collaborationOwnerProjection.status === "success"
+        ? collaborationOwnerProjection
+        : null;
+    const projectionRequest = collaborationOwnerProjectionRequestRef.current;
+    const existingRequest = collaborationOwnerSharedMessageRequestRef.current;
+
+    if (
+      !messageId ||
+      !sourceMailboxId ||
+      !projection ||
+      !projectionRequest ||
+      projectionRequest.inFlight ||
+      projectionRequest.identityKey !== projection.identityKey ||
+      projectionRequest.messageId !== messageId ||
+      projectionRequest.sourceMailboxId !== sourceMailboxId ||
+      existingRequest?.inFlight ||
+      !collaborationOwnerSharedMessageDraft.trim()
+    ) {
+      return;
+    }
+
+    let request =
+      existingRequest &&
+      existingRequest.identityKey === projection.identityKey &&
+      existingRequest.projectionRequestId === projectionRequest.requestId &&
+      existingRequest.messageId === messageId &&
+      existingRequest.sourceMailboxId === sourceMailboxId &&
+      existingRequest.collaborationId === projection.collaboration.collaborationId &&
+      existingRequest.text === collaborationOwnerSharedMessageDraft
+        ? existingRequest
+        : null;
+
+    if (!request) {
+      const preparation = prepareSharedCollaborationMessageForOwner(
+        projection.collaboration.collaborationId,
+        collaborationOwnerSharedMessageDraft,
+      );
+      if (preparation.status !== "ready") {
+        collaborationOwnerSharedMessageRequestRef.current = null;
+        setCollaborationOwnerSharedMessageState({
+          status: "failure",
+          failureStatus: preparation.status,
+          canRetry: false,
+        });
+        return;
+      }
+
+      const requestId = collaborationOwnerSharedMessageGenerationRef.current + 1;
+      collaborationOwnerSharedMessageGenerationRef.current = requestId;
+      request = {
+        identityKey: projection.identityKey,
+        requestId,
+        projectionRequestId: projectionRequest.requestId,
+        messageId,
+        sourceMailboxId,
+        collaborationId: projection.collaboration.collaborationId,
+        text: collaborationOwnerSharedMessageDraft,
+        operation: preparation.operation,
+        inFlight: false,
+      };
+      collaborationOwnerSharedMessageRequestRef.current = request;
+    }
+
+    request.inFlight = true;
+    setCollaborationOwnerSharedMessageState({ status: "sending" });
+
+    const isCurrentRequest = () => {
+      const currentProjectionRequest = collaborationOwnerProjectionRequestRef.current;
+      return (
+        collaborationOwnerSharedMessageRequestRef.current === request &&
+        collaborationOwnerSharedMessageGenerationRef.current === request.requestId &&
+        currentProjectionRequest?.identityKey === request.identityKey &&
+        currentProjectionRequest.requestId === request.projectionRequestId &&
+        currentProjectionRequest.messageId === request.messageId &&
+        currentProjectionRequest.sourceMailboxId === request.sourceMailboxId
+      );
+    };
+
+    void (async (pendingRequest: CollaborationOwnerSharedMessageRequest) => {
+      let result;
+      try {
+        result = await pendingRequest.operation.execute();
+      } catch {
+        result = { status: "network_failure" } as const;
+      }
+      if (!isCurrentRequest()) {
+        return;
+      }
+
+      pendingRequest.inFlight = false;
+      if (result.status !== "success") {
+        setCollaborationOwnerSharedMessageState({
+          status: "failure",
+          failureStatus: result.status,
+          ...(result.status === "rate_limited" &&
+          result.retryAfterSeconds !== undefined
+            ? { retryAfterSeconds: result.retryAfterSeconds }
+            : {}),
+          canRetry: true,
+        });
+        return;
+      }
+
+      setCollaborationOwnerProjection((current) => {
+        if (
+          current.status !== "success" ||
+          current.identityKey !== pendingRequest.identityKey ||
+          current.collaboration.collaborationId !== pendingRequest.collaborationId ||
+          current.collaboration.mailboxId !== pendingRequest.sourceMailboxId
+        ) {
+          return current;
+        }
+
+        const hasCommittedMessage = current.collaboration.messages.some(
+          (message) => message.id === result.message.id,
+        );
+        return {
+          ...current,
+          collaboration: {
+            ...current.collaboration,
+            updatedAt: result.updatedAt,
+            messages: hasCommittedMessage
+              ? current.collaboration.messages
+              : [...current.collaboration.messages, result.message],
+          },
+        };
+      });
+      collaborationOwnerSharedMessageRequestRef.current = null;
+      setCollaborationOwnerSharedMessageDraft("");
+      setCollaborationOwnerSharedMessageState({ status: "idle" });
+    })(request);
   };
 
   const submitCollaborationOwnerInternalNote = () => {
@@ -29453,6 +29662,7 @@ function MailboxView({
                         <section
                           data-collaboration-owner-read-projection
                           data-collaboration-owner-internal-note-enabled="true"
+                          data-collaboration-owner-shared-message-enabled="true"
                           className="space-y-4"
                         >
                           <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,var(--workspace-card),var(--workspace-card-subtle))] px-5 py-5">
@@ -29557,6 +29767,78 @@ function MailboxView({
                                 No server messages.
                               </div>
                             )}
+                          </section>
+
+                          <section
+                            data-collaboration-owner-shared-message-composer
+                            className="space-y-3"
+                          >
+                            <label className="block space-y-2">
+                              <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                                Shared Message
+                              </span>
+                              <textarea
+                                value={collaborationOwnerSharedMessageDraft}
+                                disabled={
+                                  collaborationOwnerSharedMessageState.status === "sending"
+                                }
+                                onChange={(event) => {
+                                  const pendingRequest =
+                                    collaborationOwnerSharedMessageRequestRef.current;
+                                  if (pendingRequest && !pendingRequest.inFlight) {
+                                    collaborationOwnerSharedMessageRequestRef.current = null;
+                                  }
+                                  setCollaborationOwnerSharedMessageDraft(event.target.value);
+                                  if (
+                                    collaborationOwnerSharedMessageState.status === "failure"
+                                  ) {
+                                    setCollaborationOwnerSharedMessageState({ status: "idle" });
+                                  }
+                                }}
+                                rows={3}
+                                placeholder="Add a message to this Cuevion collaboration"
+                                className="min-h-[7rem] w-full resize-none rounded-[18px] border border-[color:rgba(111,148,111,0.28)] bg-[linear-gradient(180deg,rgba(255,253,249,0.98),rgba(248,244,236,0.96))] px-4 py-3.5 text-[0.92rem] leading-7 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)] disabled:cursor-not-allowed disabled:opacity-60 dark:border-[var(--workspace-accent-border)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
+                              />
+                            </label>
+                            <div className="text-[0.76rem] leading-5 text-[var(--workspace-text-faint)]">
+                              This message is shared in the Collaboration Activity. It does not
+                              email the source-message sender.
+                            </div>
+                            {collaborationOwnerSharedMessageState.status === "failure" ? (
+                              <div
+                                data-collaboration-owner-shared-message-feedback
+                                className="rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.78rem] leading-6 text-[var(--workspace-text-faint)]"
+                              >
+                                {getCollaborationOwnerSharedMessageFailureMessage(
+                                  collaborationOwnerSharedMessageState.failureStatus,
+                                  collaborationOwnerSharedMessageState.retryAfterSeconds,
+                                )}
+                              </div>
+                            ) : null}
+                            <div className="flex justify-end">
+                              <button
+                                type="button"
+                                data-collaboration-owner-shared-message-action
+                                onClick={submitCollaborationOwnerSharedMessage}
+                                disabled={
+                                  collaborationOwnerSharedMessageState.status === "sending" ||
+                                  !collaborationOwnerSharedMessageDraft.trim()
+                                }
+                                className={
+                                  collaborationOwnerSharedMessageState.status !== "sending" &&
+                                  collaborationOwnerSharedMessageDraft.trim()
+                                    ? collaborationCompactPrimaryActionButtonClass
+                                    : collaborationCompactDisabledActionButtonClass
+                                }
+                              >
+                                {collaborationOwnerSharedMessageState.status === "sending"
+                                  ? "Adding Shared Message…"
+                                  : collaborationOwnerSharedMessageState.status === "failure" &&
+                                      collaborationOwnerSharedMessageState.canRetry
+                                    ? "Retry Shared Message"
+                                    : "Add Shared Message"}
+                              </button>
+                            </div>
                           </section>
 
                           <section
