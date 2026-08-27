@@ -144,7 +144,7 @@ class PriorityWorkflowRouteTests(unittest.TestCase):
                 ],
             },
         )
-        self.assertEqual({command[0] for command in self.redis.commands}, {"MGET"})
+        self.assertEqual({command[0] for command in self.redis.commands}, {"EVAL"})
 
     def test_manual_cleared_and_waiting_operations_return_canonical_record(self):
         operations = (
@@ -182,6 +182,8 @@ class PriorityWorkflowRouteTests(unittest.TestCase):
         cases = (
             {**write_payload("set_cleared", "cleared"), "updatedAt": 1},
             {**write_payload("set_cleared", "cleared"), "version": 99},
+            {**write_payload("set_cleared", "cleared"), "expiresAt": 99},
+            {**write_payload("set_cleared", "cleared"), "clearedExpiresAt": 99},
             {**write_payload("set_cleared", "cleared"), "userId": "user-2"},
             write_payload("set_cleared", "yes"),
             read_payload(GMAIL_IDENTITY, GMAIL_IDENTITY),

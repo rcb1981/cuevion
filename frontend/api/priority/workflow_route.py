@@ -5,6 +5,10 @@ may migrate manual/removed, Done, and waiting writers (P2), hydrate these
 authorities and retire browser-local membership authority (P3), establish a
 canonical mailbox candidate projection (P4), and only then switch every
 Priority surface to that one projection (P5).
+
+The field-specific retention policy is approved only for the current
+single-user/private-beta phase and must be re-reviewed before external testers
+or any multi-user rollout.
 """
 
 from __future__ import annotations

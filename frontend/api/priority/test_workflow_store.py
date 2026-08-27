@@ -6,8 +6,11 @@ import unittest
 from . import store as store_module
 from .authority import PriorityMessageIdentity
 from .store import (
+    WORKFLOW_CLEARED_TTL_SECONDS,
+    WORKFLOW_MANUAL_TTL_SECONDS,
+    WORKFLOW_PHYSICAL_TTL_SECONDS,
     WORKFLOW_REDIS_READ_BATCH_SIZE,
-    WORKFLOW_TTL_SECONDS,
+    WORKFLOW_WAITING_TTL_SECONDS,
     PriorityWorkflowScope,
     PriorityWorkflowStore,
     WorkflowStoreUnavailable,
@@ -21,6 +24,7 @@ class WorkflowMemoryRedis:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
         self.expirations: dict[str, int] = {}
+        self.physical_expires_at: dict[str, int] = {}
         self.commands: list[list[object]] = []
         self.clock_ms = 1_700_000_000_000
         self.unavailable = False
@@ -29,13 +33,24 @@ class WorkflowMemoryRedis:
         if self.unavailable:
             raise OSError("fixed unavailable")
         self.commands.append(list(command))
-        if command[0] == "MGET":
-            return {"result": [self.values.get(key) for key in command[1:]]}
-        if command[0] != "EVAL" or command[1] != store_module._WRITE_WORKFLOW_RECORD_SCRIPT:
+        if command[0] != "EVAL":
             raise AssertionError(command)
         key_count = int(command[2])
         keys = command[3 : 3 + key_count]
         args = command[3 + key_count :]
+        if command[1] == store_module._READ_WORKFLOW_RECORDS_SCRIPT:
+            missing_sentinel = args[0]
+            return {
+                "result": [
+                    self.clock_ms,
+                    *(
+                        self.values.get(key, missing_sentinel)
+                        for key in keys
+                    ),
+                ]
+            }
+        if command[1] != store_module._WRITE_WORKFLOW_RECORD_SCRIPT:
+            raise AssertionError(command)
         key = keys[0]
         (
             schema_version,
@@ -43,7 +58,10 @@ class WorkflowMemoryRedis:
             identity_digest,
             field,
             value,
-            ttl,
+            manual_ttl,
+            cleared_ttl,
+            waiting_ttl,
+            physical_ttl,
             max_bytes,
             max_safe_integer,
             corrupt_sentinel,
@@ -55,8 +73,11 @@ class WorkflowMemoryRedis:
                 "scopeDigest": scope_digest,
                 "identityDigest": identity_digest,
                 "manualPriority": "none",
+                "manualExpiresAt": 0,
                 "cleared": "active",
+                "clearedExpiresAt": 0,
                 "waiting": "absent",
+                "waitingExpiresAt": 0,
                 "version": 0,
                 "updatedAt": 0,
             }
@@ -71,8 +92,11 @@ class WorkflowMemoryRedis:
                         "scopeDigest",
                         "identityDigest",
                         "manualPriority",
+                        "manualExpiresAt",
                         "cleared",
+                        "clearedExpiresAt",
                         "waiting",
+                        "waitingExpiresAt",
                         "version",
                         "updatedAt",
                     }
@@ -86,6 +110,12 @@ class WorkflowMemoryRedis:
             except Exception:
                 return {"result": corrupt_sentinel}
         record[field] = value
+        expiry_field, ttl = {
+            "manualPriority": ("manualExpiresAt", int(manual_ttl)),
+            "cleared": ("clearedExpiresAt", int(cleared_ttl)),
+            "waiting": ("waitingExpiresAt", int(waiting_ttl)),
+        }[field]
+        record[expiry_field] = self.clock_ms + ttl * 1_000
         record["version"] += 1
         record["updatedAt"] = self.clock_ms
         self.clock_ms += 1
@@ -93,7 +123,10 @@ class WorkflowMemoryRedis:
         if len(encoded.encode("utf-8")) > int(max_bytes):
             return {"result": corrupt_sentinel}
         self.values[key] = encoded
-        self.expirations[key] = int(ttl)
+        self.expirations[key] = int(physical_ttl)
+        self.physical_expires_at[key] = (
+            record["updatedAt"] + int(physical_ttl) * 1_000
+        )
         return {"result": encoded}
 
 
@@ -134,6 +167,13 @@ class PriorityWorkflowStoreTests(unittest.TestCase):
         self.redis = WorkflowMemoryRedis()
         self.store = PriorityWorkflowStore(self.redis, hmac_secret=SECRET)
 
+    def test_private_beta_retention_constants_match_approved_policy(self):
+        day = 24 * 60 * 60
+        self.assertEqual(WORKFLOW_MANUAL_TTL_SECONDS, 180 * day)
+        self.assertEqual(WORKFLOW_CLEARED_TTL_SECONDS, 180 * day)
+        self.assertEqual(WORKFLOW_WAITING_TTL_SECONDS, 14 * day)
+        self.assertEqual(WORKFLOW_PHYSICAL_TTL_SECONDS, 180 * day)
+
     def test_missing_batch_records_are_neutral_and_reads_use_no_scans(self):
         scopes = tuple(
             gmail_scope(provider_message_id=f"message-{index}")
@@ -146,7 +186,13 @@ class PriorityWorkflowStoreTests(unittest.TestCase):
         self.assertTrue(all(record.manual_priority == "none" for record in records))
         self.assertTrue(all(record.cleared == "active" for record in records))
         self.assertTrue(all(record.waiting == "absent" for record in records))
-        self.assertEqual([command[0] for command in self.redis.commands], ["MGET", "MGET"])
+        self.assertEqual([command[0] for command in self.redis.commands], ["EVAL", "EVAL"])
+        self.assertTrue(
+            all(
+                command[1] == store_module._READ_WORKFLOW_RECORDS_SCRIPT
+                for command in self.redis.commands
+            )
+        )
 
     def test_manual_priority_exact_states_round_trip(self):
         scope = gmail_scope()
@@ -218,13 +264,173 @@ class PriorityWorkflowStoreTests(unittest.TestCase):
         self.assertNotIn("mailbox-1", key)
         self.assertNotIn("gmail-message-1", key)
 
-    def test_every_write_applies_the_bounded_workflow_ttl(self):
+    def test_every_write_applies_the_bounded_physical_workflow_ttl(self):
         scope = gmail_scope()
         self.store.write_field(scope, field="cleared", value="cleared")
         key = next(iter(self.redis.values))
-        self.assertEqual(self.redis.expirations[key], WORKFLOW_TTL_SECONDS)
+        self.assertEqual(
+            self.redis.expirations[key],
+            WORKFLOW_PHYSICAL_TTL_SECONDS,
+        )
         eval_command = self.redis.commands[-1]
-        self.assertEqual(eval_command[-4], WORKFLOW_TTL_SECONDS)
+        self.assertEqual(eval_command[-4], WORKFLOW_PHYSICAL_TTL_SECONDS)
+
+    def test_manual_priority_and_removed_expire_independently_after_180_days(self):
+        for index, value in enumerate(("priority", "removed"), start=1):
+            with self.subTest(value=value):
+                scope = gmail_scope(provider_message_id=f"manual-{index}")
+                written = self.store.write_field(
+                    scope,
+                    field="manualPriority",
+                    value=value,
+                )
+                self.assertEqual(written.manual_priority, value)
+                self.assertIsNotNone(written.manual_expires_at)
+                self.assertEqual(
+                    written.manual_expires_at - written.updated_at,
+                    WORKFLOW_MANUAL_TTL_SECONDS * 1_000,
+                )
+                expiry = written.manual_expires_at
+                self.redis.clock_ms = expiry - 1
+                self.assertEqual(
+                    self.store.read_records((scope,))[0].manual_priority,
+                    value,
+                )
+                self.redis.clock_ms = expiry
+                self.assertEqual(
+                    self.store.read_records((scope,))[0].manual_priority,
+                    "none",
+                )
+
+    def test_cleared_expires_to_active_after_180_days(self):
+        scope = gmail_scope(provider_message_id="cleared-retention")
+        written = self.store.write_field(scope, field="cleared", value="cleared")
+        self.assertEqual(
+            written.cleared_expires_at - written.updated_at,
+            WORKFLOW_CLEARED_TTL_SECONDS * 1_000,
+        )
+        self.redis.clock_ms = written.cleared_expires_at - 1
+        self.assertEqual(self.store.read_records((scope,))[0].cleared, "cleared")
+        self.redis.clock_ms = written.cleared_expires_at
+        self.assertEqual(self.store.read_records((scope,))[0].cleared, "active")
+
+    def test_waiting_states_expire_to_absent_after_14_days(self):
+        for index, value in enumerate(
+            ("waiting_on_other", "returned_reply"),
+            start=1,
+        ):
+            with self.subTest(value=value):
+                scope = gmail_scope(provider_message_id=f"waiting-{index}")
+                written = self.store.write_field(
+                    scope,
+                    field="waiting",
+                    value=value,
+                )
+                self.assertEqual(
+                    written.waiting_expires_at - written.updated_at,
+                    WORKFLOW_WAITING_TTL_SECONDS * 1_000,
+                )
+                self.redis.clock_ms = written.waiting_expires_at - 1
+                self.assertEqual(
+                    self.store.read_records((scope,))[0].waiting,
+                    value,
+                )
+                self.redis.clock_ms = written.waiting_expires_at
+                self.assertEqual(
+                    self.store.read_records((scope,))[0].waiting,
+                    "absent",
+                )
+
+    def test_reads_do_not_refresh_logical_or_physical_retention(self):
+        scope = gmail_scope(provider_message_id="read-retention")
+        written = self.store.write_field(
+            scope,
+            field="manualPriority",
+            value="priority",
+        )
+        key = self.store._key(scope)
+        raw_before = self.redis.values[key]
+        physical_before = self.redis.physical_expires_at[key]
+        logical_before = written.manual_expires_at
+        self.redis.clock_ms += 30 * 24 * 60 * 60 * 1_000
+        observed = self.store.read_records((scope,))[0]
+        self.assertEqual(observed.manual_expires_at, logical_before)
+        self.assertEqual(self.redis.values[key], raw_before)
+        self.assertEqual(self.redis.physical_expires_at[key], physical_before)
+        self.assertEqual(
+            self.redis.commands[-1][1],
+            store_module._READ_WORKFLOW_RECORDS_SCRIPT,
+        )
+
+    def test_unrelated_writes_preserve_logical_expiries_while_physical_ttl_refreshes(self):
+        scope = gmail_scope(provider_message_id="independent-retention")
+        manual = self.store.write_field(
+            scope,
+            field="manualPriority",
+            value="priority",
+        )
+        key = self.store._key(scope)
+        manual_expiry = manual.manual_expires_at
+        first_physical_expiry = self.redis.physical_expires_at[key]
+
+        self.redis.clock_ms = manual.updated_at + 170 * 24 * 60 * 60 * 1_000
+        waiting = self.store.write_field(
+            scope,
+            field="waiting",
+            value="waiting_on_other",
+        )
+        self.assertEqual(waiting.manual_expires_at, manual_expiry)
+        waiting_expiry = waiting.waiting_expires_at
+        self.assertGreater(self.redis.physical_expires_at[key], first_physical_expiry)
+
+        self.redis.clock_ms += 24 * 60 * 60 * 1_000
+        cleared = self.store.write_field(scope, field="cleared", value="cleared")
+        self.assertEqual(cleared.manual_expires_at, manual_expiry)
+        self.assertEqual(cleared.waiting_expires_at, waiting_expiry)
+        cleared_expiry = cleared.cleared_expires_at
+
+        self.redis.clock_ms += 24 * 60 * 60 * 1_000
+        manual_rewrite = self.store.write_field(
+            scope,
+            field="manualPriority",
+            value="removed",
+        )
+        self.assertGreater(manual_rewrite.manual_expires_at, manual_expiry)
+        self.assertEqual(manual_rewrite.waiting_expires_at, waiting_expiry)
+        self.assertEqual(manual_rewrite.cleared_expires_at, cleared_expiry)
+
+    def test_batch_read_normalizes_each_field_from_one_server_time_snapshot(self):
+        manual_scope = gmail_scope(provider_message_id="batch-manual")
+        waiting_scope = gmail_scope(provider_message_id="batch-waiting")
+        manual = self.store.write_field(
+            manual_scope,
+            field="manualPriority",
+            value="priority",
+        )
+        waiting = self.store.write_field(
+            waiting_scope,
+            field="waiting",
+            value="returned_reply",
+        )
+        self.redis.clock_ms = waiting.waiting_expires_at
+        records = self.store.read_records((manual_scope, waiting_scope))
+        self.assertEqual(records[0].manual_priority, "priority")
+        self.assertEqual(records[1].waiting, "absent")
+        self.assertLess(self.redis.clock_ms, manual.manual_expires_at)
+
+    def test_expiry_is_derived_only_from_redis_server_time(self):
+        scope = gmail_scope(provider_message_id="server-time")
+        self.redis.clock_ms = 2_000_000_000_000
+        written = self.store.write_field(
+            scope,
+            field="manualPriority",
+            value="priority",
+        )
+        self.assertEqual(written.updated_at, 2_000_000_000_000)
+        self.assertEqual(
+            written.manual_expires_at,
+            2_000_000_000_000 + WORKFLOW_MANUAL_TTL_SECONDS * 1_000,
+        )
 
     def test_corrupt_or_unavailable_storage_fails_closed(self):
         scope = gmail_scope()

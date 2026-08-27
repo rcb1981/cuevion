@@ -42,8 +42,13 @@ NEW_INBOUND_INDEX_READ_BATCH_SIZE = 6
 SEMANTIC_HYDRATION_RESULT_BATCH_SIZE = 3
 NEW_INBOUND_DISMISSAL_TTL_SECONDS = NEW_INBOUND_INDEX_TTL_SECONDS
 NEW_INBOUND_DISMISSAL_READ_BATCH_SIZE = NEW_INBOUND_INDEX_MAX_RECORDS
-WORKFLOW_STORE_SCHEMA_VERSION = 1
-WORKFLOW_TTL_SECONDS = RESULT_TTL_SECONDS
+WORKFLOW_STORE_SCHEMA_VERSION = 2
+# Approved private-beta policy. Re-review before external testers or multi-user
+# rollout; logical field expiry is intentionally independent of physical TTL.
+WORKFLOW_MANUAL_TTL_SECONDS = 180 * 24 * 60 * 60
+WORKFLOW_CLEARED_TTL_SECONDS = 180 * 24 * 60 * 60
+WORKFLOW_WAITING_TTL_SECONDS = 14 * 24 * 60 * 60
+WORKFLOW_PHYSICAL_TTL_SECONDS = 180 * 24 * 60 * 60
 WORKFLOW_MAX_BATCH_IDENTITIES = 64
 WORKFLOW_REDIS_READ_BATCH_SIZE = 16
 WORKFLOW_MAX_SERIALIZED_RECORD_BYTES = 2 * 1_024
@@ -81,6 +86,7 @@ _NEGATIVE_CODES = frozenset(
 )
 _CURRENT_MISMATCH_SENTINEL = "__cuevion_priority_current_mismatch__"
 _WORKFLOW_CORRUPT_SENTINEL = "__cuevion_priority_workflow_corrupt__"
+_WORKFLOW_MISSING_SENTINEL = "__cuevion_priority_workflow_missing__"
 _COMMIT_RESULT_SCRIPT = (
     "if redis.call('GET',KEYS[1])==ARGV[1] and "
     "redis.call('GET',KEYS[2])==ARGV[2] then "
@@ -184,46 +190,73 @@ _MARK_CURRENT_SCRIPT = (
     "end;"
     "redis.call('SET',KEYS[1],ARGV[2],'EX',ARGV[3]);return 1"
 )
+_READ_WORKFLOW_RECORDS_SCRIPT = (
+    "local clock=redis.call('TIME');local seconds=tonumber(clock[1]);"
+    "local micros=tonumber(clock[2]);if not seconds or not micros then "
+    "return {-1} end;local current=seconds*1000+math.floor(micros/1000);"
+    "local values=redis.call('MGET',unpack(KEYS));local result={current};"
+    "for index=1,#KEYS do if values[index] then "
+    "result[#result+1]=values[index] else result[#result+1]=ARGV[1] end;end;"
+    "return result"
+)
 _WRITE_WORKFLOW_RECORD_SCRIPT = (
     "local existing=redis.call('GET',KEYS[1]);local record=nil;"
     "if existing then local ok,value=pcall(cjson.decode,existing);"
-    "if not ok or type(value)~='table' then return ARGV[9] end;"
+    "if not ok or type(value)~='table' then return ARGV[12] end;"
     "local count=0;for _ in pairs(value) do count=count+1 end;"
-    "if count~=8 or value['schemaVersion']~=tonumber(ARGV[1]) or "
+    "if count~=11 or value['schemaVersion']~=tonumber(ARGV[1]) or "
     "value['scopeDigest']~=ARGV[2] or value['identityDigest']~=ARGV[3] or "
     "type(value['manualPriority'])~='string' or "
     "(value['manualPriority']~='none' and value['manualPriority']~='priority' "
     "and value['manualPriority']~='removed') or "
+    "type(value['manualExpiresAt'])~='number' or "
+    "value['manualExpiresAt']<0 or value['manualExpiresAt']%1~=0 or "
+    "value['manualExpiresAt']>tonumber(ARGV[11]) or "
     "type(value['cleared'])~='string' or "
     "(value['cleared']~='active' and value['cleared']~='cleared') or "
+    "type(value['clearedExpiresAt'])~='number' or "
+    "value['clearedExpiresAt']<0 or value['clearedExpiresAt']%1~=0 or "
+    "value['clearedExpiresAt']>tonumber(ARGV[11]) or "
     "type(value['waiting'])~='string' or "
     "(value['waiting']~='absent' and value['waiting']~='waiting_on_other' "
     "and value['waiting']~='returned_reply') or "
+    "type(value['waitingExpiresAt'])~='number' or "
+    "value['waitingExpiresAt']<0 or value['waitingExpiresAt']%1~=0 or "
+    "value['waitingExpiresAt']>tonumber(ARGV[11]) or "
     "type(value['version'])~='number' or value['version']<1 or "
-    "value['version']%1~=0 or value['version']>=tonumber(ARGV[8]) or "
+    "value['version']%1~=0 or value['version']>=tonumber(ARGV[11]) or "
     "type(value['updatedAt'])~='number' or value['updatedAt']<0 or "
-    "value['updatedAt']%1~=0 or value['updatedAt']>tonumber(ARGV[8]) "
-    "then return ARGV[9] end;record=value;else record={"
+    "value['updatedAt']%1~=0 or value['updatedAt']>tonumber(ARGV[11]) "
+    "then return ARGV[12] end;record=value;else record={"
     "schemaVersion=tonumber(ARGV[1]),scopeDigest=ARGV[2],identityDigest=ARGV[3],"
-    "manualPriority='none',cleared='active',waiting='absent',version=0,updatedAt=0};end;"
-    "local field=ARGV[4];local nextValue=ARGV[5];"
+    "manualPriority='none',manualExpiresAt=0,cleared='active',clearedExpiresAt=0,"
+    "waiting='absent',waitingExpiresAt=0,version=0,updatedAt=0};end;"
+    "local field=ARGV[4];local nextValue=ARGV[5];local fieldTtl=nil;"
     "if field=='manualPriority' then "
     "if nextValue~='none' and nextValue~='priority' and nextValue~='removed' "
-    "then return ARGV[9] end;record['manualPriority']=nextValue;"
+    "then return ARGV[12] end;record['manualPriority']=nextValue;"
+    "fieldTtl=tonumber(ARGV[6]);"
     "elseif field=='cleared' then "
-    "if nextValue~='active' and nextValue~='cleared' then return ARGV[9] end;"
-    "record['cleared']=nextValue;elseif field=='waiting' then "
+    "if nextValue~='active' and nextValue~='cleared' then return ARGV[12] end;"
+    "record['cleared']=nextValue;fieldTtl=tonumber(ARGV[7]);"
+    "elseif field=='waiting' then "
     "if nextValue~='absent' and nextValue~='waiting_on_other' "
-    "and nextValue~='returned_reply' then return ARGV[9] end;"
-    "record['waiting']=nextValue;else return ARGV[9] end;"
+    "and nextValue~='returned_reply' then return ARGV[12] end;"
+    "record['waiting']=nextValue;fieldTtl=tonumber(ARGV[8]);"
+    "else return ARGV[12] end;if not fieldTtl or fieldTtl<1 then "
+    "return ARGV[12] end;"
     "local clock=redis.call('TIME');local seconds=tonumber(clock[1]);"
     "local micros=tonumber(clock[2]);if not seconds or not micros then "
-    "return ARGV[9] end;local updatedAt=seconds*1000+math.floor(micros/1000);"
-    "if updatedAt<0 or updatedAt>tonumber(ARGV[8]) then return ARGV[9] end;"
+    "return ARGV[12] end;local updatedAt=seconds*1000+math.floor(micros/1000);"
+    "local expiresAt=updatedAt+fieldTtl*1000;"
+    "if updatedAt<0 or expiresAt>tonumber(ARGV[11]) then return ARGV[12] end;"
+    "if field=='manualPriority' then record['manualExpiresAt']=expiresAt;"
+    "elseif field=='cleared' then record['clearedExpiresAt']=expiresAt;"
+    "else record['waitingExpiresAt']=expiresAt;end;"
     "record['version']=record['version']+1;record['updatedAt']=updatedAt;"
-    "local encoded=cjson.encode(record);if string.len(encoded)>tonumber(ARGV[7]) "
-    "then return ARGV[9] end;"
-    "redis.call('SET',KEYS[1],encoded,'EX',ARGV[6]);return encoded"
+    "local encoded=cjson.encode(record);if string.len(encoded)>tonumber(ARGV[10]) "
+    "then return ARGV[12] end;"
+    "redis.call('SET',KEYS[1],encoded,'EX',ARGV[9]);return encoded"
 )
 
 
@@ -407,6 +440,9 @@ class PriorityWorkflowRecord:
     waiting: str = "absent"
     version: int = 0
     updated_at: int | None = None
+    manual_expires_at: int | None = None
+    cleared_expires_at: int | None = None
+    waiting_expires_at: int | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -422,9 +458,75 @@ class PriorityWorkflowRecord:
                     or not 0 <= self.updated_at <= WORKFLOW_MAX_SAFE_INTEGER
                 )
             )
-            or (self.version == 0) != (self.updated_at is None)
+            or any(
+                expiry is not None
+                and (
+                    type(expiry) is not int
+                    or not 0 <= expiry <= WORKFLOW_MAX_SAFE_INTEGER
+                )
+                for expiry in (
+                    self.manual_expires_at,
+                    self.cleared_expires_at,
+                    self.waiting_expires_at,
+                )
+            )
+            or (self.version == 0)
+            != (
+                self.updated_at is None
+                and self.manual_expires_at is None
+                and self.cleared_expires_at is None
+                and self.waiting_expires_at is None
+            )
+            or (
+                self.version > 0
+                and (
+                    self.updated_at is None
+                    or any(
+                        expiry is None
+                        for expiry in (
+                            self.manual_expires_at,
+                            self.cleared_expires_at,
+                            self.waiting_expires_at,
+                        )
+                    )
+                )
+            )
+            or (
+                self.version == 0
+                and (
+                    self.manual_priority != "none"
+                    or self.cleared != "active"
+                    or self.waiting != "absent"
+                )
+            )
         ):
             raise ValueError("invalid Priority workflow record")
+
+    def normalized_at(self, current: int) -> PriorityWorkflowRecord:
+        if (
+            type(current) is not int
+            or not 0 <= current <= WORKFLOW_MAX_SAFE_INTEGER
+        ):
+            raise ValueError("invalid Priority workflow server time")
+        if self.version == 0:
+            return self
+        assert self.manual_expires_at is not None
+        assert self.cleared_expires_at is not None
+        assert self.waiting_expires_at is not None
+        return PriorityWorkflowRecord(
+            manual_priority=(
+                self.manual_priority
+                if current < self.manual_expires_at
+                else "none"
+            ),
+            cleared=self.cleared if current < self.cleared_expires_at else "active",
+            waiting=self.waiting if current < self.waiting_expires_at else "absent",
+            version=self.version,
+            updated_at=self.updated_at,
+            manual_expires_at=self.manual_expires_at,
+            cleared_expires_at=self.cleared_expires_at,
+            waiting_expires_at=self.waiting_expires_at,
+        )
 
     def to_wire_dict(
         self,
@@ -578,11 +680,22 @@ class PriorityWorkflowStore:
         records: list[PriorityWorkflowRecord] = []
         for start in range(0, len(scopes), WORKFLOW_REDIS_READ_BATCH_SIZE):
             batch = scopes[start : start + WORKFLOW_REDIS_READ_BATCH_SIZE]
-            values = self._command(["MGET", *(self._key(scope) for scope in batch)])
-            if type(values) is not list or len(values) != len(batch):
+            values = self._command(
+                [
+                    "EVAL",
+                    _READ_WORKFLOW_RECORDS_SCRIPT,
+                    len(batch),
+                    *(self._key(scope) for scope in batch),
+                    _WORKFLOW_MISSING_SENTINEL,
+                ]
+            )
+            if type(values) is not list or len(values) != len(batch) + 1:
                 raise WorkflowStoreUnavailable()
-            for scope, value in zip(batch, values, strict=True):
-                if value is None:
+            current = _workflow_safe_integer(values[0], minimum=0)
+            if current is None:
+                raise WorkflowStoreUnavailable()
+            for scope, value in zip(batch, values[1:], strict=True):
+                if value == _WORKFLOW_MISSING_SENTINEL:
                     records.append(PriorityWorkflowRecord())
                     continue
                 scope_digest, identity_digest = self._digests(scope)
@@ -593,7 +706,7 @@ class PriorityWorkflowStore:
                 )
                 if decoded is None:
                     raise WorkflowStoreUnavailable()
-                records.append(decoded)
+                records.append(decoded.normalized_at(current))
         return tuple(records)
 
     def write_field(
@@ -629,7 +742,10 @@ class PriorityWorkflowStore:
                 identity_digest,
                 field,
                 value,
-                WORKFLOW_TTL_SECONDS,
+                WORKFLOW_MANUAL_TTL_SECONDS,
+                WORKFLOW_CLEARED_TTL_SECONDS,
+                WORKFLOW_WAITING_TTL_SECONDS,
+                WORKFLOW_PHYSICAL_TTL_SECONDS,
                 WORKFLOW_MAX_SERIALIZED_RECORD_BYTES,
                 WORKFLOW_MAX_SAFE_INTEGER,
                 _WORKFLOW_CORRUPT_SENTINEL,
@@ -644,7 +760,8 @@ class PriorityWorkflowStore:
         )
         if decoded is None:
             raise WorkflowStoreUnavailable()
-        return decoded
+        assert decoded.updated_at is not None
+        return decoded.normalized_at(decoded.updated_at)
 
 
 class SemanticAssessmentStore:
@@ -1447,20 +1564,38 @@ def _decode_workflow_record(
             "scopeDigest",
             "identityDigest",
             "manualPriority",
+            "manualExpiresAt",
             "cleared",
+            "clearedExpiresAt",
             "waiting",
+            "waitingExpiresAt",
             "version",
             "updatedAt",
         }:
             return None
         version = _workflow_safe_integer(payload["version"], minimum=1)
         updated_at = _workflow_safe_integer(payload["updatedAt"], minimum=0)
+        manual_expires_at = _workflow_safe_integer(
+            payload["manualExpiresAt"],
+            minimum=0,
+        )
+        cleared_expires_at = _workflow_safe_integer(
+            payload["clearedExpiresAt"],
+            minimum=0,
+        )
+        waiting_expires_at = _workflow_safe_integer(
+            payload["waitingExpiresAt"],
+            minimum=0,
+        )
         if (
             payload["schemaVersion"] != WORKFLOW_STORE_SCHEMA_VERSION
             or payload["scopeDigest"] != expected_scope_digest
             or payload["identityDigest"] != expected_identity_digest
             or version is None
             or updated_at is None
+            or manual_expires_at is None
+            or cleared_expires_at is None
+            or waiting_expires_at is None
         ):
             return None
         return PriorityWorkflowRecord(
@@ -1469,6 +1604,9 @@ def _decode_workflow_record(
             waiting=payload["waiting"],
             version=version,
             updated_at=updated_at,
+            manual_expires_at=manual_expires_at,
+            cleared_expires_at=cleared_expires_at,
+            waiting_expires_at=waiting_expires_at,
         )
     except Exception:
         return None
