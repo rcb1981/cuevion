@@ -476,8 +476,8 @@ assert.match(
 );
 assert.match(
   priorityActionBridgeSource,
-  /handleSetManualPriority = async[\s\S]*?coordinatePrioritySemanticNewInboundRemoval<MailMessage>[\s\S]*?observation: semanticObservation[\s\S]*?dismissExactPrioritySemanticNewInboundObservation[\s\S]*?resolveCurrentPrioritySemanticNewInboundDismissalTarget[\s\S]*?mailboxStoreRef\.current[\s\S]*?applyManualPriorityUpdate/,
-  "Remove delegates exact dismissal and current-store application to the ordered coordinator",
+  /handleSetManualPriority = async[\s\S]*?coordinatePrioritySemanticNewInboundRemoval<MailMessage>[\s\S]*?observation: semanticObservation[\s\S]*?dismissExactPrioritySemanticNewInboundObservation[\s\S]*?resolveCurrentPrioritySemanticNewInboundDismissalTarget[\s\S]*?resolution\.status === "local_only"[\s\S]*?applyManualPriorityUpdate[\s\S]*?set_manual_priority[\s\S]*?applyManualPriorityRecordToMirror/,
+  "Remove preserves exact dismissal, isolates legacy local behavior, and applies the canonical workflow mirror only after its server write",
 );
 assert.match(
   priorityActionBridgeSource,
@@ -486,8 +486,8 @@ assert.match(
 );
 assert.match(
   priorityActionBridgeSource,
-  /handleMarkPriorityItemDone = async[\s\S]*?coordinatePrioritySemanticNewInboundRemoval<MailMessage>[\s\S]*?observation: semanticObservation[\s\S]*?dismissExactPrioritySemanticNewInboundObservation[\s\S]*?resolveCurrentPrioritySemanticNewInboundDismissalTarget[\s\S]*?applyMarkPriorityItemDone/,
-  "Done delegates exact dismissal and current-store application to the ordered coordinator",
+  /handleMarkPriorityItemDone = async[\s\S]*?coordinatePrioritySemanticNewInboundRemoval<MailMessage>[\s\S]*?observation: semanticObservation[\s\S]*?dismissExactPrioritySemanticNewInboundObservation[\s\S]*?resolveCurrentPrioritySemanticNewInboundDismissalTarget[\s\S]*?resolution\.status === "local_only"[\s\S]*?applyMarkPriorityItemDone[\s\S]*?set_cleared[\s\S]*?applyPriorityClearedRecordToMirror/,
+  "Done preserves exact dismissal, isolates legacy local behavior, and applies cleared only after its server write",
 );
 assert.match(
   dismissalRequestSource,

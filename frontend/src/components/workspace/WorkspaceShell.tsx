@@ -367,6 +367,17 @@ import {
   type WaitingOnOtherStore,
 } from "../../lib/waitingOnOther";
 import {
+  PriorityWorkflowAuthorityClient,
+  type PriorityWorkflowRecord,
+} from "../../lib/priorityWorkflowAuthorityApi";
+import {
+  PriorityWorkflowWriteCoordinator,
+  resolvePriorityWorkflowTarget,
+  type PriorityWorkflowOperation,
+  type PriorityWorkflowTarget,
+  type PriorityWorkflowTargetResolution,
+} from "../../lib/priorityWorkflowAuthority";
+import {
   SEMANTIC_SCHEMA_VERSION,
   addPrioritySemanticObservation,
   buildPrioritySemanticActiveEventRefStorageKey,
@@ -427,6 +438,7 @@ const BundleOrganizerSurface = lazy(() =>
 );
 
 const PRODUCT_ACCESS_STORAGE_KEY = "cuevion-product-access";
+const PRIORITY_WORKFLOW_MAX_PENDING_TRANSITIONS = 64;
 const BUNDLE_PILOT_ACCESS_CODE = "CUEVION-BUNDLE-PILOT";
 const BUNDLE_SHOW_ORGANIZER_MANAGED_MAIL_STORAGE_KEY =
   "cuevion-bundle-show-organizer-managed-mail";
@@ -1509,6 +1521,18 @@ type ManualPriorityUpdateOptions = {
   sourceMailboxId?: InboxId | null;
   sourceMessage?: MailMessage | null;
 };
+type PriorityWorkflowFailure = {
+  message: string;
+  retry: () => void;
+};
+
+function buildPriorityWorkflowWaitingTransitionKey(
+  mailboxId: string,
+  conversationId: string,
+  transitionedAt: string,
+) {
+  return JSON.stringify([mailboxId, conversationId, transitionedAt]);
+}
 
 function resolveManualPriorityOverride(
   overrides: ManualPriorityOverrideStore,
@@ -2101,10 +2125,10 @@ export async function coordinatePrioritySemanticNewInboundRemoval<T>(input: {
   resolveCurrentTarget: (
     observation: PrioritySemanticNewInboundHydrationRecord,
   ) => T | null;
-  applyLocal: (target: T | null) => boolean;
+  applyLocal: (target: T | null) => boolean | Promise<boolean>;
 }) {
   if (!input.observation) {
-    return input.applyLocal(null);
+    return await input.applyLocal(null);
   }
   if (!input.resolveCurrentTarget(input.observation)) {
     return false;
@@ -2113,7 +2137,7 @@ export async function coordinatePrioritySemanticNewInboundRemoval<T>(input: {
     return false;
   }
   const currentTarget = input.resolveCurrentTarget(input.observation);
-  return currentTarget ? input.applyLocal(currentTarget) : false;
+  return currentTarget ? await input.applyLocal(currentTarget) : false;
 }
 
 function isCanonicalPrioritySemanticNewInboundImapInteger(
@@ -42556,6 +42580,9 @@ export function WorkspaceShell({
       }
     >
   >(new Map());
+  const pendingPriorityWorkflowWaitingTransitionsRef = useRef<Set<string>>(
+    new Set(),
+  );
   const pendingPrioritySemanticReconciliationRef = useRef<{
     previousStore: WaitingOnOtherStore;
     reconciledStore: WaitingOnOtherStore;
@@ -45920,6 +45947,8 @@ export function WorkspaceShell({
   const [manualChangeConfirmationMessage, setManualChangeConfirmationMessage] = useState<string | null>(
     null,
   );
+  const [priorityWorkflowFailure, setPriorityWorkflowFailure] =
+    useState<PriorityWorkflowFailure | null>(null);
   const [prioritySemanticNewInboundDismissalFailure, setPrioritySemanticNewInboundDismissalFailure] =
     useState<string | null>(null);
   const [spamSuppressionKeys, setSpamSuppressionKeys] = useState<string[]>(() => {
@@ -45995,6 +46024,46 @@ export function WorkspaceShell({
   manualPriorityOverridesRef.current = manualPriorityOverrides;
   const priorityClearedKeysRef = useRef(priorityClearedKeys);
   priorityClearedKeysRef.current = priorityClearedKeys;
+  const waitingOnOtherStoreRef = useRef(waitingOnOtherStore);
+  waitingOnOtherStoreRef.current = waitingOnOtherStore;
+  const priorityWorkflowAuthorityScopeKey = JSON.stringify([
+    workspacePersistenceScope,
+    workspaceDataMode,
+    hasAuthenticatedMemberAuthority,
+    savedManagedInboxes.map((mailbox) => [
+      mailbox.id,
+      mailbox.provider,
+      mailbox.connected,
+      mailbox.connectionStatus,
+    ]),
+  ]);
+  const priorityWorkflowWriteCoordinatorRef = useRef<
+    PriorityWorkflowWriteCoordinator | null
+  >(null);
+  const priorityWorkflowReturnedReplyAttemptsRef = useRef<Set<string>>(
+    new Set(),
+  );
+  const priorityWorkflowReturnedReplyAttemptScopeRef = useRef(
+    priorityWorkflowAuthorityScopeKey,
+  );
+  if (!priorityWorkflowWriteCoordinatorRef.current) {
+    priorityWorkflowWriteCoordinatorRef.current =
+      new PriorityWorkflowWriteCoordinator(
+        new PriorityWorkflowAuthorityClient(),
+        priorityWorkflowAuthorityScopeKey,
+      );
+  }
+  priorityWorkflowWriteCoordinatorRef.current.activateScope(
+    priorityWorkflowAuthorityScopeKey,
+  );
+  if (
+    priorityWorkflowReturnedReplyAttemptScopeRef.current !==
+    priorityWorkflowAuthorityScopeKey
+  ) {
+    priorityWorkflowReturnedReplyAttemptScopeRef.current =
+      priorityWorkflowAuthorityScopeKey;
+    priorityWorkflowReturnedReplyAttemptsRef.current.clear();
+  }
   const prioritySemanticNewInboundOwnedAddressSetRef = useRef<Set<string>>(
     new Set(),
   );
@@ -46419,6 +46488,7 @@ export function WorkspaceShell({
     requestedPrioritySemanticAssessmentObservationKeysRef.current.clear();
     pendingPrioritySemanticReturnedReplyTriggersRef.current.clear();
     pendingPrioritySemanticOutgoingReplyTriggersRef.current.clear();
+    pendingPriorityWorkflowWaitingTransitionsRef.current.clear();
     pendingPrioritySemanticReconciliationRef.current = null;
     if (typeof window !== "undefined") {
       try {
@@ -46686,7 +46756,20 @@ export function WorkspaceShell({
   );
 
   useEffect(() => {
-    if (!isPrioritySemanticDeterministicStoreCommitted) {
+    if (isPrioritySemanticDeterministicStoreCommitted) {
+      return;
+    }
+    const returnedReplyTriggers = findPrioritySemanticReturnedReplyTriggers(
+      waitingOnOtherStore,
+      effectiveWaitingOnOtherStore,
+      externalInboundConversationEntries,
+    );
+    if (
+      workspaceDataMode !== "live" ||
+      !hasAuthenticatedMemberAuthority ||
+      returnedReplyTriggers.length === 0
+    ) {
+      waitingOnOtherStoreRef.current = effectiveWaitingOnOtherStore;
       setWaitingOnOtherStore(effectiveWaitingOnOtherStore);
       try {
         pendingPrioritySemanticReconciliationRef.current = {
@@ -46697,12 +46780,19 @@ export function WorkspaceShell({
       } catch {
         pendingPrioritySemanticReconciliationRef.current = null;
       }
+      return;
     }
+    void commitPriorityWorkflowReturnedReplyTransition(
+      returnedReplyTriggers[0],
+      externalInboundConversationEntries,
+    );
   }, [
     effectiveWaitingOnOtherStore,
     externalInboundConversationEntries,
+    hasAuthenticatedMemberAuthority,
     isPrioritySemanticDeterministicStoreCommitted,
     waitingOnOtherStore,
+    workspaceDataMode,
   ]);
 
   useEffect(() => {
@@ -46771,10 +46861,26 @@ export function WorkspaceShell({
               trigger.mailboxId,
               trigger.conversationId,
             );
-            if (
-              !isDeterministicWaitingCommitted ||
-              activeEvent?.activeEventRef !== trigger.activeEventRef
-            ) {
+            if (!isDeterministicWaitingCommitted) {
+              const pendingWorkflowKey =
+                buildPriorityWorkflowWaitingTransitionKey(
+                  trigger.mailboxId,
+                  trigger.conversationId,
+                  trigger.sentAt,
+                );
+              if (
+                pendingPriorityWorkflowWaitingTransitionsRef.current.has(
+                  pendingWorkflowKey,
+                )
+              ) {
+                return;
+              }
+              pendingPrioritySemanticOutgoingReplyTriggersRef.current.delete(
+                pendingKey,
+              );
+              return;
+            }
+            if (activeEvent?.activeEventRef !== trigger.activeEventRef) {
               pendingPrioritySemanticOutgoingReplyTriggersRef.current.delete(
                 pendingKey,
               );
@@ -49672,6 +49778,208 @@ export function WorkspaceShell({
     });
   };
 
+  const resolvePriorityWorkflowActionTarget = (
+    mailboxId: InboxId,
+    message: MailMessage,
+  ): PriorityWorkflowTargetResolution =>
+    resolvePriorityWorkflowTarget({
+      serverAuthorityEnabled:
+        workspaceDataMode === "live" && hasAuthenticatedMemberAuthority,
+      mailbox: savedManagedInboxes.find(
+        (candidate) => candidate.id === mailboxId,
+      ),
+      message,
+    });
+
+  const showPriorityWorkflowFailure = (
+    message: string,
+    retry: () => void,
+  ) => {
+    setPriorityWorkflowFailure({ message, retry });
+  };
+
+  const attemptPriorityWorkflowWrite = async (input: {
+    target: PriorityWorkflowTarget;
+    operation: PriorityWorkflowOperation;
+    commit: (record: PriorityWorkflowRecord) => void;
+    continueAfterSuccess?: () => Promise<boolean | void> | boolean | void;
+  }): Promise<boolean> => {
+    const retry = () => {
+      setPriorityWorkflowFailure(null);
+      void attemptPriorityWorkflowWrite(input);
+    };
+    const outcome = await priorityWorkflowWriteCoordinatorRef.current!.write({
+      scopeKey: priorityWorkflowAuthorityScopeKey,
+      target: input.target,
+      operation: input.operation,
+      commit: input.commit,
+    });
+    if (outcome.status === "failed") {
+      showPriorityWorkflowFailure(outcome.error.message, retry);
+      return false;
+    }
+    if (outcome.status === "superseded") {
+      return false;
+    }
+    if (input.continueAfterSuccess) {
+      return (await input.continueAfterSuccess()) !== false;
+    }
+    return true;
+  };
+
+  const rejectCanonicalPriorityWorkflowAction = (retry: () => void) => {
+    showPriorityWorkflowFailure(
+      "This message cannot be saved across devices yet. Refresh the mailbox and retry.",
+      retry,
+    );
+  };
+
+  const applyManualPriorityRecordToMirror = (
+    mailboxId: InboxId,
+    message: MailMessage,
+    record: PriorityWorkflowRecord,
+  ) => {
+    const project = (current: ManualPriorityOverrideStore) =>
+      record.manualPriority === "none"
+        ? removePersistedMessageStateValue(current, message, { mailboxId })
+        : writePersistedMessageStateValue(
+            current,
+            message,
+            record.manualPriority,
+            { mailboxId },
+          );
+    const immediate = project(manualPriorityOverridesRef.current);
+    manualPriorityOverridesRef.current = immediate;
+    setManualPriorityOverrides((current) => {
+      const next = project(current);
+      manualPriorityOverridesRef.current = next;
+      return next;
+    });
+    if (record.manualPriority === "priority") {
+      const linkedReviewId = reviewController.getReviewBySourceId(message.id)?.id ?? null;
+      setCompletedPriorityReviewIds((current) =>
+        current.filter(
+          (reviewId) =>
+            reviewId !== `manual-priority-${message.id}` &&
+            reviewId !== linkedReviewId,
+        ),
+      );
+    }
+  };
+
+  const applyPriorityClearedRecordToMirror = (
+    mailboxId: InboxId,
+    message: MailMessage,
+    record: PriorityWorkflowRecord,
+  ) => {
+    const affectedKeys = new Set(
+      getPriorityClearedIdentityKeys(mailboxId, message),
+    );
+    const project = (current: string[]) => {
+      const migrated = migrateLegacyMailboxPrefixedImapStateKeys(
+        current,
+        buildPersistedMessageIdentityCandidates(mailboxStoreRef.current),
+        legacyImapMigrationOptions,
+      );
+      return record.cleared === "cleared"
+        ? Array.from(new Set([...migrated, ...affectedKeys]))
+        : migrated.filter((key) => !affectedKeys.has(key));
+    };
+    const immediate = project(priorityClearedKeysRef.current);
+    priorityClearedKeysRef.current = immediate;
+    setPriorityClearedKeys((current) => {
+      const next = project(current);
+      priorityClearedKeysRef.current = next;
+      return next;
+    });
+  };
+
+  const clearWaitingRecordFromMirror = (
+    mailboxId: InboxId,
+    message: MailMessage,
+  ) => {
+    const project = (current: WaitingOnOtherStore) =>
+      clearConversationWaitingOnOther(current, { mailboxId, message });
+    const immediate = project(waitingOnOtherStoreRef.current);
+    waitingOnOtherStoreRef.current = immediate;
+    setWaitingOnOtherStore((current) => {
+      const next = project(current);
+      waitingOnOtherStoreRef.current = next;
+      return next;
+    });
+  };
+
+  const commitPriorityWorkflowReturnedReplyTransition = async (
+    trigger: PrioritySemanticReturnedReplyTrigger,
+    entries: Array<{ mailboxId: InboxId; message: MailMessage }>,
+  ) => {
+    const candidates = entries.flatMap((entry) => {
+      if (entry.mailboxId !== trigger.mailboxId) {
+        return [];
+      }
+      const resolution = resolvePriorityWorkflowActionTarget(
+        entry.mailboxId,
+        entry.message,
+      );
+      return resolution.status === "canonical" &&
+        JSON.stringify(resolution.target.identity) ===
+          JSON.stringify(trigger.incomingLocator)
+        ? [{ entry, target: resolution.target }]
+        : [];
+    });
+    const attemptKey = [
+      trigger.mailboxId,
+      trigger.conversationId,
+      trigger.returnedMessageKey,
+    ].join("::");
+    if (priorityWorkflowReturnedReplyAttemptsRef.current.has(attemptKey)) {
+      return false;
+    }
+    priorityWorkflowReturnedReplyAttemptsRef.current.add(attemptKey);
+    if (candidates.length !== 1) {
+      rejectCanonicalPriorityWorkflowAction(() => {
+        priorityWorkflowReturnedReplyAttemptsRef.current.delete(attemptKey);
+        void commitPriorityWorkflowReturnedReplyTransition(trigger, entries);
+      });
+      return false;
+    }
+    const [{ entry, target }] = candidates;
+    return priorityWorkflowWriteCoordinatorRef.current!.runAction(
+      priorityWorkflowAuthorityScopeKey,
+      `${target.recordKey}:returned_reply:${trigger.returnedMessageKey}`,
+      () =>
+        attemptPriorityWorkflowWrite({
+          target,
+          operation: {
+            operation: "set_waiting",
+            value: "returned_reply",
+          },
+          commit: () => {
+            const previousStore = waitingOnOtherStoreRef.current;
+            const reconciledStore = reconcileWaitingOnOtherStore(
+              previousStore,
+              [entry],
+              {
+                ownEmailAddresses: [
+                  ...connectedOrderedMailboxes.map(
+                    (mailbox) => mailbox.email,
+                  ),
+                  authenticatedUser?.email ?? activeWorkspaceEmail,
+                ],
+              },
+            );
+            pendingPrioritySemanticReconciliationRef.current = {
+              previousStore,
+              reconciledStore,
+              externalInboundEntries: [entry],
+            };
+            waitingOnOtherStoreRef.current = reconciledStore;
+            setWaitingOnOtherStore(reconciledStore);
+          },
+        }),
+    );
+  };
+
   const applyManualPriorityUpdate = (
     messageId: string,
     shouldBePriority: boolean,
@@ -49819,6 +50127,23 @@ export function WorkspaceShell({
       options.sourceMessage?.id === messageId
         ? options.sourceMessage
         : sourceMessage;
+    const initialWorkflowResolution =
+      sourceMailboxId && exactSourceMessage
+        ? resolvePriorityWorkflowActionTarget(
+            sourceMailboxId,
+            exactSourceMessage,
+          )
+        : null;
+    if (
+      workspaceDataMode === "live" &&
+      hasAuthenticatedMemberAuthority &&
+      initialWorkflowResolution?.status !== "canonical"
+    ) {
+      rejectCanonicalPriorityWorkflowAction(() => {
+        void handleSetManualPriority(messageId, shouldBePriority, options);
+      });
+      return false;
+    }
     const semanticObservation =
       !shouldBePriority &&
       !options.skipSemanticNewInboundDismissal &&
@@ -49857,25 +50182,116 @@ export function WorkspaceShell({
               ...actionFence,
             })
           : null,
-      applyLocal: (currentMessage) => {
-        return currentMessage && sourceMailboxId
-          ? applyManualPriorityUpdate(
-              messageId,
-              shouldBePriority,
-              {
-                ...options,
-                storageMailboxId:
-                  options.storageMailboxId ?? sourceMailboxId,
-                sourceMailboxId,
-                sourceMessage: currentMessage,
-              },
-              mailboxStoreRef.current,
-            )
-          : applyManualPriorityUpdate(
-              messageId,
-              shouldBePriority,
-              options,
+      applyLocal: async (currentMessage) => {
+        const actionMessage = currentMessage ?? exactSourceMessage;
+        if (!sourceMailboxId || !actionMessage) {
+          if (
+            workspaceDataMode === "live" &&
+            hasAuthenticatedMemberAuthority
+          ) {
+            rejectCanonicalPriorityWorkflowAction(() => {
+              void handleSetManualPriority(
+                messageId,
+                shouldBePriority,
+                options,
+              );
+            });
+            return false;
+          }
+          return applyManualPriorityUpdate(
+            messageId,
+            shouldBePriority,
+            options,
+          );
+        }
+        const resolution = resolvePriorityWorkflowActionTarget(
+          sourceMailboxId,
+          actionMessage,
+        );
+        if (resolution.status === "local_only") {
+          return applyManualPriorityUpdate(
+            messageId,
+            shouldBePriority,
+            {
+              ...options,
+              storageMailboxId:
+                options.storageMailboxId ?? sourceMailboxId,
+              sourceMailboxId,
+              sourceMessage: actionMessage,
+            },
+            mailboxStoreRef.current,
+          );
+        }
+        if (resolution.status === "invalid") {
+          rejectCanonicalPriorityWorkflowAction(() => {
+            void handleSetManualPriority(messageId, shouldBePriority, {
+              ...options,
+              sourceMailboxId,
+              sourceMessage: actionMessage,
+            });
+          });
+          return false;
+        }
+
+        const finish = () => {
+          if (options.showConfirmation !== false) {
+            setManualChangeConfirmationMessage(
+              shouldBePriority
+                ? "Priority set to Important"
+                : "This is not priority",
             );
+          }
+          return true;
+        };
+        return priorityWorkflowWriteCoordinatorRef.current!.runAction(
+          priorityWorkflowAuthorityScopeKey,
+          `${resolution.target.recordKey}:manual:${
+            shouldBePriority ? "priority" : "removed"
+          }`,
+          () =>
+            attemptPriorityWorkflowWrite({
+              target: resolution.target,
+              operation: {
+                operation: "set_manual_priority",
+                value: shouldBePriority ? "priority" : "removed",
+              },
+              commit: (record) =>
+                applyManualPriorityRecordToMirror(
+                  sourceMailboxId,
+                  actionMessage,
+                  record,
+                ),
+              continueAfterSuccess: () =>
+                shouldBePriority
+                  ? attemptPriorityWorkflowWrite({
+                      target: resolution.target,
+                      operation: {
+                        operation: "set_cleared",
+                        value: "active",
+                      },
+                      commit: (record) =>
+                        applyPriorityClearedRecordToMirror(
+                          sourceMailboxId,
+                          actionMessage,
+                          record,
+                        ),
+                      continueAfterSuccess: finish,
+                    })
+                  : attemptPriorityWorkflowWrite({
+                      target: resolution.target,
+                      operation: {
+                        operation: "set_waiting",
+                        value: "absent",
+                      },
+                      commit: () =>
+                        clearWaitingRecordFromMirror(
+                          sourceMailboxId,
+                          actionMessage,
+                        ),
+                      continueAfterSuccess: finish,
+                    }),
+            }),
+        );
       },
     });
   };
@@ -49940,6 +50356,20 @@ export function WorkspaceShell({
     if (!mailboxId || !sourceMessage) {
       return false;
     }
+    const initialWorkflowResolution = resolvePriorityWorkflowActionTarget(
+      mailboxId,
+      sourceMessage,
+    );
+    if (
+      workspaceDataMode === "live" &&
+      hasAuthenticatedMemberAuthority &&
+      initialWorkflowResolution.status !== "canonical"
+    ) {
+      rejectCanonicalPriorityWorkflowAction(() => {
+        void handleMarkPriorityItemDone(reviewItem);
+      });
+      return false;
+    }
     const semanticObservation =
       resolveExactPrioritySemanticNewInboundObservation(
         mailboxId,
@@ -49963,20 +50393,160 @@ export function WorkspaceShell({
           record,
           ...actionFence,
         }),
-      applyLocal: (currentMessage) => {
-        return applyMarkPriorityItemDone(
-          reviewItem,
-          currentMessage
-            ? { mailboxId, message: currentMessage }
-            : canonicalTarget
-              ? {
-                  mailboxId: canonicalTarget.mailboxId,
-                  message: canonicalTarget.message,
-                }
-              : undefined,
+      applyLocal: async (currentMessage) => {
+        const actionMessage =
+          currentMessage ?? canonicalTarget?.message ?? sourceMessage;
+        const resolution = resolvePriorityWorkflowActionTarget(
+          mailboxId,
+          actionMessage,
+        );
+        if (resolution.status === "local_only") {
+          return applyMarkPriorityItemDone(reviewItem, {
+            mailboxId,
+            message: actionMessage,
+          });
+        }
+        if (resolution.status === "invalid") {
+          rejectCanonicalPriorityWorkflowAction(() => {
+            void handleMarkPriorityItemDone(reviewItem);
+          });
+          return false;
+        }
+        return priorityWorkflowWriteCoordinatorRef.current!.runAction(
+          priorityWorkflowAuthorityScopeKey,
+          `${resolution.target.recordKey}:done`,
+          () =>
+            attemptPriorityWorkflowWrite({
+              target: resolution.target,
+              operation: {
+                operation: "set_cleared",
+                value: "cleared",
+              },
+              commit: (record) =>
+                applyPriorityClearedRecordToMirror(
+                  mailboxId,
+                  actionMessage,
+                  record,
+                ),
+              continueAfterSuccess: () =>
+                attemptPriorityWorkflowWrite({
+                  target: resolution.target,
+                  operation: {
+                    operation: "set_waiting",
+                    value: "absent",
+                  },
+                  commit: () =>
+                    clearWaitingRecordFromMirror(mailboxId, actionMessage),
+                }),
+            }),
         );
       },
     });
+  };
+
+  const applyWaitingOnOtherTransitionToMirror = (
+    mailboxId: InboxId,
+    message: MailMessage,
+    composeMode: "reply" | "reply_all",
+    transitionedAt: string,
+  ) => {
+    const project = (current: WaitingOnOtherStore) =>
+      transitionWaitingOnOtherAfterSend(current, {
+        mailboxId,
+        message,
+        composeMode,
+        sendSucceeded: true,
+        transitionedAt,
+      });
+    const immediate = project(waitingOnOtherStoreRef.current);
+    waitingOnOtherStoreRef.current = immediate;
+    setWaitingOnOtherStore((current) => {
+      const next = project(current);
+      waitingOnOtherStoreRef.current = next;
+      return next;
+    });
+  };
+
+  const handleSuccessfulConversationReply = async (
+    mailboxId: InboxId,
+    message: MailMessage,
+    composeMode: "reply" | "reply_all",
+    transitionedAt: string,
+  ) => {
+    const conversation = resolveCanonicalConversationIdentity(
+      message,
+      mailboxId,
+    );
+    if (!conversation.isAuthoritativeConversation) {
+      return false;
+    }
+    const resolution = resolvePriorityWorkflowActionTarget(
+      mailboxId,
+      message,
+    );
+    if (resolution.status === "local_only") {
+      applyWaitingOnOtherTransitionToMirror(
+        mailboxId,
+        message,
+        composeMode,
+        transitionedAt,
+      );
+      return true;
+    }
+    if (resolution.status === "invalid") {
+      rejectCanonicalPriorityWorkflowAction(() => {
+        void handleSuccessfulConversationReply(
+          mailboxId,
+          message,
+          composeMode,
+          transitionedAt,
+        );
+      });
+      return false;
+    }
+    const pendingWorkflowKey = buildPriorityWorkflowWaitingTransitionKey(
+      mailboxId,
+      conversation.key,
+      transitionedAt,
+    );
+    pendingPriorityWorkflowWaitingTransitionsRef.current.add(
+      pendingWorkflowKey,
+    );
+    while (
+      pendingPriorityWorkflowWaitingTransitionsRef.current.size >
+      PRIORITY_WORKFLOW_MAX_PENDING_TRANSITIONS
+    ) {
+      const oldest =
+        pendingPriorityWorkflowWaitingTransitionsRef.current.values().next()
+          .value;
+      if (typeof oldest !== "string") {
+        break;
+      }
+      pendingPriorityWorkflowWaitingTransitionsRef.current.delete(oldest);
+    }
+    return priorityWorkflowWriteCoordinatorRef.current!.runAction(
+      priorityWorkflowAuthorityScopeKey,
+      `${resolution.target.recordKey}:waiting_on_other:${transitionedAt}`,
+      () =>
+        attemptPriorityWorkflowWrite({
+          target: resolution.target,
+          operation: {
+            operation: "set_waiting",
+            value: "waiting_on_other",
+          },
+          commit: () => {
+            applyWaitingOnOtherTransitionToMirror(
+              mailboxId,
+              message,
+              composeMode,
+              transitionedAt,
+            );
+            pendingPriorityWorkflowWaitingTransitionsRef.current.delete(
+              pendingWorkflowKey,
+            );
+          },
+        }),
+    );
   };
 
   const handlePriorityListAction = (
@@ -54575,21 +55145,8 @@ export function WorkspaceShell({
                   manualOrganizerInclusions={manualOrganizerInclusions}
                   spamSuppressionKeys={spamSuppressionKeys}
                   onSetManualPriority={handleSetManualPriority}
-                  onSuccessfulConversationReply={(
-                    mailboxId,
-                    message,
-                    composeMode,
-                    transitionedAt,
-                  ) =>
-                    setWaitingOnOtherStore((current) =>
-                      transitionWaitingOnOtherAfterSend(current, {
-                        mailboxId,
-                        message,
-                        composeMode,
-                        sendSucceeded: true,
-                        transitionedAt,
-                      }),
-                    )
+                  onSuccessfulConversationReply={
+                    handleSuccessfulConversationReply
                   }
                   onPrioritySemanticReplyConfirmed={
                     handlePrioritySemanticReplyConfirmed
@@ -54887,10 +55444,40 @@ export function WorkspaceShell({
 		          <div className="pointer-events-none fixed bottom-6 right-6 z-[341]">
 		            <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.84rem] leading-6 text-[var(--workspace-text)] shadow-panel">
 		              {mailboxSyncFeedbackMessage}
-		            </div>
-		          </div>
-		        ) : null}
-		      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+      <SettingsModalShell
+        open={Boolean(priorityWorkflowFailure)}
+        themeMode={resolvedTheme}
+        maxWidthClass="max-w-[420px]"
+      >
+        <div className="space-y-2">
+          <h2 className="text-[1.15rem] font-medium tracking-tight text-[var(--workspace-text)]">
+            Change not saved
+          </h2>
+          <p className="text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
+            {priorityWorkflowFailure?.message}
+          </p>
+        </div>
+        <div className="mt-6 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setPriorityWorkflowFailure(null)}
+            className={settingsPairedSecondaryActionClass}
+          >
+            Close
+          </button>
+          <button
+            type="button"
+            onClick={() => priorityWorkflowFailure?.retry()}
+            className={settingsPrimaryActionClass}
+          >
+            Try again
+          </button>
+        </div>
+      </SettingsModalShell>
       <SettingsModalShell
         open={Boolean(prioritySemanticNewInboundDismissalFailure)}
         themeMode={resolvedTheme}
