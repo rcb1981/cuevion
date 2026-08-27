@@ -32,6 +32,16 @@ try {
     "const closeCollaborationOverlay = () =>",
     "const syncCollaborationMentionState = (",
   );
+  const ownerCreateRegion = sourceBetween(
+    workspaceSource,
+    "const createMessageCollaboration = () =>",
+    "const sendCollaborationReply = (",
+  );
+  const ownerCreateFailureCopyRegion = sourceBetween(
+    workspaceSource,
+    "function getCollaborationOwnerCreateFailureMessage(",
+    "const primaryNavigationItems = [",
+  );
 
   assert.equal((workspaceSource.match(/lookupCollaborationForOwner\(/g) ?? []).length, 1);
   assert.equal((workspaceSource.match(/readCollaborationForOwner\(/g) ?? []).length, 1);
@@ -71,6 +81,113 @@ try {
   );
   assert.equal(explicitOpenRegion.includes("beginCollaborationOwnerRead("), true);
   assert.equal(closeRegion.includes("fenceCollaborationOwnerProjection();"), true);
+
+  assert.equal(
+    (workspaceSource.match(/createCollaborationForOwner\(/g) ?? []).length,
+    1,
+    "The visible owner-v2 start path must have one create invocation",
+  );
+  assert.equal(
+    ownerCreateRegion.includes(
+      "createCollaborationForOwner(\n          trustedLocator,\n          \"needs_review\",",
+    ),
+    true,
+  );
+  assert.equal(
+    ownerCreateRegion.includes("collaboration: result.collaboration"),
+    true,
+    "The complete validated create DTO must become the server projection directly",
+  );
+  assert.equal(ownerCreateRegion.includes("result.created"), false);
+  assert.equal(ownerCreateRegion.includes("lookupCollaborationForOwner("), false);
+  assert.equal(ownerCreateRegion.includes("readCollaborationForOwner("), false);
+  assert.equal(ownerCreateRegion.includes("createCollaborationThread("), false);
+  assert.equal(ownerCreateRegion.includes("updateMessageById("), false);
+  assert.equal(ownerCreateRegion.includes("setMailboxStore("), false);
+  assert.equal(ownerCreateRegion.includes("setDraftCollaborationByMessageId"), true);
+  assert.ok(
+    ownerCreateRegion.indexOf("if (currentLocator)") <
+      ownerCreateRegion.indexOf("setDraftCollaborationByMessageId"),
+    "Only unsupported contexts may reach the unchanged legacy draft path",
+  );
+  assert.equal(
+    ownerCreateRegion.slice(
+      ownerCreateRegion.indexOf("if (currentLocator)"),
+      ownerCreateRegion.indexOf("const initialCollaboration"),
+    ).includes("setDraftCollaborationByMessageId"),
+    false,
+  );
+
+  for (const forbiddenOwnerCreateSideEffect of [
+    "localStorage",
+    "sessionStorage",
+    "indexedDB",
+    "X-Cuevion-Idempotency-Key",
+    "setInterval(",
+    "setTimeout(",
+  ]) {
+    assert.equal(
+      ownerCreateRegion.includes(forbiddenOwnerCreateSideEffect),
+      false,
+      `Owner create path must not contain ${forbiddenOwnerCreateSideEffect}`,
+    );
+  }
+  assert.equal(
+    ownerCreateRegion.includes("deriveCollaborationOwnerSourceLocator({"),
+    true,
+  );
+  assert.equal(ownerCreateRegion.includes("locator: trustedLocator"), true);
+  assert.equal(ownerCreateRegion.includes("activeRequest?.inFlight"), true);
+  assert.equal(ownerCreateRegion.includes('operation: "create"'), true);
+  assert.equal(ownerCreateRegion.includes("currentRequest.requestId === requestId"), true);
+  assert.equal(ownerCreateRegion.includes("currentRequest.messageId === messageId"), true);
+  assert.equal(
+    ownerCreateRegion.includes("currentRequest.sourceMailboxId === sourceMailboxId"),
+    true,
+  );
+  assert.equal(ownerCreateRegion.includes("if (!isCurrentRequest())"), true);
+  assert.equal(
+    ownerCreateRegion.includes('failureStatus: "invalid_source_locator"'),
+    true,
+  );
+  assert.equal(
+    workspaceSource.includes(
+      'collaborationOwnerCreateState.status === "loading" ||\n                              collaborationOwnerProjection.status === "loading"',
+    ),
+    true,
+  );
+  assert.equal(
+    workspaceSource.includes("data-collaboration-owner-create-feedback"),
+    true,
+  );
+  assert.equal(workspaceSource.includes("Starting collaboration…"), true);
+
+  for (const failureStatus of [
+    "unauthorized",
+    "forbidden",
+    "not_found",
+    "conflict",
+    "rate_limited",
+    "service_unavailable",
+    "internal_error",
+    "invalid_response",
+    "network_failure",
+    "invalid_source_locator",
+    "invalid_state",
+  ]) {
+    assert.equal(
+      ownerCreateFailureCopyRegion.includes(`\"${failureStatus}\"`),
+      true,
+      `Missing bounded create failure copy for ${failureStatus}`,
+    );
+  }
+  assert.equal(ownerCreateFailureCopyRegion.includes("404"), false);
+  assert.equal(
+    ownerCreateFailureCopyRegion.includes(
+      "Collaboration is temporarily unavailable. Try again later.",
+    ),
+    true,
+  );
 
   for (const forbiddenOwnerReadSideEffect of [
     "setMailboxStore(",

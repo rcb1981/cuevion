@@ -694,7 +694,7 @@ async function run() {
       );
     });
 
-    await test("remains absent from every WorkspaceShell UI path", reset, async () => {
+    await test("is isolated to the visible WorkspaceShell start path", reset, async () => {
       const workspaceSource = fs.readFileSync(
         path.resolve(
           __dirname,
@@ -702,8 +702,29 @@ async function run() {
         ),
         "utf8",
       );
-      assert.equal(workspaceSource.includes("collaborationOwnerWriteApi"), false);
-      assert.equal(workspaceSource.includes("createCollaborationForOwner"), false);
+      const startIndex = workspaceSource.indexOf(
+        "const createMessageCollaboration = () =>",
+      );
+      const endIndex = workspaceSource.indexOf(
+        "const sendCollaborationReply = (",
+        startIndex,
+      );
+      assert.notEqual(startIndex, -1);
+      assert.notEqual(endIndex, -1);
+      const visibleStartRegion = workspaceSource.slice(startIndex, endIndex);
+
+      assert.equal(workspaceSource.includes("collaborationOwnerWriteApi"), true);
+      assert.equal(
+        (workspaceSource.match(/createCollaborationForOwner\(/g) ?? []).length,
+        1,
+      );
+      assert.equal(visibleStartRegion.includes("createCollaborationForOwner("), true);
+      assert.equal(visibleStartRegion.includes("createCollaborationThread("), false);
+      assert.equal(visibleStartRegion.includes("result.created"), false);
+      assert.equal(
+        visibleStartRegion.includes("collaboration: result.collaboration"),
+        true,
+      );
 
       const writeSource = fs.readFileSync(
         path.resolve(__dirname, "./collaborationOwnerWriteApi.ts"),
