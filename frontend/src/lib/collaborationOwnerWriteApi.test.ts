@@ -85,6 +85,33 @@ function createResponse(
   });
 }
 
+function appendedMessage(
+  visibility: "internal" | "shared",
+  text: string,
+) {
+  return {
+    id: "N".repeat(22),
+    authorDisplayName: "Owner",
+    authorRole: "Cuevion user",
+    text,
+    timestamp: NOW_MS,
+    visibility,
+  } as const;
+}
+
+function appendResponse(
+  visibility: "internal" | "shared",
+  text: string,
+) {
+  return response(200, {
+    ok: true,
+    data: {
+      message: appendedMessage(visibility, text),
+      updatedAt: NOW_MS,
+    },
+  });
+}
+
 function readResponse(mailboxId: string) {
   return response(200, {
     ok: true,
@@ -105,6 +132,7 @@ function assertExactRequest(
   call: FetchCall,
   body: unknown,
   csrfToken?: string,
+  idempotencyKey?: string,
 ) {
   assert.equal(call.input, "/api/collaboration/owner");
   assert.equal(call.init?.method, "POST");
@@ -115,13 +143,36 @@ function assertExactRequest(
     Accept: "application/json",
     "Content-Type": "application/json",
     ...(csrfToken ? { "X-Cuevion-CSRF": csrfToken } : {}),
+    ...(idempotencyKey
+      ? { "X-Cuevion-Idempotency-Key": idempotencyKey }
+      : {}),
   });
-  assert.equal(
-    Object.keys(call.init?.headers as Record<string, string>).some(
-      (name) => name.toLowerCase() === "x-cuevion-idempotency-key",
-    ),
-    false,
+}
+
+function idempotencyKeyFrom(call: FetchCall): string {
+  const headers = call.init?.headers as Record<string, string>;
+  const key = headers["X-Cuevion-Idempotency-Key"];
+  assert.equal(typeof key, "string");
+  return key;
+}
+
+function assertCanonicalIdempotencyKey(key: string) {
+  assert.equal(key.length, 43);
+  assert.equal(/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(key), true);
+  const decoded = atob(
+    key.replace(/-/g, "+").replace(/_/g, "/") + "=",
   );
+  assert.equal(decoded.length, 32);
+}
+
+function requireReadyOperation(
+  result: WriteApi.CollaborationOwnerAppendPreparationResult,
+): WriteApi.CollaborationOwnerAppendOperation {
+  assert.equal(result.status, "ready");
+  if (result.status !== "ready") {
+    throw new Error("Expected a prepared append operation");
+  }
+  return result.operation;
 }
 
 function googleLocator(): CollaborationOwnerSourceLocator {
@@ -694,6 +745,381 @@ async function run() {
       );
     });
 
+    await test("sends the exact append_internal contract with a hidden canonical key", reset, async () => {
+      const calls: FetchCall[] = [];
+      const text = "Private\nowner note\tkept";
+      installFetch(
+        [csrfResponse("csrf-token"), appendResponse("internal", text)],
+        calls,
+      );
+      const operation = requireReadyOperation(
+        writeApi.prepareInternalCollaborationMessageForOwner(
+          COLLABORATION_ID,
+          text,
+        ),
+      );
+      assert.deepEqual(Reflect.ownKeys(operation), ["execute"]);
+      assert.equal(JSON.stringify(operation), "{}");
+      assert.deepEqual(await operation.execute(), {
+        status: "success",
+        message: appendedMessage("internal", text),
+        updatedAt: NOW_MS,
+      });
+
+      assert.equal(calls.length, 2);
+      assertExactRequest(calls[0], { operation: "csrf" });
+      const key = idempotencyKeyFrom(calls[1]);
+      assertCanonicalIdempotencyKey(key);
+      assertExactRequest(
+        calls[1],
+        {
+          operation: "append_internal",
+          collaborationId: COLLABORATION_ID,
+          text,
+        },
+        "csrf-token",
+        key,
+      );
+    });
+
+    await test("sends the exact append_shared contract", reset, async () => {
+      const calls: FetchCall[] = [];
+      const text = "Visible reply";
+      installFetch(
+        [csrfResponse("csrf-token"), appendResponse("shared", text)],
+        calls,
+      );
+      const operation = requireReadyOperation(
+        writeApi.prepareSharedCollaborationMessageForOwner(
+          COLLABORATION_ID,
+          text,
+        ),
+      );
+      assert.equal((await operation.execute()).status, "success");
+      const key = idempotencyKeyFrom(calls[1]);
+      assertCanonicalIdempotencyKey(key);
+      assertExactRequest(
+        calls[1],
+        {
+          operation: "append_shared",
+          collaborationId: COLLABORATION_ID,
+          text,
+        },
+        "csrf-token",
+        key,
+      );
+    });
+
+    await test("reuses one key for the same logical append and payload", reset, async () => {
+      const calls: FetchCall[] = [];
+      const text = "Retry-safe note";
+      installFetch(
+        [
+          csrfResponse("csrf-token"),
+          appendResponse("internal", text),
+          appendResponse("internal", text),
+        ],
+        calls,
+      );
+      const operation = requireReadyOperation(
+        writeApi.prepareInternalCollaborationMessageForOwner(
+          COLLABORATION_ID,
+          text,
+        ),
+      );
+      assert.equal((await operation.execute()).status, "success");
+      assert.equal((await operation.execute()).status, "success");
+      assert.deepEqual(calls[1].init?.body, calls[2].init?.body);
+      assert.equal(idempotencyKeyFrom(calls[1]), idempotencyKeyFrom(calls[2]));
+    });
+
+    await test("keeps the append key across the automatic CSRF retry", reset, async () => {
+      const calls: FetchCall[] = [];
+      const text = "CSRF retry note";
+      installFetch(
+        [
+          csrfResponse("stale-token"),
+          response(403, {}),
+          csrfResponse("fresh-token"),
+          appendResponse("internal", text),
+        ],
+        calls,
+      );
+      const operation = requireReadyOperation(
+        writeApi.prepareInternalCollaborationMessageForOwner(
+          COLLABORATION_ID,
+          text,
+        ),
+      );
+      assert.equal((await operation.execute()).status, "success");
+      assert.equal(calls.length, 4);
+      assert.equal(idempotencyKeyFrom(calls[1]), idempotencyKeyFrom(calls[3]));
+      assert.equal(
+        (calls[1].init?.headers as Record<string, string>)["X-Cuevion-CSRF"],
+        "stale-token",
+      );
+      assert.equal(
+        (calls[3].init?.headers as Record<string, string>)["X-Cuevion-CSRF"],
+        "fresh-token",
+      );
+    });
+
+    await test("does not auto-retry lost append responses and supports explicit same-key retry", reset, async () => {
+      const calls: FetchCall[] = [];
+      const text = "Lost response note";
+      installFetch(
+        [
+          csrfResponse("csrf-token"),
+          async () => {
+            throw new Error("synthetic ambiguous append failure");
+          },
+          appendResponse("internal", text),
+        ],
+        calls,
+      );
+      const operation = requireReadyOperation(
+        writeApi.prepareInternalCollaborationMessageForOwner(
+          COLLABORATION_ID,
+          text,
+        ),
+      );
+      assert.deepEqual(await operation.execute(), { status: "network_failure" });
+      assert.equal(calls.length, 2);
+
+      assert.equal((await operation.execute()).status, "success");
+      assert.equal(calls.length, 3);
+      assert.deepEqual(calls[1].init?.body, calls[2].init?.body);
+      assert.equal(idempotencyKeyFrom(calls[1]), idempotencyKeyFrom(calls[2]));
+    });
+
+    await test("gives concurrent logical appends independent keys", reset, async () => {
+      const calls: FetchCall[] = [];
+      const text = "Independent note";
+      installFetch(
+        [
+          csrfResponse("shared-token"),
+          appendResponse("internal", text),
+          appendResponse("internal", text),
+        ],
+        calls,
+      );
+      const first = requireReadyOperation(
+        writeApi.prepareInternalCollaborationMessageForOwner(
+          COLLABORATION_ID,
+          text,
+        ),
+      );
+      const second = requireReadyOperation(
+        writeApi.prepareInternalCollaborationMessageForOwner(
+          COLLABORATION_ID,
+          text,
+        ),
+      );
+      const results = await Promise.all([first.execute(), second.execute()]);
+      assert.deepEqual(
+        results.map((result) => result.status),
+        ["success", "success"],
+      );
+      assert.equal(calls.length, 3);
+      assert.notEqual(idempotencyKeyFrom(calls[1]), idempotencyKeyFrom(calls[2]));
+    });
+
+    await test("validates append IDs, controls, empty text, and UTF-8 byte limits", reset, async () => {
+      const calls: FetchCall[] = [];
+      installFetch(
+        [csrfResponse("csrf-token"), appendResponse("internal", "")],
+        calls,
+      );
+      for (const invalidId of ["", "A".repeat(21), "A".repeat(129), "A A"]) {
+        assert.deepEqual(
+          writeApi.prepareInternalCollaborationMessageForOwner(invalidId, "note"),
+          { status: "invalid_collaboration_id" },
+        );
+      }
+
+      for (const invalidText of [
+        "hidden\u0000control",
+        "hidden\u200bformat",
+        `surrogate${String.fromCharCode(0xd800)}`,
+        "😀".repeat(4096) + "a",
+      ]) {
+        assert.deepEqual(
+          writeApi.prepareInternalCollaborationMessageForOwner(
+            COLLABORATION_ID,
+            invalidText,
+          ),
+          { status: "invalid_text" },
+        );
+      }
+
+      assert.equal(
+        writeApi.prepareInternalCollaborationMessageForOwner(
+          COLLABORATION_ID,
+          "😀".repeat(4096),
+        ).status,
+        "ready",
+      );
+      assert.equal(
+        writeApi.prepareInternalCollaborationMessageForOwner(
+          COLLABORATION_ID,
+          "line one\r\nline two\t",
+        ).status,
+        "ready",
+      );
+      const empty = requireReadyOperation(
+        writeApi.prepareInternalCollaborationMessageForOwner(
+          COLLABORATION_ID,
+          "",
+        ),
+      );
+      assert.equal((await empty.execute()).status, "success");
+      assert.equal(JSON.parse(String(calls[1].init?.body)).text, "");
+      assert.equal(calls.length, 2);
+    });
+
+    await test("rejects malformed and contradictory append success DTOs", reset, async () => {
+      const text = "Strict response";
+      const message = appendedMessage("internal", text);
+      const malformed = [
+        response(201, { ok: true, data: { message, updatedAt: NOW_MS } }),
+        response(200, { ok: true, data: { message, updatedAt: NOW_MS, extra: 1 } }),
+        response(200, { ok: true, data: { updatedAt: NOW_MS } }),
+        response(200, {
+          ok: true,
+          data: { message: { ...message, extra: 1 }, updatedAt: NOW_MS },
+        }),
+        response(200, {
+          ok: true,
+          data: { message: { ...message, id: "bad" }, updatedAt: NOW_MS },
+        }),
+        response(200, {
+          ok: true,
+          data: {
+            message: { ...message, authorDisplayName: "" },
+            updatedAt: NOW_MS,
+          },
+        }),
+        response(200, {
+          ok: true,
+          data: {
+            message: { ...message, authorRole: "Guest reviewer" },
+            updatedAt: NOW_MS,
+          },
+        }),
+        response(200, {
+          ok: true,
+          data: { message: { ...message, text: "changed" }, updatedAt: NOW_MS },
+        }),
+        response(200, {
+          ok: true,
+          data: {
+            message: { ...message, visibility: "shared" },
+            updatedAt: NOW_MS,
+          },
+        }),
+        response(200, {
+          ok: true,
+          data: {
+            message: { ...message, timestamp: "not-a-timestamp" },
+            updatedAt: NOW_MS,
+          },
+        }),
+        response(200, {
+          ok: true,
+          data: { message, updatedAt: "not-a-timestamp" },
+        }),
+        response(200, {
+          ok: true,
+          data: { message, updatedAt: NOW_MS + 1 },
+        }),
+      ];
+
+      for (const malformedResponse of malformed) {
+        reset();
+        const calls: FetchCall[] = [];
+        installFetch([csrfResponse("token"), malformedResponse], calls);
+        const operation = requireReadyOperation(
+          writeApi.prepareInternalCollaborationMessageForOwner(
+            COLLABORATION_ID,
+            text,
+          ),
+        );
+        assert.deepEqual(await operation.execute(), {
+          status: "invalid_response",
+        });
+      }
+    });
+
+    await test("preserves every append failure class without backend details", reset, async () => {
+      const cases: Array<{
+        outcomes: FetchOutcome[];
+        expected: WriteApi.CollaborationOwnerAppendResult;
+      }> = [
+        {
+          outcomes: [csrfResponse("token"), response(401, {})],
+          expected: { status: "unauthorized" },
+        },
+        {
+          outcomes: [
+            csrfResponse("stale"),
+            response(403, {}),
+            csrfResponse("fresh"),
+            response(403, {}),
+          ],
+          expected: { status: "forbidden" },
+        },
+        {
+          outcomes: [csrfResponse("token"), response(404, {})],
+          expected: { status: "not_found" },
+        },
+        {
+          outcomes: [csrfResponse("token"), response(409, {})],
+          expected: { status: "conflict" },
+        },
+        {
+          outcomes: [
+            csrfResponse("token"),
+            response(429, {}, { "Retry-After": "30" }),
+          ],
+          expected: { status: "rate_limited", retryAfterSeconds: 30 },
+        },
+        {
+          outcomes: [csrfResponse("token"), response(503, {})],
+          expected: { status: "service_unavailable" },
+        },
+        {
+          outcomes: [csrfResponse("token"), response(500, {})],
+          expected: { status: "internal_error" },
+        },
+        {
+          outcomes: [
+            csrfResponse("token"),
+            async () => {
+              throw new Error("synthetic network failure");
+            },
+          ],
+          expected: { status: "network_failure" },
+        },
+        {
+          outcomes: [csrfResponse("token"), response(200, { ok: true })],
+          expected: { status: "invalid_response" },
+        },
+      ];
+
+      for (const testCase of cases) {
+        reset();
+        const calls: FetchCall[] = [];
+        installFetch([...testCase.outcomes], calls);
+        const operation = requireReadyOperation(
+          writeApi.prepareSharedCollaborationMessageForOwner(
+            COLLABORATION_ID,
+            "Failure case",
+          ),
+        );
+        assert.deepEqual(await operation.execute(), testCase.expected);
+      }
+    });
+
     await test("is isolated to the visible WorkspaceShell start path", reset, async () => {
       const workspaceSource = fs.readFileSync(
         path.resolve(
@@ -724,6 +1150,16 @@ async function run() {
       assert.equal(
         visibleStartRegion.includes("collaboration: result.collaboration"),
         true,
+      );
+      assert.equal(
+        workspaceSource.includes(
+          "prepareInternalCollaborationMessageForOwner",
+        ),
+        false,
+      );
+      assert.equal(
+        workspaceSource.includes("prepareSharedCollaborationMessageForOwner"),
+        false,
       );
 
       const writeSource = fs.readFileSync(

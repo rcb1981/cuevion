@@ -29,6 +29,10 @@ type CsrfResult =
   | { status: "success"; csrf: CsrfState }
   | CollaborationOwnerTransportFailure;
 
+type CollaborationOwnerAuthenticatedRequestOptions = {
+  idempotencyKey?: string;
+};
+
 let csrfState: CsrfState | null = null;
 let csrfBootstrapPromise: Promise<CsrfResult> | null = null;
 
@@ -157,6 +161,7 @@ async function bootstrapCsrf(): Promise<CsrfResult> {
 async function executeOwnerOperation(
   body: Readonly<Record<string, unknown>>,
   csrfToken: string,
+  options: CollaborationOwnerAuthenticatedRequestOptions,
 ): Promise<{ response: Response; payload: unknown }> {
   const response = await fetch(COLLABORATION_OWNER_ENDPOINT, {
     method: "POST",
@@ -166,6 +171,9 @@ async function executeOwnerOperation(
       Accept: "application/json",
       "Content-Type": "application/json",
       "X-Cuevion-CSRF": csrfToken,
+      ...(options.idempotencyKey === undefined
+        ? {}
+        : { "X-Cuevion-Idempotency-Key": options.idempotencyKey }),
     },
     body: JSON.stringify(body),
   });
@@ -174,6 +182,7 @@ async function executeOwnerOperation(
 
 export async function performAuthenticatedCollaborationOwnerRequest(
   body: Readonly<Record<string, unknown>>,
+  options: CollaborationOwnerAuthenticatedRequestOptions = {},
 ): Promise<CollaborationOwnerAuthenticatedResponse> {
   let csrfResult = await bootstrapCsrf();
   if (csrfResult.status !== "success") {
@@ -183,7 +192,11 @@ export async function performAuthenticatedCollaborationOwnerRequest(
   for (let attempt = 0; attempt < 2; attempt += 1) {
     let operationResult: { response: Response; payload: unknown };
     try {
-      operationResult = await executeOwnerOperation(body, csrfResult.csrf.token);
+      operationResult = await executeOwnerOperation(
+        body,
+        csrfResult.csrf.token,
+        options,
+      );
     } catch {
       return { status: "network_failure" };
     }
