@@ -5,7 +5,7 @@ import {
 } from "./collaborationOwnerApiTransport";
 import {
   parseCollaborationOwnerReadDto,
-  type CollaborationOwnerReadState,
+  type CollaborationOwnerReadDto,
 } from "./collaborationOwnerReadApi";
 import {
   isTrustedCollaborationOwnerSourceLocator,
@@ -22,11 +22,8 @@ export type CollaborationOwnerCreateState =
 export type CollaborationOwnerCreateResult =
   | {
       status: "success";
-      collaborationId: string;
       created: boolean;
-      state: CollaborationOwnerReadState;
-      createdAt: number;
-      updatedAt: number;
+      collaboration: CollaborationOwnerReadDto;
     }
   | { status: "invalid_source_locator" }
   | { status: "invalid_state" }
@@ -98,10 +95,7 @@ export async function createCollaborationForOwner(
 
   return {
     status: "success",
-    collaborationId: collaboration.collaborationId,
     created,
-    state: collaboration.state,
-    createdAt: collaboration.createdAt,
-    updatedAt: collaboration.updatedAt,
+    collaboration,
   };
 }

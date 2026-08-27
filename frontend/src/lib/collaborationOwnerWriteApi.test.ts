@@ -60,7 +60,16 @@ function collaboration(
       timestamp: "2027-01-15T08:00:00.000Z",
       bodyText: "Source body",
     },
-    messages: [],
+    messages: [
+      {
+        id: "M".repeat(22),
+        authorDisplayName: "Owner",
+        authorRole: "Cuevion user",
+        text: "Please review",
+        visibility: "internal",
+        timestamp: NOW_MS - 1_500,
+      },
+    ],
   } as const;
 }
 
@@ -215,11 +224,8 @@ async function run() {
         ),
         {
           status: "success",
-          collaborationId: COLLABORATION_ID,
           created: true,
-          state: "needs_review",
-          createdAt: NOW_MS - 2_000,
-          updatedAt: NOW_MS - 1_000,
+          collaboration: collaboration("mailbox-google"),
         },
       );
       assert.equal(calls.length, 2);
@@ -379,11 +385,8 @@ async function run() {
       assert.equal(first.status, "success");
       assert.deepEqual(duplicate, {
         status: "success",
-        collaborationId: COLLABORATION_ID,
         created: false,
-        state: "resolved",
-        createdAt: NOW_MS - 2_000,
-        updatedAt: NOW_MS - 1_000,
+        collaboration: collaboration("mailbox-google", "resolved"),
       });
       assert.equal(calls.length, 3);
       assert.equal(
@@ -578,6 +581,34 @@ async function run() {
             created: true,
             collaboration: {
               ...collaboration("mailbox-google"),
+              source: {
+                ...collaboration("mailbox-google").source,
+                bodyText: 42,
+              },
+            },
+          },
+        }),
+        response(201, {
+          ok: true,
+          data: {
+            created: true,
+            collaboration: {
+              ...collaboration("mailbox-google"),
+              messages: [
+                {
+                  ...collaboration("mailbox-google").messages[0],
+                  visibility: "private",
+                },
+              ],
+            },
+          },
+        }),
+        response(201, {
+          ok: true,
+          data: {
+            created: true,
+            collaboration: {
+              ...collaboration("mailbox-google"),
               revision: 1,
             },
           },
@@ -651,11 +682,8 @@ async function run() {
       );
       assert.deepEqual(callerRetry, {
         status: "success",
-        collaborationId: COLLABORATION_ID,
         created: false,
-        state: "needs_review",
-        createdAt: NOW_MS - 2_000,
-        updatedAt: NOW_MS - 1_000,
+        collaboration: collaboration("mailbox-google"),
       });
       assert.equal(calls.length, 3);
       assert.equal(
