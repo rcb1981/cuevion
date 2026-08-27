@@ -7354,9 +7354,13 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         )
         self.assertIsNotNone(read_key)
         ttl = self.client.command(["PTTL", read_key])
+        maximum_initial_ttl = (
+            (read_policy.emission_interval_microseconds + 999) // 1000
+            + owner_rate_limit.STATE_EXPIRY_GRACE_MS
+        )
         self.assertGreater(ttl, 0)
-        self.assertLessEqual(ttl, 500)
-        time.sleep(0.7)
+        self.assertLessEqual(ttl, maximum_initial_ttl)
+        time.sleep((maximum_initial_ttl + 200) / 1000)
         self.assertEqual(self.client.command(["EXISTS", read_key]), 0)
 
     def test_owner_rate_limit_real_redis_concurrency_and_owner_independence(self):

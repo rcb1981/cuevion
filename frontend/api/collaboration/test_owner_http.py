@@ -1012,6 +1012,45 @@ class OwnerHttpBoundaryTests(unittest.TestCase):
                 )
                 self.rate_limiter.assert_not_called()
 
+    def test_readiness_environment_cannot_activate_owner_writes(self):
+        environment = _environment()
+        environment.update(
+            {
+                "VERCEL_ENV": "production",
+                "CUEVION_COLLAB_V2_HTTP_MODE": "owner_read",
+                "CUEVION_COLLAB_V2_OWNER_WRITE_READINESS_MODE": "verify",
+                "CUEVION_COLLAB_V2_OWNER_WRITE_READINESS_TOKEN": _b64(b"t" * 32),
+            }
+        )
+        service = mock.Mock(side_effect=AssertionError("create must remain disabled"))
+        with mock.patch.object(
+            owner_http.application,
+            "create_v2_collaboration_for_verified_owner",
+            service,
+        ):
+            response = http_adapter.invoke_safely(
+                lambda: owner_http.owner_response(
+                    _request(
+                        {
+                            "operation": "create",
+                            "mailboxId": MAILBOX_ID,
+                            "sourceRef": {
+                                "providerMessageId": "gmail-message-1"
+                            },
+                            "state": "needs_review",
+                        },
+                        csrf=self._csrf(),
+                    ),
+                    http_mode="owner_read",
+                    environment=environment,
+                    now=NOW,
+                ),
+                allow_method="POST",
+            )
+        self.assertEqual(response.status, 404)
+        service.assert_not_called()
+        self.rate_limiter.assert_not_called()
+
     def test_missing_rate_configuration_and_untrusted_requests_fail_before_limiter(self):
         environment = _environment()
         environment.pop(owner_rate_limit.RATE_LIMIT_HMAC_ENV)
