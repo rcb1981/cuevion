@@ -1,8 +1,16 @@
-import type { CollaborationOwnerSourceLocator } from "./collaborationOwnerSourceLocator";
+import {
+  isCanonicalCollaborationOwnerSourceLocator,
+  type CollaborationOwnerSourceLocator,
+} from "./collaborationOwnerSourceLocator";
+import {
+  __resetCollaborationOwnerApiTransportForTests,
+  COLLABORATION_OWNER_ENDPOINT,
+  performAuthenticatedCollaborationOwnerRequest,
+  type CollaborationOwnerTransportFailure,
+} from "./collaborationOwnerApiTransport";
 
-export const COLLABORATION_OWNER_READ_ENDPOINT = "/api/collaboration/owner";
+export const COLLABORATION_OWNER_READ_ENDPOINT = COLLABORATION_OWNER_ENDPOINT;
 
-const CSRF_REFRESH_MARGIN_SECONDS = 15;
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9_-]{22,128}$/;
 
 export type CollaborationOwnerReadState =
@@ -74,18 +82,6 @@ type OwnerOperationFailure = {
   retryAfterSeconds?: number;
 };
 
-type CsrfState = {
-  token: string;
-  expiresAt: number;
-};
-
-type CsrfResult =
-  | { status: "success"; csrf: CsrfState }
-  | OwnerOperationFailure;
-
-let csrfState: CsrfState | null = null;
-let csrfBootstrapPromise: Promise<CsrfResult> | null = null;
-
 function isExactRecord(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
@@ -136,7 +132,9 @@ function parseMessage(value: unknown): CollaborationOwnerReadMessage | null {
   };
 }
 
-function parseCollaboration(value: unknown): CollaborationOwnerReadDto | null {
+export function parseCollaborationOwnerReadDto(
+  value: unknown,
+): CollaborationOwnerReadDto | null {
   if (
     !isExactRecord(value, [
       "collaborationId",
@@ -197,188 +195,45 @@ function parseCollaboration(value: unknown): CollaborationOwnerReadDto | null {
   };
 }
 
-async function readJson(response: Response): Promise<unknown> {
-  try {
-    return await response.json();
-  } catch {
-    return null;
-  }
+function isValidSourceLocator(
+  locator: CollaborationOwnerSourceLocator,
+): boolean {
+  return isCanonicalCollaborationOwnerSourceLocator(locator);
 }
 
-function parseRetryAfter(response: Response): number | undefined {
-  const value = response.headers.get("Retry-After");
-  if (value === null || !/^(?:[1-9]|[1-5][0-9]|60)$/.test(value)) {
-    return undefined;
-  }
-
-  return Number(value);
-}
-
-function classifyFailure(response: Response): OwnerOperationFailure {
-  if (response.status === 401) {
-    csrfState = null;
-    return { status: "unauthorized" };
-  }
-  if (response.status === 403) {
-    return { status: "forbidden" };
-  }
-  if (response.status === 404) {
-    return { status: "not_found" };
-  }
-  if (response.status === 429) {
-    const retryAfterSeconds = parseRetryAfter(response);
+function mapTransportFailure(
+  failure: CollaborationOwnerTransportFailure,
+): OwnerOperationFailure {
+  if (failure.status === "rate_limited") {
     return {
       status: "rate_limited",
-      ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
+      ...(failure.retryAfterSeconds === undefined
+        ? {}
+        : { retryAfterSeconds: failure.retryAfterSeconds }),
     };
   }
-  if (response.status >= 200 && response.status < 300) {
+  if (failure.status === "unauthorized") {
+    return { status: "unauthorized" };
+  }
+  if (failure.status === "forbidden") {
+    return { status: "forbidden" };
+  }
+  if (failure.status === "not_found") {
+    return { status: "not_found" };
+  }
+  if (failure.status === "invalid_response") {
     return { status: "invalid_response" };
   }
   return { status: "unavailable" };
 }
 
-async function bootstrapCsrf(): Promise<CsrfResult> {
-  const currentEpochSeconds = Date.now() / 1000;
-  if (csrfState && csrfState.expiresAt - currentEpochSeconds > CSRF_REFRESH_MARGIN_SECONDS) {
-    return { status: "success", csrf: csrfState };
-  }
-
-  csrfState = null;
-  if (csrfBootstrapPromise) {
-    return csrfBootstrapPromise;
-  }
-
-  const pendingBootstrap = (async (): Promise<CsrfResult> => {
-    let response: Response;
-    try {
-      response = await fetch(COLLABORATION_OWNER_READ_ENDPOINT, {
-        method: "POST",
-        credentials: "same-origin",
-        cache: "no-store",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ operation: "csrf" }),
-      });
-    } catch {
-      return { status: "unavailable" };
-    }
-
-    if (!response.ok) {
-      return classifyFailure(response);
-    }
-
-    const payload = await readJson(response);
-    if (
-      !isExactRecord(payload, ["ok", "data"]) ||
-      payload.ok !== true ||
-      !isExactRecord(payload.data, ["csrfToken", "expiresAt"]) ||
-      typeof payload.data.csrfToken !== "string" ||
-      payload.data.csrfToken.length === 0 ||
-      !Number.isSafeInteger(payload.data.expiresAt) ||
-      (payload.data.expiresAt as number) <= Date.now() / 1000
-    ) {
-      return { status: "invalid_response" };
-    }
-
-    csrfState = {
-      token: payload.data.csrfToken,
-      expiresAt: payload.data.expiresAt as number,
-    };
-    return { status: "success", csrf: csrfState };
-  })().finally(() => {
-    csrfBootstrapPromise = null;
-  });
-
-  csrfBootstrapPromise = pendingBootstrap;
-  return pendingBootstrap;
-}
-
-function isValidSourceLocator(
-  locator: CollaborationOwnerSourceLocator,
-): boolean {
-  if (
-    !isExactRecord(locator, ["mailboxId", "sourceRef"]) ||
-    typeof locator.mailboxId !== "string" ||
-    locator.mailboxId.length === 0 ||
-    locator.mailboxId !== locator.mailboxId.trim()
-  ) {
-    return false;
-  }
-
-  const sourceRef: unknown = locator.sourceRef;
-
-  if (
-    isExactRecord(sourceRef, ["providerMessageId"]) &&
-    typeof sourceRef.providerMessageId === "string" &&
-    /^\S+$/.test(sourceRef.providerMessageId)
-  ) {
-    return true;
-  }
-
-  return (
-    isExactRecord(sourceRef, ["folder", "uidValidity", "imapUid"]) &&
-    sourceRef.folder === "INBOX" &&
-    typeof sourceRef.uidValidity === "string" &&
-    /^[1-9][0-9]*$/.test(sourceRef.uidValidity) &&
-    typeof sourceRef.imapUid === "string" &&
-    /^[1-9][0-9]*$/.test(sourceRef.imapUid)
-  );
-}
-
-async function executeOwnerOperation(
-  body: Record<string, unknown>,
-  csrfToken: string,
-): Promise<{ response: Response; payload: unknown }> {
-  const response = await fetch(COLLABORATION_OWNER_READ_ENDPOINT, {
-    method: "POST",
-    credentials: "same-origin",
-    cache: "no-store",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      "X-Cuevion-CSRF": csrfToken,
-    },
-    body: JSON.stringify(body),
-  });
-  return { response, payload: await readJson(response) };
-}
-
 async function performAuthenticatedOwnerOperation(
   body: Record<string, unknown>,
 ): Promise<{ status: "success"; payload: unknown } | OwnerOperationFailure> {
-  let csrfResult = await bootstrapCsrf();
-  if (csrfResult.status !== "success") {
-    return csrfResult;
-  }
-
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    let operationResult: { response: Response; payload: unknown };
-    try {
-      operationResult = await executeOwnerOperation(body, csrfResult.csrf.token);
-    } catch {
-      return { status: "unavailable" };
-    }
-
-    if (operationResult.response.status === 403 && attempt === 0) {
-      csrfState = null;
-      csrfResult = await bootstrapCsrf();
-      if (csrfResult.status !== "success") {
-        return csrfResult;
-      }
-      continue;
-    }
-
-    if (!operationResult.response.ok) {
-      return classifyFailure(operationResult.response);
-    }
-
-    return { status: "success", payload: operationResult.payload };
-  }
-
-  return { status: "forbidden" };
+  const result = await performAuthenticatedCollaborationOwnerRequest(body);
+  return result.status === "response"
+    ? { status: "success", payload: result.payload }
+    : mapTransportFailure(result);
 }
 
 export async function lookupCollaborationForOwner(
@@ -431,7 +286,7 @@ export async function readCollaborationForOwner(
     isExactRecord(result.payload, ["ok", "data"]) &&
     result.payload.ok === true &&
     isExactRecord(result.payload.data, ["collaboration"])
-      ? parseCollaboration(result.payload.data.collaboration)
+      ? parseCollaborationOwnerReadDto(result.payload.data.collaboration)
       : null;
   return collaboration
     ? { status: "success", collaboration }
@@ -439,6 +294,5 @@ export async function readCollaborationForOwner(
 }
 
 export function __resetCollaborationOwnerReadApiForTests() {
-  csrfState = null;
-  csrfBootstrapPromise = null;
+  __resetCollaborationOwnerApiTransportForTests();
 }

@@ -442,13 +442,17 @@ async function run() {
     });
 
     await test("never uses browser persistence for CSRF", async () => {
-      const source = fs.readFileSync(
-        path.resolve(__dirname, "./collaborationOwnerReadApi.ts"),
-        "utf8",
+      const sources = [
+        "./collaborationOwnerReadApi.ts",
+        "./collaborationOwnerApiTransport.ts",
+      ].map((filename) =>
+        fs.readFileSync(path.resolve(__dirname, filename), "utf8"),
       );
-      assert.equal(source.includes("localStorage"), false);
-      assert.equal(source.includes("sessionStorage"), false);
-      assert.equal(source.includes("indexedDB"), false);
+      for (const source of sources) {
+        assert.equal(source.includes("localStorage"), false);
+        assert.equal(source.includes("sessionStorage"), false);
+        assert.equal(source.includes("indexedDB"), false);
+      }
     });
   } finally {
     globalThis.fetch = originalFetch;

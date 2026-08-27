@@ -1,7 +1,11 @@
 declare const process: { exitCode?: number };
 
 import assert from "node:assert/strict";
-import { deriveCollaborationOwnerSourceLocator } from "./collaborationOwnerSourceLocator";
+import {
+  deriveCollaborationOwnerSourceLocator,
+  isCanonicalCollaborationOwnerSourceLocator,
+  isTrustedCollaborationOwnerSourceLocator,
+} from "./collaborationOwnerSourceLocator";
 
 const googleMailbox = {
   id: "mailbox-google",
@@ -73,10 +77,22 @@ function run(name: string, callback: () => void) {
 }
 
 run("uses the exact Gmail providerMessageId and never the app message id", () => {
-  assert.deepEqual(deriveCollaborationOwnerSourceLocator(googleInput()), {
+  const locator = deriveCollaborationOwnerSourceLocator(googleInput());
+  assert.deepEqual(locator, {
     mailboxId: googleMailbox.id,
     sourceRef: { providerMessageId: "provider-message-id" },
   });
+  assert.equal(isCanonicalCollaborationOwnerSourceLocator(locator), true);
+  assert.equal(isTrustedCollaborationOwnerSourceLocator(locator), true);
+  assert.equal(Object.isFrozen(locator), true);
+  assert.equal(Object.isFrozen(locator?.sourceRef), true);
+  assert.equal(
+    isTrustedCollaborationOwnerSourceLocator({
+      mailboxId: googleMailbox.id,
+      sourceRef: { providerMessageId: "provider-message-id" },
+    }),
+    false,
+  );
   assert.equal(
     deriveCollaborationOwnerSourceLocator(
       googleInput({

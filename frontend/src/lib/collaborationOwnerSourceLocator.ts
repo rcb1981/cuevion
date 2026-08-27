@@ -1,16 +1,16 @@
 export type CollaborationOwnerLookupSourceRef =
   | {
-      providerMessageId: string;
+      readonly providerMessageId: string;
     }
   | {
-      folder: "INBOX";
-      uidValidity: string;
-      imapUid: string;
+      readonly folder: "INBOX";
+      readonly uidValidity: string;
+      readonly imapUid: string;
     };
 
 export type CollaborationOwnerSourceLocator = {
-  mailboxId: string;
-  sourceRef: CollaborationOwnerLookupSourceRef;
+  readonly mailboxId: string;
+  readonly sourceRef: CollaborationOwnerLookupSourceRef;
 };
 
 type ManagedMailboxAuthority = {
@@ -49,6 +49,22 @@ export type CollaborationOwnerSourceLocatorInput = {
 
 const CANONICAL_POSITIVE_DECIMAL_PATTERN = /^[1-9][0-9]*$/;
 const EXACT_PROVIDER_MESSAGE_ID_PATTERN = /^\S+$/;
+const trustedSourceLocators = new WeakSet<object>();
+
+function isExactRecord(
+  value: unknown,
+  keys: readonly string[],
+): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const receivedKeys = Object.keys(value);
+  return (
+    receivedKeys.length === keys.length &&
+    keys.every((key) => receivedKeys.includes(key))
+  );
+}
 
 function isCanonicalPositiveDecimal(value: unknown): value is string {
   return (
@@ -61,6 +77,55 @@ function hasExactMailboxBinding(
   mailboxId: string,
 ): boolean {
   return value === undefined || value === mailboxId;
+}
+
+function trustSourceLocator(
+  locator: CollaborationOwnerSourceLocator,
+): CollaborationOwnerSourceLocator {
+  const trusted = Object.freeze({
+    mailboxId: locator.mailboxId,
+    sourceRef: Object.freeze({ ...locator.sourceRef }),
+  });
+  trustedSourceLocators.add(trusted);
+  return trusted;
+}
+
+export function isCanonicalCollaborationOwnerSourceLocator(
+  value: unknown,
+): value is CollaborationOwnerSourceLocator {
+  if (
+    !isExactRecord(value, ["mailboxId", "sourceRef"]) ||
+    typeof value.mailboxId !== "string" ||
+    value.mailboxId.length === 0 ||
+    value.mailboxId !== value.mailboxId.trim()
+  ) {
+    return false;
+  }
+
+  const sourceRef = value.sourceRef;
+  if (
+    isExactRecord(sourceRef, ["providerMessageId"]) &&
+    typeof sourceRef.providerMessageId === "string" &&
+    EXACT_PROVIDER_MESSAGE_ID_PATTERN.test(sourceRef.providerMessageId)
+  ) {
+    return true;
+  }
+
+  return (
+    isExactRecord(sourceRef, ["folder", "uidValidity", "imapUid"]) &&
+    sourceRef.folder === "INBOX" &&
+    isCanonicalPositiveDecimal(sourceRef.uidValidity) &&
+    isCanonicalPositiveDecimal(sourceRef.imapUid)
+  );
+}
+
+export function isTrustedCollaborationOwnerSourceLocator(
+  value: unknown,
+): value is CollaborationOwnerSourceLocator {
+  return (
+    isCanonicalCollaborationOwnerSourceLocator(value) &&
+    trustedSourceLocators.has(value)
+  );
 }
 
 export function deriveCollaborationOwnerSourceLocator({
@@ -105,10 +170,10 @@ export function deriveCollaborationOwnerSourceLocator({
       return null;
     }
 
-    return {
+    return trustSourceLocator({
       mailboxId: sourceMailboxId,
       sourceRef: { providerMessageId: message.providerMessageId },
-    };
+    });
   }
 
   if (managedMailbox.provider !== "custom_imap") {
@@ -138,12 +203,12 @@ export function deriveCollaborationOwnerSourceLocator({
     return null;
   }
 
-  return {
+  return trustSourceLocator({
     mailboxId: sourceMailboxId,
     sourceRef: {
       folder: "INBOX",
       uidValidity: uidValidityValues[0] as string,
       imapUid: message.imapUid,
     },
-  };
+  });
 }
