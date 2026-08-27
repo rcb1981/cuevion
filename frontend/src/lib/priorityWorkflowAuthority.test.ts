@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import {
+  PriorityWorkflowAuthorityStore,
+  PriorityWorkflowHydrationCoordinator,
   PriorityWorkflowWriteCoordinator,
+  projectPriorityWorkflowFields,
   resolvePriorityWorkflowTarget,
   type PriorityWorkflowOperation,
   type PriorityWorkflowTarget,
@@ -98,6 +101,15 @@ const gmailTarget: PriorityWorkflowTarget = {
     "gmail-provider-message-1",
   ]),
 };
+
+function gmailTargetFor(providerMessageId: string): PriorityWorkflowTarget {
+  const identity = { provider: "google" as const, providerMessageId };
+  return {
+    mailboxId: "mailbox-1",
+    identity,
+    recordKey: JSON.stringify(["mailbox-1", "google", providerMessageId]),
+  };
+}
 
 async function main() {
 console.log("\npriorityWorkflowAuthority");
@@ -441,6 +453,493 @@ await test("ambiguous write performs one read reconciliation and no blind retry"
   assert.equal(writes, 1);
   assert.equal(reads, 1);
   assert.deepEqual(commits, [7]);
+});
+
+await test("clean cutover ignores conflicting legacy workflow fields", () => {
+  const neutral = projectPriorityWorkflowFields({
+    canonical: true,
+    authority: {
+      status: "ready",
+      generationKey: "provider-generation-1",
+      source: "hydration",
+      record: record(gmailIdentity, 0, { updatedAt: null }),
+    },
+    legacy: {
+      manualPriority: "priority",
+      cleared: "cleared",
+      waiting: "waiting_on_other",
+    },
+  });
+  assert.deepEqual(neutral, {
+    manualPriority: "none",
+    cleared: "active",
+    waiting: "absent",
+    ready: true,
+    source: "server",
+  });
+  const canonical = projectPriorityWorkflowFields({
+    canonical: true,
+    authority: {
+      status: "ready",
+      generationKey: "provider-generation-1",
+      source: "hydration",
+      record: record(gmailIdentity, 5, {
+        manualPriority: "priority",
+        waiting: "returned_reply",
+      }),
+    },
+    legacy: {
+      manualPriority: "removed",
+      cleared: "cleared",
+      waiting: "absent",
+    },
+  });
+  assert.deepEqual(canonical, {
+    manualPriority: "priority",
+    cleared: "active",
+    waiting: "returned_reply",
+    ready: true,
+    source: "server",
+  });
+});
+
+await test("canonical not-ready is neutral containment while unsupported stays legacy", () => {
+  const legacy = {
+    manualPriority: "removed" as const,
+    cleared: "cleared" as const,
+    waiting: "waiting_on_other" as const,
+  };
+  assert.deepEqual(
+    projectPriorityWorkflowFields({
+      canonical: true,
+      authority: { status: "not_ready" },
+      legacy,
+    }),
+    {
+      manualPriority: "none",
+      cleared: "active",
+      waiting: "absent",
+      ready: false,
+      source: "not_ready",
+    },
+  );
+  assert.deepEqual(
+    projectPriorityWorkflowFields({
+      canonical: false,
+      authority: { status: "not_ready" },
+      legacy,
+    }),
+    { ...legacy, ready: true, source: "legacy" },
+  );
+});
+
+await test("hydration dedupes identities and splits requests at the server bound", async () => {
+  const requests: PriorityWorkflowIdentity[][] = [];
+  const store = new PriorityWorkflowAuthorityStore("scope-1");
+  const coordinator = new PriorityWorkflowHydrationCoordinator(
+    {
+      read: async ({ identities }) => {
+        requests.push(identities);
+        return {
+          ok: true as const,
+          value: identities.map((identity) => record(identity, 0, { updatedAt: null })),
+        };
+      },
+    },
+    store,
+  );
+  const uniqueTargets = Array.from({ length: 129 }, (_, index) =>
+    gmailTargetFor(`gmail-${index}`),
+  );
+  const outcome = await coordinator.hydrateMailbox({
+    scopeKey: "scope-1",
+    mailboxId: "mailbox-1",
+    generationKey: "provider-generation-1",
+    targets: [...uniqueTargets, uniqueTargets[0], uniqueTargets[64]],
+  });
+  assert.equal(outcome.status, "hydrated");
+  assert.deepEqual(requests.map((identities) => identities.length), [64, 64, 1]);
+  assert.equal(
+    new Set(requests.flat().map((identity) => JSON.stringify(identity))).size,
+    129,
+  );
+});
+
+await test("hydration sends the exact canonical IMAP locator in one mailbox batch", async () => {
+  const requests: Array<{
+    mailboxId: string;
+    identities: PriorityWorkflowIdentity[];
+  }> = [];
+  const target: PriorityWorkflowTarget = {
+    mailboxId: "mailbox-1",
+    identity: imapIdentity,
+    recordKey: JSON.stringify([
+      "mailbox-1",
+      "custom_imap",
+      "INBOX",
+      "77",
+      "102",
+    ]),
+  };
+  const store = new PriorityWorkflowAuthorityStore("scope-1");
+  const coordinator = new PriorityWorkflowHydrationCoordinator(
+    {
+      read: async (request) => {
+        requests.push(request);
+        return {
+          ok: true as const,
+          value: [record(imapIdentity, 0, { updatedAt: null })],
+        };
+      },
+    },
+    store,
+  );
+  await coordinator.hydrateMailbox({
+    scopeKey: "scope-1",
+    mailboxId: "mailbox-1",
+    generationKey: "imap-generation-1",
+    targets: [target],
+  });
+  assert.deepEqual(requests, [
+    { mailboxId: "mailbox-1", identities: [imapIdentity] },
+  ]);
+});
+
+await test("one accepted provider generation hydrates once without polling", async () => {
+  let reads = 0;
+  const store = new PriorityWorkflowAuthorityStore("scope-1");
+  const coordinator = new PriorityWorkflowHydrationCoordinator(
+    {
+      read: async ({ identities }) => {
+        reads += 1;
+        return {
+          ok: true as const,
+          value: identities.map((identity) => record(identity, 0, { updatedAt: null })),
+        };
+      },
+    },
+    store,
+  );
+  assert.equal(
+    (
+      await coordinator.hydrateMailbox({
+        scopeKey: "scope-1",
+        mailboxId: "mailbox-1",
+        generationKey: "provider-generation-1",
+        targets: [gmailTarget],
+      })
+    ).status,
+    "hydrated",
+  );
+  assert.equal(
+    (
+      await coordinator.hydrateMailbox({
+        scopeKey: "scope-1",
+        mailboxId: "mailbox-1",
+        generationKey: "provider-generation-1",
+        targets: [gmailTarget],
+      })
+    ).status,
+    "already_requested",
+  );
+  assert.equal(reads, 1);
+});
+
+await test("a new provider generation is not-ready before its read but preserves P2 writes", async () => {
+  const store = new PriorityWorkflowAuthorityStore("scope-1");
+  const coordinator = new PriorityWorkflowHydrationCoordinator(
+    {
+      read: async () => ({
+        ok: true as const,
+        value: [record(gmailIdentity, 2, { manualPriority: "priority" })],
+      }),
+    },
+    store,
+  );
+  await coordinator.hydrateMailbox({
+    scopeKey: "scope-1",
+    mailboxId: "mailbox-1",
+    generationKey: "provider-generation-1",
+    targets: [gmailTarget],
+  });
+  assert.equal(store.read(gmailTarget).status, "ready");
+  store.activateMailboxGeneration({
+    scopeKey: "scope-1",
+    mailboxId: "mailbox-1",
+    generationKey: "provider-generation-2",
+    targets: [gmailTarget],
+  });
+  assert.equal(store.read(gmailTarget).status, "not_ready");
+  assert.equal(
+    store.acceptWrite({
+      scopeKey: "scope-1",
+      target: gmailTarget,
+      record: record(gmailIdentity, 3, { manualPriority: "removed" }),
+    }),
+    true,
+  );
+  store.activateMailboxGeneration({
+    scopeKey: "scope-1",
+    mailboxId: "mailbox-1",
+    generationKey: "provider-generation-3",
+    targets: [gmailTarget],
+  });
+  const authority = store.read(gmailTarget);
+  assert.equal(authority.status, "ready");
+  if (authority.status === "ready") {
+    assert.equal(authority.record.version, 3);
+    assert.equal(authority.source, "write");
+    assert.equal(authority.generationKey, "provider-generation-3");
+  }
+});
+
+await test("a stale slower provider generation cannot project into the current scope", async () => {
+  const first = deferred<ReadResult>();
+  let call = 0;
+  const store = new PriorityWorkflowAuthorityStore("scope-1");
+  const coordinator = new PriorityWorkflowHydrationCoordinator(
+    {
+      read: async () => {
+        call += 1;
+        return call === 1
+          ? first.promise
+          : {
+              ok: true as const,
+              value: [record(gmailIdentity, 2, { manualPriority: "priority" })],
+            };
+      },
+    },
+    store,
+  );
+  const staleHydration = coordinator.hydrateMailbox({
+    scopeKey: "scope-1",
+    mailboxId: "mailbox-1",
+    generationKey: "provider-generation-1",
+    targets: [gmailTarget],
+  });
+  await Promise.resolve();
+  const currentHydration = await coordinator.hydrateMailbox({
+    scopeKey: "scope-1",
+    mailboxId: "mailbox-1",
+    generationKey: "provider-generation-2",
+    targets: [gmailTarget],
+  });
+  first.resolve({
+    ok: true,
+    value: [record(gmailIdentity, 1, { manualPriority: "removed" })],
+  });
+  assert.equal(currentHydration.status, "hydrated");
+  assert.equal((await staleHydration).status, "stale");
+  const authority = store.read(gmailTarget);
+  assert.equal(authority.status, "ready");
+  if (authority.status === "ready") {
+    assert.equal(authority.record.manualPriority, "priority");
+    assert.equal(authority.record.version, 2);
+  }
+});
+
+await test("server failure remains not-ready and never turns legacy state into a write", async () => {
+  let reads = 0;
+  const store = new PriorityWorkflowAuthorityStore("scope-1");
+  const coordinator = new PriorityWorkflowHydrationCoordinator(
+    {
+      read: async () => {
+        reads += 1;
+        return {
+          ok: false as const,
+          error: {
+            code: "workflow_storage_unavailable",
+            message: "unavailable",
+            ambiguous: false,
+          },
+        };
+      },
+    },
+    store,
+  );
+  const legacyLocalState = {
+    manualPriority: "priority",
+    cleared: "cleared",
+    waiting: "waiting_on_other",
+  };
+  assert.equal(
+    (
+      await coordinator.hydrateMailbox({
+        scopeKey: "scope-1",
+        mailboxId: "mailbox-1",
+        generationKey: "provider-generation-1",
+        targets: [gmailTarget],
+      })
+    ).status,
+    "failed",
+  );
+  assert.equal(store.read(gmailTarget).status, "not_ready");
+  assert.equal(reads, 1);
+  assert.deepEqual(legacyLocalState, {
+    manualPriority: "priority",
+    cleared: "cleared",
+    waiting: "waiting_on_other",
+  });
+});
+
+await test("pending hydration v3 cannot overwrite a P2 write v4", async () => {
+  const pending = deferred<ReadResult>();
+  const store = new PriorityWorkflowAuthorityStore("scope-1");
+  const coordinator = new PriorityWorkflowHydrationCoordinator(
+    { read: () => pending.promise },
+    store,
+  );
+  const hydration = coordinator.hydrateMailbox({
+    scopeKey: "scope-1",
+    mailboxId: "mailbox-1",
+    generationKey: "provider-generation-1",
+    targets: [gmailTarget],
+  });
+  await Promise.resolve();
+  assert.equal(
+    store.acceptWrite({
+      scopeKey: "scope-1",
+      target: gmailTarget,
+      record: record(gmailIdentity, 4, { manualPriority: "priority" }),
+    }),
+    true,
+  );
+  pending.resolve({
+    ok: true,
+    value: [record(gmailIdentity, 3, { manualPriority: "removed" })],
+  });
+  assert.equal((await hydration).status, "hydrated");
+  const authority = store.read(gmailTarget);
+  assert.equal(authority.status, "ready");
+  if (authority.status === "ready") {
+    assert.equal(authority.record.version, 4);
+    assert.equal(authority.record.manualPriority, "priority");
+  }
+});
+
+await test("neutral v0, P2 v1, and later hydration v3 advance monotonically", async () => {
+  const responses: ReadResult[] = [
+    { ok: true, value: [record(gmailIdentity, 0, { updatedAt: null })] },
+    {
+      ok: true,
+      value: [record(gmailIdentity, 3, { waiting: "returned_reply" })],
+    },
+  ];
+  const store = new PriorityWorkflowAuthorityStore("scope-1");
+  const coordinator = new PriorityWorkflowHydrationCoordinator(
+    { read: async () => responses.shift()! },
+    store,
+  );
+  await coordinator.hydrateMailbox({
+    scopeKey: "scope-1",
+    mailboxId: "mailbox-1",
+    generationKey: "provider-generation-1",
+    targets: [gmailTarget],
+  });
+  assert.equal(store.read(gmailTarget).status, "ready");
+  assert.equal(
+    store.acceptWrite({
+      scopeKey: "scope-1",
+      target: gmailTarget,
+      record: record(gmailIdentity, 1, { cleared: "cleared" }),
+    }),
+    true,
+  );
+  await coordinator.hydrateMailbox({
+    scopeKey: "scope-1",
+    mailboxId: "mailbox-1",
+    generationKey: "provider-generation-2",
+    targets: [gmailTarget],
+  });
+  const authority = store.read(gmailTarget);
+  assert.equal(authority.status, "ready");
+  if (authority.status === "ready") {
+    assert.equal(authority.record.version, 3);
+    assert.equal(authority.record.waiting, "returned_reply");
+  }
+});
+
+await test("equal versions cannot regress fields across hydration sources", async () => {
+  const store = new PriorityWorkflowAuthorityStore("scope-1");
+  assert.equal(
+    store.acceptWrite({
+      scopeKey: "scope-1",
+      target: gmailTarget,
+      record: record(gmailIdentity, 2, { manualPriority: "priority" }),
+    }),
+    true,
+  );
+  const coordinator = new PriorityWorkflowHydrationCoordinator(
+    {
+      read: async () => ({
+        ok: true as const,
+        value: [record(gmailIdentity, 2, { manualPriority: "removed" })],
+      }),
+    },
+    store,
+  );
+  await coordinator.hydrateMailbox({
+    scopeKey: "scope-1",
+    mailboxId: "mailbox-1",
+    generationKey: "provider-generation-1",
+    targets: [gmailTarget],
+  });
+  const authority = store.read(gmailTarget);
+  assert.equal(authority.status, "ready");
+  if (authority.status === "ready") {
+    assert.equal(authority.record.manualPriority, "priority");
+  }
+});
+
+await test("independent browser persistence states converge on the same server authority", async () => {
+  const serverRecord = record(gmailIdentity, 8, {
+    manualPriority: "priority",
+    cleared: "active",
+    waiting: "returned_reply",
+  });
+  const hydrateSession = async (legacy: unknown) => {
+    const store = new PriorityWorkflowAuthorityStore("scope-1");
+    const coordinator = new PriorityWorkflowHydrationCoordinator(
+      { read: async () => ({ ok: true as const, value: [serverRecord] }) },
+      store,
+    );
+    await coordinator.hydrateMailbox({
+      scopeKey: "scope-1",
+      mailboxId: "mailbox-1",
+      generationKey: "provider-generation-1",
+      targets: [gmailTarget],
+    });
+    const authority = store.read(gmailTarget);
+    const projection = projectPriorityWorkflowFields({
+      canonical: true,
+      authority,
+      legacy: {
+        manualPriority: "none",
+        cleared: "active",
+        waiting: "absent",
+      },
+    });
+    return {
+      legacy,
+      authority,
+      workflowMembership:
+        projection.ready &&
+        projection.cleared === "active" &&
+        projection.manualPriority !== "removed" &&
+        (projection.manualPriority === "priority" ||
+          projection.waiting !== "absent"),
+    };
+  };
+  const sessionA = await hydrateSession({
+    manualPriority: "priority",
+    cleared: "cleared",
+    waiting: "waiting_on_other",
+  });
+  const sessionB = await hydrateSession({});
+  assert.notDeepEqual(sessionA.legacy, sessionB.legacy);
+  assert.deepEqual(sessionA.authority, sessionB.authority);
+  assert.equal(sessionA.workflowMembership, true);
+  assert.equal(sessionA.workflowMembership, sessionB.workflowMembership);
 });
 
 if (failed > 0) {

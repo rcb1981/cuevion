@@ -371,7 +371,10 @@ import {
   type PriorityWorkflowRecord,
 } from "../../lib/priorityWorkflowAuthorityApi";
 import {
+  PriorityWorkflowAuthorityStore,
+  PriorityWorkflowHydrationCoordinator,
   PriorityWorkflowWriteCoordinator,
+  projectPriorityWorkflowFields,
   resolvePriorityWorkflowTarget,
   type PriorityWorkflowOperation,
   type PriorityWorkflowTarget,
@@ -45847,7 +45850,7 @@ export function WorkspaceShell({
       }
     });
   const [isApplyingFocusPreferences, setIsApplyingFocusPreferences] = useState(false);
-  const [manualPriorityOverrides, setManualPriorityOverrides] =
+  const [localManualPriorityOverrides, setManualPriorityOverrides] =
     useState<ManualPriorityOverrideStore>(() => {
       if (typeof window === "undefined") {
         return {};
@@ -45865,7 +45868,7 @@ export function WorkspaceShell({
         return {};
       }
     });
-  const [priorityClearedKeys, setPriorityClearedKeys] = useState<string[]>(() => {
+  const [localPriorityClearedKeys, setPriorityClearedKeys] = useState<string[]>(() => {
     if (typeof window === "undefined") {
       return [];
     }
@@ -45885,7 +45888,7 @@ export function WorkspaceShell({
       return [];
     }
   });
-  const [waitingOnOtherStore, setWaitingOnOtherStore] =
+  const [localWaitingOnOtherStore, setWaitingOnOtherStore] =
     useState<WaitingOnOtherStore>(() => {
       if (typeof window === "undefined") {
         return {};
@@ -45949,6 +45952,8 @@ export function WorkspaceShell({
   );
   const [priorityWorkflowFailure, setPriorityWorkflowFailure] =
     useState<PriorityWorkflowFailure | null>(null);
+  const [priorityWorkflowAuthorityRevision, setPriorityWorkflowAuthorityRevision] =
+    useState(0);
   const [prioritySemanticNewInboundDismissalFailure, setPrioritySemanticNewInboundDismissalFailure] =
     useState<string | null>(null);
   const [spamSuppressionKeys, setSpamSuppressionKeys] = useState<string[]>(() => {
@@ -46020,12 +46025,6 @@ export function WorkspaceShell({
     normalizedUserFocusPreferences,
   );
   normalizedUserFocusPreferencesRef.current = normalizedUserFocusPreferences;
-  const manualPriorityOverridesRef = useRef(manualPriorityOverrides);
-  manualPriorityOverridesRef.current = manualPriorityOverrides;
-  const priorityClearedKeysRef = useRef(priorityClearedKeys);
-  priorityClearedKeysRef.current = priorityClearedKeys;
-  const waitingOnOtherStoreRef = useRef(waitingOnOtherStore);
-  waitingOnOtherStoreRef.current = waitingOnOtherStore;
   const priorityWorkflowAuthorityScopeKey = JSON.stringify([
     workspacePersistenceScope,
     workspaceDataMode,
@@ -46037,6 +46036,18 @@ export function WorkspaceShell({
       mailbox.connectionStatus,
     ]),
   ]);
+  const priorityWorkflowAuthorityClientRef = useRef<
+    PriorityWorkflowAuthorityClient | null
+  >(null);
+  const priorityWorkflowAuthorityStoreRef = useRef<
+    PriorityWorkflowAuthorityStore | null
+  >(null);
+  const priorityWorkflowHydrationCoordinatorRef = useRef<
+    PriorityWorkflowHydrationCoordinator | null
+  >(null);
+  const priorityWorkflowHydrationGenerationKeysRef = useRef<
+    Map<InboxId, string>
+  >(new Map());
   const priorityWorkflowWriteCoordinatorRef = useRef<
     PriorityWorkflowWriteCoordinator | null
   >(null);
@@ -46046,10 +46057,28 @@ export function WorkspaceShell({
   const priorityWorkflowReturnedReplyAttemptScopeRef = useRef(
     priorityWorkflowAuthorityScopeKey,
   );
+  if (!priorityWorkflowAuthorityClientRef.current) {
+    priorityWorkflowAuthorityClientRef.current =
+      new PriorityWorkflowAuthorityClient();
+  }
+  if (!priorityWorkflowAuthorityStoreRef.current) {
+    priorityWorkflowAuthorityStoreRef.current =
+      new PriorityWorkflowAuthorityStore(priorityWorkflowAuthorityScopeKey);
+  }
+  priorityWorkflowAuthorityStoreRef.current.activateScope(
+    priorityWorkflowAuthorityScopeKey,
+  );
+  if (!priorityWorkflowHydrationCoordinatorRef.current) {
+    priorityWorkflowHydrationCoordinatorRef.current =
+      new PriorityWorkflowHydrationCoordinator(
+        priorityWorkflowAuthorityClientRef.current,
+        priorityWorkflowAuthorityStoreRef.current,
+      );
+  }
   if (!priorityWorkflowWriteCoordinatorRef.current) {
     priorityWorkflowWriteCoordinatorRef.current =
       new PriorityWorkflowWriteCoordinator(
-        new PriorityWorkflowAuthorityClient(),
+        priorityWorkflowAuthorityClientRef.current,
         priorityWorkflowAuthorityScopeKey,
       );
   }
@@ -46063,7 +46092,250 @@ export function WorkspaceShell({
     priorityWorkflowReturnedReplyAttemptScopeRef.current =
       priorityWorkflowAuthorityScopeKey;
     priorityWorkflowReturnedReplyAttemptsRef.current.clear();
+    priorityWorkflowHydrationGenerationKeysRef.current.clear();
   }
+  const priorityWorkflowCanonicalTargets = useMemo(() => {
+    const entries = new Map<
+      string,
+      {
+        mailboxId: InboxId;
+        folder: MailFolder;
+        message: MailMessage;
+        target: PriorityWorkflowTarget;
+      }
+    >();
+    orderedMailboxes.forEach((mailbox) => {
+      const managedMailbox = savedManagedInboxes.find(
+        (candidate) => candidate.id === mailbox.id,
+      );
+      const collections =
+        mailboxStore[mailbox.id] ?? createEmptyMailboxCollections();
+      canonicalFolderOrder.forEach((folder) => {
+        collections[folder].forEach((message) => {
+          const resolution = resolvePriorityWorkflowTarget({
+            serverAuthorityEnabled:
+              workspaceDataMode === "live" &&
+              hasAuthenticatedMemberAuthority,
+            mailbox: managedMailbox,
+            message,
+          });
+          if (
+            resolution.status === "canonical" &&
+            !entries.has(resolution.target.recordKey)
+          ) {
+            entries.set(resolution.target.recordKey, {
+              mailboxId: mailbox.id,
+              folder,
+              message,
+              target: resolution.target,
+            });
+          }
+        });
+      });
+    });
+    return [...entries.values()];
+  }, [
+    hasAuthenticatedMemberAuthority,
+    mailboxStore,
+    orderedMailboxes,
+    savedManagedInboxes,
+    workspaceDataMode,
+  ]);
+  const resolvePriorityWorkflowAcceptedGenerationKey = (
+    mailboxId: InboxId,
+  ) => {
+    const acceptedRefreshAuthority =
+      prioritySemanticNewInboundAcceptedRefreshAuthorityRef.current[
+        mailboxId
+      ];
+    const connectionKey =
+      providerArchiveCurrentConnectionKeysRef.current[mailboxId];
+    const connectionEpoch =
+      providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0;
+    if (
+      !acceptedRefreshAuthority ||
+      !connectionKey ||
+      acceptedRefreshAuthority.connectionKey !== connectionKey ||
+      acceptedRefreshAuthority.connectionEpoch !== connectionEpoch ||
+      (acceptedRefreshAuthority.provider === "google"
+        ? !gmailInboxAuthorityRef.current.isCurrentGeneration(
+            mailboxId,
+            acceptedRefreshAuthority.authorityGeneration,
+          )
+        : !customImapInboxAuthorityRef.current.isCurrentGeneration(
+            mailboxId,
+            acceptedRefreshAuthority.authorityGeneration,
+          ))
+    ) {
+      return null;
+    }
+    return JSON.stringify([
+      priorityWorkflowAuthorityScopeKey,
+      mailboxId,
+      connectionKey,
+      connectionEpoch,
+      acceptedRefreshAuthority.provider,
+      acceptedRefreshAuthority.authorityGeneration,
+    ]);
+  };
+  connectedOrderedMailboxes.forEach((mailbox) => {
+    const generationKey = resolvePriorityWorkflowAcceptedGenerationKey(
+      mailbox.id,
+    );
+    if (!generationKey) {
+      return;
+    }
+    priorityWorkflowAuthorityStoreRef.current!.activateMailboxGeneration({
+      scopeKey: priorityWorkflowAuthorityScopeKey,
+      mailboxId: mailbox.id,
+      generationKey,
+      targets: priorityWorkflowCanonicalTargets
+        .filter((entry) => entry.mailboxId === mailbox.id)
+        .map((entry) => entry.target),
+    });
+  });
+  const resolvePriorityWorkflowReadAuthority = (
+    mailboxId: InboxId,
+    message: MailMessage,
+  ) => {
+    const resolution = resolvePriorityWorkflowTarget({
+      serverAuthorityEnabled:
+        workspaceDataMode === "live" && hasAuthenticatedMemberAuthority,
+      mailbox: savedManagedInboxes.find(
+        (candidate) => candidate.id === mailboxId,
+      ),
+      message,
+    });
+    return resolution.status === "canonical"
+      ? {
+          status: "canonical" as const,
+          target: resolution.target,
+          authority:
+            priorityWorkflowAuthorityStoreRef.current!.read(
+              resolution.target,
+            ),
+        }
+      : { status: "legacy" as const };
+  };
+  const manualPriorityOverrides = useMemo(() => {
+    void priorityWorkflowAuthorityRevision;
+    return priorityWorkflowCanonicalTargets.reduce<ManualPriorityOverrideStore>(
+      (current, entry) => {
+        const authority =
+          priorityWorkflowAuthorityStoreRef.current!.read(entry.target);
+        const projection = projectPriorityWorkflowFields({
+          canonical: true,
+          authority,
+          legacy: {
+            manualPriority: "none",
+            cleared: "active",
+            waiting: "absent",
+          },
+        });
+        const withoutLegacy = removePersistedMessageStateValue(
+          current,
+          entry.message,
+          { mailboxId: entry.mailboxId },
+        );
+        return projection.ready && projection.manualPriority !== "none"
+          ? writePersistedMessageStateValue(
+              withoutLegacy,
+              entry.message,
+              projection.manualPriority,
+              { mailboxId: entry.mailboxId },
+            )
+          : withoutLegacy;
+      },
+      localManualPriorityOverrides,
+    );
+  }, [
+    localManualPriorityOverrides,
+    priorityWorkflowAuthorityRevision,
+    priorityWorkflowCanonicalTargets,
+  ]);
+  const priorityClearedKeys = useMemo(() => {
+    void priorityWorkflowAuthorityRevision;
+    return priorityWorkflowCanonicalTargets.reduce<string[]>((current, entry) => {
+      const authority =
+        priorityWorkflowAuthorityStoreRef.current!.read(entry.target);
+      const projection = projectPriorityWorkflowFields({
+        canonical: true,
+        authority,
+        legacy: {
+          manualPriority: "none",
+          cleared: "active",
+          waiting: "absent",
+        },
+      });
+      const affectedKeys = new Set(
+        getPersistedMessageIdentityKeys(entry.message, {
+          mailboxId: entry.mailboxId,
+        }).map((key) => `mailbox:${entry.mailboxId}:${key}`),
+      );
+      const withoutLegacy = current.filter((key) => !affectedKeys.has(key));
+      return projection.ready && projection.cleared === "cleared"
+        ? Array.from(new Set([...withoutLegacy, ...affectedKeys]))
+        : withoutLegacy;
+    }, localPriorityClearedKeys);
+  }, [
+    localPriorityClearedKeys,
+    priorityWorkflowAuthorityRevision,
+    priorityWorkflowCanonicalTargets,
+  ]);
+  const waitingOnOtherStore = useMemo(() => {
+    void priorityWorkflowAuthorityRevision;
+    const orderedTargets = [...priorityWorkflowCanonicalTargets].sort(
+      (left, right) =>
+        resolveMailDateMs(left.message) - resolveMailDateMs(right.message) ||
+        left.target.recordKey.localeCompare(right.target.recordKey),
+    );
+    return orderedTargets.reduce<WaitingOnOtherStore>(
+      (current, entry) => {
+        const authority =
+          priorityWorkflowAuthorityStoreRef.current!.read(entry.target);
+        const projection = projectPriorityWorkflowFields({
+          canonical: true,
+          authority,
+          legacy: {
+            manualPriority: "none",
+            cleared: "active",
+            waiting: "absent",
+          },
+        });
+        const withoutLegacy = clearConversationWaitingOnOther(current, {
+          mailboxId: entry.mailboxId,
+          message: entry.message,
+        });
+        if (
+          !projection.ready ||
+          projection.waiting !== "waiting_on_other" ||
+          authority.status !== "ready" ||
+          authority.record.updatedAt === null ||
+          authority.record.updatedAt > 8_640_000_000_000_000
+        ) {
+          return withoutLegacy;
+        }
+        return transitionWaitingOnOtherAfterSend(withoutLegacy, {
+          mailboxId: entry.mailboxId,
+          message: entry.message,
+          composeMode: "reply",
+          sendSucceeded: true,
+          transitionedAt: new Date(authority.record.updatedAt).toISOString(),
+        });
+      },
+      localWaitingOnOtherStore,
+    );
+  }, [
+    localWaitingOnOtherStore,
+    priorityWorkflowAuthorityRevision,
+    priorityWorkflowCanonicalTargets,
+  ]);
+  const manualPriorityOverridesRef = useRef(manualPriorityOverrides);
+  manualPriorityOverridesRef.current = manualPriorityOverrides;
+  const priorityClearedKeysRef = useRef(priorityClearedKeys);
+  priorityClearedKeysRef.current = priorityClearedKeys;
+  const waitingOnOtherStoreRef = useRef(waitingOnOtherStore);
+  waitingOnOtherStoreRef.current = waitingOnOtherStore;
   const prioritySemanticNewInboundOwnedAddressSetRef = useRef<Set<string>>(
     new Set(),
   );
@@ -47095,9 +47367,9 @@ export function WorkspaceShell({
     recordPrioritySemanticObservation,
   ]);
 
-  const waitingOnOtherRepresentativeEntries = useMemo(
-    () =>
-      selectWaitingOnOtherRepresentatives(
+  const waitingOnOtherRepresentativeEntries = useMemo(() => {
+    void priorityWorkflowAuthorityRevision;
+    const legacyEntries = selectWaitingOnOtherRepresentatives(
         effectiveWaitingOnOtherStore,
         orderedMailboxes.flatMap((candidate) => {
           const collections =
@@ -47113,16 +47385,50 @@ export function WorkspaceShell({
             message,
           }));
         }),
-      ),
-    [effectiveWaitingOnOtherStore, mailboxStore, orderedMailboxes],
-  );
+      ).filter(
+        ({ mailboxId, message }) =>
+          resolvePriorityWorkflowReadAuthority(mailboxId, message).status ===
+          "legacy",
+      );
+    const canonicalEntries = priorityWorkflowCanonicalTargets.flatMap(
+      (entry) => {
+        const authority =
+          priorityWorkflowAuthorityStoreRef.current!.read(entry.target);
+        const mailbox = orderedMailboxes.find(
+          (candidate) => candidate.id === entry.mailboxId,
+        );
+        return authority.status === "ready" &&
+          authority.record.waiting === "waiting_on_other" &&
+          mailbox
+          ? [
+              {
+                mailboxId: entry.mailboxId,
+                mailboxTitle: mailbox.title,
+                message: entry.message,
+              },
+            ]
+          : [];
+      },
+    );
+    return dedupeLatestCanonicalConversationEntries([
+      ...legacyEntries,
+      ...canonicalEntries,
+    ]);
+  }, [
+    effectiveWaitingOnOtherStore,
+    mailboxStore,
+    orderedMailboxes,
+    priorityWorkflowAuthorityRevision,
+    priorityWorkflowCanonicalTargets,
+  ]);
   const returnedReplyRepresentativeEntries = useMemo(() => {
+    void priorityWorkflowAuthorityRevision;
     const ownedEmailAddresses = [
       ...connectedOrderedMailboxes.map((mailbox) => mailbox.email),
       authenticatedUser?.email ?? activeWorkspaceEmail,
     ];
 
-    return dedupeLatestCanonicalConversationEntries(
+    const legacyEntries =
       orderedMailboxes.flatMap((candidate) => {
         const collections =
           mailboxStore[candidate.id] ?? createEmptyMailboxCollections();
@@ -47130,6 +47436,8 @@ export function WorkspaceShell({
         return [...collections.Inbox, ...collections.Filtered]
           .filter((message) => !isWorkspaceMessageSpamSuppressed(message))
           .flatMap((message) =>
+            resolvePriorityWorkflowReadAuthority(candidate.id, message)
+              .status === "legacy" &&
             resolveWaitingReturnedReplyEvidence(
               effectiveWaitingOnOtherStore,
               candidate.id,
@@ -47145,8 +47453,33 @@ export function WorkspaceShell({
                 ]
               : [],
           );
-      }),
+      });
+    const canonicalEntries = priorityWorkflowCanonicalTargets.flatMap(
+      (entry) => {
+        const authority =
+          priorityWorkflowAuthorityStoreRef.current!.read(entry.target);
+        const mailbox = orderedMailboxes.find(
+          (candidate) => candidate.id === entry.mailboxId,
+        );
+        return authority.status === "ready" &&
+          authority.record.waiting === "returned_reply" &&
+          (entry.folder === "Inbox" || entry.folder === "Filtered") &&
+          mailbox &&
+          !isWorkspaceMessageSpamSuppressed(entry.message)
+          ? [
+              {
+                mailboxId: entry.mailboxId,
+                mailboxTitle: mailbox.title,
+                message: entry.message,
+              },
+            ]
+          : [];
+      },
     );
+    return dedupeLatestCanonicalConversationEntries([
+      ...legacyEntries,
+      ...canonicalEntries,
+    ]);
   }, [
     activeWorkspaceEmail,
     authenticatedUser?.email,
@@ -47154,6 +47487,8 @@ export function WorkspaceShell({
     effectiveWaitingOnOtherStore,
     mailboxStore,
     orderedMailboxes,
+    priorityWorkflowAuthorityRevision,
+    priorityWorkflowCanonicalTargets,
   ]);
   const normalPriorityGateCandidateEntries = (() => {
     const seenMessageKeys = new Set<string>();
@@ -47250,31 +47585,54 @@ export function WorkspaceShell({
       ]),
     );
     const runtimeWaitingOnOtherEvidence = Object.fromEntries(
-      normalPriorityGateCandidateEntries.map(({ mailboxId, message }) => [
-        createNormalPriorityMessageKey(mailboxId, message),
-        Boolean(
-          resolveWaitingOnOtherState(
-            effectiveWaitingOnOtherStore,
-            mailboxId,
-            message,
-          ),
-        ),
-      ]),
+      normalPriorityGateCandidateEntries.map(({ mailboxId, message }) => {
+        const workflow = resolvePriorityWorkflowReadAuthority(
+          mailboxId,
+          message,
+        );
+        return [
+          createNormalPriorityMessageKey(mailboxId, message),
+          workflow.status === "canonical"
+            ? workflow.authority.status === "ready" &&
+              workflow.authority.record.waiting === "waiting_on_other"
+            : Boolean(
+                resolveWaitingOnOtherState(
+                  effectiveWaitingOnOtherStore,
+                  mailboxId,
+                  message,
+                ),
+              ),
+        ];
+      }),
     );
     const ownedEmailAddresses = [
       ...connectedOrderedMailboxes.map((mailbox) => mailbox.email),
       authenticatedUser?.email ?? activeWorkspaceEmail,
     ];
     const runtimeReturnedReplyEvidence = Object.fromEntries(
-      normalPriorityGateCandidateEntries.map(({ mailboxId, message }) => [
-        createNormalPriorityMessageKey(mailboxId, message),
-        resolveWaitingReturnedReplyEvidence(
-          effectiveWaitingOnOtherStore,
+      normalPriorityGateCandidateEntries.map(({ mailboxId, message }) => {
+        const workflow = resolvePriorityWorkflowReadAuthority(
           mailboxId,
           message,
-          ownedEmailAddresses,
-        ),
-      ]),
+        );
+        return [
+          createNormalPriorityMessageKey(mailboxId, message),
+          workflow.status === "canonical"
+            ? workflow.authority.status === "ready" &&
+              workflow.authority.record.waiting === "returned_reply"
+              ? ({
+                  hasEvidence: true,
+                  confidence: "high",
+                } as ReturnType<typeof resolveWaitingReturnedReplyEvidence>)
+              : null
+            : resolveWaitingReturnedReplyEvidence(
+                effectiveWaitingOnOtherStore,
+                mailboxId,
+                message,
+                ownedEmailAddresses,
+              ),
+        ];
+      }),
     );
 
     return buildPriorityRuntimeSignalsForCandidates({
@@ -47365,13 +47723,21 @@ export function WorkspaceShell({
     ).filter(({ message, mailboxId }) => {
       const override = resolveManualPriorityOverride(manualPriorityOverrides, message);
       const messageKey = createNormalPriorityMessageKey(mailboxId, message);
-      const hasWaitingOnOtherEvidence = Boolean(
-        resolveWaitingOnOtherState(
-          effectiveWaitingOnOtherStore,
-          mailboxId,
-          message,
-        ),
+      const workflow = resolvePriorityWorkflowReadAuthority(
+        mailboxId,
+        message,
       );
+      const hasWaitingOnOtherEvidence =
+        workflow.status === "canonical"
+          ? workflow.authority.status === "ready" &&
+            workflow.authority.record.waiting === "waiting_on_other"
+          : Boolean(
+              resolveWaitingOnOtherState(
+                effectiveWaitingOnOtherStore,
+                mailboxId,
+                message,
+              ),
+            );
       const returnedReplyEvidence =
         priorityRuntimeSignalsForCandidates[messageKey]?.returnedReplyEvidence;
       const hasReturnedReplyEvidence = Boolean(
@@ -48187,6 +48553,10 @@ export function WorkspaceShell({
   const priorityWorkStateByReviewItemId = Object.fromEntries(
     livePriorityInboxEntries.map(({ mailboxId, message }) => {
       const messageKey = createNormalPriorityMessageKey(mailboxId, message);
+      const workflow = resolvePriorityWorkflowReadAuthority(
+        mailboxId,
+        message,
+      );
       const returnedReplyEvidence =
         priorityRuntimeSignalsForCandidates[messageKey]?.returnedReplyEvidence;
       const semanticObservation =
@@ -48199,13 +48569,17 @@ export function WorkspaceShell({
       return [
         `live-priority-${mailboxId}-${message.id}`,
         resolvePriorityWorkState({
-          hasWaitingOnOtherEvidence: Boolean(
-            resolveWaitingOnOtherState(
-              effectiveWaitingOnOtherStore,
-              mailboxId,
-              message,
-            ),
-          ),
+          hasWaitingOnOtherEvidence:
+            workflow.status === "canonical"
+              ? workflow.authority.status === "ready" &&
+                workflow.authority.record.waiting === "waiting_on_other"
+              : Boolean(
+                  resolveWaitingOnOtherState(
+                    effectiveWaitingOnOtherStore,
+                    mailboxId,
+                    message,
+                  ),
+                ),
           hasReturnedReplyEvidence: Boolean(
             returnedReplyEvidence?.hasEvidence &&
               returnedReplyEvidence.confidence === "high",
@@ -49812,7 +50186,20 @@ export function WorkspaceShell({
       scopeKey: priorityWorkflowAuthorityScopeKey,
       target: input.target,
       operation: input.operation,
-      commit: input.commit,
+      commit: (record) => {
+        const accepted =
+          priorityWorkflowAuthorityStoreRef.current!.acceptWrite({
+            scopeKey: priorityWorkflowAuthorityScopeKey,
+            target: input.target,
+            record,
+          });
+        if (!accepted) {
+          return false;
+        }
+        input.commit(record);
+        setPriorityWorkflowAuthorityRevision((current) => current + 1);
+        return true;
+      },
     });
     if (outcome.status === "failed") {
       showPriorityWorkflowFailure(outcome.error.message, retry);
@@ -49908,6 +50295,204 @@ export function WorkspaceShell({
       return next;
     });
   };
+
+  const applyWaitingRecordToMirror = (
+    mailboxId: InboxId,
+    message: MailMessage,
+    record: PriorityWorkflowRecord,
+  ) => {
+    const project = (current: WaitingOnOtherStore) => {
+      if (
+        record.waiting === "waiting_on_other" &&
+        record.updatedAt !== null &&
+        record.updatedAt <= 8_640_000_000_000_000
+      ) {
+        return transitionWaitingOnOtherAfterSend(
+          clearConversationWaitingOnOther(current, { mailboxId, message }),
+          {
+            mailboxId,
+            message,
+            composeMode: "reply",
+            sendSucceeded: true,
+            transitionedAt: new Date(record.updatedAt).toISOString(),
+          },
+        );
+      }
+      if (record.waiting === "returned_reply") {
+        const reconciled = reconcileWaitingOnOtherStore(
+          current,
+          [{ mailboxId, message }],
+          {
+            ownEmailAddresses: [
+              ...connectedOrderedMailboxes.map((mailbox) => mailbox.email),
+              authenticatedUser?.email ?? activeWorkspaceEmail,
+            ],
+          },
+        );
+        const conversation = resolveCanonicalConversationIdentity(
+          message,
+          mailboxId,
+        );
+        if (
+          conversation.isAuthoritativeConversation &&
+          Object.values(reconciled).some(
+            (candidate) =>
+              candidate.mailboxId === mailboxId &&
+              candidate.conversationKey === conversation.key &&
+              candidate.state === "returned_reply",
+          )
+        ) {
+          return reconciled;
+        }
+      }
+      return clearConversationWaitingOnOther(current, { mailboxId, message });
+    };
+    const immediate = project(waitingOnOtherStoreRef.current);
+    waitingOnOtherStoreRef.current = immediate;
+    setWaitingOnOtherStore((current) => {
+      const next = project(current);
+      waitingOnOtherStoreRef.current = next;
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    if (
+      workspaceDataMode !== "live" ||
+      !hasAuthenticatedMemberAuthority
+    ) {
+      return;
+    }
+    connectedOrderedMailboxes.forEach((mailbox) => {
+      const acceptedRefreshAuthority =
+        prioritySemanticNewInboundAcceptedRefreshAuthorityRef.current[
+          mailbox.id
+        ];
+      const connectionKey =
+        providerArchiveCurrentConnectionKeysRef.current[mailbox.id];
+      const connectionEpoch =
+        providerArchiveConnectionEpochsRef.current[mailbox.id] ?? 0;
+      if (
+        !acceptedRefreshAuthority ||
+        !connectionKey ||
+        acceptedRefreshAuthority.connectionKey !== connectionKey ||
+        acceptedRefreshAuthority.connectionEpoch !== connectionEpoch ||
+        (acceptedRefreshAuthority.provider === "google"
+          ? !gmailInboxAuthorityRef.current.isCurrentGeneration(
+              mailbox.id,
+              acceptedRefreshAuthority.authorityGeneration,
+            )
+          : !customImapInboxAuthorityRef.current.isCurrentGeneration(
+              mailbox.id,
+              acceptedRefreshAuthority.authorityGeneration,
+            ))
+      ) {
+        return;
+      }
+      const targetEntries = priorityWorkflowCanonicalTargets.filter(
+        (entry) => entry.mailboxId === mailbox.id,
+      );
+      if (targetEntries.length === 0) {
+        return;
+      }
+      const generationKey = JSON.stringify([
+        priorityWorkflowAuthorityScopeKey,
+        mailbox.id,
+        connectionKey,
+        connectionEpoch,
+        acceptedRefreshAuthority.provider,
+        acceptedRefreshAuthority.authorityGeneration,
+      ]);
+      if (
+        priorityWorkflowHydrationGenerationKeysRef.current.get(mailbox.id) ===
+        generationKey
+      ) {
+        return;
+      }
+      priorityWorkflowHydrationGenerationKeysRef.current.set(
+        mailbox.id,
+        generationKey,
+      );
+      const hydration =
+        priorityWorkflowHydrationCoordinatorRef.current!.hydrateMailbox({
+          scopeKey: priorityWorkflowAuthorityScopeKey,
+          mailboxId: mailbox.id,
+          generationKey,
+          targets: targetEntries.map((entry) => entry.target),
+        });
+      // beginMailboxHydration synchronously invalidates older generation reads.
+      setPriorityWorkflowAuthorityRevision((current) => current + 1);
+      void hydration.then((outcome) => {
+        if (
+          outcome.status === "stale" ||
+          outcome.status === "already_requested" ||
+          outcome.status === "empty"
+        ) {
+          return;
+        }
+        const currentAcceptedRefreshAuthority =
+          prioritySemanticNewInboundAcceptedRefreshAuthorityRef.current[
+            mailbox.id
+          ];
+        if (
+          priorityWorkflowHydrationGenerationKeysRef.current.get(mailbox.id) !==
+            generationKey ||
+          !currentAcceptedRefreshAuthority ||
+          currentAcceptedRefreshAuthority.connectionKey !== connectionKey ||
+          currentAcceptedRefreshAuthority.connectionEpoch !== connectionEpoch ||
+          currentAcceptedRefreshAuthority.authorityGeneration !==
+            acceptedRefreshAuthority.authorityGeneration ||
+          providerArchiveCurrentConnectionKeysRef.current[mailbox.id] !==
+            connectionKey ||
+          (providerArchiveConnectionEpochsRef.current[mailbox.id] ?? 0) !==
+            connectionEpoch
+        ) {
+          return;
+        }
+        [...targetEntries]
+          .sort(
+            (left, right) =>
+              resolveMailDateMs(left.message) -
+                resolveMailDateMs(right.message) ||
+              left.target.recordKey.localeCompare(right.target.recordKey),
+          )
+          .forEach((entry) => {
+            const authority =
+              priorityWorkflowAuthorityStoreRef.current!.read(entry.target);
+            if (
+              authority.status !== "ready" ||
+              authority.generationKey !== generationKey
+            ) {
+              return;
+            }
+            applyManualPriorityRecordToMirror(
+              entry.mailboxId,
+              entry.message,
+              authority.record,
+            );
+            applyPriorityClearedRecordToMirror(
+              entry.mailboxId,
+              entry.message,
+              authority.record,
+            );
+            applyWaitingRecordToMirror(
+              entry.mailboxId,
+              entry.message,
+              authority.record,
+            );
+          });
+        setPriorityWorkflowAuthorityRevision((current) => current + 1);
+      });
+    });
+  }, [
+    connectedOrderedMailboxes,
+    hasAuthenticatedMemberAuthority,
+    prioritySemanticNewInboundHydrationRefreshEpoch,
+    priorityWorkflowAuthorityScopeKey,
+    priorityWorkflowCanonicalTargets,
+    providerArchiveConnectionKeys,
+    workspaceDataMode,
+  ]);
 
   const commitPriorityWorkflowReturnedReplyTransition = async (
     trigger: PrioritySemanticReturnedReplyTrigger,

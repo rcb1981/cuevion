@@ -179,6 +179,431 @@ type WorkflowClient = Pick<
   "setManualPriority" | "setCleared" | "setWaiting" | "read"
 >;
 
+const PRIORITY_WORKFLOW_MAX_BATCH_IDENTITIES = 64;
+
+export type PriorityWorkflowAuthorityReadState =
+  | { status: "not_ready" }
+  | {
+      status: "ready";
+      record: PriorityWorkflowRecord;
+      generationKey: string;
+      source: "hydration" | "write";
+    };
+
+export type PriorityWorkflowFieldProjection = {
+  manualPriority: PriorityWorkflowManualPriority;
+  cleared: PriorityWorkflowCleared;
+  waiting: PriorityWorkflowWaiting;
+  ready: boolean;
+  source: "server" | "legacy" | "not_ready";
+};
+
+export function projectPriorityWorkflowFields(input: {
+  canonical: boolean;
+  authority: PriorityWorkflowAuthorityReadState;
+  legacy: Pick<
+    PriorityWorkflowFieldProjection,
+    "manualPriority" | "cleared" | "waiting"
+  >;
+}): PriorityWorkflowFieldProjection {
+  if (!input.canonical) {
+    return { ...input.legacy, ready: true, source: "legacy" };
+  }
+  if (input.authority.status !== "ready") {
+    return {
+      manualPriority: "none",
+      cleared: "active",
+      waiting: "absent",
+      ready: false,
+      source: "not_ready",
+    };
+  }
+  return {
+    manualPriority: input.authority.record.manualPriority,
+    cleared: input.authority.record.cleared,
+    waiting: input.authority.record.waiting,
+    ready: true,
+    source: "server",
+  };
+}
+
+type PriorityWorkflowAcceptedRecord = Extract<
+  PriorityWorkflowAuthorityReadState,
+  { status: "ready" }
+>;
+
+export type PriorityWorkflowHydrationOutcome =
+  | {
+      status: "hydrated" | "partial";
+      generationKey: string;
+      acceptedRecordKeys: string[];
+      failedBatchCount: number;
+    }
+  | {
+      status: "failed";
+      generationKey: string;
+      acceptedRecordKeys: string[];
+      failedBatchCount: number;
+      error: PriorityWorkflowAuthorityError;
+    }
+  | { status: "empty" | "already_requested" | "stale"; generationKey: string };
+
+type PriorityWorkflowHydrationPlan = {
+  scopeKey: string;
+  scopeGeneration: number;
+  mailboxId: string;
+  generationKey: string;
+  requestGeneration: number;
+  batches: PriorityWorkflowTarget[][];
+};
+
+function recordsHaveEqualAuthority(
+  left: PriorityWorkflowRecord,
+  right: PriorityWorkflowRecord,
+) {
+  return (
+    left.mailboxId === right.mailboxId &&
+    buildPriorityWorkflowRecordKey(left.mailboxId, left.identity) ===
+      buildPriorityWorkflowRecordKey(right.mailboxId, right.identity) &&
+    left.manualPriority === right.manualPriority &&
+    left.cleared === right.cleared &&
+    left.waiting === right.waiting &&
+    left.version === right.version &&
+    left.updatedAt === right.updatedAt
+  );
+}
+
+/**
+ * In-memory read authority for the currently accepted provider generations.
+ * Browser persistence is deliberately absent: local workflow state is only a
+ * mirror and never participates in record acceptance.
+ */
+export class PriorityWorkflowAuthorityStore {
+  #activeScopeKey: string;
+  #scopeGeneration = 0;
+  #requestGeneration = 0;
+  readonly #mailboxGenerations = new Map<
+    string,
+    { generationKey: string; requestGeneration: number }
+  >();
+  readonly #acceptedRecords = new Map<string, PriorityWorkflowAcceptedRecord>();
+  readonly #acceptedVersions = new Map<string, number>();
+  readonly #latestRecords = new Map<string, PriorityWorkflowRecord>();
+
+  constructor(initialScopeKey: string) {
+    this.#activeScopeKey = initialScopeKey;
+  }
+
+  activateScope(scopeKey: string) {
+    if (scopeKey === this.#activeScopeKey) {
+      return false;
+    }
+    this.#activeScopeKey = scopeKey;
+    this.#scopeGeneration += 1;
+    this.#mailboxGenerations.clear();
+    this.#acceptedRecords.clear();
+    this.#acceptedVersions.clear();
+    this.#latestRecords.clear();
+    return true;
+  }
+
+  read(target: PriorityWorkflowTarget): PriorityWorkflowAuthorityReadState {
+    return this.#acceptedRecords.get(target.recordKey) ?? { status: "not_ready" };
+  }
+
+  acceptWrite(input: {
+    scopeKey: string;
+    target: PriorityWorkflowTarget;
+    record: PriorityWorkflowRecord;
+  }) {
+    if (
+      input.scopeKey !== this.#activeScopeKey ||
+      input.record.version < 1 ||
+      !sameTarget(input.record, input.target)
+    ) {
+      return false;
+    }
+    const generationKey =
+      this.#mailboxGenerations.get(input.target.mailboxId)?.generationKey ??
+      JSON.stringify(["write", this.#scopeGeneration, input.target.mailboxId]);
+    return this.#acceptRecord(
+      input.target,
+      input.record,
+      generationKey,
+      "write",
+    );
+  }
+
+  activateMailboxGeneration(input: {
+    scopeKey: string;
+    mailboxId: string;
+    generationKey: string;
+    targets: readonly PriorityWorkflowTarget[];
+  }) {
+    if (input.scopeKey !== this.#activeScopeKey) {
+      return false;
+    }
+    const uniqueTargets = new Map<string, PriorityWorkflowTarget>();
+    input.targets.forEach((target) => {
+      if (target.mailboxId === input.mailboxId) {
+        uniqueTargets.set(target.recordKey, target);
+      }
+    });
+    return this.#activateMailboxGeneration(
+      input.mailboxId,
+      input.generationKey,
+      uniqueTargets,
+    );
+  }
+
+  beginMailboxHydration(input: {
+    scopeKey: string;
+    mailboxId: string;
+    generationKey: string;
+    targets: readonly PriorityWorkflowTarget[];
+  }): PriorityWorkflowHydrationPlan | "empty" | "already_requested" | "stale" {
+    if (input.scopeKey !== this.#activeScopeKey) {
+      return "stale";
+    }
+    const uniqueTargets = new Map<string, PriorityWorkflowTarget>();
+    input.targets.forEach((target) => {
+      if (target.mailboxId === input.mailboxId) {
+        uniqueTargets.set(target.recordKey, target);
+      }
+    });
+    if (uniqueTargets.size === 0) {
+      return "empty";
+    }
+    const current = this.#mailboxGenerations.get(input.mailboxId);
+    if (
+      current?.generationKey === input.generationKey &&
+      current.requestGeneration > 0
+    ) {
+      return "already_requested";
+    }
+
+    if (current?.generationKey !== input.generationKey) {
+      this.#activateMailboxGeneration(
+        input.mailboxId,
+        input.generationKey,
+        uniqueTargets,
+      );
+    }
+
+    this.#requestGeneration += 1;
+    const requestGeneration = this.#requestGeneration;
+    this.#mailboxGenerations.set(input.mailboxId, {
+      generationKey: input.generationKey,
+      requestGeneration,
+    });
+    const targets = [...uniqueTargets.values()];
+    const batches: PriorityWorkflowTarget[][] = [];
+    for (
+      let index = 0;
+      index < targets.length;
+      index += PRIORITY_WORKFLOW_MAX_BATCH_IDENTITIES
+    ) {
+      batches.push(
+        targets.slice(index, index + PRIORITY_WORKFLOW_MAX_BATCH_IDENTITIES),
+      );
+    }
+    return {
+      scopeKey: input.scopeKey,
+      scopeGeneration: this.#scopeGeneration,
+      mailboxId: input.mailboxId,
+      generationKey: input.generationKey,
+      requestGeneration,
+      batches,
+    };
+  }
+
+  acceptHydrationBatch(
+    plan: PriorityWorkflowHydrationPlan,
+    batch: readonly PriorityWorkflowTarget[],
+    records: readonly PriorityWorkflowRecord[],
+  ) {
+    if (!this.#isCurrentPlan(plan) || batch.length !== records.length) {
+      return [] as string[];
+    }
+    const acceptedRecordKeys: string[] = [];
+    records.forEach((record, index) => {
+      const target = batch[index];
+      if (
+        target &&
+        target.mailboxId === plan.mailboxId &&
+        this.#acceptRecord(
+          target,
+          record,
+          plan.generationKey,
+          "hydration",
+        )
+      ) {
+        acceptedRecordKeys.push(target.recordKey);
+      }
+    });
+    return acceptedRecordKeys;
+  }
+
+  isCurrentPlan(plan: PriorityWorkflowHydrationPlan) {
+    return this.#isCurrentPlan(plan);
+  }
+
+  #isCurrentPlan(plan: PriorityWorkflowHydrationPlan) {
+    const current = this.#mailboxGenerations.get(plan.mailboxId);
+    return Boolean(
+      plan.scopeKey === this.#activeScopeKey &&
+        plan.scopeGeneration === this.#scopeGeneration &&
+        current?.generationKey === plan.generationKey &&
+        current.requestGeneration === plan.requestGeneration,
+    );
+  }
+
+  #activateMailboxGeneration(
+    mailboxId: string,
+    generationKey: string,
+    targets: ReadonlyMap<string, PriorityWorkflowTarget>,
+  ) {
+    const current = this.#mailboxGenerations.get(mailboxId);
+    if (current?.generationKey === generationKey) {
+      return false;
+    }
+    this.#mailboxGenerations.set(mailboxId, {
+      generationKey,
+      requestGeneration: 0,
+    });
+    for (const [recordKey, accepted] of this.#acceptedRecords) {
+      if (accepted.record.mailboxId !== mailboxId) {
+        continue;
+      }
+      if (accepted.source === "write" && targets.has(recordKey)) {
+        this.#acceptedRecords.set(recordKey, {
+          ...accepted,
+          generationKey,
+        });
+      } else {
+        this.#acceptedRecords.delete(recordKey);
+      }
+    }
+    return true;
+  }
+
+  #acceptRecord(
+    target: PriorityWorkflowTarget,
+    record: PriorityWorkflowRecord,
+    generationKey: string,
+    source: "hydration" | "write",
+  ) {
+    if (!sameTarget(record, target)) {
+      return false;
+    }
+    const acceptedVersion = this.#acceptedVersions.get(target.recordKey);
+    const accepted = this.#acceptedRecords.get(target.recordKey);
+    const latestRecord = this.#latestRecords.get(target.recordKey);
+    if (
+      acceptedVersion !== undefined &&
+      (record.version < acceptedVersion ||
+        (record.version === acceptedVersion &&
+          (!latestRecord ||
+            !recordsHaveEqualAuthority(record, latestRecord))))
+    ) {
+      return false;
+    }
+    if (acceptedVersion === undefined || record.version > acceptedVersion) {
+      this.#acceptedVersions.set(target.recordKey, record.version);
+      this.#latestRecords.set(target.recordKey, record);
+    }
+    this.#acceptedRecords.set(target.recordKey, {
+      status: "ready",
+      record,
+      generationKey,
+      source:
+        record.version === acceptedVersion && accepted?.source === "write"
+          ? "write"
+          : source,
+    });
+    return true;
+  }
+}
+
+export class PriorityWorkflowHydrationCoordinator {
+  readonly #client: Pick<PriorityWorkflowAuthorityClient, "read">;
+  readonly #store: PriorityWorkflowAuthorityStore;
+
+  constructor(
+    client: Pick<PriorityWorkflowAuthorityClient, "read">,
+    store: PriorityWorkflowAuthorityStore,
+  ) {
+    this.#client = client;
+    this.#store = store;
+  }
+
+  async hydrateMailbox(input: {
+    scopeKey: string;
+    mailboxId: string;
+    generationKey: string;
+    targets: readonly PriorityWorkflowTarget[];
+  }): Promise<PriorityWorkflowHydrationOutcome> {
+    const plan = this.#store.beginMailboxHydration(input);
+    if (typeof plan === "string") {
+      return { status: plan, generationKey: input.generationKey };
+    }
+    const results = await Promise.all(
+      plan.batches.map(async (batch) => {
+        try {
+          return {
+            batch,
+            result: await this.#client.read({
+              mailboxId: plan.mailboxId,
+              identities: batch.map((target) => target.identity),
+            }),
+          };
+        } catch {
+          return {
+            batch,
+            result: {
+              ok: false as const,
+              error: {
+                code: "workflow_read_failed",
+                message: "Priority workflow authority is temporarily unavailable.",
+                ambiguous: false,
+              },
+            },
+          };
+        }
+      }),
+    );
+    if (!this.#store.isCurrentPlan(plan)) {
+      return { status: "stale", generationKey: plan.generationKey };
+    }
+    const acceptedRecordKeys: string[] = [];
+    const failures: PriorityWorkflowAuthorityError[] = [];
+    results.forEach(({ batch, result }) => {
+      if (!result.ok) {
+        failures.push(result.error);
+        return;
+      }
+      acceptedRecordKeys.push(
+        ...this.#store.acceptHydrationBatch(plan, batch, result.value),
+      );
+    });
+    if (failures.length === results.length) {
+      return {
+        status: "failed",
+        generationKey: plan.generationKey,
+        acceptedRecordKeys,
+        failedBatchCount: failures.length,
+        error: failures[0],
+      };
+    }
+    return {
+      status: failures.length > 0 ? "partial" : "hydrated",
+      generationKey: plan.generationKey,
+      acceptedRecordKeys,
+      failedBatchCount: failures.length,
+    };
+  }
+}
+
 export type PriorityWorkflowOperation =
   | { operation: "set_manual_priority"; value: PriorityWorkflowManualPriority }
   | { operation: "set_cleared"; value: PriorityWorkflowCleared }
@@ -260,7 +685,7 @@ export class PriorityWorkflowWriteCoordinator {
     scopeKey: string;
     target: PriorityWorkflowTarget;
     operation: PriorityWorkflowOperation;
-    commit: (record: PriorityWorkflowRecord) => void;
+    commit: (record: PriorityWorkflowRecord) => boolean | void;
   }): Promise<PriorityWorkflowWriteOutcome> {
     const operationKey = JSON.stringify([
       input.scopeKey,
@@ -306,7 +731,7 @@ export class PriorityWorkflowWriteCoordinator {
     scopeKey: string;
     target: PriorityWorkflowTarget;
     operation: PriorityWorkflowOperation;
-    commit: (record: PriorityWorkflowRecord) => void;
+    commit: (record: PriorityWorkflowRecord) => boolean | void;
     generation: number;
     scopeGeneration: number;
   }): Promise<PriorityWorkflowWriteOutcome> {
@@ -392,7 +817,9 @@ export class PriorityWorkflowWriteCoordinator {
       return { status: "stale", generation: input.generation };
     }
     this.#acceptedVersions.set(scopedRecordKey, record.version);
-    input.commit(record);
+    if (input.commit(record) === false) {
+      return { status: "stale", generation: input.generation };
+    }
     return { status, record, generation: input.generation };
   }
 }

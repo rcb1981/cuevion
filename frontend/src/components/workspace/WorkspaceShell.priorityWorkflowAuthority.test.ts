@@ -106,10 +106,42 @@ assert.match(
   "the compose success callback must use the canonical waiting writer",
 );
 
-assert.doesNotMatch(
+assert.match(
   workspaceSource,
-  /priorityWorkflowWriteCoordinatorRef\.current!?\.read\(/,
-  "normal workspace startup, render, and selection must not read workflow authority",
+  /PriorityWorkflowHydrationCoordinator[\s\S]*?hydrateMailbox\([\s\S]*?targets: targetEntries\.map/,
+  "accepted provider generations must enter the bounded workflow hydration coordinator",
+);
+assert.match(
+  workspaceSource,
+  /acceptedRefreshAuthority\.connectionKey !== connectionKey[\s\S]*?acceptedRefreshAuthority\.authorityGeneration[\s\S]*?isCurrentGeneration/,
+  "workflow hydration must be fenced by the accepted connection and provider authority generation",
+);
+assert.match(
+  workspaceSource,
+  /priorityWorkflowHydrationGenerationKeysRef\.current\.get\(mailbox\.id\)[\s\S]*?generationKey[\s\S]*?return;/,
+  "one accepted provider generation must schedule workflow hydration only once",
+);
+assert.match(
+  workspaceSource,
+  /priorityWorkflowAuthorityStoreRef\.current!\.acceptWrite\([\s\S]*?input\.commit\(record\)[\s\S]*?setPriorityWorkflowAuthorityRevision/,
+  "P2 write records must update read authority before their local mirror",
+);
+const hydrationStart = workspaceSource.indexOf(
+  "priorityWorkflowHydrationCoordinatorRef.current!.hydrateMailbox",
+);
+const hydrationEnd = workspaceSource.indexOf(
+  "const commitPriorityWorkflowReturnedReplyTransition = async",
+  hydrationStart,
+);
+const hydrationBridge = workspaceSource.slice(hydrationStart, hydrationEnd);
+assert.ok(
+  hydrationStart >= 0 && hydrationEnd > hydrationStart,
+  "the P3 hydration bridge must remain narrowly bounded",
+);
+assert.doesNotMatch(
+  hydrationBridge,
+  /\.setManualPriority\(|\.setCleared\(|\.setWaiting\(/,
+  "startup hydration must never backfill legacy workflow state to the server",
 );
 assert.match(
   authoritySource,
@@ -123,8 +155,33 @@ assert.doesNotMatch(
 );
 assert.match(
   workspaceSource,
-  /const \[manualPriorityOverrides,[\s\S]*?window\.localStorage\.getItem\(manualPriorityOverridesStorageKey\)[\s\S]*?const \[priorityClearedKeys,[\s\S]*?window\.localStorage\.getItem\(priorityClearedStorageKey\)[\s\S]*?const \[waitingOnOtherStore,[\s\S]*?window\.localStorage\.getItem\(waitingOnOtherStorageKey\)/,
-  "P2 must leave all existing local read mirrors in place",
+  /const \[localManualPriorityOverrides,[\s\S]*?window\.localStorage\.getItem\(manualPriorityOverridesStorageKey\)[\s\S]*?const \[localPriorityClearedKeys,[\s\S]*?window\.localStorage\.getItem\(priorityClearedStorageKey\)[\s\S]*?const \[localWaitingOnOtherStore,[\s\S]*?window\.localStorage\.getItem\(waitingOnOtherStorageKey\)/,
+  "legacy browser workflow data must remain isolated behind explicit local mirror state",
+);
+assert.match(
+  workspaceSource,
+  /const manualPriorityOverrides = useMemo[\s\S]*?removePersistedMessageStateValue[\s\S]*?projection\.manualPriority/,
+  "canonical manual Priority reads must mask local history and project server authority",
+);
+assert.match(
+  workspaceSource,
+  /const priorityClearedKeys = useMemo[\s\S]*?withoutLegacy[\s\S]*?projection\.cleared === "cleared"/,
+  "canonical Done reads must replace local cleared keys",
+);
+assert.match(
+  workspaceSource,
+  /const waitingOnOtherStore = useMemo[\s\S]*?clearConversationWaitingOnOther[\s\S]*?projection\.waiting !== "waiting_on_other"/,
+  "canonical waiting reads must remove local waiting history before server projection",
+);
+assert.match(
+  workspaceSource,
+  /authority\.record\.waiting === "returned_reply"[\s\S]*?hasEvidence: true[\s\S]*?confidence: "high"/,
+  "server returned_reply must feed the existing runtime selector as high-confidence evidence",
+);
+assert.match(
+  hydrationBridge,
+  /applyManualPriorityRecordToMirror[\s\S]*?applyPriorityClearedRecordToMirror[\s\S]*?applyWaitingRecordToMirror/,
+  "successful hydration must normalize all three local workflow mirrors",
 );
 assert.match(
   workspaceSource,
