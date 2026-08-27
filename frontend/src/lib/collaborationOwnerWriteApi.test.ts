@@ -1120,7 +1120,7 @@ async function run() {
       }
     });
 
-    await test("is isolated to the visible WorkspaceShell start path", reset, async () => {
+    await test("is isolated to the visible WorkspaceShell owner-v2 paths", reset, async () => {
       const workspaceSource = fs.readFileSync(
         path.resolve(
           __dirname,
@@ -1152,10 +1152,13 @@ async function run() {
         true,
       );
       assert.equal(
-        workspaceSource.includes(
-          "prepareInternalCollaborationMessageForOwner",
-        ),
-        false,
+        (workspaceSource.match(/prepareInternalCollaborationMessageForOwner\(/g) ?? [])
+          .length,
+        1,
+      );
+      assert.equal(
+        visibleStartRegion.includes("prepareInternalCollaborationMessageForOwner("),
+        true,
       );
       assert.equal(
         workspaceSource.includes("prepareSharedCollaborationMessageForOwner"),

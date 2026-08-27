@@ -17,6 +17,10 @@ try {
     path.resolve(__dirname, "./WorkspaceShell.tsx"),
     "utf8",
   );
+  const ownerWriteSource = fs.readFileSync(
+    path.resolve(__dirname, "../../lib/collaborationOwnerWriteApi.ts"),
+    "utf8",
+  );
   const ownerReadRegion = sourceBetween(
     workspaceSource,
     "const beginCollaborationOwnerRead = (",
@@ -41,6 +45,26 @@ try {
     workspaceSource,
     "function getCollaborationOwnerCreateFailureMessage(",
     "const primaryNavigationItems = [",
+  );
+  const ownerInternalNoteFailureCopyRegion = sourceBetween(
+    workspaceSource,
+    "function getCollaborationOwnerInternalNoteFailureMessage(",
+    "const primaryNavigationItems = [",
+  );
+  const ownerInternalNoteRegion = sourceBetween(
+    workspaceSource,
+    "const submitCollaborationOwnerInternalNote = () =>",
+    "const sendCollaborationReply = (",
+  );
+  const ownerInternalNoteComposerRegion = sourceBetween(
+    workspaceSource,
+    "data-collaboration-owner-internal-note-composer",
+    ") : isPreStartCollaboration ? (",
+  );
+  const ownerAppendClientRegion = sourceBetween(
+    ownerWriteSource,
+    "async function executeAppendOperation(",
+    "export async function createCollaborationForOwner(",
   );
 
   assert.equal((workspaceSource.match(/lookupCollaborationForOwner\(/g) ?? []).length, 1);
@@ -208,8 +232,12 @@ try {
   }
   assert.equal(ownerReadRegion.includes("status: \"failure\""), true);
   assert.equal(workspaceSource.includes("data-collaboration-owner-read-projection"), true);
-  assert.equal(workspaceSource.includes('data-collaboration-owner-read-only="true"'), true);
-  assert.equal(workspaceSource.includes('data-collaboration-owner-write-controls="hidden"'), true);
+  assert.equal(
+    workspaceSource.includes('data-collaboration-owner-internal-note-enabled="true"'),
+    true,
+  );
+  assert.equal(workspaceSource.includes('data-collaboration-owner-read-only="true"'), false);
+  assert.equal(workspaceSource.includes('data-collaboration-owner-write-controls="hidden"'), false);
   assert.equal(
     workspaceSource.includes(
       "activeCollaborationOwnerProjection?.source.subject ??\n                          activeCollaborationMessage.subject",
@@ -227,6 +255,160 @@ try {
     precedingOwnerFunctionIndex > precedingEffectIndex,
     "Owner lookup must be owned by the explicit-open function, not an effect",
   );
+
+  assert.equal(
+    (workspaceSource.match(/prepareInternalCollaborationMessageForOwner\(/g) ?? [])
+      .length,
+    1,
+    "One new logical Internal Note must prepare exactly once",
+  );
+  assert.equal(
+    (ownerInternalNoteRegion.match(/pendingRequest\.operation\.execute\(\)/g) ?? [])
+      .length,
+    1,
+    "Submission and explicit retry must execute the retained operation",
+  );
+  assert.equal(ownerAppendClientRegion.includes('visibility === "internal" ? "append_internal"'), true);
+  assert.equal(ownerAppendClientRegion.includes("prepareInternalCollaborationMessageForOwner("), true);
+  assert.equal(ownerInternalNoteRegion.includes("prepareSharedCollaborationMessageForOwner"), false);
+  assert.equal(ownerInternalNoteRegion.includes("append_shared"), false);
+  assert.equal(ownerInternalNoteRegion.includes("sendCollaborationReply("), false);
+  assert.equal(ownerInternalNoteRegion.includes("mutateCollaborationThread("), false);
+  assert.equal(ownerInternalNoteRegion.includes("createCollaborationThread("), false);
+  assert.equal(ownerInternalNoteRegion.includes("sendGmailMessage("), false);
+  assert.equal(ownerInternalNoteRegion.includes("connectInboxWithImap("), false);
+
+  assert.equal(ownerInternalNoteRegion.includes("!collaborationOwnerInternalNoteDraft.trim()"), true);
+  assert.equal(
+    ownerInternalNoteRegion.includes(
+      "projection.collaboration.collaborationId,\n        collaborationOwnerInternalNoteDraft,",
+    ),
+    true,
+    "Preparation must receive the exact untrimmed draft",
+  );
+  assert.equal(
+    ownerInternalNoteRegion.includes(
+      "existingRequest.text === collaborationOwnerInternalNoteDraft",
+    ),
+    true,
+  );
+  assert.equal(ownerInternalNoteRegion.includes("existingRequest?.inFlight"), true);
+  assert.equal(ownerInternalNoteRegion.includes("request.inFlight = true"), true);
+  assert.equal(ownerInternalNoteComposerRegion.includes('status === "sending"'), true);
+  assert.equal(ownerInternalNoteComposerRegion.includes("Retry Internal Note"), true);
+  assert.equal(ownerInternalNoteComposerRegion.includes("Add Internal Note"), true);
+  assert.equal(
+    ownerInternalNoteComposerRegion.includes(
+      "collaborationOwnerInternalNoteRequestRef.current = null",
+    ),
+    true,
+    "Editing a failed logical note must explicitly abandon its prepared operation",
+  );
+
+  assert.equal(
+    ownerInternalNoteRegion.includes(
+      "result.status !== \"success\"",
+    ),
+    true,
+  );
+  assert.ok(
+    ownerInternalNoteRegion.indexOf('result.status !== "success"') <
+      ownerInternalNoteRegion.indexOf(
+        'collaborationOwnerInternalNoteRequestRef.current = null',
+        ownerInternalNoteRegion.indexOf('result.status !== "success"'),
+      ),
+    "A failed execution must retain the prepared operation until retry or edit",
+  );
+  assert.equal(ownerInternalNoteRegion.includes("pendingRequest.operation.execute()"), true);
+  assert.equal(
+    ownerInternalNoteRegion.includes(
+      "message.id === result.message.id",
+    ),
+    true,
+    "Committed server message IDs are the dedupe authority",
+  );
+  assert.equal(ownerInternalNoteRegion.includes("updatedAt: result.updatedAt"), true);
+  assert.equal(ownerInternalNoteRegion.includes("result.message"), true);
+  assert.equal(ownerInternalNoteRegion.includes("readCollaborationForOwner("), false);
+  assert.equal(ownerInternalNoteRegion.includes("lookupCollaborationForOwner("), false);
+  assert.equal(ownerInternalNoteRegion.includes("authorDisplayName:"), false);
+  assert.equal(ownerInternalNoteRegion.includes("timestamp:"), false);
+  assert.equal(ownerInternalNoteRegion.includes("visibility:"), false);
+
+  for (const staleFence of [
+    "collaborationOwnerProjectionGenerationRef.current === request.requestId",
+    "currentProjectionRequest?.identityKey === request.identityKey",
+    "currentProjectionRequest.requestId === request.projectionRequestId",
+    "currentProjectionRequest.messageId === request.messageId",
+    "currentProjectionRequest.sourceMailboxId === request.sourceMailboxId",
+    "current.collaboration.collaborationId !== pendingRequest.collaborationId",
+    "current.collaboration.mailboxId !== pendingRequest.sourceMailboxId",
+  ]) {
+    assert.equal(
+      ownerInternalNoteRegion.includes(staleFence),
+      true,
+      `Missing owner Internal Note stale fence: ${staleFence}`,
+    );
+  }
+  assert.equal(closeRegion.includes("fenceCollaborationOwnerProjection();"), true);
+  assert.equal(
+    workspaceSource.includes("collaborationOwnerInternalNoteRequestRef.current = null;\n    setCollaborationOwnerInternalNoteDraft(\"\");"),
+    true,
+  );
+
+  for (const failureStatus of [
+    "invalid_collaboration_id",
+    "invalid_text",
+    "unauthorized",
+    "forbidden",
+    "not_found",
+    "conflict",
+    "rate_limited",
+    "service_unavailable",
+    "internal_error",
+    "invalid_response",
+    "network_failure",
+  ]) {
+    assert.equal(
+      ownerInternalNoteFailureCopyRegion.includes(`\"${failureStatus}\"`),
+      true,
+      `Missing bounded Internal Note failure copy for ${failureStatus}`,
+    );
+  }
+  assert.equal(ownerInternalNoteFailureCopyRegion.includes("404"), false);
+  assert.equal(
+    ownerInternalNoteFailureCopyRegion.includes(
+      "Internal notes are temporarily unavailable. Retry later.",
+    ),
+    true,
+  );
+
+  assert.equal(ownerInternalNoteComposerRegion.includes("entry.authorDisplayName"), false);
+  assert.equal(workspaceSource.includes("entry.authorDisplayName"), true);
+  assert.equal(workspaceSource.includes("entry.authorRole"), true);
+  assert.equal(workspaceSource.includes("entry.text"), true);
+  assert.equal(workspaceSource.includes("entry.timestamp"), true);
+  assert.equal(workspaceSource.includes('"Internal · Private"'), true);
+  assert.equal(workspaceSource.includes("Server collaboration · Read only"), false);
+  assert.equal(workspaceSource.includes("Server projection is read only."), false);
+
+  for (const forbiddenPersistence of [
+    "updateMessageById(",
+    "setMailboxStore(",
+    "localStorage",
+    "sessionStorage",
+    "indexedDB",
+    "saveLiveInboxSnapshot(",
+  ]) {
+    assert.equal(
+      ownerInternalNoteRegion.includes(forbiddenPersistence),
+      false,
+      `Owner Internal Note must not use ${forbiddenPersistence}`,
+    );
+  }
+  assert.equal(explicitOpenRegion.includes("submitCollaborationOwnerInternalNote("), false);
+  assert.equal(workspaceSource.includes("openShareCollaboration("), true);
+  assert.equal(workspaceSource.includes("setCollaborationHistoryExpanded("), true);
 } catch (error) {
   process.exitCode = 1;
   console.error("FAIL: Workspace Collaboration owner-read integration contract");

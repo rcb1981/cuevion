@@ -242,7 +242,11 @@ import {
   readCollaborationForOwner,
   type CollaborationOwnerReadDto,
 } from "../../lib/collaborationOwnerReadApi";
-import { createCollaborationForOwner } from "../../lib/collaborationOwnerWriteApi";
+import {
+  createCollaborationForOwner,
+  prepareInternalCollaborationMessageForOwner,
+  type CollaborationOwnerAppendOperation,
+} from "../../lib/collaborationOwnerWriteApi";
 import {
   deriveCollaborationOwnerSourceLocator,
   type CollaborationOwnerSourceLocator,
@@ -462,6 +466,40 @@ function getCollaborationOwnerCreateFailureMessage(
     return "Collaboration could not be started. Try again.";
   }
   return "Collaboration is temporarily unavailable. Try again later.";
+}
+
+function getCollaborationOwnerInternalNoteFailureMessage(
+  failureStatus: string,
+  retryAfterSeconds?: number,
+) {
+  if (failureStatus === "invalid_text") {
+    return "This internal note cannot be added. Check its content and try again.";
+  }
+  if (failureStatus === "unauthorized") {
+    return "Sign in again to add this internal note.";
+  }
+  if (failureStatus === "forbidden") {
+    return "Internal notes are not available for this mailbox.";
+  }
+  if (failureStatus === "conflict") {
+    return "The collaboration changed before this note could be added. Retry the note.";
+  }
+  if (failureStatus === "rate_limited") {
+    return retryAfterSeconds === undefined
+      ? "Too many collaboration requests. Retry shortly."
+      : `Too many collaboration requests. Retry in ${retryAfterSeconds} seconds.`;
+  }
+  if (
+    failureStatus === "invalid_collaboration_id" ||
+    failureStatus === "not_found" ||
+    failureStatus === "service_unavailable" ||
+    failureStatus === "internal_error" ||
+    failureStatus === "invalid_response" ||
+    failureStatus === "network_failure"
+  ) {
+    return "Internal notes are temporarily unavailable. Retry later.";
+  }
+  return "Internal notes are temporarily unavailable. Retry later.";
 }
 
 const primaryNavigationItems = [
@@ -1676,6 +1714,28 @@ type CollaborationOwnerProjectionState =
       failureStatus: string;
       retryAfterSeconds?: number;
     };
+
+type CollaborationOwnerInternalNoteState =
+  | { status: "idle" }
+  | { status: "sending" }
+  | {
+      status: "failure";
+      failureStatus: string;
+      retryAfterSeconds?: number;
+      canRetry: boolean;
+    };
+
+type CollaborationOwnerInternalNoteRequest = {
+  identityKey: string;
+  requestId: number;
+  projectionRequestId: number;
+  messageId: string;
+  sourceMailboxId: InboxId;
+  collaborationId: string;
+  text: string;
+  operation: CollaborationOwnerAppendOperation;
+  inFlight: boolean;
+};
 
 const PRIORITY_SEMANTIC_NEW_INBOUND_MAX_PENDING = 256;
 
@@ -16858,6 +16918,12 @@ function MailboxView({
     sourceMailboxId: InboxId;
     locator: CollaborationOwnerSourceLocator;
   } | null>(null);
+  const [collaborationOwnerInternalNoteDraft, setCollaborationOwnerInternalNoteDraft] =
+    useState("");
+  const [collaborationOwnerInternalNoteState, setCollaborationOwnerInternalNoteState] =
+    useState<CollaborationOwnerInternalNoteState>({ status: "idle" });
+  const collaborationOwnerInternalNoteRequestRef =
+    useRef<CollaborationOwnerInternalNoteRequest | null>(null);
   const [pendingEndCollaborationMessageId, setPendingEndCollaborationMessageId] = useState<
     string | null
   >(null);
@@ -19758,7 +19824,7 @@ function MailboxView({
     collaborationOwnerProjection.status === "success"
       ? collaborationOwnerProjection.collaboration
       : null;
-  const isActiveCollaborationOwnerProjectionReadOnly = Boolean(
+  const hasActiveCollaborationOwnerProjection = Boolean(
     activeCollaborationOwnerProjection,
   );
   const isPreStartCollaboration = Boolean(
@@ -22192,6 +22258,9 @@ function MailboxView({
     const requestId = collaborationOwnerProjectionGenerationRef.current + 1;
     collaborationOwnerProjectionGenerationRef.current = requestId;
     collaborationOwnerProjectionRequestRef.current = null;
+    collaborationOwnerInternalNoteRequestRef.current = null;
+    setCollaborationOwnerInternalNoteDraft("");
+    setCollaborationOwnerInternalNoteState({ status: "idle" });
     setCollaborationOwnerCreateState({ status: "idle" });
     setCollaborationOwnerProjection({
       status: "idle",
@@ -22448,6 +22517,9 @@ function MailboxView({
     setContextMenuState(null);
     setDetailActionsMenuState(null);
     setIsCollaborationActionsMenuOpen(false);
+    collaborationOwnerInternalNoteRequestRef.current = null;
+    setCollaborationOwnerInternalNoteDraft("");
+    setCollaborationOwnerInternalNoteState({ status: "idle" });
     if (options?.loadOwnerProjection) {
       beginCollaborationOwnerRead(
         messageId,
@@ -22890,6 +22962,144 @@ function MailboxView({
       [collaborationStateKey]: initialCollaboration.collaboration,
     }));
     setStartCollaborationInviteEmail("");
+  };
+
+  const submitCollaborationOwnerInternalNote = () => {
+    const messageId = activeCollaborationMessageId;
+    const sourceMailboxId = activeCollaborationSourceMailboxId;
+    const projection =
+      collaborationOwnerProjection.status === "success"
+        ? collaborationOwnerProjection
+        : null;
+    const projectionRequest = collaborationOwnerProjectionRequestRef.current;
+    const existingRequest = collaborationOwnerInternalNoteRequestRef.current;
+
+    if (
+      !messageId ||
+      !sourceMailboxId ||
+      !projection ||
+      !projectionRequest ||
+      projectionRequest.inFlight ||
+      projectionRequest.identityKey !== projection.identityKey ||
+      projectionRequest.messageId !== messageId ||
+      projectionRequest.sourceMailboxId !== sourceMailboxId ||
+      existingRequest?.inFlight ||
+      !collaborationOwnerInternalNoteDraft.trim()
+    ) {
+      return;
+    }
+
+    let request =
+      existingRequest &&
+      existingRequest.identityKey === projection.identityKey &&
+      existingRequest.projectionRequestId === projectionRequest.requestId &&
+      existingRequest.messageId === messageId &&
+      existingRequest.sourceMailboxId === sourceMailboxId &&
+      existingRequest.collaborationId === projection.collaboration.collaborationId &&
+      existingRequest.text === collaborationOwnerInternalNoteDraft
+        ? existingRequest
+        : null;
+
+    if (!request) {
+      const preparation = prepareInternalCollaborationMessageForOwner(
+        projection.collaboration.collaborationId,
+        collaborationOwnerInternalNoteDraft,
+      );
+      if (preparation.status !== "ready") {
+        collaborationOwnerInternalNoteRequestRef.current = null;
+        setCollaborationOwnerInternalNoteState({
+          status: "failure",
+          failureStatus: preparation.status,
+          canRetry: false,
+        });
+        return;
+      }
+
+      const requestId = collaborationOwnerProjectionGenerationRef.current + 1;
+      collaborationOwnerProjectionGenerationRef.current = requestId;
+      request = {
+        identityKey: projection.identityKey,
+        requestId,
+        projectionRequestId: projectionRequest.requestId,
+        messageId,
+        sourceMailboxId,
+        collaborationId: projection.collaboration.collaborationId,
+        text: collaborationOwnerInternalNoteDraft,
+        operation: preparation.operation,
+        inFlight: false,
+      };
+      collaborationOwnerInternalNoteRequestRef.current = request;
+    }
+
+    request.inFlight = true;
+    setCollaborationOwnerInternalNoteState({ status: "sending" });
+
+    const isCurrentRequest = () => {
+      const currentProjectionRequest = collaborationOwnerProjectionRequestRef.current;
+      return (
+        collaborationOwnerInternalNoteRequestRef.current === request &&
+        collaborationOwnerProjectionGenerationRef.current === request.requestId &&
+        currentProjectionRequest?.identityKey === request.identityKey &&
+        currentProjectionRequest.requestId === request.projectionRequestId &&
+        currentProjectionRequest.messageId === request.messageId &&
+        currentProjectionRequest.sourceMailboxId === request.sourceMailboxId
+      );
+    };
+
+    void (async (pendingRequest: CollaborationOwnerInternalNoteRequest) => {
+      let result;
+      try {
+        result = await pendingRequest.operation.execute();
+      } catch {
+        result = { status: "network_failure" } as const;
+      }
+      if (!isCurrentRequest()) {
+        return;
+      }
+
+      pendingRequest.inFlight = false;
+      if (result.status !== "success") {
+        setCollaborationOwnerInternalNoteState({
+          status: "failure",
+          failureStatus: result.status,
+          ...(result.status === "rate_limited" &&
+          result.retryAfterSeconds !== undefined
+            ? { retryAfterSeconds: result.retryAfterSeconds }
+            : {}),
+          canRetry: true,
+        });
+        return;
+      }
+
+      setCollaborationOwnerProjection((current) => {
+        if (
+          current.status !== "success" ||
+          current.identityKey !== pendingRequest.identityKey ||
+          current.collaboration.collaborationId !== pendingRequest.collaborationId ||
+          current.collaboration.mailboxId !== pendingRequest.sourceMailboxId
+        ) {
+          return current;
+        }
+
+        const hasCommittedMessage = current.collaboration.messages.some(
+          (message) => message.id === result.message.id,
+        );
+        return {
+          ...current,
+          requestId: pendingRequest.requestId,
+          collaboration: {
+            ...current.collaboration,
+            updatedAt: result.updatedAt,
+            messages: hasCommittedMessage
+              ? current.collaboration.messages
+              : [...current.collaboration.messages, result.message],
+          },
+        };
+      });
+      collaborationOwnerInternalNoteRequestRef.current = null;
+      setCollaborationOwnerInternalNoteDraft("");
+      setCollaborationOwnerInternalNoteState({ status: "idle" });
+    })(request);
   };
 
   const sendCollaborationReply = (messageId: string) => {
@@ -29238,17 +29448,17 @@ function MailboxView({
                           Checking the server collaboration…
                         </div>
                       ) : null}
-                      {isActiveCollaborationOwnerProjectionReadOnly &&
+                      {hasActiveCollaborationOwnerProjection &&
                       activeCollaborationOwnerProjection ? (
                         <section
                           data-collaboration-owner-read-projection
-                          data-collaboration-owner-read-only="true"
+                          data-collaboration-owner-internal-note-enabled="true"
                           className="space-y-4"
                         >
                           <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,var(--workspace-card),var(--workspace-card-subtle))] px-5 py-5">
                             <div className="flex flex-wrap items-center justify-between gap-3">
                               <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                                Server collaboration · Read only
+                                Server collaboration
                               </div>
                               <span className="inline-flex rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 py-1 text-[0.62rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)]">
                                 {activeCollaborationOwnerProjection.state}
@@ -29328,7 +29538,9 @@ function MailboxView({
                                       <span>{entry.authorDisplayName}</span>
                                       <span>{entry.authorRole}</span>
                                       <span className="uppercase tracking-[0.12em]">
-                                        {entry.visibility}
+                                        {entry.visibility === "internal"
+                                          ? "Internal · Private"
+                                          : "Shared"}
                                       </span>
                                       <span className="text-[var(--workspace-text-faint)]">
                                         {formatCollaborationStatusTimestamp(entry.timestamp)}
@@ -29345,6 +29557,74 @@ function MailboxView({
                                 No server messages.
                               </div>
                             )}
+                          </section>
+
+                          <section
+                            data-collaboration-owner-internal-note-composer
+                            className="space-y-3"
+                          >
+                            <label className="block space-y-2">
+                              <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                                Internal Note
+                              </span>
+                              <textarea
+                                value={collaborationOwnerInternalNoteDraft}
+                                disabled={
+                                  collaborationOwnerInternalNoteState.status === "sending"
+                                }
+                                onChange={(event) => {
+                                  const pendingRequest =
+                                    collaborationOwnerInternalNoteRequestRef.current;
+                                  if (pendingRequest && !pendingRequest.inFlight) {
+                                    collaborationOwnerInternalNoteRequestRef.current = null;
+                                  }
+                                  setCollaborationOwnerInternalNoteDraft(event.target.value);
+                                  if (
+                                    collaborationOwnerInternalNoteState.status === "failure"
+                                  ) {
+                                    setCollaborationOwnerInternalNoteState({ status: "idle" });
+                                  }
+                                }}
+                                rows={3}
+                                placeholder="Add a private note for your Cuevion collaboration"
+                                className="min-h-[7rem] w-full resize-none rounded-[18px] border border-[color:rgba(111,148,111,0.28)] bg-[linear-gradient(180deg,rgba(255,253,249,0.98),rgba(248,244,236,0.96))] px-4 py-3.5 text-[0.92rem] leading-7 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)] disabled:cursor-not-allowed disabled:opacity-60 dark:border-[var(--workspace-accent-border)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
+                              />
+                            </label>
+                            {collaborationOwnerInternalNoteState.status === "failure" ? (
+                              <div
+                                data-collaboration-owner-internal-note-feedback
+                                className="rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.78rem] leading-6 text-[var(--workspace-text-faint)]"
+                              >
+                                {getCollaborationOwnerInternalNoteFailureMessage(
+                                  collaborationOwnerInternalNoteState.failureStatus,
+                                  collaborationOwnerInternalNoteState.retryAfterSeconds,
+                                )}
+                              </div>
+                            ) : null}
+                            <div className="flex justify-end">
+                              <button
+                                type="button"
+                                data-collaboration-owner-internal-note-action
+                                onClick={submitCollaborationOwnerInternalNote}
+                                disabled={
+                                  collaborationOwnerInternalNoteState.status === "sending" ||
+                                  !collaborationOwnerInternalNoteDraft.trim()
+                                }
+                                className={
+                                  collaborationOwnerInternalNoteState.status !== "sending" &&
+                                  collaborationOwnerInternalNoteDraft.trim()
+                                    ? collaborationCompactPrimaryActionButtonClass
+                                    : collaborationCompactDisabledActionButtonClass
+                                }
+                              >
+                                {collaborationOwnerInternalNoteState.status === "sending"
+                                  ? "Adding Internal Note…"
+                                  : collaborationOwnerInternalNoteState.status === "failure" &&
+                                      collaborationOwnerInternalNoteState.canRetry
+                                    ? "Retry Internal Note"
+                                    : "Add Internal Note"}
+                              </button>
+                            </div>
                           </section>
                         </section>
                       ) : isPreStartCollaboration ? (
@@ -29927,12 +30207,15 @@ function MailboxView({
                   </div>
 
                   <div className="mt-4 flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-[var(--workspace-border-soft)] pt-4">
-                    {isActiveCollaborationOwnerProjectionReadOnly ? (
-                      <div
-                        data-collaboration-owner-write-controls="hidden"
-                        className="text-[0.76rem] leading-6 text-[var(--workspace-text-faint)]"
-                      >
-                        Server projection is read only.
+                    {hasActiveCollaborationOwnerProjection ? (
+                      <div className="ml-auto">
+                        <button
+                          type="button"
+                          onClick={closeCollaborationOverlay}
+                          className={collaborationCompactTertiaryActionButtonClass}
+                        >
+                          Close
+                        </button>
                       </div>
                     ) : (
                       <>
