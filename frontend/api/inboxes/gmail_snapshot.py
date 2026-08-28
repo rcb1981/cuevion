@@ -33,8 +33,9 @@ def _result(
     snapshot: dict | None = None,
     error: dict | None = None,
     refresh_failure: dict | None = None,
+    priority_candidate_sources: list[dict] | None = None,
 ) -> dict:
-    return {
+    result = {
         "status": (
             "ok"
             if snapshot is not None
@@ -47,6 +48,9 @@ def _result(
         "error": error,
         "refresh_failure": refresh_failure,
     }
+    if priority_candidate_sources is not None:
+        result["_priorityCandidateSources"] = priority_candidate_sources
+    return result
 
 
 def _invalid_response(context: dict) -> dict:
@@ -143,7 +147,7 @@ def _message_ids_from_list(
     return message_ids, True
 
 
-def parse_gmail_message_detail(
+def _parse_gmail_message_detail_with_candidate_source(
     detail_payload: object,
     *,
     context: dict,
@@ -153,7 +157,7 @@ def parse_gmail_message_detail(
     focus_preferences: dict | None = None,
     strict: bool = False,
     message_parser=message_from_bytes,
-) -> dict | None:
+) -> tuple[dict, dict] | None:
     """Validate and normalize one Gmail ``format=raw`` detail response.
 
     This helper is transport-free. Documented provider-data failures return
@@ -242,7 +246,50 @@ def parse_gmail_message_detail(
         if valid_identifier(normalized_rfc_message_id):
             preview["rfcMessageId"] = normalized_rfc_message_id
 
-    return preview
+    candidate_source = {
+        "provider": "google",
+        "providerMessageId": provider_message_id,
+        "providerThreadId": (
+            provider_thread_id if valid_identifier(provider_thread_id) else None
+        ),
+        "providerFolder": provider_folder.upper(),
+        "labels": label_ids,
+        "providerTimestampMillis": (
+            detail_payload.get("internalDate")
+            if isinstance(detail_payload.get("internalDate"), str)
+            else None
+        ),
+        **imap_connect_preview.build_priority_candidate_render_source(
+            parsed_message,
+            preview,
+        ),
+    }
+    return preview, candidate_source
+
+
+def parse_gmail_message_detail(
+    detail_payload: object,
+    *,
+    context: dict,
+    provider_folder: str,
+    requested_message_id: str,
+    index: int,
+    focus_preferences: dict | None = None,
+    strict: bool = False,
+    message_parser=message_from_bytes,
+) -> dict | None:
+    """Validate and normalize one Gmail ``format=raw`` detail response."""
+    parsed = _parse_gmail_message_detail_with_candidate_source(
+        detail_payload,
+        context=context,
+        provider_folder=provider_folder,
+        requested_message_id=requested_message_id,
+        index=index,
+        focus_preferences=focus_preferences,
+        strict=strict,
+        message_parser=message_parser,
+    )
+    return parsed[0] if parsed is not None else None
 
 
 def read_gmail_folder_snapshot(
@@ -338,6 +385,7 @@ def read_gmail_folder_snapshot(
         message_ids.append(required_message_id)
 
     messages: list[dict] = []
+    priority_candidate_sources: list[dict] = []
     snapshot = {
         "providerFolder": provider_folder,
         "serverMailboxId": context.get("mailbox_id"),
@@ -362,7 +410,7 @@ def read_gmail_folder_snapshot(
             )
         if detail_error is not None:
             return _result(context, error=detail_error)
-        preview = parse_gmail_message_detail(
+        parsed = _parse_gmail_message_detail_with_candidate_source(
             detail_payload,
             context=context,
             provider_folder=provider_folder,
@@ -372,10 +420,11 @@ def read_gmail_folder_snapshot(
             strict=strict,
             message_parser=message_parser,
         )
-        if preview is None:
+        if parsed is None:
             if strict:
                 return _invalid_response(context)
             continue
+        preview, priority_candidate_source = parsed
 
         candidate_snapshot = {
             **snapshot,
@@ -395,5 +444,11 @@ def read_gmail_folder_snapshot(
                 )
             break
         messages.append(preview)
+        if provider_folder == "Inbox":
+            priority_candidate_sources.append(priority_candidate_source)
 
-    return _result(context, snapshot=snapshot)
+    return _result(
+        context,
+        snapshot=snapshot,
+        priority_candidate_sources=priority_candidate_sources,
+    )

@@ -48,6 +48,9 @@ from .authenticated_gmail import (
     valid_identifier,
 )
 from .gmail_snapshot import read_gmail_folder_snapshot
+from api.priority.candidate_projection import (
+    populate_runtime_priority_candidates,
+)
 from api.priority.semantic_config import read_new_inbound_client_mode
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -173,7 +176,11 @@ class handler(BaseHTTPRequestHandler):
                 send_json(self, 400, focus_error)
                 return
 
-        resolution = resolve_authenticated_gmail(self.headers, payload.get("mailboxId"))
+        resolution = resolve_authenticated_gmail(
+            self.headers,
+            payload.get("mailboxId"),
+            include_member_authority=True,
+        )
         if resolution["status"] != "ok":
             send_json(self, resolution["status_code"], resolution["error"])
             return
@@ -215,6 +222,19 @@ class handler(BaseHTTPRequestHandler):
             if isinstance(message, dict)
             and valid_identifier(message.get("providerMessageId"))
         ]
+
+        candidate_sources = snapshot_result.get("_priorityCandidateSources")
+        if isinstance(candidate_sources, list) and candidate_sources:
+            try:
+                populate_runtime_priority_candidates(
+                    member=resolution.get("memberAuthority"),
+                    mailbox_id=context.get("mailbox_id"),
+                    mailbox_account_identity=context.get("mailbox_email"),
+                    provider="google",
+                    sources=candidate_sources,
+                )
+            except Exception:
+                pass
 
         send_json(
             self,

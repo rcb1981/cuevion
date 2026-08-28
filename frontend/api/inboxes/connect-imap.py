@@ -38,6 +38,9 @@ from user_config_store import (  # noqa: E402
     rollback_owned_custom_imap_mailbox_update,
     upsert_owned_custom_imap_mailbox,
 )
+from api.priority.candidate_projection import (  # noqa: E402
+    populate_runtime_priority_candidates,
+)
 from api.priority.semantic_config import read_new_inbound_client_mode  # noqa: E402
 
 INITIAL_FIELDS = {
@@ -2874,7 +2877,11 @@ class handler(BaseHTTPRequestHandler):
             self._send_json(400, _error("invalid_request", "Refresh request is invalid."))
             return
 
-        resolved = resolve_authenticated_imap_mailbox(self.headers, mailbox_id)
+        resolved = resolve_authenticated_imap_mailbox(
+            self.headers,
+            mailbox_id,
+            include_member_authority=True,
+        )
         if resolved["status"] != "ok" or not resolved["mailbox"]:
             error = resolved["error"] or {
                 "code": "mailbox_configuration_malformed",
@@ -2921,6 +2928,18 @@ class handler(BaseHTTPRequestHandler):
             else:
                 self._send_json(502, _error("connection_failed", "Could not refresh this inbox."))
             return
+        candidate_sources = response_payload.get("_priorityCandidateSources")
+        if isinstance(candidate_sources, list) and candidate_sources:
+            try:
+                populate_runtime_priority_candidates(
+                    member=resolved.get("memberAuthority"),
+                    mailbox_id=mailbox.get("mailboxId"),
+                    mailbox_account_identity=mailbox["email"].casefold(),
+                    provider="custom_imap",
+                    sources=candidate_sources,
+                )
+            except Exception:
+                pass
         success_payload = _preview_success_payload(response_payload)
         success_payload["prioritySemanticNewInboundMode"] = (
             read_new_inbound_client_mode()

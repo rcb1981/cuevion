@@ -7,6 +7,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 from urllib.error import URLError
 
@@ -268,6 +269,144 @@ class GmailSnapshotTransportRetryTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(len(paths), 1)
+
+    def test_current_window_emits_private_candidate_source_without_raw_content(self):
+        message_id = "message-with-time"
+        raw = (
+            "Message-Id: <message-with-time@example.test>\r\n"
+            "Date: Tue, 01 Jul 2025 12:00:00 +0200\r\n"
+            "From: Sender Name <sender@example.test>\r\n"
+            f"To: {MAILBOX_EMAIL}\r\n"
+            "Subject: Candidate source\r\n"
+            "Content-Type: text/html; charset=utf-8\r\n"
+            "\r\n"
+            "<p>Private body marker</p>"
+        ).encode("utf-8")
+        detail = {
+            "id": message_id,
+            "threadId": "provider-thread-exact",
+            "labelIds": ["INBOX", "UNREAD", "STARRED"],
+            "internalDate": "1751364000123",
+            "raw": base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii"),
+        }
+        paths: list[str] = []
+        result = gmail_snapshot.read_gmail_folder_snapshot(
+            gmail_context(),
+            provider_folder="Inbox",
+            request_with_one_refresh=snapshot_request(
+                [
+                    ({"messages": [{"id": message_id}]}, None),
+                    (detail, None),
+                ],
+                paths,
+            ),
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(paths), 2)
+        self.assertEqual(
+            set(result["snapshot"]),
+            {"providerFolder", "serverMailboxId", "messages", "uidValidity"},
+        )
+        source = result["_priorityCandidateSources"][0]
+        self.assertEqual(source["providerMessageId"], message_id)
+        self.assertEqual(source["providerThreadId"], "provider-thread-exact")
+        self.assertEqual(source["providerFolder"], "INBOX")
+        self.assertEqual(source["labels"], ["INBOX", "UNREAD", "STARRED"])
+        self.assertEqual(source["providerTimestampMillis"], "1751364000123")
+        self.assertEqual(source["rfcDate"], "Tue, 01 Jul 2025 12:00:00 +0200")
+        self.assertEqual(source["senderAddress"], "sender@example.test")
+        for forbidden in ("raw", "body", "bodyHtml", "attachments"):
+            self.assertNotIn(forbidden, source)
+
+    def test_missing_true_time_is_not_replaced_by_preview_created_at(self):
+        message_id = "message-without-time"
+        paths: list[str] = []
+        result = gmail_snapshot.read_gmail_folder_snapshot(
+            gmail_context(),
+            provider_folder="Inbox",
+            request_with_one_refresh=snapshot_request(
+                [
+                    ({"messages": [{"id": message_id}]}, None),
+                    (gmail_detail(message_id), None),
+                ],
+                paths,
+            ),
+        )
+
+        preview = result["snapshot"]["messages"][0]
+        source = result["_priorityCandidateSources"][0]
+        self.assertTrue(preview["createdAt"])
+        self.assertIsNone(source["providerTimestampMillis"])
+        self.assertIsNone(source["rfcDate"])
+
+    def test_route_response_ignores_private_sidecar_and_population_failure(self):
+        preview = {
+            "providerMessageId": "message-1",
+            "providerThreadId": "thread-1",
+            "labelIds": ["INBOX"],
+        }
+        snapshot_result = {
+            "status": "ok",
+            "context": gmail_context(),
+            "snapshot": {
+                "messages": [preview],
+                "uidValidity": "gmail-api",
+            },
+            "error": None,
+            "refresh_failure": None,
+            "_priorityCandidateSources": [{"private": "source"}],
+        }
+        request_handler = SimpleNamespace(headers={})
+        sent: list[tuple[int, dict]] = []
+        with patch.object(
+            fetch_gmail,
+            "read_json_body",
+            return_value=({"mailboxId": MAILBOX_ID}, None),
+        ), patch.object(
+            fetch_gmail,
+            "resolve_authenticated_gmail",
+            return_value={
+                "status": "ok",
+                "context": gmail_context(),
+                "memberAuthority": object(),
+            },
+        ), patch.object(
+            fetch_gmail,
+            "read_gmail_folder_snapshot",
+            return_value=snapshot_result,
+        ), patch.object(
+            fetch_gmail,
+            "populate_runtime_priority_candidates",
+            side_effect=RuntimeError("candidate store offline"),
+        ), patch.object(
+            fetch_gmail,
+            "read_new_inbound_client_mode",
+            return_value="off",
+        ), patch.object(
+            fetch_gmail,
+            "send_json",
+            side_effect=lambda _handler, status, payload: sent.append(
+                (status, payload)
+            ),
+        ):
+            fetch_gmail.handler._handle_post(request_handler)
+
+        self.assertEqual(
+            sent,
+            [
+                (
+                    200,
+                    {
+                        "ok": True,
+                        "messages": [preview],
+                        "inboxUidSet": ["message-1"],
+                        "uidValidity": "gmail-api",
+                        "prioritySemanticNewInboundMode": "off",
+                    },
+                )
+            ],
+        )
 
     def test_refresh_failure_is_not_transport_retried(self):
         request = Mock(

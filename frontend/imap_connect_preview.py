@@ -377,13 +377,13 @@ def _resolve_in_reply_to_root(
     return direct_parent_id
 
 
-def resolve_custom_imap_thread_ids(
+def resolve_custom_imap_thread_authorities(
     records: list[dict[str, Any]],
     mailbox_key: str,
     folder: str,
     uid_validity: str | None,
-) -> list[str | None]:
-    """Resolve one authoritative, non-subject thread ID per custom-IMAP message."""
+) -> list[dict[str, Any] | None]:
+    """Resolve bounded conversation authority without subject-derived identity."""
     record_indexes_by_message_id: dict[str, list[int]] = {}
     for index, record in enumerate(records):
         message_id = record.get("message_id")
@@ -401,7 +401,7 @@ def resolve_custom_imap_thread_ids(
         if len(indexes) == 1
     }
 
-    resolved: list[str | None] = []
+    resolved: list[dict[str, Any] | None] = []
     normalized_uid_validity = (
         uid_validity if is_canonical_uid_validity(uid_validity) else None
     )
@@ -432,30 +432,58 @@ def resolve_custom_imap_thread_ids(
 
         if root_message_id:
             resolved.append(
-                build_bounded_thread_identity(
-                    "imap:rfc",
-                    mailbox_key,
-                    root_message_id,
-                )
+                {
+                    "conversation_id": build_bounded_thread_identity(
+                        "imap:rfc",
+                        mailbox_key,
+                        root_message_id,
+                    ),
+                    "authority_kind": "rfc",
+                    "rfc_root_message_id": root_message_id,
+                    "rfc_message_id": own_message_id,
+                }
             )
             continue
 
         imap_uid = str(record.get("imap_uid") or "").strip()
         if imap_uid and normalized_uid_validity:
             resolved.append(
-                build_bounded_thread_identity(
-                    "imap:uid",
-                    mailbox_key,
-                    folder,
-                    normalized_uid_validity,
-                    imap_uid,
-                )
+                {
+                    "conversation_id": build_bounded_thread_identity(
+                        "imap:uid",
+                        mailbox_key,
+                        folder,
+                        normalized_uid_validity,
+                        imap_uid,
+                    ),
+                    "authority_kind": "imap_uid",
+                    "rfc_root_message_id": None,
+                    "rfc_message_id": None,
+                }
             )
             continue
 
         resolved.append(None)
 
     return resolved
+
+
+def resolve_custom_imap_thread_ids(
+    records: list[dict[str, Any]],
+    mailbox_key: str,
+    folder: str,
+    uid_validity: str | None,
+) -> list[str | None]:
+    """Resolve one authoritative, non-subject thread ID per custom-IMAP message."""
+    return [
+        authority["conversation_id"] if authority is not None else None
+        for authority in resolve_custom_imap_thread_authorities(
+            records,
+            mailbox_key,
+            folder,
+            uid_validity,
+        )
+    ]
 
 
 def html_to_text(value: str | None) -> str:
@@ -1582,6 +1610,25 @@ def to_message_preview(
     }
 
 
+def build_priority_candidate_render_source(
+    message: Message,
+    preview: dict[str, Any],
+) -> dict[str, Any]:
+    """Return only bounded-candidate render inputs from an already parsed MIME row."""
+    from_header = decode_mime_words(message.get("From", "Unknown sender"))
+    _sender_name, sender_address = parseaddr(from_header)
+    rfc_date = message.get("Date")
+    return {
+        "senderDisplay": preview.get("sender"),
+        "senderAddress": sender_address,
+        "subject": preview.get("subject"),
+        "snippet": preview.get("snippet"),
+        "unread": preview.get("unread"),
+        "flagged": preview.get("flagged"),
+        "rfcDate": rfc_date if isinstance(rfc_date, str) else None,
+    }
+
+
 def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     request_start = time.perf_counter()
     provider = str(payload.get("provider") or "").strip().lower()
@@ -1731,6 +1778,7 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
         preview_build_start = time.perf_counter()
         previews = []
         threading_records: list[dict[str, Any]] = []
+        candidate_render_sources: list[dict[str, Any]] = []
         for index, (message, unread, imap_uid, flagged) in enumerate(messages):
             try:
                 preview = to_message_preview(
@@ -1751,6 +1799,9 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
                             imap_uid,
                             preview["id"],
                         )
+                    )
+                    candidate_render_sources.append(
+                        build_priority_candidate_render_source(message, preview)
                     )
             except Exception as exc:
                 preview_build_duration_ms = (time.perf_counter() - preview_build_start) * 1000
@@ -1805,16 +1856,28 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             inbox_uid_set = None
             uid_validity = None
 
+        priority_candidate_sources: list[dict[str, Any]] = []
         if provider == "custom_imap":
-            thread_ids = resolve_custom_imap_thread_ids(
+            thread_authorities = resolve_custom_imap_thread_authorities(
                 threading_records,
                 mailbox_key=str(payload.get("mailboxId") or email_address),
                 folder=folder,
                 uid_validity=uid_validity,
             )
             identifiable_previews = []
-            for index, (preview, thread_id) in enumerate(zip(previews, thread_ids)):
-                if thread_id is None:
+            current_uids = (
+                set(inbox_uid_set)
+                if isinstance(inbox_uid_set, list)
+                and all(
+                    isinstance(uid, str) and re.fullmatch(r"[1-9][0-9]*", uid)
+                    for uid in inbox_uid_set
+                )
+                else set()
+            )
+            for index, (preview, thread_authority) in enumerate(
+                zip(previews, thread_authorities)
+            ):
+                if thread_authority is None:
                     record = threading_records[index]
                     logger.warning(
                         "IMAP preview omitted unidentifiable message stage=thread_identity index=%s uid_present=%s uidvalidity_present=%s",
@@ -1823,8 +1886,33 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
                         bool(uid_validity),
                     )
                     continue
+                thread_id = thread_authority["conversation_id"]
                 preview["threadId"] = thread_id
                 identifiable_previews.append(preview)
+                record = threading_records[index]
+                imap_uid = record.get("imap_uid")
+                if (
+                    not is_canonical_uid_validity(uid_validity)
+                    or not isinstance(imap_uid, str)
+                    or re.fullmatch(r"[1-9][0-9]*", imap_uid) is None
+                    or imap_uid not in current_uids
+                ):
+                    continue
+                priority_candidate_sources.append(
+                    {
+                        "provider": "custom_imap",
+                        "providerFolder": folder,
+                        "uidValidity": uid_validity,
+                        "imapUid": imap_uid,
+                        "conversationId": thread_id,
+                        "authorityKind": thread_authority["authority_kind"],
+                        "rfcRootMessageId": thread_authority[
+                            "rfc_root_message_id"
+                        ],
+                        "rfcMessageId": thread_authority["rfc_message_id"],
+                        **candidate_render_sources[index],
+                    }
+                )
             previews = identifiable_previews
 
         if not previews and any(warning.get("code") == "quota_exceeded" for warning in fetch_warnings):
@@ -1843,6 +1931,10 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             response_body["inboxUidSet"] = inbox_uid_set
         if uid_validity is not None:
             response_body["uidValidity"] = uid_validity
+        if provider == "custom_imap":
+            response_body["_priorityCandidateSources"] = (
+                priority_candidate_sources
+            )
         return 200, response_body
     except imaplib.IMAP4.error as exc:
         code = "quota_exceeded" if is_quota_error(exc) else "invalid_credentials"

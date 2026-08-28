@@ -185,8 +185,13 @@ else:
         mailbox_id: str,
         *,
         require_smtp: bool = False,
+        include_member_authority: bool = False,
     ) -> AuthenticatedImapResult:
-        owned_result = resolve_owned_managed_inbox_record(headers, mailbox_id)
+        owned_result = resolve_owned_managed_inbox_record(
+            headers,
+            mailbox_id,
+            include_member_authority=include_member_authority,
+        )
         if owned_result["status"] == "unauthorized":
             return _failure(
                 "unauthorized",
@@ -369,7 +374,7 @@ else:
                 409,
             )
 
-        return {
+        result = {
             "status": "ok",
             "mailbox": {
                 "mailboxId": mailbox_id,
@@ -394,3 +399,6 @@ else:
             },
             "error": None,
         }
+        if include_member_authority:
+            result["memberAuthority"] = owned_result.get("memberAuthority")
+        return result

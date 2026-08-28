@@ -415,11 +415,23 @@ else:
         return {"status": "ok", "context": context}
 
 
-    def resolve_authenticated_gmail(headers, mailbox_id: object) -> dict:
-        owned = resolve_owned_mailbox(headers, mailbox_id)
+    def resolve_authenticated_gmail(
+        headers,
+        mailbox_id: object,
+        *,
+        include_member_authority: bool = False,
+    ) -> dict:
+        owned = resolve_owned_mailbox(
+            headers,
+            mailbox_id,
+            include_member_authority=include_member_authority,
+        )
         if owned["status"] != "ok":
             return owned
-        return resolve_gmail_context(owned)
+        result = resolve_gmail_context(owned)
+        if result.get("status") == "ok" and include_member_authority:
+            result["memberAuthority"] = owned["memberAuthority"]
+        return result
 
 
     def refresh_gmail_context(context: GmailContext) -> dict:
