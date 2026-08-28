@@ -145,7 +145,7 @@ class MemoryRedis:
         template, expected_version = args[:2]
         payload = json.loads(template)
         if not self._canonical_collections(payload):
-            return args[7]
+            return args[8]
         now = self.current_ms
         base = now + int(args[3]) * 1_000
         absolute = now + int(args[4]) * 1_000
@@ -166,7 +166,7 @@ class MemoryRedis:
             }
         )
         encoded = self._encode(payload)
-        return args[7] if len(encoded.encode("ascii")) > int(args[5]) else encoded
+        return args[11] if len(encoded.encode("ascii")) > int(args[5]) else encoded
 
     def _set_encoded_record(
         self,
@@ -203,19 +203,19 @@ class MemoryRedis:
             try:
                 old_references = json.loads(current)["positiveReferences"]
             except Exception:
-                return args[14]
+                return args[20]
             if set(old_references) != set(candidate_module._POSITIVE_REFERENCE_KINDS) or any(
                 type(value) is not int or value != 0
                 for value in old_references.values()
             ):
-                return args[14]
+                return args[21]
         payload = json.loads(prepared)
         if (
             not self._canonical_collections(payload)
             or payload["version"] != int(args[5])
             or payload["state"] != "provider_confirmed"
         ):
-            return args[14]
+            return args[22]
         for key in keys[1:4]:
             values = self.sorted_sets.setdefault(key, {})
             for existing_member, score in list(values.items()):
@@ -223,14 +223,14 @@ class MemoryRedis:
                     values.pop(existing_member)
         memberships = [member in self.sorted_sets[key] for key in keys[1:4]]
         if mode == "normal" and current is not None and memberships != [True, True, True]:
-            return args[14]
+            return args[23]
         if mode == "normal" and current is not None and (
             len({self.sorted_sets[key][member] for key in keys[1:4]}) != 1
             or self.sorted_sets[keys[1]][member] != int(args[19])
         ):
-            return args[14]
+            return args[23]
         if mode == "normal" and current is None and any(memberships):
-            return args[14]
+            return args[23]
         if not memberships[0]:
             if len(self.sorted_sets[keys[1]]) >= int(args[9]):
                 self.values[keys[4]] = args[13]
@@ -243,8 +243,10 @@ class MemoryRedis:
             max(payload["baseExpiresAt"], max(payload["positiveReferences"].values())),
             payload["absoluteExpiresAt"],
         )
-        if expires_at <= self.current_ms or len(prepared.encode("utf-8")) > int(args[11]):
-            return args[14]
+        if len(prepared.encode("utf-8")) > int(args[11]):
+            return args[22]
+        if expires_at <= self.current_ms:
+            return args[24]
         return self._set_encoded_record(keys, member, prepared, expires_at)
 
     def _set_reference(self, keys: list[object], args: list[object]) -> object:
@@ -619,7 +621,9 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
                     command[0] == "EVAL"
                     and command[1] == candidate_module._UPSERT_CONFIRMED_SCRIPT
                 ):
-                    return {"result": candidate_module._CORRUPT_SENTINEL}
+                    return {
+                        "result": candidate_module._COMMIT_KEY_OR_MARKER_INVALID_SENTINEL
+                    }
                 return super().__call__(command)
 
         rejected_script = PriorityCandidateStore(
@@ -633,7 +637,7 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
                 snapshot(),
                 expected_version=0,
             ),
-            "store_script_rejected",
+            "store_commit_key_or_marker_invalid",
         )
 
         class MalformedUpsertResult(MemoryRedis):
@@ -645,8 +649,9 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
                     return {"result": ["malformed-sensitive-result"]}
                 return super().__call__(command)
 
+        malformed_upsert_redis = MalformedUpsertResult()
         malformed_upsert = PriorityCandidateStore(
-            MalformedUpsertResult(),
+            malformed_upsert_redis,
             hmac_secret=SECRET,
         )
         assert_stage(
@@ -656,7 +661,15 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
                 snapshot(),
                 expected_version=0,
             ),
-            "store_upsert_record_invalid",
+            "store_commit_ack_invalid",
+        )
+        self.assertEqual(
+            sum(
+                command[0] == "EVAL"
+                and command[1] == candidate_module._READ_ONE_SCRIPT
+                for command in malformed_upsert_redis.commands
+            ),
+            1,
         )
 
         class InvalidUpsertPostcondition(MemoryRedis):
@@ -697,6 +710,232 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
         self.assertEqual(bounded.stage, "store_unexpected")
         self.assertNotIn("sensitive-arbitrary-stage", str(bounded))
         self.assertNotIn("sensitive-arbitrary-stage", repr(bounded))
+
+    def test_prepared_record_failures_have_fixed_private_stages(self) -> None:
+        scope = google_scope(message_id="sensitive-provider-message-id")
+        intended = replace(
+            snapshot(),
+            render=replace(
+                snapshot().render,
+                sender_display="Sensitive Sender",
+                sender_address="sensitive-sender@example.test",
+                subject="Sensitive Subject",
+                snippet="Sensitive Snippet",
+            ),
+        )
+
+        class PreparedResult(MemoryRedis):
+            def __init__(self, mutate) -> None:
+                super().__init__()
+                self.mutate = mutate
+
+            def __call__(self, command: list[object]) -> dict[str, object]:
+                result = super().__call__(command)
+                if (
+                    command[0] == "EVAL"
+                    and command[1] == candidate_module._PREPARE_CONFIRMED_SCRIPT
+                    and type(result.get("result")) is str
+                ):
+                    return {"result": self.mutate(result["result"])}
+                return result
+
+        def mutate_payload(change):
+            def mutate(encoded: str) -> str:
+                payload = json.loads(encoded)
+                change(payload)
+                return MemoryRedis._encode(payload)
+
+            return mutate
+
+        def exponent_temporal(encoded: str) -> str:
+            observed = json.loads(encoded)["providerObservedAt"]
+            return encoded.replace(
+                f'"providerObservedAt":{observed}',
+                '"providerObservedAt":1.8e12',
+                1,
+            )
+
+        cases = (
+            (lambda _encoded: "{sensitive-invalid-json", "store_prepare_json_invalid"),
+            (
+                mutate_payload(lambda payload: payload["render"].pop("subject")),
+                "store_prepare_schema_invalid",
+            ),
+            (
+                mutate_payload(
+                    lambda payload: payload.__setitem__("scopeDigest", "0" * 64)
+                ),
+                "store_prepare_scope_invalid",
+            ),
+            (
+                mutate_payload(
+                    lambda payload: payload.__setitem__(
+                        "providerObservedAt",
+                        float(payload["providerObservedAt"]),
+                    )
+                ),
+                "store_prepare_temporal_invalid",
+            ),
+            (exponent_temporal, "store_prepare_temporal_invalid"),
+            (
+                mutate_payload(
+                    lambda payload: payload["positiveReferences"].__setitem__(
+                        "manual_priority",
+                        0.5,
+                    )
+                ),
+                "store_prepare_references_invalid",
+            ),
+        )
+        for mutate, expected_stage in cases:
+            with self.subTest(stage=expected_stage):
+                store = PriorityCandidateStore(
+                    PreparedResult(mutate),
+                    hmac_secret=SECRET,
+                )
+                with self.assertRaises(CandidateStoreUnavailable) as raised:
+                    store.upsert_confirmed(scope, intended, expected_version=0)
+                self.assertEqual(raised.exception.stage, expected_stage)
+                output = " ".join(
+                    (
+                        raised.exception.stage,
+                        str(raised.exception),
+                        repr(raised.exception),
+                    )
+                )
+                for sensitive in (
+                    "sensitive-provider-message-id",
+                    "Sensitive Sender",
+                    "sensitive-sender@example.test",
+                    "Sensitive Subject",
+                    "Sensitive Snippet",
+                    "sensitive-invalid-json",
+                ):
+                    self.assertNotIn(sensitive, output)
+
+        accepted = PriorityCandidateStore(
+            MemoryRedis(),
+            hmac_secret=SECRET,
+        ).upsert_confirmed(scope, intended, expected_version=0)
+        self.assertIs(type(accepted.provider_observed_at), int)
+
+        original = candidate_module._record_to_wire
+
+        def different_canonical(secret: str, record) -> dict[str, object]:
+            payload = original(secret, record)
+            payload["render"]["subject"] = "Different canonical subject"
+            return payload
+
+        with patch.object(
+            candidate_module,
+            "_record_to_wire",
+            side_effect=different_canonical,
+        ):
+            with self.assertRaises(CandidateStoreUnavailable) as canonical:
+                PriorityCandidateStore(
+                    MemoryRedis(),
+                    hmac_secret=SECRET,
+                ).upsert_confirmed(scope, intended, expected_version=0)
+        self.assertEqual(
+            canonical.exception.stage,
+            "store_prepare_canonical_invalid",
+        )
+
+    def test_lua_sentinels_map_one_to_one_without_merging(self) -> None:
+        scope = google_scope(message_id="sentinel-stage")
+        prepare_cases = (
+            (
+                candidate_module._PREPARE_SCHEMA_INVALID_SENTINEL,
+                "store_prepare_schema_invalid",
+            ),
+            (
+                candidate_module._PREPARE_COLLECTION_INVALID_SENTINEL,
+                "store_prepare_collection_invalid",
+            ),
+            (
+                candidate_module._PREPARE_REFERENCE_INVALID_SENTINEL,
+                "store_prepare_reference_invalid",
+            ),
+            (
+                candidate_module._PREPARE_TEMPORAL_INVALID_SENTINEL,
+                "store_prepare_temporal_invalid",
+            ),
+            (
+                candidate_module._PREPARE_SIZE_INVALID_SENTINEL,
+                "store_prepare_size_invalid",
+            ),
+        )
+
+        class PrepareSentinel(MemoryRedis):
+            def __init__(self, sentinel: str) -> None:
+                super().__init__()
+                self.sentinel = sentinel
+
+            def __call__(self, command: list[object]) -> dict[str, object]:
+                if (
+                    command[0] == "EVAL"
+                    and command[1] == candidate_module._PREPARE_CONFIRMED_SCRIPT
+                ):
+                    return {"result": self.sentinel}
+                return super().__call__(command)
+
+        for sentinel, expected_stage in prepare_cases:
+            with self.subTest(stage=expected_stage):
+                with self.assertRaises(CandidateStoreUnavailable) as raised:
+                    PriorityCandidateStore(
+                        PrepareSentinel(sentinel),
+                        hmac_secret=SECRET,
+                    ).upsert_confirmed(scope, snapshot(), expected_version=0)
+                self.assertEqual(raised.exception.stage, expected_stage)
+
+        commit_cases = (
+            (
+                candidate_module._COMMIT_KEY_OR_MARKER_INVALID_SENTINEL,
+                "store_commit_key_or_marker_invalid",
+            ),
+            (
+                candidate_module._REPAIR_SOURCE_INVALID_SENTINEL,
+                "store_repair_source_invalid",
+            ),
+            (
+                candidate_module._REPAIR_REFERENCE_PROOF_INVALID_SENTINEL,
+                "store_repair_reference_proof_invalid",
+            ),
+            (
+                candidate_module._COMMIT_PREPARED_INVALID_SENTINEL,
+                "store_commit_prepared_invalid",
+            ),
+            (
+                candidate_module._COMMIT_INDEX_INVALID_SENTINEL,
+                "store_commit_index_invalid",
+            ),
+            (
+                candidate_module._COMMIT_EXPIRY_INVALID_SENTINEL,
+                "store_commit_expiry_invalid",
+            ),
+        )
+
+        class CommitSentinel(MemoryRedis):
+            def __init__(self, sentinel: str) -> None:
+                super().__init__()
+                self.sentinel = sentinel
+
+            def __call__(self, command: list[object]) -> dict[str, object]:
+                if (
+                    command[0] == "EVAL"
+                    and command[1] == candidate_module._UPSERT_CONFIRMED_SCRIPT
+                ):
+                    return {"result": self.sentinel}
+                return super().__call__(command)
+
+        for sentinel, expected_stage in commit_cases:
+            with self.subTest(stage=expected_stage):
+                with self.assertRaises(CandidateStoreUnavailable) as raised:
+                    PriorityCandidateStore(
+                        CommitSentinel(sentinel),
+                        hmac_secret=SECRET,
+                    ).upsert_confirmed(scope, snapshot(), expected_version=0)
+                self.assertEqual(raised.exception.stage, expected_stage)
 
     def test_routing_state_invariant_and_ready_round_trip(self) -> None:
         unresolved = snapshot()
@@ -941,7 +1180,10 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
         with patch.object(candidate_module, "_routing_to_wire", side_effect=ambiguous):
             with self.assertRaises(CandidateStoreUnavailable) as raised:
                 store.upsert_confirmed(scope, ready, expected_version=0)
-        self.assertEqual(raised.exception.stage, "store_script_rejected")
+        self.assertEqual(
+            raised.exception.stage,
+            "store_prepare_collection_invalid",
+        )
         keys = store._scope_keys(scope)
         self.assertNotIn(keys["record"], redis.values)
         for index_key in (

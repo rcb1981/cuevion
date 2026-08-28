@@ -628,7 +628,10 @@ class CandidatePopulationTests(unittest.TestCase):
             store=self.store,
         )
         self.assertEqual(refused.written, 0)
-        self.assertEqual(refused.reason_counts, (("store_script_rejected", 1),))
+        self.assertEqual(
+            refused.reason_counts,
+            (("store_repair_reference_proof_invalid", 1),),
+        )
         self.assertEqual(self.redis.values[keys["record"]], encoded)
 
     def test_fatal_store_failure_counts_unprocessed_rows_without_more_work(self):
@@ -663,6 +666,73 @@ class CandidatePopulationTests(unittest.TestCase):
             ),
         )
         self.assertEqual(len(commands), 1)
+
+    def test_prepare_diagnostic_stage_propagates_without_content(self):
+        class PrepareSizeFailure(MemoryRedis):
+            def __call__(self, command: list[object]) -> dict[str, object]:
+                if (
+                    command[0] == "EVAL"
+                    and command[1]
+                    == candidate_store_module._PREPARE_CONFIRMED_SCRIPT
+                ):
+                    return {
+                        "result": candidate_store_module._PREPARE_SIZE_INVALID_SENTINEL
+                    }
+                return super().__call__(command)
+
+        sensitive = gmail_source(
+            providerMessageId="sensitive-provider-id",
+            providerThreadId="sensitive-thread-id",
+            senderDisplay="Sensitive Sender",
+            senderAddress="sensitive-sender@example.test",
+            subject="Sensitive Subject",
+            snippet="Sensitive Snippet",
+        )
+        sources = [
+            sensitive,
+            *(
+                gmail_source(
+                    providerMessageId=f"remaining-message-{index}",
+                    providerThreadId=f"remaining-thread-{index}",
+                )
+                for index in range(49)
+            ),
+        ]
+        report = populate_priority_candidates(
+            self.authority,
+            sources,
+            store=PriorityCandidateStore(
+                PrepareSizeFailure(),
+                hmac_secret=SECRET,
+            ),
+        )
+        self.assertEqual(
+            (
+                report.attempted,
+                report.processed,
+                report.written,
+                report.skipped,
+                report.incomplete,
+            ),
+            (50, 1, 0, 50, True),
+        )
+        self.assertEqual(
+            report.reason_counts,
+            (
+                ("not_processed_after_store_failure", 49),
+                ("store_prepare_size_invalid", 1),
+            ),
+        )
+        output = repr(report)
+        for private in (
+            "sensitive-provider-id",
+            "sensitive-thread-id",
+            "Sensitive Sender",
+            "sensitive-sender@example.test",
+            "Sensitive Subject",
+            "Sensitive Snippet",
+        ):
+            self.assertNotIn(private, output)
 
     def test_mailbox_and_user_caps_mark_incomplete_without_eviction(self):
         scope, _ = project_priority_candidate(self.authority, gmail_source())
@@ -762,6 +832,27 @@ class CandidatePopulationTests(unittest.TestCase):
             ),
             hmac_secret=SECRET,
         )
+
+        class DiagnosticFailure(MemoryRedis):
+            def __call__(self, command: list[object]) -> dict[str, object]:
+                if (
+                    command[0] == "EVAL"
+                    and command[1]
+                    == candidate_store_module._PREPARE_CONFIRMED_SCRIPT
+                ):
+                    return {
+                        "result": candidate_store_module._PREPARE_SIZE_INVALID_SENTINEL
+                    }
+                return super().__call__(command)
+
+        diagnostic_source = gmail_source(
+            providerMessageId="sensitive-diagnostic-provider-id",
+            providerThreadId="sensitive-diagnostic-thread-id",
+            senderDisplay="Sensitive Diagnostic Sender",
+            senderAddress="sensitive-diagnostic@example.test",
+            subject="Sensitive Diagnostic Subject",
+            snippet="Sensitive Diagnostic Snippet",
+        )
         with self.assertRaises(ValueError) as projection_error:
             project_priority_candidate(self.authority, sensitive_source)
         self.assertEqual(
@@ -805,12 +896,31 @@ class CandidatePopulationTests(unittest.TestCase):
                 sources=[sensitive_imap_source],
                 store=self.store,
             )
+            diagnostic_report = populate_runtime_priority_candidates(
+                member=SimpleNamespace(
+                    workspace_id="workspace-1",
+                    user_id="user-1",
+                ),
+                mailbox_id="mailbox-1",
+                mailbox_account_identity="owner@gmail.test",
+                provider="google",
+                sources=[diagnostic_source],
+                store=PriorityCandidateStore(
+                    DiagnosticFailure(),
+                    hmac_secret=SECRET,
+                ),
+            )
         output = "\n".join(captured.output)
         self.assertEqual(report.reason_codes, ("candidate_timestamp_invalid",))
         self.assertEqual(store_report.reason_codes, ("store_read_transport",))
         self.assertEqual(imap_report.reason_codes, ("candidate_identity_invalid",))
+        self.assertEqual(
+            diagnostic_report.reason_codes,
+            ("store_prepare_size_invalid",),
+        )
         self.assertIn("attempted=1 processed=1 written=0 skipped=1", output)
         self.assertIn("incomplete=True", output)
+        self.assertIn("store_prepare_size_invalid:1", output)
         for sensitive in (
             "sensitive-provider-id",
             "Sensitive Sender",
@@ -827,6 +937,12 @@ class CandidatePopulationTests(unittest.TestCase):
             "Sensitive IMAP Snippet",
             "sensitive-redis.invalid",
             "sensitive-redis-token",
+            "sensitive-diagnostic-provider-id",
+            "sensitive-diagnostic-thread-id",
+            "Sensitive Diagnostic Sender",
+            "sensitive-diagnostic@example.test",
+            "Sensitive Diagnostic Subject",
+            "Sensitive Diagnostic Snippet",
             "mailbox-1",
         ):
             self.assertNotIn(sensitive, output)

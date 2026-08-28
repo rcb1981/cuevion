@@ -185,7 +185,10 @@ class CandidateRealRedisTests(unittest.TestCase):
         with patch.object(candidate_module, "_routing_to_wire", side_effect=ambiguous):
             with self.assertRaises(CandidateStoreUnavailable) as raised:
                 self.store.upsert_confirmed(scope, intended, expected_version=0)
-        self.assertEqual(raised.exception.stage, "store_script_rejected")
+        self.assertEqual(
+            raised.exception.stage,
+            "store_prepare_collection_invalid",
+        )
         keys = self.store._scope_keys(scope)
         self.assertIsNone(self._transport(["GET", keys["record"]])["result"])
         self.assertEqual(self._transport(["TTL", keys["record"]])["result"], -2)
@@ -203,6 +206,106 @@ class CandidateRealRedisTests(unittest.TestCase):
                 self._transport(["TTL", keys[index_name]])["result"],
                 -2,
             )
+
+    def test_prepare_size_boundary_and_fixed_rejection_stages(self) -> None:
+        scope = google_scope()
+        base = snapshot()
+        bounded = replace(
+            base,
+            conversation=replace(
+                base.conversation,
+                conversation_id="c" * 1_024,
+                authority_kind="a" * 64,
+                provider_thread_id="t" * 256,
+            ),
+            render=replace(
+                base.render,
+                sender_display="d" * 256,
+                sender_address="a" * 320,
+                subject="s" * 580,
+                snippet="p" * candidate_module.CANDIDATE_MAX_SNIPPET_BYTES,
+            ),
+        )
+        template = candidate_module._encode_wire(
+            candidate_module._template_payload(
+                SECRET,
+                scope,
+                bounded,
+                candidate_module._empty_references(),
+            )
+        )
+        self.assertLessEqual(
+            len(template.encode("ascii")),
+            candidate_module.CANDIDATE_MAX_SERIALIZED_RECORD_BYTES,
+        )
+        with self.assertRaises(CandidateStoreUnavailable) as too_large:
+            self.store.upsert_confirmed(scope, bounded, expected_version=0)
+        self.assertEqual(
+            too_large.exception.stage,
+            "store_prepare_size_invalid",
+        )
+        self.assertIsNone(
+            self._transport(["GET", self.store._scope_keys(scope)["record"]])[
+                "result"
+            ]
+        )
+
+        safely_bounded = replace(
+            bounded,
+            render=replace(bounded.render, subject="s" * 500),
+        )
+        accepted = self.store.upsert_confirmed(
+            scope,
+            safely_bounded,
+            expected_version=0,
+        )
+        self.assertEqual(accepted.snapshot, safely_bounded)
+
+        original = candidate_module._template_payload
+
+        def invalid_schema(*args, **kwargs):
+            payload = original(*args, **kwargs)
+            payload["schemaVersion"] = 1
+            return payload
+
+        self._transport(["FLUSHDB"])
+        with patch.object(
+            candidate_module,
+            "_template_payload",
+            side_effect=invalid_schema,
+        ):
+            with self.assertRaises(CandidateStoreUnavailable) as schema:
+                self.store.upsert_confirmed(scope, base, expected_version=0)
+        self.assertEqual(schema.exception.stage, "store_prepare_schema_invalid")
+
+        def invalid_reference(*args, **kwargs):
+            payload = original(*args, **kwargs)
+            payload["positiveReferences"]["manual_priority"] = 0.5
+            return payload
+
+        with patch.object(
+            candidate_module,
+            "_template_payload",
+            side_effect=invalid_reference,
+        ):
+            with self.assertRaises(CandidateStoreUnavailable) as reference:
+                self.store.upsert_confirmed(scope, base, expected_version=0)
+        self.assertEqual(
+            reference.exception.stage,
+            "store_prepare_reference_invalid",
+        )
+
+        with self.assertRaises(CandidateStoreUnavailable) as temporal:
+            self.store._prepare_confirmed(
+                scope,
+                base,
+                candidate_module._empty_references(),
+                expected_version=candidate_module.CANDIDATE_MAX_SAFE_INTEGER,
+            )
+        self.assertEqual(
+            temporal.exception.stage,
+            "store_prepare_temporal_invalid",
+        )
 
     def test_existing_mutations_preserve_canonical_empty_collection(self) -> None:
         scope = google_scope(message_id="real-ready-mutations")
@@ -305,6 +408,145 @@ class CandidateRealRedisTests(unittest.TestCase):
                 )["result"]),
                 repaired.logical_expires_at(),
             )
+
+    def test_repair_commit_index_and_expiry_sentinels_are_distinct(self) -> None:
+        source_scope = google_scope(message_id="repair-source-invalid")
+        intended = snapshot()
+        self.store.upsert_confirmed(source_scope, intended, expected_version=0)
+        source_keys = self.store._scope_keys(source_scope)
+        self._transport(["SET", source_keys["record"], "not-json", "KEEPTTL"])
+        with self.assertRaises(CandidateStoreUnavailable) as source:
+            self.store.replace_malformed_confirmed(source_scope, intended)
+        self.assertEqual(source.exception.stage, "store_repair_source_invalid")
+        self.assertEqual(
+            self._transport(["GET", source_keys["record"]])["result"],
+            "not-json",
+        )
+
+        reference_scope = google_scope(message_id="repair-reference-invalid")
+        self.store.upsert_confirmed(reference_scope, intended, expected_version=0)
+        reference_keys = self.store._scope_keys(reference_scope)
+        raw = self._transport(["GET", reference_keys["record"]])["result"]
+        malformed = json.loads(raw)
+        malformed["routingState"] = "ready"
+        malformed["routing"] = {
+            "signal": None,
+            "uiSignal": "REPLY",
+            "internalClassification": "reply",
+            "category": "reply",
+            "finalVisibility": None,
+            "action": None,
+            "v7FinalPriority": None,
+            "noiseDisposition": "none",
+            "noiseConfidence": "low",
+            "noiseReasons": {},
+            "classifierVersion": "test-classifier-v1",
+            "routingVersion": "test-routing-v1",
+        }
+        malformed["positiveReferences"]["manual_priority"] = malformed[
+            "absoluteExpiresAt"
+        ]
+        malformed_wire = json.dumps(
+            malformed,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        self._transport(
+            ["SET", reference_keys["record"], malformed_wire, "KEEPTTL"]
+        )
+        with self.assertRaises(CandidateStoreUnavailable) as reference:
+            self.store.replace_malformed_confirmed(reference_scope, intended)
+        self.assertEqual(
+            reference.exception.stage,
+            "store_repair_reference_proof_invalid",
+        )
+        self.assertEqual(
+            self._transport(["GET", reference_keys["record"]])["result"],
+            malformed_wire,
+        )
+
+        index_scope = google_scope(message_id="commit-index-invalid")
+        index_record = self.store.upsert_confirmed(
+            index_scope,
+            intended,
+            expected_version=0,
+        )
+        index_keys = self.store._scope_keys(index_scope)
+        mutated = False
+
+        def mutate_index_before_commit(command: list[object]) -> dict[str, object]:
+            nonlocal mutated
+            if (
+                not mutated
+                and command[0] == "EVAL"
+                and command[1] == candidate_module._UPSERT_CONFIRMED_SCRIPT
+            ):
+                mutated = True
+                args = command[10:]
+                self._transport(
+                    [
+                        "ZADD",
+                        command[4],
+                        int(args[19]) + 1,
+                        args[4],
+                    ]
+                )
+            return self._transport(command)
+
+        with self.assertRaises(CandidateStoreUnavailable) as index:
+            PriorityCandidateStore(
+                mutate_index_before_commit,
+                hmac_secret=SECRET,
+            ).upsert_confirmed(
+                index_scope,
+                intended,
+                expected_version=index_record.version,
+            )
+        self.assertEqual(index.exception.stage, "store_commit_index_invalid")
+        self.assertEqual(
+            self._transport(["GET", index_keys["record"]])["result"],
+            candidate_module._encode_wire(
+                candidate_module._record_to_wire(SECRET, index_record)
+            ),
+        )
+
+        expiry_scope = google_scope(message_id="commit-expiry-invalid")
+        observed = int(time.time() * 1_000) - 60 * 24 * 60 * 60 * 1_000
+        expired_record = candidate_module.PriorityCandidateRecord(
+            scope=expiry_scope,
+            snapshot=intended,
+            provider_observed_at=observed,
+            provider_validated_at=observed,
+            base_expires_at=(
+                observed
+                + candidate_module.CANDIDATE_BASE_TTL_SECONDS * 1_000
+            ),
+            absolute_expires_at=(
+                observed
+                + candidate_module.CANDIDATE_ABSOLUTE_TTL_SECONDS * 1_000
+            ),
+            grace_expires_at=0,
+            positive_references=candidate_module._empty_references(),
+            state="provider_confirmed",
+            version=1,
+            updated_at=observed,
+        )
+        expired_wire = candidate_module._encode_wire(
+            candidate_module._record_to_wire(SECRET, expired_record)
+        )
+        with self.assertRaises(CandidateStoreUnavailable) as expiry:
+            self.store._commit_confirmed(
+                expiry_scope,
+                intended,
+                mode="normal",
+                expected_raw=candidate_module._MISSING_SENTINEL,
+                prepared=expired_wire,
+                prepared_record=expired_record,
+                expected_existing_expiry=0,
+            )
+        self.assertEqual(expiry.exception.stage, "store_commit_expiry_invalid")
 
     def test_ambiguous_commit_acknowledgement_uses_one_exact_read(self) -> None:
         commands: list[list[object]] = []
