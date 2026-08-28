@@ -13,13 +13,13 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Literal
 
 from .authority import PriorityMessageIdentity, parse_priority_message_identity
 from .event_reference import derive_priority_hmac_key
 
 
-CANDIDATE_STORE_SCHEMA_VERSION = 1
+CANDIDATE_STORE_SCHEMA_VERSION = 2
 CANDIDATE_BASE_TTL_SECONDS = 30 * 24 * 60 * 60
 CANDIDATE_PROVIDER_FAILURE_GRACE_SECONDS = 7 * 24 * 60 * 60
 CANDIDATE_ABSOLUTE_TTL_SECONDS = 180 * 24 * 60 * 60
@@ -42,7 +42,7 @@ POSITIVE_REFERENCE_MAX_SECONDS = {
 }
 
 _POSITIVE_REFERENCE_KINDS = tuple(POSITIVE_REFERENCE_MAX_SECONDS)
-_CANDIDATE_KEY_PREFIX = "cuevion:priority:candidate:v1:"
+_CANDIDATE_KEY_PREFIX = "cuevion:priority:candidate:v2:"
 _SCOPE_HMAC_INFO = b"cuevion/priority/candidate-scope/v1\x00"
 _MAILBOX_SCOPE_HMAC_INFO = b"cuevion/priority/candidate-mailbox-scope/v1\x00"
 _USER_SCOPE_HMAC_INFO = b"cuevion/priority/candidate-user-scope/v1\x00"
@@ -57,6 +57,78 @@ _MAILBOX_OVERFLOW_SENTINEL = "__cuevion_priority_candidate_mailbox_overflow__"
 _USER_OVERFLOW_SENTINEL = "__cuevion_priority_candidate_user_overflow__"
 _NAMESPACE_INVALIDATED_SENTINEL = (
     "__cuevion_priority_candidate_namespace_invalidated__"
+)
+
+PriorityCandidateRoutingState = Literal["unresolved", "ready"]
+
+_ROUTING_SIGNAL_VALUES = frozenset({"Priority", "For review"})
+_ROUTING_UI_SIGNAL_VALUES = frozenset(
+    {"PROMO", "DEMO", "REPLY", "UPDATE", "BUSINESS", "FINANCE", "INFO", "NEW"}
+)
+_ROUTING_INTERNAL_CLASSIFICATION_VALUES = frozenset(
+    {
+        "promo",
+        "promo_reminder",
+        "workflow_update",
+        "distributor_update",
+        "labelradar_update",
+        "trackstack_submission",
+        "business_reminder",
+        "royalty_statement",
+        "finance",
+        "info",
+        "reply",
+        "business",
+        "demo",
+        "high_priority_demo",
+        "incomplete_demo",
+        "unknown",
+    }
+)
+_ROUTING_CATEGORY_VALUES = frozenset(
+    {
+        *_ROUTING_INTERNAL_CLASSIFICATION_VALUES,
+        "bulk_demo",
+        "weak_demo",
+    }
+)
+_ROUTING_FINAL_VISIBILITY_VALUES = frozenset(
+    {"show_priority", "show_normal", "show_low", "hide", "delete"}
+)
+_ROUTING_ACTION_VALUES = frozenset(
+    {
+        "show_in_priority",
+        "show_in_main_feed",
+        "show_in_quiet_view",
+        "archive_candidate",
+        "delete_or_archive",
+    }
+)
+_ROUTING_V7_FINAL_PRIORITY_VALUES = frozenset(
+    {"PRIORITY", "REVIEW", "NORMAL", "LOW"}
+)
+_ROUTING_NOISE_DISPOSITION_VALUES = frozenset(
+    {"none", "bulk_marketing", "unsolicited_low_value", "strong_spam"}
+)
+_ROUTING_NOISE_CONFIDENCE_VALUES = frozenset({"low", "medium", "high"})
+_ROUTING_NOISE_REASON_VALUES = (
+    "provider_spam_evidence",
+    "authentication_failure_evidence",
+    "phishing_credential_request",
+    "unsolicited_financial_solicitation",
+    "unsolicited_investment_solicitation",
+    "cold_sales_outreach",
+    "cold_recruitment_outreach",
+    "cold_call_to_action",
+    "bulk_mail_evidence",
+    "mailbox_relevance_mismatch",
+    "no_conversation_evidence",
+    "automated_sender_evidence",
+)
+_ROUTING_NOISE_REASON_VALUE_SET = frozenset(_ROUTING_NOISE_REASON_VALUES)
+_VERSION_PLACEHOLDER_RE = re.compile(
+    r"(?:^|[^a-z0-9])(?:unknown|fake|fallback|unset|none|null|n/?a)(?:$|[^a-z0-9])",
+    re.IGNORECASE,
 )
 
 CommandTransport = Callable[[list[object]], dict[str, object]]
@@ -139,6 +211,10 @@ def _valid_content_text(value: object, maximum_bytes: int) -> bool:
         return len(value.encode("utf-8", errors="strict")) <= maximum_bytes
     except UnicodeEncodeError:
         return False
+
+
+def _valid_routing_version(value: object) -> bool:
+    return _valid_identifier(value, 128) and _VERSION_PLACEHOLDER_RE.search(value) is None
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,51 +344,49 @@ class PriorityCandidateRender:
 
 @dataclass(frozen=True, slots=True)
 class PriorityCandidateRouting:
-    signal: str
+    signal: str | None
     ui_signal: str
     internal_classification: str
     category: str
-    priority_score: int
-    final_visibility: str
-    action: str
-    final_priority: bool
-    noise_disposition: str | None
-    noise_confidence: float | None
+    final_visibility: str | None
+    action: str | None
+    v7_final_priority: str | None
+    noise_disposition: str
+    noise_confidence: str
     noise_reasons: tuple[str, ...]
     classifier_version: str
     routing_version: str
 
     def __post_init__(self) -> None:
-        bounded = (
-            (self.signal, 128),
-            (self.ui_signal, 128),
-            (self.internal_classification, 128),
-            (self.category, 128),
-            (self.final_visibility, 64),
-            (self.action, 64),
-            (self.classifier_version, 128),
-            (self.routing_version, 128),
-        )
-        confidence_valid = self.noise_confidence is None or (
-            type(self.noise_confidence) in {int, float}
-            and type(self.noise_confidence) is not bool
-            and math.isfinite(float(self.noise_confidence))
-            and 0 <= float(self.noise_confidence) <= 1
-        )
         if (
-            any(not _valid_identifier(value, maximum) for value, maximum in bounded)
-            or type(self.priority_score) is not int
-            or not 0 <= self.priority_score <= 100
-            or type(self.final_priority) is not bool
+            (self.signal is not None and self.signal not in _ROUTING_SIGNAL_VALUES)
+            or self.ui_signal not in _ROUTING_UI_SIGNAL_VALUES
+            or self.internal_classification
+            not in _ROUTING_INTERNAL_CLASSIFICATION_VALUES
+            or self.category not in _ROUTING_CATEGORY_VALUES
             or (
-                self.noise_disposition is not None
-                and not _valid_identifier(self.noise_disposition, 64)
+                self.final_visibility is not None
+                and self.final_visibility not in _ROUTING_FINAL_VISIBILITY_VALUES
             )
-            or not confidence_valid
+            or (
+                self.action is not None
+                and self.action not in _ROUTING_ACTION_VALUES
+            )
+            or (
+                self.v7_final_priority is not None
+                and self.v7_final_priority not in _ROUTING_V7_FINAL_PRIORITY_VALUES
+            )
+            or self.noise_disposition not in _ROUTING_NOISE_DISPOSITION_VALUES
+            or self.noise_confidence not in _ROUTING_NOISE_CONFIDENCE_VALUES
             or type(self.noise_reasons) is not tuple
-            or len(self.noise_reasons) > 12
+            or len(self.noise_reasons) > len(_ROUTING_NOISE_REASON_VALUES)
             or len(set(self.noise_reasons)) != len(self.noise_reasons)
-            or any(not _valid_identifier(reason, 128) for reason in self.noise_reasons)
+            or any(
+                reason not in _ROUTING_NOISE_REASON_VALUE_SET
+                for reason in self.noise_reasons
+            )
+            or not _valid_routing_version(self.classifier_version)
+            or not _valid_routing_version(self.routing_version)
         ):
             raise ValueError("invalid Priority candidate routing projection")
 
@@ -337,15 +411,25 @@ class PriorityCandidateProviderAuthority:
 class PriorityCandidateSnapshot:
     conversation: PriorityCandidateConversation
     render: PriorityCandidateRender
-    routing: PriorityCandidateRouting
+    routing_state: PriorityCandidateRoutingState
+    routing: PriorityCandidateRouting | None
     provider_authority: PriorityCandidateProviderAuthority
+
+    def __post_init__(self) -> None:
+        if not (
+            (self.routing_state == "unresolved" and self.routing is None)
+            or (
+                self.routing_state == "ready"
+                and isinstance(self.routing, PriorityCandidateRouting)
+            )
+        ):
+            raise ValueError("invalid Priority candidate routing state")
 
     def validate_for_scope(self, scope: PriorityCandidateScope) -> None:
         if (
             not isinstance(scope, PriorityCandidateScope)
             or not isinstance(self.conversation, PriorityCandidateConversation)
             or not isinstance(self.render, PriorityCandidateRender)
-            or not isinstance(self.routing, PriorityCandidateRouting)
             or not isinstance(
                 self.provider_authority, PriorityCandidateProviderAuthority
             )
@@ -574,19 +658,22 @@ def _render_to_wire(value: PriorityCandidateRender) -> dict[str, object]:
     }
 
 
-def _routing_to_wire(value: PriorityCandidateRouting) -> dict[str, object]:
+def _routing_to_wire(
+    value: PriorityCandidateRouting | None,
+) -> dict[str, object] | None:
+    if value is None:
+        return None
     return {
         "signal": value.signal,
         "uiSignal": value.ui_signal,
         "internalClassification": value.internal_classification,
         "category": value.category,
-        "priorityScore": value.priority_score,
         "finalVisibility": value.final_visibility,
         "action": value.action,
-        "finalPriority": value.final_priority,
+        "v7FinalPriority": value.v7_final_priority,
         "noiseDisposition": value.noise_disposition,
         "noiseConfidence": value.noise_confidence,
-        "noiseReasons": list(value.noise_reasons) if value.noise_reasons else None,
+        "noiseReasons": list(value.noise_reasons),
         "classifierVersion": value.classifier_version,
         "routingVersion": value.routing_version,
     }
@@ -607,6 +694,7 @@ def _record_to_wire(
         "identity": scope.identity.to_wire_dict(),
         "conversation": _conversation_to_wire(record.snapshot.conversation),
         "render": _render_to_wire(record.snapshot.render),
+        "routingState": record.snapshot.routing_state,
         "routing": _routing_to_wire(record.snapshot.routing),
         "providerAuthority": {
             "folder": record.snapshot.provider_authority.folder,
@@ -662,6 +750,7 @@ _ROOT_FIELDS = frozenset(
         "identity",
         "conversation",
         "render",
+        "routingState",
         "routing",
         "providerAuthority",
         "providerObservedAt",
@@ -693,10 +782,9 @@ _ROUTING_FIELDS = frozenset(
         "uiSignal",
         "internalClassification",
         "category",
-        "priorityScore",
         "finalVisibility",
         "action",
-        "finalPriority",
+        "v7FinalPriority",
         "noiseDisposition",
         "noiseConfidence",
         "noiseReasons",
@@ -730,24 +818,28 @@ def _decode_candidate_record(
             return None
         conversation = payload["conversation"]
         render = payload["render"]
+        routing_state = payload["routingState"]
         routing = payload["routing"]
         provider_authority = payload["providerAuthority"]
         references = payload["positiveReferences"]
+        routing_valid = (
+            routing_state == "unresolved" and routing is None
+        ) or (
+            routing_state == "ready"
+            and type(routing) is dict
+            and set(routing) == _ROUTING_FIELDS
+            and type(routing["noiseReasons"]) is list
+        )
         if (
             type(conversation) is not dict
             or set(conversation) != _CONVERSATION_FIELDS
             or type(render) is not dict
             or set(render) != _RENDER_FIELDS
-            or type(routing) is not dict
-            or set(routing) != _ROUTING_FIELDS
+            or not routing_valid
             or type(provider_authority) is not dict
             or set(provider_authority) != _PROVIDER_AUTHORITY_FIELDS
             or type(references) is not dict
             or set(references) != set(_POSITIVE_REFERENCE_KINDS)
-            or (
-                routing["noiseReasons"] is not None
-                and type(routing["noiseReasons"]) is not list
-            )
             or (
                 provider_authority["labels"] is not None
                 and type(provider_authority["labels"]) is not list
@@ -787,20 +879,24 @@ def _decode_candidate_record(
                 unread=render["unread"],
                 flagged=render["flagged"],
             ),
-            routing=PriorityCandidateRouting(
-                signal=routing["signal"],
-                ui_signal=routing["uiSignal"],
-                internal_classification=routing["internalClassification"],
-                category=routing["category"],
-                priority_score=routing["priorityScore"],
-                final_visibility=routing["finalVisibility"],
-                action=routing["action"],
-                final_priority=routing["finalPriority"],
-                noise_disposition=routing["noiseDisposition"],
-                noise_confidence=routing["noiseConfidence"],
-                noise_reasons=tuple(routing["noiseReasons"] or ()),
-                classifier_version=routing["classifierVersion"],
-                routing_version=routing["routingVersion"],
+            routing_state=routing_state,
+            routing=(
+                PriorityCandidateRouting(
+                    signal=routing["signal"],
+                    ui_signal=routing["uiSignal"],
+                    internal_classification=routing["internalClassification"],
+                    category=routing["category"],
+                    final_visibility=routing["finalVisibility"],
+                    action=routing["action"],
+                    v7_final_priority=routing["v7FinalPriority"],
+                    noise_disposition=routing["noiseDisposition"],
+                    noise_confidence=routing["noiseConfidence"],
+                    noise_reasons=tuple(routing["noiseReasons"]),
+                    classifier_version=routing["classifierVersion"],
+                    routing_version=routing["routingVersion"],
+                )
+                if routing_state == "ready"
+                else None
             ),
             provider_authority=PriorityCandidateProviderAuthority(
                 folder=provider_authority["folder"],
@@ -1261,6 +1357,7 @@ def _template_payload(
         "identity": scope.identity.to_wire_dict(),
         "conversation": _conversation_to_wire(snapshot.conversation),
         "render": _render_to_wire(snapshot.render),
+        "routingState": snapshot.routing_state,
         "routing": _routing_to_wire(snapshot.routing),
         "providerAuthority": {
             "folder": snapshot.provider_authority.folder,

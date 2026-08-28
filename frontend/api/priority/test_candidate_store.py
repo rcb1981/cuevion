@@ -396,8 +396,29 @@ def imap_scope(
     )
 
 
+def ready_routing() -> PriorityCandidateRouting:
+    return PriorityCandidateRouting(
+        signal=None,
+        ui_signal="REPLY",
+        internal_classification="reply",
+        category="reply",
+        final_visibility=None,
+        action=None,
+        v7_final_priority=None,
+        noise_disposition="none",
+        noise_confidence="low",
+        noise_reasons=(),
+        classifier_version="test-classifier-v1",
+        routing_version="test-routing-v1",
+    )
+
+
 def snapshot(
-    *, provider: str = "google", snippet: str = "bounded preview"
+    *,
+    provider: str = "google",
+    snippet: str = "bounded preview",
+    routing_state: str = "unresolved",
+    routing: PriorityCandidateRouting | None = None,
 ) -> PriorityCandidateSnapshot:
     return PriorityCandidateSnapshot(
         conversation=PriorityCandidateConversation(
@@ -416,21 +437,8 @@ def snapshot(
             unread=True,
             flagged=False,
         ),
-        routing=PriorityCandidateRouting(
-            signal="provider",
-            ui_signal="priority",
-            internal_classification="reply_required",
-            category="primary",
-            priority_score=91,
-            final_visibility="visible",
-            action="reply",
-            final_priority=True,
-            noise_disposition=None,
-            noise_confidence=None,
-            noise_reasons=(),
-            classifier_version="classifier-v1",
-            routing_version="routing-v1",
-        ),
+        routing_state=routing_state,
+        routing=routing,
         provider_authority=PriorityCandidateProviderAuthority(
             folder="INBOX",
             labels=("INBOX", "IMPORTANT") if provider == "google" else (),
@@ -439,6 +447,155 @@ def snapshot(
 
 
 class CandidateIdentityAndCodecTests(unittest.TestCase):
+    def test_routing_state_invariant_and_ready_round_trip(self) -> None:
+        unresolved = snapshot()
+        self.assertEqual(unresolved.routing_state, "unresolved")
+        self.assertIsNone(unresolved.routing)
+
+        complete_routing = ready_routing()
+        with self.assertRaises(ValueError):
+            replace(unresolved, routing=complete_routing)
+        with self.assertRaises(ValueError):
+            replace(unresolved, routing_state="ready")
+
+        ready = replace(
+            unresolved,
+            routing_state="ready",
+            routing=complete_routing,
+        )
+        redis = MemoryRedis()
+        store = PriorityCandidateStore(redis, hmac_secret=SECRET)
+        record = store.upsert_confirmed(google_scope(), ready, expected_version=0)
+        self.assertEqual(record.snapshot, ready)
+        raw = next(value for key, value in redis.values.items() if ":record:" in key)
+        payload = json.loads(raw)
+        for unknown_field in ("unexpected", "priorityScore"):
+            malformed = json.loads(raw)
+            malformed["routing"][unknown_field] = 0
+            self.assertIsNone(
+                candidate_module._decode_candidate_record(
+                    json.dumps(malformed),
+                    secret=SECRET,
+                    expected_mailbox_scope=record.scope.mailbox_scope(),
+                    expected_member_digest=derive_candidate_scope_digest(
+                        SECRET, record.scope
+                    ),
+                )
+            )
+        self.assertNotIn("priorityScore", payload["routing"])
+
+    def test_ready_routing_uses_only_strict_server_domains(self) -> None:
+        routing = ready_routing()
+        self.assertIsNone(routing.signal)
+        self.assertIsNone(routing.v7_final_priority)
+        self.assertIsNone(routing.final_visibility)
+        self.assertIsNone(routing.action)
+
+        for signal in (None, "Priority", "For review"):
+            self.assertEqual(replace(routing, signal=signal).signal, signal)
+        for final_priority in (None, "PRIORITY", "REVIEW", "NORMAL", "LOW"):
+            self.assertEqual(
+                replace(routing, v7_final_priority=final_priority).v7_final_priority,
+                final_priority,
+            )
+        for visibility in (
+            None,
+            "show_priority",
+            "show_normal",
+            "show_low",
+            "hide",
+            "delete",
+        ):
+            self.assertEqual(
+                replace(routing, final_visibility=visibility).final_visibility,
+                visibility,
+            )
+        for action in (
+            None,
+            "show_in_priority",
+            "show_in_main_feed",
+            "show_in_quiet_view",
+            "archive_candidate",
+            "delete_or_archive",
+        ):
+            self.assertEqual(replace(routing, action=action).action, action)
+        for confidence in ("low", "medium", "high"):
+            self.assertEqual(
+                replace(routing, noise_confidence=confidence).noise_confidence,
+                confidence,
+            )
+
+        for invalid_priority in ("MEDIUM", "priority", False, 0):
+            with self.assertRaises(ValueError):
+                replace(routing, v7_final_priority=invalid_priority)
+        for invalid_confidence in (0, 0.5, 1, "unknown"):
+            with self.assertRaises(ValueError):
+                replace(routing, noise_confidence=invalid_confidence)
+        for invalid_category in ("Primary", "Promo", "Updates"):
+            with self.assertRaises(ValueError):
+                replace(routing, category=invalid_category)
+        for field_name in ("classifier_version", "routing_version"):
+            for invalid_version in ("", "unknown", "fake", "fallback"):
+                with self.assertRaises(ValueError):
+                    replace(routing, **{field_name: invalid_version})
+        with self.assertRaises(ValueError):
+            replace(routing, signal="normal")
+        with self.assertRaises(ValueError):
+            replace(routing, noise_reasons=("unknown_reason",))
+        with self.assertRaises(TypeError):
+            PriorityCandidateRouting(
+                **{
+                    **{
+                        field_name: getattr(routing, field_name)
+                        for field_name in routing.__dataclass_fields__
+                    },
+                    "priority_score": 0,
+                }
+            )
+
+    def test_v2_schema_namespace_and_v1_isolation(self) -> None:
+        self.assertEqual(candidate_module.CANDIDATE_STORE_SCHEMA_VERSION, 2)
+        self.assertEqual(
+            candidate_module._CANDIDATE_KEY_PREFIX,
+            "cuevion:priority:candidate:v2:",
+        )
+
+        redis = MemoryRedis()
+        store = PriorityCandidateStore(redis, hmac_secret=SECRET)
+        scope = google_scope()
+        store.upsert_confirmed(scope, snapshot(), expected_version=0)
+        record_key = store._scope_keys(scope)["record"]
+        self.assertTrue(record_key.startswith("cuevion:priority:candidate:v2:"))
+        payload = json.loads(redis.values[record_key])
+        self.assertEqual(payload["schemaVersion"], 2)
+        v1_payload = dict(payload)
+        v1_payload["schemaVersion"] = 1
+        self.assertIsNone(
+            candidate_module._decode_candidate_record(
+                json.dumps(v1_payload),
+                secret=SECRET,
+                expected_mailbox_scope=scope.mailbox_scope(),
+                expected_member_digest=derive_candidate_scope_digest(SECRET, scope),
+            )
+        )
+
+        isolated_redis = MemoryRedis()
+        isolated_store = PriorityCandidateStore(isolated_redis, hmac_secret=SECRET)
+        v1_key = record_key.replace(
+            "cuevion:priority:candidate:v2:",
+            "cuevion:priority:candidate:v1:",
+        )
+        isolated_redis.values[v1_key] = json.dumps(v1_payload)
+        self.assertIsNone(isolated_store.read_candidate(scope))
+        self.assertIn(v1_key, isolated_redis.values)
+        accessed_keys = " ".join(
+            str(value)
+            for command in isolated_redis.commands
+            for value in command[3 : 3 + int(command[2])]
+            if command[0] == "EVAL"
+        )
+        self.assertNotIn("cuevion:priority:candidate:v1:", accessed_keys)
+
     def test_canonical_identities_and_all_scope_isolation(self) -> None:
         gmail = google_scope()
         imap = imap_scope()
@@ -494,6 +651,11 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
         raw = next(value for key, value in redis.values.items() if ":record:" in key)
         payload = json.loads(raw)
         self.assertEqual(set(payload), candidate_module._ROOT_FIELDS)
+        self.assertEqual(payload["routingState"], "unresolved")
+        self.assertIsNone(payload["routing"])
+        self.assertLessEqual(
+            len(raw.encode("ascii")), CANDIDATE_MAX_SERIALIZED_RECORD_BYTES
+        )
         serialized_keys = set()
 
         def collect_keys(value: object) -> None:
@@ -541,9 +703,9 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
         prohibited["bodyText"] = "never"
         cases.append(json.dumps(prohibited))
         wrong_schema = dict(payload)
-        wrong_schema["schemaVersion"] = 2
+        wrong_schema["schemaVersion"] = 1
         cases.append(json.dumps(wrong_schema))
-        cases.extend(("{", '{"schemaVersion":1,"schemaVersion":1}'))
+        cases.extend(("{", '{"schemaVersion":2,"schemaVersion":2}'))
         for case in cases:
             decoded = candidate_module._decode_candidate_record(
                 case,
@@ -574,18 +736,30 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             replace(snapshot().render, snippet=accepted + "a")
+        with self.assertRaises(ValueError):
+            replace(ready_routing(), routing_version="r" * 129)
         large_routing = replace(
-            snapshot().routing,
-            noise_reasons=tuple(f"{index:02d}" + "x" * 126 for index in range(12)),
+            ready_routing(),
+            noise_reasons=candidate_module._ROUTING_NOISE_REASON_VALUES,
+            classifier_version="c" * 128,
+            routing_version="r" * 128,
         )
         large_snapshot = replace(
             snapshot(),
-            conversation=replace(snapshot().conversation, conversation_id="c" * 1_024),
+            conversation=replace(
+                snapshot().conversation,
+                conversation_id="c" * 1_024,
+                authority_kind="a" * 64,
+                provider_thread_id="t" * 256,
+            ),
             render=replace(
                 snapshot().render,
+                sender_display="d" * 256,
+                sender_address="a" * 320,
                 subject="s" * 998,
                 snippet="p" * CANDIDATE_MAX_SNIPPET_BYTES,
             ),
+            routing_state="ready",
             routing=large_routing,
         )
         redis = MemoryRedis()
@@ -594,6 +768,20 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
             store.upsert_confirmed(google_scope(), large_snapshot, expected_version=0)
         self.assertFalse(any(command[0] == "EVAL" for command in redis.commands))
         self.assertEqual(CANDIDATE_MAX_SERIALIZED_RECORD_BYTES, 4_096)
+
+        ready_redis = MemoryRedis()
+        ready_store = PriorityCandidateStore(ready_redis, hmac_secret=SECRET)
+        ready_store.upsert_confirmed(
+            google_scope(),
+            snapshot(routing_state="ready", routing=ready_routing()),
+            expected_version=0,
+        )
+        ready_raw = next(
+            value for key, value in ready_redis.values.items() if ":record:" in key
+        )
+        self.assertLessEqual(
+            len(ready_raw.encode("ascii")), CANDIDATE_MAX_SERIALIZED_RECORD_BYTES
+        )
 
 
 class CandidateIndexAndTimeTests(unittest.TestCase):
