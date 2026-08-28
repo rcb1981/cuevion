@@ -11,6 +11,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from email.headerregistry import Address
 from email.utils import parsedate_to_datetime
 from typing import Literal
 
@@ -92,6 +93,7 @@ _POPULATION_REASON_CODES = frozenset(
         "store_script_rejected",
         "store_unexpected",
         "store_upsert_postcondition_invalid",
+        "store_upsert_record_invalid",
         "store_upsert_result_invalid",
         "store_upsert_transport",
         "user_capacity",
@@ -286,6 +288,24 @@ def _bounded_snippet(value: object) -> str | None:
     return encoded[:CANDIDATE_MAX_SNIPPET_BYTES].decode("utf-8", errors="ignore")
 
 
+def _valid_sender_address(value: object) -> bool:
+    if (
+        not _valid_text(value, 320, content=True)
+        or not value
+        or value != value.strip()
+    ):
+        return False
+    try:
+        parsed = Address(addr_spec=value)
+    except Exception:
+        return False
+    return bool(
+        parsed.username
+        and parsed.domain
+        and parsed.addr_spec == value
+    )
+
+
 def _rfc_timestamp(value: object) -> str | None:
     if (
         type(value) is not str
@@ -326,7 +346,7 @@ def _render(source: dict, created_at: str) -> PriorityCandidateRender:
     if (
         snippet is None
         or not _valid_text(source.get("senderDisplay"), 256, content=True)
-        or not _valid_text(source.get("senderAddress"), 320, content=True)
+        or not _valid_sender_address(source.get("senderAddress"))
         or not _valid_text(source.get("subject"), 998, content=True)
         or type(source.get("unread")) is not bool
         or type(source.get("flagged")) is not bool
@@ -530,7 +550,13 @@ def _upsert_once(
     scope: PriorityCandidateScope,
     snapshot: PriorityCandidateSnapshot,
 ) -> None:
-    existing = store.read_candidate(scope)
+    try:
+        existing = store.read_candidate(scope)
+    except CandidateStoreUnavailable as error:
+        if error.stage != "store_existing_record_invalid":
+            raise
+        store.replace_malformed_confirmed(scope, snapshot)
+        return
     store.upsert_confirmed(
         scope,
         snapshot,

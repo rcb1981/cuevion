@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import unittest
+from email.message import Message
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import imap_connect_preview
 
 from . import candidate_store as candidate_store_module
 from .candidate_projection import (
@@ -163,6 +166,109 @@ class CandidateProjectionTests(unittest.TestCase):
         self.assertIsNone(snapshot.routing)
         self.assertEqual(snapshot.render.created_at, "2025-07-01T10:00:00.000Z")
 
+    def test_render_accepts_empty_display_and_subject_with_exact_address(self):
+        for authority, source in (
+            (
+                gmail_authority(),
+                gmail_source(
+                    senderDisplay="",
+                    senderAddress="artist@example.com",
+                    subject="",
+                ),
+            ),
+            (
+                imap_authority(),
+                imap_source(
+                    senderDisplay="",
+                    senderAddress="artist@example.com",
+                    subject="",
+                ),
+            ),
+        ):
+            with self.subTest(provider=authority.provider):
+                _scope, candidate = project_priority_candidate(authority, source)
+                self.assertEqual(candidate.render.sender_display, "")
+                self.assertEqual(candidate.render.sender_address, "artist@example.com")
+                self.assertEqual(candidate.render.subject, "")
+
+    def test_render_rejects_missing_malformed_and_permissive_parse_addresses(self):
+        for sender_address in (
+            "",
+            "Unknown",
+            "Display",
+            "two@@example.com",
+            "a..b@example.com",
+            "sender address@example.com",
+        ):
+            with self.subTest(sender_address=sender_address):
+                report = populate_priority_candidates(
+                    gmail_authority(),
+                    [gmail_source(senderAddress=sender_address)],
+                    store=PriorityCandidateStore(MemoryRedis(), hmac_secret=SECRET),
+                )
+                self.assertEqual(
+                    report.reason_counts,
+                    (("candidate_render_invalid", 1),),
+                )
+
+    def test_candidate_render_source_ignores_ui_sender_and_subject_fallbacks(self):
+        message = Message()
+        message["From"] = "artist@example.com"
+        message["Date"] = "Tue, 01 Jul 2025 10:00:00 +0000"
+        source = imap_connect_preview.build_priority_candidate_render_source(
+            message,
+            {
+                "sender": "Unknown sender",
+                "subject": "Untitled message",
+                "snippet": "Provider snippet",
+                "unread": True,
+                "flagged": False,
+            },
+        )
+        self.assertEqual(source["senderDisplay"], "")
+        self.assertEqual(source["senderAddress"], "artist@example.com")
+        self.assertEqual(source["subject"], "")
+        self.assertNotIn("Unknown sender", source.values())
+        self.assertNotIn("Untitled message", source.values())
+
+        _scope, candidate = project_priority_candidate(
+            imap_authority(),
+            {
+                **imap_source(),
+                **source,
+            },
+        )
+        self.assertEqual(candidate.render.sender_display, "")
+        self.assertEqual(candidate.render.subject, "")
+
+    def test_candidate_render_source_preserves_decoded_utf8_display_and_subject(self):
+        message = Message()
+        message["From"] = "Artíst <artist@example.com>"
+        message["Subject"] = "Café subject"
+        message["Date"] = "Tue, 01 Jul 2025 10:00:00 +0000"
+        source = imap_connect_preview.build_priority_candidate_render_source(
+            message,
+            {
+                "sender": "UI sender",
+                "subject": "UI subject",
+                "snippet": "Provider snippet",
+                "unread": False,
+                "flagged": True,
+            },
+        )
+        self.assertEqual(source["senderDisplay"], "Artíst")
+        self.assertEqual(source["senderAddress"], "artist@example.com")
+        self.assertEqual(source["subject"], "Café subject")
+        _scope, candidate = project_priority_candidate(
+            imap_authority(),
+            {
+                **imap_source(),
+                **source,
+            },
+        )
+        self.assertEqual(candidate.render.sender_display, "Artíst")
+        self.assertEqual(candidate.render.subject, "Café subject")
+
     def test_imap_rejects_sequence_numbers_malformed_identity_and_synthesized_time(self):
         rejected = (
             imap_source(imapUid=None),
@@ -275,6 +381,38 @@ class CandidatePopulationTests(unittest.TestCase):
             ),
             (
                 gmail_source(subject="invalid\rsubject"),
+                "candidate_render_invalid",
+            ),
+            (
+                gmail_source(senderAddress=""),
+                "candidate_render_invalid",
+            ),
+            (
+                gmail_source(senderAddress="Unknown"),
+                "candidate_render_invalid",
+            ),
+            (
+                gmail_source(senderDisplay="d" * 257),
+                "candidate_render_invalid",
+            ),
+            (
+                gmail_source(subject="s" * 999),
+                "candidate_render_invalid",
+            ),
+            (
+                gmail_source(subject="invalid\x01subject"),
+                "candidate_render_invalid",
+            ),
+            (
+                gmail_source(senderDisplay="\ud800"),
+                "candidate_render_invalid",
+            ),
+            (
+                gmail_source(unread=1),
+                "candidate_render_invalid",
+            ),
+            (
+                gmail_source(flagged=0),
                 "candidate_render_invalid",
             ),
         )
@@ -395,6 +533,103 @@ class CandidatePopulationTests(unittest.TestCase):
             corrupt_report.reason_counts,
             (("store_read_postcondition_invalid", 1),),
         )
+
+    def test_provider_refresh_repairs_only_exact_malformed_v2_without_references(self):
+        source = gmail_source()
+        other_source = gmail_source(
+            providerMessageId="gmail-message-unrelated",
+            providerThreadId="gmail-thread-unrelated",
+        )
+        initial = populate_priority_candidates(
+            self.authority,
+            [source, other_source],
+            store=self.store,
+        )
+        self.assertEqual(initial.written, 2)
+        scope, _snapshot = project_priority_candidate(self.authority, source)
+        other_scope, _ = project_priority_candidate(self.authority, other_source)
+        keys = self.store._scope_keys(scope)
+        other_before = self.store.read_candidate(other_scope)
+
+        malformed = json.loads(self.redis.values[keys["record"]])
+        malformed["routingState"] = "ready"
+        malformed["routing"] = {
+            "signal": None,
+            "uiSignal": "REPLY",
+            "internalClassification": "reply",
+            "category": "reply",
+            "finalVisibility": None,
+            "action": None,
+            "v7FinalPriority": None,
+            "noiseDisposition": "none",
+            "noiseConfidence": "low",
+            "noiseReasons": {},
+            "classifierVersion": "test-classifier-v1",
+            "routingVersion": "test-routing-v1",
+        }
+        self.redis.values[keys["record"]] = self.redis._encode(malformed)
+
+        repaired = populate_priority_candidates(
+            self.authority,
+            [source],
+            store=self.store,
+        )
+        self.assertEqual((repaired.written, repaired.skipped), (1, 0))
+        self.assertFalse(repaired.incomplete)
+        record = self.store.read_candidate(scope)
+        self.assertEqual(record.version, 1)
+        self.assertEqual(record.snapshot.routing_state, "unresolved")
+        self.assertIsNone(record.snapshot.routing)
+        self.assertTrue(
+            all(reference.expires_at == 0 for reference in record.positive_references)
+        )
+        for index_key in (
+            keys["mailbox_index"],
+            keys["user_index"],
+            keys["namespace_index"],
+        ):
+            self.assertEqual(
+                self.redis.sorted_sets[index_key][keys["member"]],
+                record.logical_expires_at(),
+            )
+        self.assertEqual(self.store.read_candidate(other_scope), other_before)
+        self.assertFalse(any(command[0] == "SCAN" for command in self.redis.commands))
+
+    def test_malformed_v2_with_nonzero_reference_is_not_repaired(self):
+        source = gmail_source()
+        populate_priority_candidates(self.authority, [source], store=self.store)
+        scope, _snapshot = project_priority_candidate(self.authority, source)
+        keys = self.store._scope_keys(scope)
+        malformed = json.loads(self.redis.values[keys["record"]])
+        malformed["routingState"] = "ready"
+        malformed["routing"] = {
+            "signal": None,
+            "uiSignal": "REPLY",
+            "internalClassification": "reply",
+            "category": "reply",
+            "finalVisibility": None,
+            "action": None,
+            "v7FinalPriority": None,
+            "noiseDisposition": "none",
+            "noiseConfidence": "low",
+            "noiseReasons": {},
+            "classifierVersion": "test-classifier-v1",
+            "routingVersion": "test-routing-v1",
+        }
+        malformed["positiveReferences"]["manual_priority"] = (
+            malformed["absoluteExpiresAt"]
+        )
+        encoded = self.redis._encode(malformed)
+        self.redis.values[keys["record"]] = encoded
+
+        refused = populate_priority_candidates(
+            self.authority,
+            [source],
+            store=self.store,
+        )
+        self.assertEqual(refused.written, 0)
+        self.assertEqual(refused.reason_counts, (("store_script_rejected", 1),))
+        self.assertEqual(self.redis.values[keys["record"]], encoded)
 
     def test_fatal_store_failure_counts_unprocessed_rows_without_more_work(self):
         commands: list[list[object]] = []

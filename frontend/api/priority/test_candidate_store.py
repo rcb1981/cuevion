@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 from . import candidate_store as candidate_module
 from .authority import PriorityMessageIdentity
@@ -72,8 +74,10 @@ class MemoryRedis:
         key_count = int(command[2])
         keys = command[3 : 3 + key_count]
         args = command[3 + key_count :]
+        if script == candidate_module._PREPARE_CONFIRMED_SCRIPT:
+            return {"result": self._prepare(args)}
         if script == candidate_module._UPSERT_CONFIRMED_SCRIPT:
-            return {"result": self._upsert(keys, args)}
+            return {"result": self._commit(keys, args)}
         if script == candidate_module._SET_POSITIVE_REFERENCE_SCRIPT:
             return {"result": self._set_reference(keys, args)}
         if script == candidate_module._MARK_VALIDATION_FAILURE_SCRIPT:
@@ -120,50 +124,35 @@ class MemoryRedis:
             self.sorted_sets.setdefault(key, {})[member] = expires_at
         return encoded
 
-    def _upsert(self, keys: list[object], args: list[object]) -> object:
-        expected_raw, missing, expected_version, template, member = args[:5]
-        if self.values.get(keys[6]) is not None:
-            return args[18]
-        current = self.values.get(keys[0])
-        if expected_raw == missing:
-            if current is not None:
-                return args[15]
-        elif current != expected_raw:
-            return args[15]
-        for key in keys[1:4]:
-            values = self.sorted_sets.setdefault(key, {})
-            for existing_member, score in list(values.items()):
-                if score <= self.current_ms:
-                    values.pop(existing_member)
-        memberships = [member in self.sorted_sets[key] for key in keys[1:4]]
-        if current is not None and memberships != [True, True, True]:
-            return args[14]
-        if current is not None and (
-            len({self.sorted_sets[key][member] for key in keys[1:4]}) != 1
-            or self.sorted_sets[keys[1]][member] != int(args[19])
+    @staticmethod
+    def _canonical_collections(payload: dict[str, object]) -> bool:
+        provider_labels = payload.get("providerAuthority", {}).get("labels")
+        if provider_labels is not None and not (
+            isinstance(provider_labels, list) and provider_labels
         ):
-            return args[14]
-        if current is None and any(memberships):
-            return args[14]
-        if current is None:
-            if len(self.sorted_sets[keys[1]]) >= int(args[9]):
-                self.values[keys[4]] = args[13]
-                return args[16]
-            if len(self.sorted_sets[keys[2]]) >= int(args[10]):
-                self.values[keys[5]] = args[13]
-                return args[17]
+            return False
+        if payload.get("routingState") == "unresolved":
+            return payload.get("routing") is None
+        routing = payload.get("routing")
+        if not isinstance(routing, dict):
+            return False
+        noise_reasons = routing.get("noiseReasons")
+        return noise_reasons is None or (
+            isinstance(noise_reasons, list) and bool(noise_reasons)
+        )
+
+    def _prepare(self, args: list[object]) -> object:
+        template, expected_version = args[:2]
         payload = json.loads(template)
-        prior_version = json.loads(current)["version"] if current is not None else 0
-        if prior_version != int(expected_version):
-            return args[15]
+        if not self._canonical_collections(payload):
+            return args[7]
         now = self.current_ms
-        base = now + int(args[6]) * 1_000
-        absolute = now + int(args[7]) * 1_000
-        positive = 0
+        base = now + int(args[3]) * 1_000
+        absolute = now + int(args[4]) * 1_000
         for kind, expires_at in payload["positiveReferences"].items():
-            expires_at = 0 if expires_at <= now else min(expires_at, absolute)
-            payload["positiveReferences"][kind] = expires_at
-            positive = max(positive, expires_at)
+            payload["positiveReferences"][kind] = (
+                0 if expires_at <= now else min(expires_at, absolute)
+            )
         payload.update(
             {
                 "providerObservedAt": now,
@@ -172,14 +161,91 @@ class MemoryRedis:
                 "absoluteExpiresAt": absolute,
                 "graceExpiresAt": 0,
                 "state": "provider_confirmed",
-                "version": prior_version + 1,
+                "version": int(expected_version) + 1,
                 "updatedAt": now,
             }
         )
-        expires_at = min(max(base, positive), absolute)
-        if len(self._encode(payload).encode("ascii")) > int(args[11]):
+        encoded = self._encode(payload)
+        return args[7] if len(encoded.encode("ascii")) > int(args[5]) else encoded
+
+    def _set_encoded_record(
+        self,
+        keys: list[object],
+        member: str,
+        encoded: str,
+        expires_at: int,
+    ) -> str:
+        self.values[keys[0]] = encoded
+        self.expires_at[keys[0]] = expires_at
+        for key in keys[1:4]:
+            self.sorted_sets.setdefault(key, {})[member] = expires_at
+        return encoded
+
+    def _commit(self, keys: list[object], args: list[object]) -> object:
+        mode, expected_digest, expected_length, prepared, member = args[:5]
+        if self.values.get(keys[6]) is not None:
+            return args[18]
+        current = self.values.get(keys[0])
+        if expected_digest == "":
+            if current is not None:
+                return args[15]
+        elif (
+            current is None
+            or len(current.encode("utf-8")) != int(expected_length)
+            or hashlib.sha1(
+                current.encode("utf-8"),
+                usedforsecurity=False,
+            ).hexdigest()
+            != expected_digest
+        ):
+            return args[15]
+        if mode == "repair":
+            try:
+                old_references = json.loads(current)["positiveReferences"]
+            except Exception:
+                return args[14]
+            if set(old_references) != set(candidate_module._POSITIVE_REFERENCE_KINDS) or any(
+                type(value) is not int or value != 0
+                for value in old_references.values()
+            ):
+                return args[14]
+        payload = json.loads(prepared)
+        if (
+            not self._canonical_collections(payload)
+            or payload["version"] != int(args[5])
+            or payload["state"] != "provider_confirmed"
+        ):
             return args[14]
-        return self._set_record(keys, member, payload, expires_at)
+        for key in keys[1:4]:
+            values = self.sorted_sets.setdefault(key, {})
+            for existing_member, score in list(values.items()):
+                if score <= self.current_ms:
+                    values.pop(existing_member)
+        memberships = [member in self.sorted_sets[key] for key in keys[1:4]]
+        if mode == "normal" and current is not None and memberships != [True, True, True]:
+            return args[14]
+        if mode == "normal" and current is not None and (
+            len({self.sorted_sets[key][member] for key in keys[1:4]}) != 1
+            or self.sorted_sets[keys[1]][member] != int(args[19])
+        ):
+            return args[14]
+        if mode == "normal" and current is None and any(memberships):
+            return args[14]
+        if not memberships[0]:
+            if len(self.sorted_sets[keys[1]]) >= int(args[9]):
+                self.values[keys[4]] = args[13]
+                return args[16]
+        if not memberships[1]:
+            if len(self.sorted_sets[keys[2]]) >= int(args[10]):
+                self.values[keys[5]] = args[13]
+                return args[17]
+        expires_at = min(
+            max(payload["baseExpiresAt"], max(payload["positiveReferences"].values())),
+            payload["absoluteExpiresAt"],
+        )
+        if expires_at <= self.current_ms or len(prepared.encode("utf-8")) > int(args[11]):
+            return args[14]
+        return self._set_encoded_record(keys, member, prepared, expires_at)
 
     def _set_reference(self, keys: list[object], args: list[object]) -> object:
         current = self.values.get(keys[0])
@@ -590,7 +656,7 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
                 snapshot(),
                 expected_version=0,
             ),
-            "store_upsert_result_invalid",
+            "store_upsert_record_invalid",
         )
 
         class InvalidUpsertPostcondition(MemoryRedis):
@@ -606,19 +672,17 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
                     return {"result": self._encode(payload)}
                 return result
 
+        invalid_postcondition_redis = InvalidUpsertPostcondition()
         invalid_postcondition = PriorityCandidateStore(
-            InvalidUpsertPostcondition(),
+            invalid_postcondition_redis,
             hmac_secret=SECRET,
         )
-        assert_stage(
-            invalid_postcondition,
-            lambda store: store.upsert_confirmed(
-                scope,
-                snapshot(),
-                expected_version=0,
-            ),
-            "store_upsert_postcondition_invalid",
+        reconciled = invalid_postcondition.upsert_confirmed(
+            scope,
+            snapshot(),
+            expected_version=0,
         )
+        self.assertEqual(reconciled, invalid_postcondition.read_candidate(scope))
 
         for sensitive in (
             "redis-sensitive",
@@ -656,6 +720,19 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
         self.assertEqual(record.snapshot, ready)
         raw = next(value for key, value in redis.values.items() if ":record:" in key)
         payload = json.loads(raw)
+        self.assertIsNone(payload["routing"]["noiseReasons"])
+        malformed_empty_reasons = json.loads(raw)
+        malformed_empty_reasons["routing"]["noiseReasons"] = []
+        self.assertIsNone(
+            candidate_module._decode_candidate_record(
+                json.dumps(malformed_empty_reasons),
+                secret=SECRET,
+                expected_mailbox_scope=record.scope.mailbox_scope(),
+                expected_member_digest=derive_candidate_scope_digest(
+                    SECRET, record.scope
+                ),
+            )
+        )
         for unknown_field in ("unexpected", "priorityScore"):
             malformed = json.loads(raw)
             malformed["routing"][unknown_field] = 0
@@ -670,6 +747,216 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
                 )
             )
         self.assertNotIn("priorityScore", payload["routing"])
+
+        imap_redis = MemoryRedis()
+        imap_store = PriorityCandidateStore(imap_redis, hmac_secret=SECRET)
+        imap_candidate_scope = imap_scope()
+        imap_record = imap_store.upsert_confirmed(
+            imap_candidate_scope,
+            snapshot(provider="custom_imap"),
+            expected_version=0,
+        )
+        imap_raw = imap_redis.values[
+            imap_store._scope_keys(imap_candidate_scope)["record"]
+        ]
+        imap_payload = json.loads(imap_raw)
+        self.assertIsNone(imap_payload["providerAuthority"]["labels"])
+        imap_payload["providerAuthority"]["labels"] = []
+        self.assertIsNone(
+            candidate_module._decode_candidate_record(
+                json.dumps(imap_payload),
+                secret=SECRET,
+                expected_mailbox_scope=imap_candidate_scope.mailbox_scope(),
+                expected_member_digest=derive_candidate_scope_digest(
+                    SECRET, imap_record.scope
+                ),
+            )
+        )
+
+    def test_ambiguous_commit_acknowledgement_reconciles_once(self) -> None:
+        scope = google_scope(message_id="ack-reconcile")
+        intended = snapshot()
+
+        class AmbiguousAfterCommit(MemoryRedis):
+            def __call__(self, command: list[object]) -> dict[str, object]:
+                result = super().__call__(command)
+                if (
+                    command[0] == "EVAL"
+                    and command[1] == candidate_module._UPSERT_CONFIRMED_SCRIPT
+                ):
+                    return {"unexpected": "content-free"}
+                return result
+
+        redis = AmbiguousAfterCommit()
+        store = PriorityCandidateStore(redis, hmac_secret=SECRET)
+        accepted = store.upsert_confirmed(scope, intended, expected_version=0)
+        self.assertEqual(
+            sum(
+                command[0] == "EVAL"
+                and command[1] == candidate_module._READ_ONE_SCRIPT
+                for command in redis.commands
+            ),
+            1,
+        )
+        self.assertEqual(accepted, store.read_candidate(scope))
+        commit_commands = [
+            command
+            for command in redis.commands
+            if command[0] == "EVAL"
+            and command[1] == candidate_module._UPSERT_CONFIRMED_SCRIPT
+        ]
+        self.assertEqual(len(commit_commands), 1)
+
+        class TransportLostAfterCommit(MemoryRedis):
+            def __call__(self, command: list[object]) -> dict[str, object]:
+                result = super().__call__(command)
+                if (
+                    command[0] == "EVAL"
+                    and command[1] == candidate_module._UPSERT_CONFIRMED_SCRIPT
+                ):
+                    raise TimeoutError("content-free")
+                return result
+
+        transport_redis = TransportLostAfterCommit()
+        transport_store = PriorityCandidateStore(
+            transport_redis,
+            hmac_secret=SECRET,
+        )
+        transport_accepted = transport_store.upsert_confirmed(
+            google_scope(message_id="transport-reconcile"),
+            intended,
+            expected_version=0,
+        )
+        self.assertEqual(transport_accepted.version, 1)
+
+    def test_ambiguous_acknowledgement_fails_without_exact_matching_commit(self) -> None:
+        scope = google_scope(message_id="ack-no-commit")
+
+        class NoCommit(MemoryRedis):
+            def __call__(self, command: list[object]) -> dict[str, object]:
+                if (
+                    command[0] == "EVAL"
+                    and command[1] == candidate_module._UPSERT_CONFIRMED_SCRIPT
+                ):
+                    return {"unexpected": "content-free"}
+                return super().__call__(command)
+
+        with self.assertRaises(CandidateStoreUnavailable) as missing:
+            PriorityCandidateStore(NoCommit(), hmac_secret=SECRET).upsert_confirmed(
+                scope,
+                snapshot(),
+                expected_version=0,
+            )
+        self.assertEqual(missing.exception.stage, "store_upsert_result_invalid")
+
+        class DifferentCommit(MemoryRedis):
+            def __call__(self, command: list[object]) -> dict[str, object]:
+                result = super().__call__(command)
+                if (
+                    command[0] == "EVAL"
+                    and command[1] == candidate_module._UPSERT_CONFIRMED_SCRIPT
+                ):
+                    keys = command[3:10]
+                    payload = json.loads(self.values[keys[0]])
+                    payload["render"]["subject"] = "Different current snapshot"
+                    self.values[keys[0]] = self._encode(payload)
+                    return {"unexpected": "content-free"}
+                return result
+
+        with self.assertRaises(CandidateStoreUnavailable) as different:
+            PriorityCandidateStore(
+                DifferentCommit(), hmac_secret=SECRET
+            ).upsert_confirmed(
+                google_scope(message_id="ack-different"),
+                snapshot(),
+                expected_version=0,
+            )
+        self.assertEqual(different.exception.stage, "store_upsert_result_invalid")
+
+        class DifferentVersion(MemoryRedis):
+            def __call__(self, command: list[object]) -> dict[str, object]:
+                result = super().__call__(command)
+                if (
+                    command[0] == "EVAL"
+                    and command[1] == candidate_module._UPSERT_CONFIRMED_SCRIPT
+                ):
+                    keys = command[3:10]
+                    payload = json.loads(self.values[keys[0]])
+                    payload["version"] += 1
+                    self.values[keys[0]] = self._encode(payload)
+                    return {"unexpected": "content-free"}
+                return result
+
+        with self.assertRaises(CandidateStoreUnavailable) as different_version:
+            PriorityCandidateStore(
+                DifferentVersion(), hmac_secret=SECRET
+            ).upsert_confirmed(
+                google_scope(message_id="ack-different-version"),
+                snapshot(),
+                expected_version=0,
+            )
+        self.assertEqual(
+            different_version.exception.stage,
+            "store_upsert_result_invalid",
+        )
+
+        class ReconciliationReadFails(MemoryRedis):
+            def __call__(self, command: list[object]) -> dict[str, object]:
+                result = super().__call__(command)
+                if (
+                    command[0] == "EVAL"
+                    and command[1] == candidate_module._UPSERT_CONFIRMED_SCRIPT
+                ):
+                    return {"unexpected": "content-free"}
+                if (
+                    command[0] == "EVAL"
+                    and command[1] == candidate_module._READ_ONE_SCRIPT
+                ):
+                    raise TimeoutError("content-free")
+                return result
+
+        with self.assertRaises(CandidateStoreUnavailable) as read_failure:
+            PriorityCandidateStore(
+                ReconciliationReadFails(), hmac_secret=SECRET
+            ).upsert_confirmed(
+                google_scope(message_id="ack-read-failure"),
+                snapshot(),
+                expected_version=0,
+            )
+        self.assertEqual(read_failure.exception.stage, "store_upsert_result_invalid")
+
+    def test_invalid_canonical_collection_is_rejected_before_commit(self) -> None:
+        scope = google_scope(message_id="precommit-invalid")
+        ready = snapshot(routing_state="ready", routing=ready_routing())
+        original = candidate_module._routing_to_wire
+
+        def ambiguous(value):
+            result = original(value)
+            assert result is not None
+            result["noiseReasons"] = []
+            return result
+
+        redis = MemoryRedis()
+        store = PriorityCandidateStore(redis, hmac_secret=SECRET)
+        with patch.object(candidate_module, "_routing_to_wire", side_effect=ambiguous):
+            with self.assertRaises(CandidateStoreUnavailable) as raised:
+                store.upsert_confirmed(scope, ready, expected_version=0)
+        self.assertEqual(raised.exception.stage, "store_script_rejected")
+        keys = store._scope_keys(scope)
+        self.assertNotIn(keys["record"], redis.values)
+        for index_key in (
+            keys["mailbox_index"],
+            keys["user_index"],
+            keys["namespace_index"],
+        ):
+            self.assertNotIn(keys["member"], redis.sorted_sets.get(index_key, {}))
+        self.assertFalse(
+            any(
+                command[0] == "EVAL"
+                and command[1] == candidate_module._UPSERT_CONFIRMED_SCRIPT
+                for command in redis.commands
+            )
+        )
 
     def test_ready_routing_uses_only_strict_server_domains(self) -> None:
         routing = ready_routing()

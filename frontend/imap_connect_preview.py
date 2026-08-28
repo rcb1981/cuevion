@@ -1615,13 +1615,14 @@ def build_priority_candidate_render_source(
     preview: dict[str, Any],
 ) -> dict[str, Any]:
     """Return only bounded-candidate render inputs from an already parsed MIME row."""
-    from_header = decode_mime_words(message.get("From", "Unknown sender"))
-    _sender_name, sender_address = parseaddr(from_header)
+    from_header = decode_mime_words(message.get("From"))
+    sender_display, sender_address = parseaddr(from_header)
+    subject = decode_mime_words(message.get("Subject"))
     rfc_date = message.get("Date")
     return {
-        "senderDisplay": preview.get("sender"),
+        "senderDisplay": sender_display,
         "senderAddress": sender_address,
-        "subject": preview.get("subject"),
+        "subject": subject,
         "snippet": preview.get("snippet"),
         "unread": preview.get("unread"),
         "flagged": preview.get("flagged"),

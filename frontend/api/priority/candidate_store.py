@@ -143,6 +143,7 @@ CANDIDATE_STORE_FAILURE_STAGES = frozenset(
         "store_script_rejected",
         "store_unexpected",
         "store_upsert_postcondition_invalid",
+        "store_upsert_record_invalid",
         "store_upsert_result_invalid",
         "store_upsert_transport",
     }
@@ -696,7 +697,7 @@ def _routing_to_wire(
         "v7FinalPriority": value.v7_final_priority,
         "noiseDisposition": value.noise_disposition,
         "noiseConfidence": value.noise_confidence,
-        "noiseReasons": list(value.noise_reasons),
+        "noiseReasons": list(value.noise_reasons) if value.noise_reasons else None,
         "classifierVersion": value.classifier_version,
         "routingVersion": value.routing_version,
     }
@@ -851,7 +852,13 @@ def _decode_candidate_record(
             routing_state == "ready"
             and type(routing) is dict
             and set(routing) == _ROUTING_FIELDS
-            and type(routing["noiseReasons"]) is list
+            and (
+                routing["noiseReasons"] is None
+                or (
+                    type(routing["noiseReasons"]) is list
+                    and bool(routing["noiseReasons"])
+                )
+            )
         )
         if (
             type(conversation) is not dict
@@ -865,7 +872,10 @@ def _decode_candidate_record(
             or set(references) != set(_POSITIVE_REFERENCE_KINDS)
             or (
                 provider_authority["labels"] is not None
-                and type(provider_authority["labels"]) is not list
+                and (
+                    type(provider_authority["labels"]) is not list
+                    or not provider_authority["labels"]
+                )
             )
             or payload["schemaVersion"] != CANDIDATE_STORE_SCHEMA_VERSION
             or payload["mailboxId"] != expected_mailbox_scope.mailbox_id
@@ -914,7 +924,7 @@ def _decode_candidate_record(
                     v7_final_priority=routing["v7FinalPriority"],
                     noise_disposition=routing["noiseDisposition"],
                     noise_confidence=routing["noiseConfidence"],
-                    noise_reasons=tuple(routing["noiseReasons"]),
+                    noise_reasons=tuple(routing["noiseReasons"] or ()),
                     classifier_version=routing["classifierVersion"],
                     routing_version=routing["routingVersion"],
                 )
@@ -967,7 +977,101 @@ _REFERENCE_REJECTED_SENTINEL = (
     "__cuevion_priority_candidate_reference_rejected__"
 )
 
-_UPSERT_CONFIRMED_SCRIPT = r"""
+_CANONICAL_COLLECTION_VALIDATOR_SCRIPT = r"""
+local function exactKeys(value,allowed,expectedCount)
+  if type(value)~='table' then return false end
+  local count=0
+  for key,_ in pairs(value) do
+    if not allowed[key] then return false end
+    count=count+1
+  end
+  return count==expectedCount
+end
+local function canonicalStringCollection(value)
+  if value==cjson.null then return true end
+  if type(value)~='table' then return false end
+  local length=#value
+  if length<1 then return false end
+  local count=0
+  for key,item in pairs(value) do
+    if type(key)~='number' or key%1~=0 or key<1 or key>length or
+      type(item)~='string' then return false end
+    count=count+1
+  end
+  return count==length
+end
+local function candidateCollectionsAreCanonical(record)
+  if type(record)~='table' then return false end
+  local providerAuthority=record['providerAuthority']
+  if not exactKeys(providerAuthority,{folder=true,labels=true},2) or
+    not canonicalStringCollection(providerAuthority['labels']) then return false end
+  local routingState=record['routingState'];local routing=record['routing']
+  if routingState=='unresolved' then return routing==cjson.null end
+  if routingState~='ready' or not exactKeys(routing,{
+    signal=true,uiSignal=true,internalClassification=true,category=true,
+    finalVisibility=true,action=true,v7FinalPriority=true,
+    noiseDisposition=true,noiseConfidence=true,noiseReasons=true,
+    classifierVersion=true,routingVersion=true},12) then return false end
+  return canonicalStringCollection(routing['noiseReasons'])
+end
+"""
+
+_REFERENCE_VALIDATOR_SCRIPT = r"""
+local referenceKinds={'manual_priority','waiting','returned_reply',
+  'semantic_promotion','collaboration_priority','assigned_review'}
+local referenceKindSet={}
+for _,kind in ipairs(referenceKinds) do referenceKindSet[kind]=true end
+local function exactReferences(references,maximum,requireZero)
+  if type(references)~='table' then return false end
+  local count=0
+  for kind,expires in pairs(references) do
+    if not referenceKindSet[kind] or type(expires)~='number' or expires%1~=0 or
+      expires<0 or expires>maximum or (requireZero and expires~=0) then return false end
+    count=count+1
+  end
+  return count==#referenceKinds
+end
+"""
+
+_CANONICAL_COLLECTION_VALIDATOR_SCRIPT += _REFERENCE_VALIDATOR_SCRIPT
+
+_PREPARE_CONFIRMED_SCRIPT = _CANONICAL_COLLECTION_VALIDATOR_SCRIPT + r"""
+local ok,record=pcall(cjson.decode,ARGV[1])
+local maximum=tonumber(ARGV[7])
+if not ok or type(record)~='table' or
+  record['schemaVersion']~=tonumber(ARGV[3]) or
+  not candidateCollectionsAreCanonical(record) or
+  not exactReferences(record['positiveReferences'],maximum,false) then
+  return ARGV[8]
+end
+local expectedVersion=tonumber(ARGV[2])
+if not expectedVersion or expectedVersion<0 or expectedVersion%1~=0 or
+  expectedVersion>=maximum then return ARGV[8] end
+local clock=redis.call('TIME')
+local seconds=tonumber(clock[1]);local micros=tonumber(clock[2])
+if not seconds or not micros then return ARGV[8] end
+local now=seconds*1000+math.floor(micros/1000)
+if now<0 or now>maximum then return ARGV[8] end
+local base=now+tonumber(ARGV[4])*1000
+local absolute=now+tonumber(ARGV[5])*1000
+if base>maximum or absolute>maximum then return ARGV[8] end
+local references=record['positiveReferences'];local positive=0
+for _,kind in ipairs(referenceKinds) do
+  local expires=references[kind]
+  if expires<=now then expires=0 elseif expires>absolute then expires=absolute end
+  references[kind]=expires
+  if expires>positive then positive=expires end
+end
+record['providerObservedAt']=now;record['providerValidatedAt']=now
+record['baseExpiresAt']=base;record['absoluteExpiresAt']=absolute
+record['graceExpiresAt']=0;record['state']='provider_confirmed'
+record['version']=expectedVersion+1;record['updatedAt']=now
+local encoded=cjson.encode(record)
+if string.len(encoded)>tonumber(ARGV[6]) then return ARGV[8] end
+return encoded
+"""
+
+_UPSERT_CONFIRMED_SCRIPT = _REFERENCE_VALIDATOR_SCRIPT + r"""
 local function keyType(key)
   local value=redis.call('TYPE',key)
   if type(value)=='table' then return value['ok'] end
@@ -989,85 +1093,77 @@ for index=5,6 do
   if marker and marker~=ARGV[14] then return ARGV[15] end
 end
 local current=redis.call('GET',KEYS[1])
-if ARGV[1]==ARGV[2] then
+local mode=ARGV[1]
+if mode~='normal' and mode~='repair' then return ARGV[15] end
+if ARGV[2]=='' then
   if current then return ARGV[16] end
 else
-  if current~=ARGV[1] then return ARGV[16] end
+  if not current or string.len(current)~=tonumber(ARGV[3]) or
+    redis.sha1hex(current)~=ARGV[2] then return ARGV[16] end
 end
+if mode=='repair' then
+  if not current then return ARGV[16] end
+  local oldOk,oldRecord=pcall(cjson.decode,current)
+  if not oldOk or type(oldRecord)~='table' or
+    not exactReferences(oldRecord['positiveReferences'],tonumber(ARGV[13]),true) then
+    return ARGV[15]
+  end
+end
+local ok,record=pcall(cjson.decode,ARGV[4])
+local maximum=tonumber(ARGV[13])
+if not ok or type(record)~='table' or string.len(ARGV[4])>tonumber(ARGV[12]) or
+  not exactReferences(record['positiveReferences'],maximum,false) or
+  type(record['providerObservedAt'])~='number' or
+  record['providerObservedAt']%1~=0 or record['providerObservedAt']<0 or
+  record['providerObservedAt']>maximum or
+  record['providerObservedAt']~=record['providerValidatedAt'] or
+  record['providerObservedAt']~=record['updatedAt'] or
+  record['baseExpiresAt']~=record['providerObservedAt']+tonumber(ARGV[7])*1000 or
+  record['absoluteExpiresAt']~=record['providerObservedAt']+tonumber(ARGV[8])*1000 or
+  record['graceExpiresAt']~=0 or record['state']~='provider_confirmed' or
+  record['version']~=tonumber(ARGV[6]) then return ARGV[15] end
 local clock=redis.call('TIME')
 local seconds=tonumber(clock[1]);local micros=tonumber(clock[2])
 if not seconds or not micros then return ARGV[15] end
 local now=seconds*1000+math.floor(micros/1000)
-if now<0 or now>tonumber(ARGV[13]) then return ARGV[15] end
+if now<0 or now>maximum then return ARGV[15] end
+local positive=0
+for _,kind in ipairs(referenceKinds) do
+  local expires=record['positiveReferences'][kind]
+  if expires>record['absoluteExpiresAt'] then return ARGV[15] end
+  if expires>positive then positive=expires end
+end
+local expires=math.max(record['baseExpiresAt'],positive)
+if expires>record['absoluteExpiresAt'] then expires=record['absoluteExpiresAt'] end
+if expires<=now then return ARGV[15] end
+for index=2,4 do redis.call('ZREMRANGEBYSCORE',KEYS[index],'-inf',now) end
 local scores={redis.call('ZSCORE',KEYS[2],ARGV[5]),
   redis.call('ZSCORE',KEYS[3],ARGV[5]),redis.call('ZSCORE',KEYS[4],ARGV[5])}
-if current then
+if mode=='normal' and current then
   if not scores[1] or not scores[2] or not scores[3] or
     tonumber(scores[1])~=tonumber(scores[2]) or
     tonumber(scores[1])~=tonumber(scores[3]) or
     tonumber(scores[1])~=tonumber(ARGV[20]) then return ARGV[15] end
-else
-  redis.call('ZREMRANGEBYSCORE',KEYS[2],'-inf',now)
-  redis.call('ZREMRANGEBYSCORE',KEYS[3],'-inf',now)
-  redis.call('ZREMRANGEBYSCORE',KEYS[4],'-inf',now)
-  if redis.call('ZSCORE',KEYS[2],ARGV[5]) or
-    redis.call('ZSCORE',KEYS[3],ARGV[5]) or
-    redis.call('ZSCORE',KEYS[4],ARGV[5]) then return ARGV[15] end
-  if redis.call('ZCARD',KEYS[2])>=tonumber(ARGV[10]) then
-    redis.call('SET',KEYS[5],ARGV[14],'EX',ARGV[9]);return ARGV[17]
-  end
-  if redis.call('ZCARD',KEYS[3])>=tonumber(ARGV[11]) then
-    redis.call('SET',KEYS[6],ARGV[14],'EX',ARGV[9]);return ARGV[18]
-  end
+elseif mode=='normal' and (scores[1] or scores[2] or scores[3]) then
+  return ARGV[15]
 end
-local ok,record=pcall(cjson.decode,ARGV[4])
-if not ok or type(record)~='table' or
-  record['schemaVersion']~=tonumber(ARGV[6]) then return ARGV[15] end
-local existingVersion=0
-if current then
-  local currentOk,existing=pcall(cjson.decode,current)
-  if not currentOk or type(existing)~='table' or
-    type(existing['version'])~='number' or existing['version']%1~=0 or
-    existing['version']<1 or existing['version']>tonumber(ARGV[13]) then
-    return ARGV[15]
-  end
-  existingVersion=existing['version']
+if not scores[1] and redis.call('ZCARD',KEYS[2])>=tonumber(ARGV[10]) then
+  redis.call('SET',KEYS[5],ARGV[14],'EX',ARGV[9]);return ARGV[17]
 end
-if existingVersion~=tonumber(ARGV[3]) then return ARGV[16] end
-local base=now+tonumber(ARGV[7])*1000
-local absolute=now+tonumber(ARGV[8])*1000
-if base>tonumber(ARGV[13]) or absolute>tonumber(ARGV[13]) then return ARGV[15] end
-local references=record['positiveReferences']
-if type(references)~='table' then return ARGV[15] end
-local positive=0
-for _,kind in ipairs({'manual_priority','waiting','returned_reply',
-  'semantic_promotion','collaboration_priority','assigned_review'}) do
-  local expires=references[kind]
-  if type(expires)~='number' or expires%1~=0 or expires<0 or
-    expires>tonumber(ARGV[13]) then return ARGV[15] end
-  if expires<=now then expires=0 elseif expires>absolute then expires=absolute end
-  references[kind]=expires
-  if expires>positive then positive=expires end
+if not scores[2] and redis.call('ZCARD',KEYS[3])>=tonumber(ARGV[11]) then
+  redis.call('SET',KEYS[6],ARGV[14],'EX',ARGV[9]);return ARGV[18]
 end
-record['providerObservedAt']=now;record['providerValidatedAt']=now
-record['baseExpiresAt']=base;record['absoluteExpiresAt']=absolute
-record['graceExpiresAt']=0;record['state']='provider_confirmed'
-record['version']=existingVersion+1;record['updatedAt']=now
-local expires=math.max(base,positive)
-if expires>absolute then expires=absolute end
-local encoded=cjson.encode(record)
-if string.len(encoded)>tonumber(ARGV[12]) then return ARGV[15] end
 local ttl=math.ceil((expires-now)/1000)
 if ttl<1 then return ARGV[15] end
-redis.call('SET',KEYS[1],encoded,'EX',ttl)
+redis.call('SET',KEYS[1],ARGV[4],'EX',ttl)
 for index=2,4 do
   redis.call('ZADD',KEYS[index],expires,ARGV[5])
   redis.call('EXPIRE',KEYS[index],ARGV[9])
 end
-return encoded
+return ARGV[4]
 """
 
-_SET_POSITIVE_REFERENCE_SCRIPT = r"""
+_SET_POSITIVE_REFERENCE_SCRIPT = _CANONICAL_COLLECTION_VALIDATOR_SCRIPT + r"""
 local current=redis.call('GET',KEYS[1])
 if not current then return ARGV[12] end
 if current~=ARGV[1] then return ARGV[11] end
@@ -1130,6 +1226,7 @@ if expires<=now then
   return ARGV[12]
 end
 record['version']=record['version']+1;record['updatedAt']=now
+if not candidateCollectionsAreCanonical(record) then return ARGV[10] end
 local encoded=cjson.encode(record)
 if string.len(encoded)>tonumber(ARGV[8]) then return ARGV[10] end
 local ttl=math.ceil((expires-now)/1000)
@@ -1141,7 +1238,7 @@ end
 return encoded
 """
 
-_MARK_VALIDATION_FAILURE_SCRIPT = r"""
+_MARK_VALIDATION_FAILURE_SCRIPT = _CANONICAL_COLLECTION_VALIDATOR_SCRIPT + r"""
 local current=redis.call('GET',KEYS[1])
 if not current then return ARGV[10] end
 if current~=ARGV[1] then return ARGV[9] end
@@ -1183,6 +1280,7 @@ if expires<=now then
 end
 record['state']='provider_validation_grace';record['graceExpiresAt']=grace
 record['version']=record['version']+1;record['updatedAt']=now
+if not candidateCollectionsAreCanonical(record) then return ARGV[8] end
 local encoded=cjson.encode(record)
 if string.len(encoded)>tonumber(ARGV[6]) then return ARGV[8] end
 local ttl=math.ceil((expires-now)/1000)
@@ -1492,6 +1590,172 @@ class PriorityCandidateStore:
             raise CandidateStoreUnavailable(failure_stage)
         return record
 
+    def _prepare_confirmed(
+        self,
+        scope: PriorityCandidateScope,
+        snapshot: PriorityCandidateSnapshot,
+        references: tuple[PriorityCandidatePositiveReference, ...],
+        *,
+        expected_version: int,
+    ) -> tuple[str, PriorityCandidateRecord]:
+        template = _encode_wire(
+            _template_payload(self._hmac_secret, scope, snapshot, references)
+        )
+        result = self._command(
+            [
+                "EVAL",
+                _PREPARE_CONFIRMED_SCRIPT,
+                0,
+                template,
+                expected_version,
+                CANDIDATE_STORE_SCHEMA_VERSION,
+                CANDIDATE_BASE_TTL_SECONDS,
+                CANDIDATE_ABSOLUTE_TTL_SECONDS,
+                CANDIDATE_MAX_SERIALIZED_RECORD_BYTES,
+                CANDIDATE_MAX_SAFE_INTEGER,
+                _CORRUPT_SENTINEL,
+            ],
+            transport_stage="store_upsert_transport",
+            result_stage="store_upsert_result_invalid",
+        )
+        if result == _CORRUPT_SENTINEL:
+            raise CandidateStoreUnavailable("store_script_rejected")
+        record = self._decode_exact(
+            result,
+            scope,
+            failure_stage="store_upsert_record_invalid",
+        )
+        if (
+            type(result) is not str
+            or record.snapshot != snapshot
+            or record.version != expected_version + 1
+            or record.state != "provider_confirmed"
+            or record.provider_observed_at != record.updated_at
+        ):
+            raise CandidateStoreUnavailable(
+                "store_upsert_postcondition_invalid"
+            )
+        canonical = _encode_wire(_record_to_wire(self._hmac_secret, record))
+        if self._decode_exact(
+            canonical,
+            scope,
+            failure_stage="store_upsert_record_invalid",
+        ) != record:
+            raise CandidateStoreUnavailable("store_upsert_record_invalid")
+        return canonical, record
+
+    def _reconcile_confirmed(
+        self,
+        scope: PriorityCandidateScope,
+        snapshot: PriorityCandidateSnapshot,
+        *,
+        expected_version: int,
+        acknowledgement_error: CandidateStoreUnavailable,
+    ) -> PriorityCandidateRecord:
+        try:
+            record = self.read_candidate(scope)
+        except Exception:
+            raise acknowledgement_error from None
+        if (
+            record is None
+            or record.scope != scope
+            or record.snapshot != snapshot
+            or record.version != expected_version
+            or record.state != "provider_confirmed"
+            or record.provider_observed_at != record.updated_at
+        ):
+            raise acknowledgement_error from None
+        return record
+
+    def _commit_confirmed(
+        self,
+        scope: PriorityCandidateScope,
+        snapshot: PriorityCandidateSnapshot,
+        *,
+        mode: Literal["normal", "repair"],
+        expected_raw: str,
+        prepared: str,
+        prepared_record: PriorityCandidateRecord,
+        expected_existing_expiry: int,
+    ) -> PriorityCandidateRecord:
+        keys = self._scope_keys(scope)
+        if expected_raw == _MISSING_SENTINEL:
+            expected_digest = ""
+            expected_length = 0
+        else:
+            # Redis exposes SHA-1 for compact exact-value CAS fingerprints. The
+            # HMAC-derived key remains the security boundary; length plus this
+            # digest only avoids resending a bounded record in the command body.
+            expected_digest = hashlib.sha1(
+                expected_raw.encode("utf-8"),
+                usedforsecurity=False,
+            ).hexdigest()
+            expected_length = len(expected_raw.encode("utf-8"))
+        try:
+            result = self._command(
+                [
+                    "EVAL",
+                    _UPSERT_CONFIRMED_SCRIPT,
+                    7,
+                    keys["record"],
+                    keys["mailbox_index"],
+                    keys["user_index"],
+                    keys["namespace_index"],
+                    keys["mailbox_incomplete"],
+                    keys["user_incomplete"],
+                    keys["namespace_invalid"],
+                    mode,
+                    expected_digest,
+                    expected_length,
+                    prepared,
+                    keys["member"],
+                    prepared_record.version,
+                    CANDIDATE_BASE_TTL_SECONDS,
+                    CANDIDATE_ABSOLUTE_TTL_SECONDS,
+                    CANDIDATE_INDEX_TTL_SECONDS,
+                    CANDIDATE_MAX_MAILBOX_RECORDS,
+                    CANDIDATE_MAX_USER_RECORDS,
+                    CANDIDATE_MAX_SERIALIZED_RECORD_BYTES,
+                    CANDIDATE_MAX_SAFE_INTEGER,
+                    _INCOMPLETE_VALUE,
+                    _CORRUPT_SENTINEL,
+                    _CONFLICT_SENTINEL,
+                    _MAILBOX_OVERFLOW_SENTINEL,
+                    _USER_OVERFLOW_SENTINEL,
+                    _NAMESPACE_INVALIDATED_SENTINEL,
+                    expected_existing_expiry,
+                ],
+                transport_stage="store_upsert_transport",
+                result_stage="store_upsert_result_invalid",
+            )
+        except CandidateStoreUnavailable as error:
+            return self._reconcile_confirmed(
+                scope,
+                snapshot,
+                expected_version=prepared_record.version,
+                acknowledgement_error=error,
+            )
+        if result == _CONFLICT_SENTINEL:
+            raise CandidateVersionConflict()
+        if result == _MAILBOX_OVERFLOW_SENTINEL:
+            raise CandidateCapacityExceeded("mailbox")
+        if result == _USER_OVERFLOW_SENTINEL:
+            raise CandidateCapacityExceeded("user")
+        if result == _NAMESPACE_INVALIDATED_SENTINEL:
+            raise CandidateNamespaceInvalidated()
+        if result == _CORRUPT_SENTINEL:
+            raise CandidateStoreUnavailable("store_script_rejected")
+        if result != prepared:
+            return self._reconcile_confirmed(
+                scope,
+                snapshot,
+                expected_version=prepared_record.version,
+                acknowledgement_error=CandidateStoreUnavailable(
+                    "store_upsert_record_invalid"
+                ),
+            )
+        return prepared_record
+
     def upsert_confirmed(
         self,
         scope: PriorityCandidateScope,
@@ -1530,69 +1794,68 @@ class PriorityCandidateStore:
             references = existing.positive_references
             expected_raw = current
             expected_existing_expiry = existing.logical_expires_at()
-        template = _encode_wire(
-            _template_payload(self._hmac_secret, scope, snapshot, references)
+        prepared, prepared_record = self._prepare_confirmed(
+            scope,
+            snapshot,
+            references,
+            expected_version=expected_version,
         )
-        result = self._command(
-            [
-                "EVAL",
-                _UPSERT_CONFIRMED_SCRIPT,
-                7,
-                keys["record"],
-                keys["mailbox_index"],
-                keys["user_index"],
-                keys["namespace_index"],
-                keys["mailbox_incomplete"],
-                keys["user_incomplete"],
-                keys["namespace_invalid"],
-                expected_raw,
-                _MISSING_SENTINEL,
-                expected_version,
-                template,
-                keys["member"],
-                CANDIDATE_STORE_SCHEMA_VERSION,
-                CANDIDATE_BASE_TTL_SECONDS,
-                CANDIDATE_ABSOLUTE_TTL_SECONDS,
-                CANDIDATE_INDEX_TTL_SECONDS,
-                CANDIDATE_MAX_MAILBOX_RECORDS,
-                CANDIDATE_MAX_USER_RECORDS,
-                CANDIDATE_MAX_SERIALIZED_RECORD_BYTES,
-                CANDIDATE_MAX_SAFE_INTEGER,
-                _INCOMPLETE_VALUE,
-                _CORRUPT_SENTINEL,
-                _CONFLICT_SENTINEL,
-                _MAILBOX_OVERFLOW_SENTINEL,
-                _USER_OVERFLOW_SENTINEL,
-                _NAMESPACE_INVALIDATED_SENTINEL,
-                expected_existing_expiry,
-            ],
+        return self._commit_confirmed(
+            scope,
+            snapshot,
+            mode="normal",
+            expected_raw=expected_raw,
+            prepared=prepared,
+            prepared_record=prepared_record,
+            expected_existing_expiry=expected_existing_expiry,
+        )
+
+    def replace_malformed_confirmed(
+        self,
+        scope: PriorityCandidateScope,
+        snapshot: PriorityCandidateSnapshot,
+    ) -> PriorityCandidateRecord:
+        if (
+            not isinstance(scope, PriorityCandidateScope)
+            or not isinstance(snapshot, PriorityCandidateSnapshot)
+            or snapshot.routing_state != "unresolved"
+            or snapshot.routing is not None
+        ):
+            raise ValueError("invalid Priority candidate repair")
+        snapshot.validate_for_scope(scope)
+        keys = self._scope_keys(scope)
+        current = self._command(
+            ["GET", keys["record"]],
             transport_stage="store_upsert_transport",
             result_stage="store_upsert_result_invalid",
         )
-        if result == _CONFLICT_SENTINEL:
+        if current is None:
             raise CandidateVersionConflict()
-        if result == _MAILBOX_OVERFLOW_SENTINEL:
-            raise CandidateCapacityExceeded("mailbox")
-        if result == _USER_OVERFLOW_SENTINEL:
-            raise CandidateCapacityExceeded("user")
-        if result == _NAMESPACE_INVALIDATED_SENTINEL:
-            raise CandidateNamespaceInvalidated()
-        if result == _CORRUPT_SENTINEL:
-            raise CandidateStoreUnavailable("store_script_rejected")
-        record = self._decode_exact(
-            result,
-            scope,
-            failure_stage="store_upsert_result_invalid",
+        if type(current) is not str:
+            raise CandidateStoreUnavailable("store_existing_record_invalid")
+        decoded = _decode_candidate_record(
+            current,
+            secret=self._hmac_secret,
+            expected_mailbox_scope=scope.mailbox_scope(),
+            expected_member_digest=keys["member"],
         )
-        if (
-            record.version != expected_version + 1
-            or record.state != "provider_confirmed"
-            or record.provider_observed_at != record.updated_at
-        ):
-            raise CandidateStoreUnavailable(
-                "store_upsert_postcondition_invalid"
-            )
-        return record
+        if decoded is not None:
+            raise CandidateVersionConflict()
+        prepared, prepared_record = self._prepare_confirmed(
+            scope,
+            snapshot,
+            _empty_references(),
+            expected_version=0,
+        )
+        return self._commit_confirmed(
+            scope,
+            snapshot,
+            mode="repair",
+            expected_raw=current,
+            prepared=prepared,
+            prepared_record=prepared_record,
+            expected_existing_expiry=0,
+        )
 
     def read_candidate(
         self, scope: PriorityCandidateScope
