@@ -75,16 +75,52 @@ _NON_INBOX_GMAIL_LABELS = frozenset({"SENT", "SPAM", "TRASH", "DRAFT"})
 _POPULATION_REASON_CODES = frozenset(
     {
         "authority_invalid",
-        "candidate_invalid",
-        "capacity_exceeded",
+        "candidate_conversation_invalid",
+        "candidate_duplicate",
+        "candidate_identity_invalid",
+        "candidate_render_invalid",
+        "candidate_snapshot_invalid",
+        "candidate_timestamp_invalid",
         "configuration_unavailable",
+        "mailbox_capacity",
         "namespace_invalidated",
-        "store_unavailable",
+        "not_processed_after_store_failure",
+        "store_existing_record_invalid",
+        "store_read_postcondition_invalid",
+        "store_read_result_invalid",
+        "store_read_transport",
+        "store_script_rejected",
+        "store_unexpected",
+        "store_upsert_postcondition_invalid",
+        "store_upsert_result_invalid",
+        "store_upsert_transport",
+        "user_capacity",
         "version_conflict",
         "window_invalid",
     }
 )
 logger = logging.getLogger(__name__)
+
+
+class CandidateProjectionInvalid(ValueError):
+    """Content-free, stage-bounded candidate adapter rejection."""
+
+    __slots__ = ("reason_code",)
+
+    def __init__(self, reason_code: str) -> None:
+        self.reason_code = (
+            reason_code
+            if reason_code
+            in {
+                "candidate_conversation_invalid",
+                "candidate_identity_invalid",
+                "candidate_render_invalid",
+                "candidate_snapshot_invalid",
+                "candidate_timestamp_invalid",
+            }
+            else "candidate_snapshot_invalid"
+        )
+        ValueError.__init__(self, "invalid Priority candidate projection")
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,32 +158,47 @@ class PriorityCandidatePopulationAuthority:
 @dataclass(frozen=True, slots=True)
 class PriorityCandidatePopulationReport:
     attempted: int
+    processed: int
     written: int
     skipped: int
     incomplete: bool
-    reason_codes: tuple[str, ...]
+    reason_counts: tuple[tuple[str, int], ...]
+
+    @property
+    def reason_codes(self) -> tuple[str, ...]:
+        return tuple(code for code, _count in self.reason_counts)
 
     def __post_init__(self) -> None:
         if (
             type(self.attempted) is not int
+            or type(self.processed) is not int
             or type(self.written) is not int
             or type(self.skipped) is not int
-            or not 0 <= self.written <= self.attempted <= MAX_CURRENT_WINDOW_CANDIDATES
+            or not 0 <= self.written <= self.processed <= self.attempted
+            <= MAX_CURRENT_WINDOW_CANDIDATES
             or self.skipped != self.attempted - self.written
             or type(self.incomplete) is not bool
-            or type(self.reason_codes) is not tuple
-            or len(self.reason_codes) > len(_POPULATION_REASON_CODES)
-            or len(set(self.reason_codes)) != len(self.reason_codes)
-            or any(code not in _POPULATION_REASON_CODES for code in self.reason_codes)
-            or self.incomplete != bool(self.reason_codes)
+            or type(self.reason_counts) is not tuple
+            or len(self.reason_counts) > len(_POPULATION_REASON_CODES)
+            or tuple(sorted(self.reason_counts)) != self.reason_counts
+            or len({code for code, _count in self.reason_counts})
+            != len(self.reason_counts)
+            or any(
+                code not in _POPULATION_REASON_CODES
+                or type(count) is not int
+                or not 1 <= count <= MAX_CURRENT_WINDOW_CANDIDATES + 1
+                for code, count in self.reason_counts
+            )
+            or self.incomplete != bool(self.reason_counts)
         ):
             raise ValueError("invalid Priority candidate population report")
 
 
 def _report(
     attempted: int,
+    processed: int,
     written: int,
-    reasons: set[str],
+    reason_counts: dict[str, int],
 ) -> PriorityCandidatePopulationReport:
     safe_attempted = (
         attempted
@@ -159,13 +210,28 @@ def _report(
         if type(written) is int and 0 <= written <= safe_attempted
         else 0
     )
-    safe_reasons = tuple(sorted(reasons.intersection(_POPULATION_REASON_CODES)))
+    safe_processed = (
+        processed
+        if type(processed) is int
+        and safe_written <= processed <= safe_attempted
+        else safe_written
+    )
+    safe_reason_counts = tuple(
+        sorted(
+            (code, count)
+            for code, count in reason_counts.items()
+            if code in _POPULATION_REASON_CODES
+            and type(count) is int
+            and 1 <= count <= MAX_CURRENT_WINDOW_CANDIDATES + 1
+        )
+    )
     return PriorityCandidatePopulationReport(
         attempted=safe_attempted,
+        processed=safe_processed,
         written=safe_written,
         skipped=safe_attempted - safe_written,
-        incomplete=bool(safe_reasons),
-        reason_codes=safe_reasons,
+        incomplete=bool(safe_reason_counts),
+        reason_counts=safe_reason_counts,
     )
 
 
@@ -174,11 +240,15 @@ def _operational_report(
 ) -> PriorityCandidatePopulationReport:
     if report.incomplete:
         logger.warning(
-            "Priority candidate population incomplete attempted=%s written=%s skipped=%s reason_codes=%s",
+            "Priority candidate population incomplete attempted=%s processed=%s written=%s skipped=%s incomplete=%s reason_counts=%s",
             report.attempted,
+            report.processed,
             report.written,
             report.skipped,
-            ",".join(report.reason_codes),
+            report.incomplete,
+            ",".join(
+                f"{code}:{count}" for code, count in report.reason_counts
+            ),
         )
     return report
 
@@ -261,16 +331,19 @@ def _render(source: dict, created_at: str) -> PriorityCandidateRender:
         or type(source.get("unread")) is not bool
         or type(source.get("flagged")) is not bool
     ):
-        raise ValueError("invalid candidate render source")
-    return PriorityCandidateRender(
-        sender_display=source["senderDisplay"],
-        sender_address=source["senderAddress"],
-        subject=source["subject"],
-        snippet=snippet,
-        created_at=created_at,
-        unread=source["unread"],
-        flagged=source["flagged"],
-    )
+        raise CandidateProjectionInvalid("candidate_render_invalid")
+    try:
+        return PriorityCandidateRender(
+            sender_display=source["senderDisplay"],
+            sender_address=source["senderAddress"],
+            subject=source["subject"],
+            snippet=snippet,
+            created_at=created_at,
+            unread=source["unread"],
+            flagged=source["flagged"],
+        )
+    except Exception:
+        raise CandidateProjectionInvalid("candidate_render_invalid") from None
 
 
 def _gmail_projection(
@@ -278,7 +351,7 @@ def _gmail_projection(
     source: object,
 ) -> tuple[PriorityCandidateScope, PriorityCandidateSnapshot]:
     if type(source) is not dict or set(source) != _GMAIL_SOURCE_FIELDS:
-        raise ValueError("invalid Gmail candidate source")
+        raise CandidateProjectionInvalid("candidate_identity_invalid")
     labels = source.get("labels")
     provider_message_id = source.get("providerMessageId")
     provider_thread_id = source.get("providerThreadId")
@@ -293,43 +366,58 @@ def _gmail_projection(
         or "INBOX" not in labels
         or _NON_INBOX_GMAIL_LABELS.intersection(labels)
         or not _valid_text(provider_message_id, 256)
-        or not _valid_text(provider_thread_id, 256)
     ):
-        raise ValueError("invalid Gmail candidate source")
+        raise CandidateProjectionInvalid("candidate_identity_invalid")
+    if not _valid_text(provider_thread_id, 256):
+        raise CandidateProjectionInvalid("candidate_conversation_invalid")
     created_at = _provider_millisecond_timestamp(
         source.get("providerTimestampMillis")
     ) or _rfc_timestamp(source.get("rfcDate"))
     if created_at is None:
-        raise ValueError("invalid Gmail candidate message time")
-    scope = PriorityCandidateScope(
-        workspace_id=authority.workspace_id,
-        user_id=authority.user_id,
-        mailbox_id=authority.mailbox_id,
-        mailbox_account_identity=authority.mailbox_account_identity,
-        provider="google",
-        identity=PriorityMessageIdentity(
+        raise CandidateProjectionInvalid("candidate_timestamp_invalid")
+    try:
+        scope = PriorityCandidateScope(
+            workspace_id=authority.workspace_id,
+            user_id=authority.user_id,
+            mailbox_id=authority.mailbox_id,
+            mailbox_account_identity=authority.mailbox_account_identity,
             provider="google",
-            provider_message_id=provider_message_id,
-        ),
-    )
-    snapshot = PriorityCandidateSnapshot(
-        conversation=PriorityCandidateConversation(
+            identity=PriorityMessageIdentity(
+                provider="google",
+                provider_message_id=provider_message_id,
+            ),
+        )
+        scope.canonical_bytes()
+    except Exception:
+        raise CandidateProjectionInvalid("candidate_identity_invalid") from None
+    try:
+        conversation = PriorityCandidateConversation(
             conversation_id=canonical_conversation_id(
                 authority.mailbox_id,
                 provider_thread_id,
             ),
             authority_kind="gmail",
             provider_thread_id=provider_thread_id,
-        ),
-        render=_render(source, created_at),
-        routing_state="unresolved",
-        routing=None,
-        provider_authority=PriorityCandidateProviderAuthority(
-            folder="INBOX",
-            labels=tuple(labels),
-        ),
-    )
-    snapshot.validate_for_scope(scope)
+        )
+    except Exception:
+        raise CandidateProjectionInvalid(
+            "candidate_conversation_invalid"
+        ) from None
+    render = _render(source, created_at)
+    try:
+        snapshot = PriorityCandidateSnapshot(
+            conversation=conversation,
+            render=render,
+            routing_state="unresolved",
+            routing=None,
+            provider_authority=PriorityCandidateProviderAuthority(
+                folder="INBOX",
+                labels=tuple(labels),
+            ),
+        )
+        snapshot.validate_for_scope(scope)
+    except Exception:
+        raise CandidateProjectionInvalid("candidate_snapshot_invalid") from None
     return scope, snapshot
 
 
@@ -337,7 +425,7 @@ def _optional_identifier(value: object, maximum_bytes: int) -> str | None:
     if value is None:
         return None
     if not _valid_text(value, maximum_bytes):
-        raise ValueError("invalid optional candidate identifier")
+        raise CandidateProjectionInvalid("candidate_conversation_invalid")
     return value
 
 
@@ -346,7 +434,7 @@ def _imap_projection(
     source: object,
 ) -> tuple[PriorityCandidateScope, PriorityCandidateSnapshot]:
     if type(source) is not dict or set(source) != _IMAP_SOURCE_FIELDS:
-        raise ValueError("invalid IMAP candidate source")
+        raise CandidateProjectionInvalid("candidate_identity_invalid")
     folder = source.get("providerFolder")
     uid_validity = source.get("uidValidity")
     imap_uid = source.get("imapUid")
@@ -361,51 +449,68 @@ def _imap_projection(
         or _IMAP_NUMBER_RE.fullmatch(uid_validity) is None
         or type(imap_uid) is not str
         or _IMAP_NUMBER_RE.fullmatch(imap_uid) is None
-        or not _valid_text(conversation_id, 1_024)
+    ):
+        raise CandidateProjectionInvalid("candidate_identity_invalid")
+    if (
+        not _valid_text(conversation_id, 1_024)
         or authority_kind not in {"rfc", "imap_uid"}
     ):
-        raise ValueError("invalid IMAP candidate source")
+        raise CandidateProjectionInvalid("candidate_conversation_invalid")
     created_at = _rfc_timestamp(source.get("rfcDate"))
     if created_at is None:
-        raise ValueError("invalid IMAP candidate message time")
+        raise CandidateProjectionInvalid("candidate_timestamp_invalid")
     rfc_root_message_id = _optional_identifier(
         source.get("rfcRootMessageId"),
         1_024,
     )
     rfc_message_id = _optional_identifier(source.get("rfcMessageId"), 1_024)
     if authority_kind == "rfc" and rfc_root_message_id is None:
-        raise ValueError("invalid IMAP RFC conversation source")
+        raise CandidateProjectionInvalid("candidate_conversation_invalid")
     if authority_kind == "imap_uid" and rfc_root_message_id is not None:
-        raise ValueError("invalid IMAP UID conversation source")
-    scope = PriorityCandidateScope(
-        workspace_id=authority.workspace_id,
-        user_id=authority.user_id,
-        mailbox_id=authority.mailbox_id,
-        mailbox_account_identity=authority.mailbox_account_identity,
-        provider="custom_imap",
-        identity=PriorityMessageIdentity(
+        raise CandidateProjectionInvalid("candidate_conversation_invalid")
+    try:
+        scope = PriorityCandidateScope(
+            workspace_id=authority.workspace_id,
+            user_id=authority.user_id,
+            mailbox_id=authority.mailbox_id,
+            mailbox_account_identity=authority.mailbox_account_identity,
             provider="custom_imap",
-            provider_folder=folder,
-            uid_validity=uid_validity,
-            imap_uid=imap_uid,
-        ),
-    )
-    snapshot = PriorityCandidateSnapshot(
-        conversation=PriorityCandidateConversation(
+            identity=PriorityMessageIdentity(
+                provider="custom_imap",
+                provider_folder=folder,
+                uid_validity=uid_validity,
+                imap_uid=imap_uid,
+            ),
+        )
+        scope.canonical_bytes()
+    except Exception:
+        raise CandidateProjectionInvalid("candidate_identity_invalid") from None
+    try:
+        conversation = PriorityCandidateConversation(
             conversation_id=conversation_id,
             authority_kind=authority_kind,
             rfc_root_message_id=rfc_root_message_id,
             rfc_message_id=rfc_message_id,
-        ),
-        render=_render(source, created_at),
-        routing_state="unresolved",
-        routing=None,
-        provider_authority=PriorityCandidateProviderAuthority(
-            folder=folder,
-            labels=(),
-        ),
-    )
-    snapshot.validate_for_scope(scope)
+        )
+    except Exception:
+        raise CandidateProjectionInvalid(
+            "candidate_conversation_invalid"
+        ) from None
+    render = _render(source, created_at)
+    try:
+        snapshot = PriorityCandidateSnapshot(
+            conversation=conversation,
+            render=render,
+            routing_state="unresolved",
+            routing=None,
+            provider_authority=PriorityCandidateProviderAuthority(
+                folder=folder,
+                labels=(),
+            ),
+        )
+        snapshot.validate_for_scope(scope)
+    except Exception:
+        raise CandidateProjectionInvalid("candidate_snapshot_invalid") from None
     return scope, snapshot
 
 
@@ -414,7 +519,7 @@ def project_priority_candidate(
     source: object,
 ) -> tuple[PriorityCandidateScope, PriorityCandidateSnapshot]:
     if not isinstance(authority, PriorityCandidatePopulationAuthority):
-        raise ValueError("invalid Priority candidate authority")
+        raise CandidateProjectionInvalid("candidate_identity_invalid")
     if authority.provider == "google":
         return _gmail_projection(authority, source)
     return _imap_projection(authority, source)
@@ -445,27 +550,42 @@ def populate_priority_candidates(
         not isinstance(authority, PriorityCandidatePopulationAuthority)
         or not isinstance(store, PriorityCandidateStore)
     ):
-        return _report(0, 0, {"authority_invalid"})
+        return _report(0, 0, 0, {"authority_invalid": 1})
     if (
         type(sources) is not list
         or len(sources) > MAX_CURRENT_WINDOW_CANDIDATES
     ):
-        return _report(0, 0, {"window_invalid"})
+        return _report(0, 0, 0, {"window_invalid": 1})
 
     attempted = len(sources)
+    processed = 0
     written = 0
-    reasons: set[str] = set()
+    reason_counts: dict[str, int] = {}
     seen_scopes: set[bytes] = set()
+
+    def count(reason_code: str, amount: int = 1) -> None:
+        reason_counts[reason_code] = reason_counts.get(reason_code, 0) + amount
+
+    def abort_after_store_failure(error: CandidateStoreUnavailable) -> None:
+        count(error.stage)
+        remaining = attempted - processed
+        if remaining:
+            count("not_processed_after_store_failure", remaining)
+
     for source in sources:
+        processed += 1
         try:
             scope, snapshot = project_priority_candidate(authority, source)
             canonical_scope = scope.canonical_bytes()
             if canonical_scope in seen_scopes:
-                reasons.add("candidate_invalid")
+                count("candidate_duplicate")
                 continue
             seen_scopes.add(canonical_scope)
+        except CandidateProjectionInvalid as error:
+            count(error.reason_code)
+            continue
         except Exception:
-            reasons.add("candidate_invalid")
+            count("candidate_snapshot_invalid")
             continue
 
         try:
@@ -474,35 +594,43 @@ def populate_priority_candidates(
             try:
                 _upsert_once(store, scope, snapshot)
             except CandidateVersionConflict:
-                reasons.add("version_conflict")
+                count("version_conflict")
                 continue
-            except CandidateCapacityExceeded:
-                reasons.add("capacity_exceeded")
+            except CandidateCapacityExceeded as error:
+                count(
+                    "mailbox_capacity"
+                    if error.scope_kind == "mailbox"
+                    else "user_capacity"
+                )
                 continue
             except CandidateNamespaceInvalidated:
-                reasons.add("namespace_invalidated")
+                count("namespace_invalidated")
                 continue
-            except CandidateStoreUnavailable:
-                reasons.add("store_unavailable")
+            except CandidateStoreUnavailable as error:
+                abort_after_store_failure(error)
                 break
             except Exception:
-                reasons.add("candidate_invalid")
+                count("candidate_snapshot_invalid")
                 continue
-        except CandidateCapacityExceeded:
-            reasons.add("capacity_exceeded")
+        except CandidateCapacityExceeded as error:
+            count(
+                "mailbox_capacity"
+                if error.scope_kind == "mailbox"
+                else "user_capacity"
+            )
             continue
         except CandidateNamespaceInvalidated:
-            reasons.add("namespace_invalidated")
+            count("namespace_invalidated")
             continue
-        except CandidateStoreUnavailable:
-            reasons.add("store_unavailable")
+        except CandidateStoreUnavailable as error:
+            abort_after_store_failure(error)
             break
         except Exception:
-            reasons.add("candidate_invalid")
+            count("candidate_snapshot_invalid")
             continue
         written += 1
 
-    return _report(attempted, written, reasons)
+    return _report(attempted, processed, written, reason_counts)
 
 
 def populate_runtime_priority_candidates(
@@ -532,7 +660,7 @@ def populate_runtime_priority_candidates(
         )
     except Exception:
         return _operational_report(
-            _report(attempted, 0, {"authority_invalid"})
+            _report(attempted, 0, 0, {"authority_invalid": 1})
         )
 
     runtime_store = store
@@ -542,7 +670,12 @@ def populate_runtime_priority_candidates(
             runtime_store = build_runtime_candidate_store(hmac_secret=secret)
         except Exception:
             return _operational_report(
-                _report(attempted, 0, {"configuration_unavailable"})
+                _report(
+                    attempted,
+                    0,
+                    0,
+                    {"configuration_unavailable": 1},
+                )
             )
     try:
         return _operational_report(
@@ -554,5 +687,5 @@ def populate_runtime_priority_candidates(
         )
     except Exception:
         return _operational_report(
-            _report(attempted, 0, {"store_unavailable"})
+            _report(attempted, 0, 0, {"store_unexpected": 1})
         )

@@ -447,6 +447,193 @@ def snapshot(
 
 
 class CandidateIdentityAndCodecTests(unittest.TestCase):
+    def test_read_and_upsert_failures_expose_only_fixed_stages(self) -> None:
+        scope = google_scope()
+
+        def assert_stage(
+            store: PriorityCandidateStore,
+            operation,
+            expected_stage: str,
+        ) -> None:
+            with self.assertRaises(CandidateStoreUnavailable) as raised:
+                operation(store)
+            self.assertEqual(raised.exception.stage, expected_stage)
+            self.assertEqual(
+                str(raised.exception),
+                "Priority candidate storage is unavailable",
+            )
+
+        sensitive_transport_error = (
+            "https://redis-sensitive.invalid token-sensitive subject-sensitive"
+        )
+        read_timeout = PriorityCandidateStore(
+            lambda _command: (_ for _ in ()).throw(
+                TimeoutError(sensitive_transport_error)
+            ),
+            hmac_secret=SECRET,
+        )
+        assert_stage(
+            read_timeout,
+            lambda store: store.read_candidate(scope),
+            "store_read_transport",
+        )
+
+        malformed_read = PriorityCandidateStore(
+            lambda _command: {"result": "malformed-sensitive-result"},
+            hmac_secret=SECRET,
+        )
+        assert_stage(
+            malformed_read,
+            lambda store: store.read_candidate(scope),
+            "store_read_result_invalid",
+        )
+
+        corrupt_existing = PriorityCandidateStore(
+            lambda _command: {
+                "result": [
+                    1_800_000_000_000,
+                    "corrupt-subject-sensitive",
+                    1_800_000_001_000,
+                ]
+            },
+            hmac_secret=SECRET,
+        )
+        assert_stage(
+            corrupt_existing,
+            lambda store: store.read_candidate(scope),
+            "store_existing_record_invalid",
+        )
+
+        inconsistent_redis = MemoryRedis()
+        inconsistent_store = PriorityCandidateStore(
+            inconsistent_redis,
+            hmac_secret=SECRET,
+        )
+        record = inconsistent_store.upsert_confirmed(
+            scope,
+            snapshot(),
+            expected_version=0,
+        )
+        keys = inconsistent_store._scope_keys(scope)
+        inconsistent_redis.sorted_sets[keys["mailbox_index"]][keys["member"]] = (
+            record.logical_expires_at() + 1
+        )
+        assert_stage(
+            inconsistent_store,
+            lambda store: store.read_candidate(scope),
+            "store_read_postcondition_invalid",
+        )
+
+        class UpsertTransportFailure(MemoryRedis):
+            def __call__(self, command: list[object]) -> dict[str, object]:
+                if (
+                    command[0] == "EVAL"
+                    and command[1] == candidate_module._UPSERT_CONFIRMED_SCRIPT
+                ):
+                    raise TimeoutError(sensitive_transport_error)
+                return super().__call__(command)
+
+        upsert_timeout = PriorityCandidateStore(
+            UpsertTransportFailure(),
+            hmac_secret=SECRET,
+        )
+        assert_stage(
+            upsert_timeout,
+            lambda store: store.upsert_confirmed(
+                scope,
+                snapshot(),
+                expected_version=0,
+            ),
+            "store_upsert_transport",
+        )
+
+        class RejectedScript(MemoryRedis):
+            def __call__(self, command: list[object]) -> dict[str, object]:
+                if (
+                    command[0] == "EVAL"
+                    and command[1] == candidate_module._UPSERT_CONFIRMED_SCRIPT
+                ):
+                    return {"result": candidate_module._CORRUPT_SENTINEL}
+                return super().__call__(command)
+
+        rejected_script = PriorityCandidateStore(
+            RejectedScript(),
+            hmac_secret=SECRET,
+        )
+        assert_stage(
+            rejected_script,
+            lambda store: store.upsert_confirmed(
+                scope,
+                snapshot(),
+                expected_version=0,
+            ),
+            "store_script_rejected",
+        )
+
+        class MalformedUpsertResult(MemoryRedis):
+            def __call__(self, command: list[object]) -> dict[str, object]:
+                if (
+                    command[0] == "EVAL"
+                    and command[1] == candidate_module._UPSERT_CONFIRMED_SCRIPT
+                ):
+                    return {"result": ["malformed-sensitive-result"]}
+                return super().__call__(command)
+
+        malformed_upsert = PriorityCandidateStore(
+            MalformedUpsertResult(),
+            hmac_secret=SECRET,
+        )
+        assert_stage(
+            malformed_upsert,
+            lambda store: store.upsert_confirmed(
+                scope,
+                snapshot(),
+                expected_version=0,
+            ),
+            "store_upsert_result_invalid",
+        )
+
+        class InvalidUpsertPostcondition(MemoryRedis):
+            def __call__(self, command: list[object]) -> dict[str, object]:
+                result = super().__call__(command)
+                if (
+                    command[0] == "EVAL"
+                    and command[1] == candidate_module._UPSERT_CONFIRMED_SCRIPT
+                    and isinstance(result.get("result"), str)
+                ):
+                    payload = json.loads(result["result"])
+                    payload["version"] += 1
+                    return {"result": self._encode(payload)}
+                return result
+
+        invalid_postcondition = PriorityCandidateStore(
+            InvalidUpsertPostcondition(),
+            hmac_secret=SECRET,
+        )
+        assert_stage(
+            invalid_postcondition,
+            lambda store: store.upsert_confirmed(
+                scope,
+                snapshot(),
+                expected_version=0,
+            ),
+            "store_upsert_postcondition_invalid",
+        )
+
+        for sensitive in (
+            "redis-sensitive",
+            "token-sensitive",
+            "subject-sensitive",
+            "corrupt-subject-sensitive",
+            "malformed-sensitive-result",
+        ):
+            self.assertNotIn(sensitive, str(CandidateStoreUnavailable()))
+            self.assertNotIn(sensitive, repr(CandidateStoreUnavailable()))
+        bounded = CandidateStoreUnavailable("sensitive-arbitrary-stage")
+        self.assertEqual(bounded.stage, "store_unexpected")
+        self.assertNotIn("sensitive-arbitrary-stage", str(bounded))
+        self.assertNotIn("sensitive-arbitrary-stage", repr(bounded))
+
     def test_routing_state_invariant_and_ready_round_trip(self) -> None:
         unresolved = snapshot()
         self.assertEqual(unresolved.routing_state, "unresolved")

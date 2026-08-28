@@ -134,10 +134,33 @@ _VERSION_PLACEHOLDER_RE = re.compile(
 CommandTransport = Callable[[list[object]], dict[str, object]]
 
 
+CANDIDATE_STORE_FAILURE_STAGES = frozenset(
+    {
+        "store_existing_record_invalid",
+        "store_read_postcondition_invalid",
+        "store_read_result_invalid",
+        "store_read_transport",
+        "store_script_rejected",
+        "store_unexpected",
+        "store_upsert_postcondition_invalid",
+        "store_upsert_result_invalid",
+        "store_upsert_transport",
+    }
+)
+
+
 class CandidateStoreUnavailable(Exception):
     """Value-free failure for unavailable or malformed candidate storage."""
 
-    __slots__ = ()
+    __slots__ = ("stage",)
+
+    def __init__(self, stage: str = "store_unexpected") -> None:
+        self.stage = (
+            stage
+            if stage in CANDIDATE_STORE_FAILURE_STAGES
+            else "store_unexpected"
+        )
+        Exception.__init__(self)
 
     def __str__(self) -> str:
         return "Priority candidate storage is unavailable"
@@ -1397,13 +1420,19 @@ class PriorityCandidateStore:
         self._transport = command_transport
         self._hmac_secret = hmac_secret
 
-    def _command(self, command: list[object]) -> object:
+    def _command(
+        self,
+        command: list[object],
+        *,
+        transport_stage: str = "store_unexpected",
+        result_stage: str = "store_unexpected",
+    ) -> object:
         try:
             payload = self._transport(command)
         except Exception:
-            raise CandidateStoreUnavailable() from None
+            raise CandidateStoreUnavailable(transport_stage) from None
         if type(payload) is not dict or set(payload) != {"result"}:
-            raise CandidateStoreUnavailable()
+            raise CandidateStoreUnavailable(result_stage)
         return payload["result"]
 
     def _mailbox_keys(
@@ -1448,6 +1477,8 @@ class PriorityCandidateStore:
         self,
         value: object,
         scope: PriorityCandidateScope,
+        *,
+        failure_stage: str = "store_unexpected",
     ) -> PriorityCandidateRecord:
         record = _decode_candidate_record(
             value,
@@ -1458,7 +1489,7 @@ class PriorityCandidateStore:
             ),
         )
         if record is None or record.scope != scope:
-            raise CandidateStoreUnavailable()
+            raise CandidateStoreUnavailable(failure_stage)
         return record
 
     def upsert_confirmed(
@@ -1477,7 +1508,11 @@ class PriorityCandidateStore:
             raise ValueError("invalid Priority candidate write")
         snapshot.validate_for_scope(scope)
         keys = self._scope_keys(scope)
-        current = self._command(["GET", keys["record"]])
+        current = self._command(
+            ["GET", keys["record"]],
+            transport_stage="store_upsert_transport",
+            result_stage="store_upsert_result_invalid",
+        )
         if current is None:
             if expected_version != 0:
                 raise CandidateVersionConflict()
@@ -1485,7 +1520,11 @@ class PriorityCandidateStore:
             expected_raw = _MISSING_SENTINEL
             expected_existing_expiry = 0
         else:
-            existing = self._decode_exact(current, scope)
+            existing = self._decode_exact(
+                current,
+                scope,
+                failure_stage="store_existing_record_invalid",
+            )
             if existing.version != expected_version:
                 raise CandidateVersionConflict()
             references = existing.positive_references
@@ -1526,7 +1565,9 @@ class PriorityCandidateStore:
                 _USER_OVERFLOW_SENTINEL,
                 _NAMESPACE_INVALIDATED_SENTINEL,
                 expected_existing_expiry,
-            ]
+            ],
+            transport_stage="store_upsert_transport",
+            result_stage="store_upsert_result_invalid",
         )
         if result == _CONFLICT_SENTINEL:
             raise CandidateVersionConflict()
@@ -1537,14 +1578,20 @@ class PriorityCandidateStore:
         if result == _NAMESPACE_INVALIDATED_SENTINEL:
             raise CandidateNamespaceInvalidated()
         if result == _CORRUPT_SENTINEL:
-            raise CandidateStoreUnavailable()
-        record = self._decode_exact(result, scope)
+            raise CandidateStoreUnavailable("store_script_rejected")
+        record = self._decode_exact(
+            result,
+            scope,
+            failure_stage="store_upsert_result_invalid",
+        )
         if (
             record.version != expected_version + 1
             or record.state != "provider_confirmed"
             or record.provider_observed_at != record.updated_at
         ):
-            raise CandidateStoreUnavailable()
+            raise CandidateStoreUnavailable(
+                "store_upsert_postcondition_invalid"
+            )
         return record
 
     def read_candidate(
@@ -1565,24 +1612,36 @@ class PriorityCandidateStore:
                 keys["member"],
                 _CORRUPT_SENTINEL,
                 _MISSING_SENTINEL,
-            ]
+            ],
+            transport_stage="store_read_transport",
+            result_stage="store_read_result_invalid",
         )
-        if type(result) is not list or not result or result == [_CORRUPT_SENTINEL]:
-            raise CandidateStoreUnavailable()
+        if type(result) is not list or not result:
+            raise CandidateStoreUnavailable("store_read_result_invalid")
+        if result == [_CORRUPT_SENTINEL]:
+            raise CandidateStoreUnavailable(
+                "store_read_postcondition_invalid"
+            )
         if len(result) == 2 and result[1] == _MISSING_SENTINEL:
             current = _safe_redis_integer(result[0])
             if current is None:
-                raise CandidateStoreUnavailable()
+                raise CandidateStoreUnavailable("store_read_result_invalid")
             return None
         if len(result) != 3:
-            raise CandidateStoreUnavailable()
+            raise CandidateStoreUnavailable("store_read_result_invalid")
         current = _safe_redis_integer(result[0])
         score = _safe_redis_integer(result[2])
         if current is None or score is None:
-            raise CandidateStoreUnavailable()
-        record = self._decode_exact(result[1], scope)
+            raise CandidateStoreUnavailable("store_read_result_invalid")
+        record = self._decode_exact(
+            result[1],
+            scope,
+            failure_stage="store_existing_record_invalid",
+        )
         if score != record.logical_expires_at():
-            raise CandidateStoreUnavailable()
+            raise CandidateStoreUnavailable(
+                "store_read_postcondition_invalid"
+            )
         return None if record.authority_state_at(current) == "expired" else record
 
     def read_mailbox_page(

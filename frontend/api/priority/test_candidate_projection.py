@@ -242,10 +242,105 @@ class CandidatePopulationTests(unittest.TestCase):
             [gmail_source(providerTimestampMillis=None, rfcDate=None), gmail_source()],
             store=self.store,
         )
+        self.assertEqual(result.processed, 2)
         self.assertEqual(result.written, 1)
         self.assertEqual(result.skipped, 1)
         self.assertTrue(result.incomplete)
-        self.assertEqual(result.reason_codes, ("candidate_invalid",))
+        self.assertEqual(result.reason_codes, ("candidate_timestamp_invalid",))
+        self.assertEqual(
+            result.reason_counts,
+            (("candidate_timestamp_invalid", 1),),
+        )
+
+    def test_adapter_failures_are_stage_bounded_and_row_local(self):
+        cases = (
+            (
+                gmail_source(providerMessageId=""),
+                "candidate_identity_invalid",
+            ),
+            (
+                gmail_source(providerTimestampMillis=None, rfcDate=None),
+                "candidate_timestamp_invalid",
+            ),
+            (
+                gmail_source(
+                    providerTimestampMillis=None,
+                    rfcDate="Tue, 01 Jul 2025 10:00:00",
+                ),
+                "candidate_timestamp_invalid",
+            ),
+            (
+                gmail_source(providerThreadId=""),
+                "candidate_conversation_invalid",
+            ),
+            (
+                gmail_source(subject="invalid\rsubject"),
+                "candidate_render_invalid",
+            ),
+        )
+        for source, expected_reason in cases:
+            with self.subTest(expected_reason=expected_reason):
+                report = populate_priority_candidates(
+                    self.authority,
+                    [source],
+                    store=self.store,
+                )
+                self.assertEqual(report.processed, 1)
+                self.assertEqual(report.written, 0)
+                self.assertEqual(report.reason_counts, ((expected_reason, 1),))
+
+        with patch.object(
+            candidate_store_module.PriorityCandidateSnapshot,
+            "validate_for_scope",
+            side_effect=ValueError("content-must-not-escape"),
+        ):
+            snapshot_report = populate_priority_candidates(
+                self.authority,
+                [gmail_source()],
+                store=self.store,
+            )
+        self.assertEqual(
+            snapshot_report.reason_counts,
+            (("candidate_snapshot_invalid", 1),),
+        )
+
+        duplicate_report = populate_priority_candidates(
+            self.authority,
+            [gmail_source(), gmail_source()],
+            store=self.store,
+        )
+        self.assertEqual(duplicate_report.processed, 2)
+        self.assertEqual(duplicate_report.written, 1)
+        self.assertEqual(
+            duplicate_report.reason_counts,
+            (("candidate_duplicate", 1),),
+        )
+
+        aggregate_report = populate_priority_candidates(
+            self.authority,
+            [
+                gmail_source(providerTimestampMillis=None, rfcDate=None),
+                gmail_source(
+                    providerMessageId="gmail-message-render-invalid",
+                    providerThreadId="gmail-thread-render-invalid",
+                    subject="invalid\rsubject",
+                ),
+                gmail_source(
+                    providerMessageId="gmail-message-valid",
+                    providerThreadId="gmail-thread-valid",
+                ),
+            ],
+            store=self.store,
+        )
+        self.assertEqual(aggregate_report.processed, 3)
+        self.assertEqual(aggregate_report.written, 1)
+        self.assertEqual(
+            aggregate_report.reason_counts,
+            (
+                ("candidate_render_invalid", 1),
+                ("candidate_timestamp_invalid", 1),
+            ),
+        )
 
     def test_imap_repeat_dedupes_and_new_uidvalidity_keeps_old_namespace(self):
         authority = imap_authority()
@@ -282,7 +377,11 @@ class CandidatePopulationTests(unittest.TestCase):
             [gmail_source()],
             store=unavailable,
         )
-        self.assertEqual(unavailable_report.reason_codes, ("store_unavailable",))
+        self.assertEqual(
+            unavailable_report.reason_counts,
+            (("store_read_transport", 1),),
+        )
+        self.assertEqual(unavailable_report.processed, 1)
 
         scope, _ = project_priority_candidate(self.authority, gmail_source())
         keys = self.store._scope_keys(scope)
@@ -292,7 +391,43 @@ class CandidatePopulationTests(unittest.TestCase):
             [gmail_source()],
             store=self.store,
         )
-        self.assertEqual(corrupt_report.reason_codes, ("store_unavailable",))
+        self.assertEqual(
+            corrupt_report.reason_counts,
+            (("store_read_postcondition_invalid", 1),),
+        )
+
+    def test_fatal_store_failure_counts_unprocessed_rows_without_more_work(self):
+        commands: list[list[object]] = []
+
+        def unavailable(command: list[object]) -> dict[str, object]:
+            commands.append(command)
+            raise TimeoutError("content-free-test-timeout")
+
+        store = PriorityCandidateStore(unavailable, hmac_secret=SECRET)
+        sources = [
+            gmail_source(
+                providerMessageId=f"gmail-message-{index}",
+                providerThreadId=f"gmail-thread-{index}",
+            )
+            for index in range(50)
+        ]
+        report = populate_priority_candidates(
+            self.authority,
+            sources,
+            store=store,
+        )
+        self.assertEqual(report.attempted, 50)
+        self.assertEqual(report.processed, 1)
+        self.assertEqual(report.written, 0)
+        self.assertEqual(report.skipped, 50)
+        self.assertEqual(
+            report.reason_counts,
+            (
+                ("not_processed_after_store_failure", 49),
+                ("store_read_transport", 1),
+            ),
+        )
+        self.assertEqual(len(commands), 1)
 
     def test_mailbox_and_user_caps_mark_incomplete_without_eviction(self):
         scope, _ = project_priority_candidate(self.authority, gmail_source())
@@ -302,7 +437,7 @@ class CandidatePopulationTests(unittest.TestCase):
                 [gmail_source()],
                 store=self.store,
             )
-        self.assertEqual(mailbox_report.reason_codes, ("capacity_exceeded",))
+        self.assertEqual(mailbox_report.reason_codes, ("mailbox_capacity",))
         mailbox_page = self.store.read_mailbox_page(scope.mailbox_scope())
         self.assertTrue(mailbox_page.mailbox_incomplete)
         self.assertEqual(mailbox_page.total, 0)
@@ -315,7 +450,7 @@ class CandidatePopulationTests(unittest.TestCase):
                 [gmail_source()],
                 store=other_store,
             )
-        self.assertEqual(user_report.reason_codes, ("capacity_exceeded",))
+        self.assertEqual(user_report.reason_codes, ("user_capacity",))
         user_page = other_store.read_mailbox_page(scope.mailbox_scope())
         self.assertTrue(user_page.user_incomplete)
         self.assertEqual(user_page.total, 0)
@@ -374,6 +509,30 @@ class CandidatePopulationTests(unittest.TestCase):
             providerTimestampMillis=None,
             rfcDate=None,
         )
+        sensitive_imap_source = imap_source(
+            providerFolder="Sensitive Folder",
+            imapUid="987654-sensitive-uid",
+            rfcRootMessageId="sensitive-root@message-id.test",
+            rfcMessageId="sensitive-message@message-id.test",
+            senderDisplay="Sensitive IMAP Sender",
+            senderAddress="sensitive-imap@example.test",
+            subject="Sensitive IMAP Subject",
+            snippet="Sensitive IMAP Snippet",
+        )
+        sensitive_store = PriorityCandidateStore(
+            lambda _command: (_ for _ in ()).throw(
+                RuntimeError(
+                    "https://sensitive-redis.invalid sensitive-redis-token"
+                )
+            ),
+            hmac_secret=SECRET,
+        )
+        with self.assertRaises(ValueError) as projection_error:
+            project_priority_candidate(self.authority, sensitive_source)
+        self.assertEqual(
+            str(projection_error.exception),
+            "invalid Priority candidate projection",
+        )
         with self.assertLogs(
             "api.priority.candidate_projection",
             level="WARNING",
@@ -389,14 +548,50 @@ class CandidatePopulationTests(unittest.TestCase):
                 sources=[sensitive_source],
                 store=self.store,
             )
+            store_report = populate_runtime_priority_candidates(
+                member=SimpleNamespace(
+                    workspace_id="workspace-1",
+                    user_id="user-1",
+                ),
+                mailbox_id="mailbox-1",
+                mailbox_account_identity="owner@gmail.test",
+                provider="google",
+                sources=[gmail_source()],
+                store=sensitive_store,
+            )
+            imap_report = populate_runtime_priority_candidates(
+                member=SimpleNamespace(
+                    workspace_id="workspace-1",
+                    user_id="user-1",
+                ),
+                mailbox_id="mailbox-1",
+                mailbox_account_identity="owner@imap.test",
+                provider="custom_imap",
+                sources=[sensitive_imap_source],
+                store=self.store,
+            )
         output = "\n".join(captured.output)
-        self.assertEqual(report.reason_codes, ("candidate_invalid",))
+        self.assertEqual(report.reason_codes, ("candidate_timestamp_invalid",))
+        self.assertEqual(store_report.reason_codes, ("store_read_transport",))
+        self.assertEqual(imap_report.reason_codes, ("candidate_identity_invalid",))
+        self.assertIn("attempted=1 processed=1 written=0 skipped=1", output)
+        self.assertIn("incomplete=True", output)
         for sensitive in (
             "sensitive-provider-id",
             "Sensitive Sender",
             "sensitive@example.test",
             "Sensitive Subject",
             "Sensitive Snippet",
+            "Sensitive Folder",
+            "987654-sensitive-uid",
+            "sensitive-root@message-id.test",
+            "sensitive-message@message-id.test",
+            "Sensitive IMAP Sender",
+            "sensitive-imap@example.test",
+            "Sensitive IMAP Subject",
+            "Sensitive IMAP Snippet",
+            "sensitive-redis.invalid",
+            "sensitive-redis-token",
             "mailbox-1",
         ):
             self.assertNotIn(sensitive, output)
