@@ -668,16 +668,18 @@ class CandidatePopulationTests(unittest.TestCase):
         self.assertEqual(len(commands), 1)
 
     def test_prepare_diagnostic_stage_propagates_without_content(self):
-        class PrepareSizeFailure(MemoryRedis):
+        class PrepareFailure(MemoryRedis):
+            def __init__(self, sentinel: str) -> None:
+                super().__init__()
+                self.sentinel = sentinel
+
             def __call__(self, command: list[object]) -> dict[str, object]:
                 if (
                     command[0] == "EVAL"
                     and command[1]
                     == candidate_store_module._PREPARE_CONFIRMED_SCRIPT
                 ):
-                    return {
-                        "result": candidate_store_module._PREPARE_SIZE_INVALID_SENTINEL
-                    }
+                    return {"result": self.sentinel}
                 return super().__call__(command)
 
         sensitive = gmail_source(
@@ -698,41 +700,81 @@ class CandidatePopulationTests(unittest.TestCase):
                 for index in range(49)
             ),
         ]
-        report = populate_priority_candidates(
-            self.authority,
-            sources,
-            store=PriorityCandidateStore(
-                PrepareSizeFailure(),
-                hmac_secret=SECRET,
-            ),
-        )
-        self.assertEqual(
+        diagnostics = (
             (
-                report.attempted,
-                report.processed,
-                report.written,
-                report.skipped,
-                report.incomplete,
+                candidate_store_module._PREPARE_JSON_DECODE_INVALID_SENTINEL,
+                "store_prepare_json_decode_invalid",
             ),
-            (50, 1, 0, 50, True),
-        )
-        self.assertEqual(
-            report.reason_counts,
             (
-                ("not_processed_after_store_failure", 49),
-                ("store_prepare_size_invalid", 1),
+                candidate_store_module._PREPARE_ROOT_TYPE_INVALID_SENTINEL,
+                "store_prepare_root_type_invalid",
+            ),
+            (
+                candidate_store_module._PREPARE_SCHEMA_VERSION_INVALID_SENTINEL,
+                "store_prepare_schema_version_invalid",
+            ),
+            (
+                candidate_store_module._PREPARE_PROVIDER_AUTHORITY_SHAPE_INVALID_SENTINEL,
+                "store_prepare_provider_authority_shape_invalid",
+            ),
+            (
+                candidate_store_module._PREPARE_LABELS_COLLECTION_INVALID_SENTINEL,
+                "store_prepare_labels_collection_invalid",
+            ),
+            (
+                candidate_store_module._PREPARE_UNRESOLVED_ROUTING_NULL_INVALID_SENTINEL,
+                "store_prepare_unresolved_routing_null_invalid",
+            ),
+            (
+                candidate_store_module._PREPARE_ROUTING_STATE_INVALID_SENTINEL,
+                "store_prepare_routing_state_invalid",
+            ),
+            (
+                candidate_store_module._PREPARE_READY_ROUTING_SHAPE_INVALID_SENTINEL,
+                "store_prepare_ready_routing_shape_invalid",
+            ),
+            (
+                candidate_store_module._PREPARE_NOISE_REASONS_COLLECTION_INVALID_SENTINEL,
+                "store_prepare_noise_reasons_collection_invalid",
             ),
         )
-        output = repr(report)
-        for private in (
-            "sensitive-provider-id",
-            "sensitive-thread-id",
-            "Sensitive Sender",
-            "sensitive-sender@example.test",
-            "Sensitive Subject",
-            "Sensitive Snippet",
-        ):
-            self.assertNotIn(private, output)
+        for sentinel, expected_stage in diagnostics:
+            with self.subTest(expected_stage=expected_stage):
+                report = populate_priority_candidates(
+                    self.authority,
+                    sources,
+                    store=PriorityCandidateStore(
+                        PrepareFailure(sentinel),
+                        hmac_secret=SECRET,
+                    ),
+                )
+                self.assertEqual(
+                    (
+                        report.attempted,
+                        report.processed,
+                        report.written,
+                        report.skipped,
+                        report.incomplete,
+                    ),
+                    (50, 1, 0, 50, True),
+                )
+                self.assertEqual(
+                    report.reason_counts,
+                    (
+                        ("not_processed_after_store_failure", 49),
+                        (expected_stage, 1),
+                    ),
+                )
+                output = repr(report)
+                for private in (
+                    "sensitive-provider-id",
+                    "sensitive-thread-id",
+                    "Sensitive Sender",
+                    "sensitive-sender@example.test",
+                    "Sensitive Subject",
+                    "Sensitive Snippet",
+                ):
+                    self.assertNotIn(private, output)
 
     def test_mailbox_and_user_caps_mark_incomplete_without_eviction(self):
         scope, _ = project_priority_candidate(self.authority, gmail_source())

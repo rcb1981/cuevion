@@ -59,11 +59,32 @@ _USER_OVERFLOW_SENTINEL = "__cuevion_priority_candidate_user_overflow__"
 _NAMESPACE_INVALIDATED_SENTINEL = (
     "__cuevion_priority_candidate_namespace_invalidated__"
 )
-_PREPARE_SCHEMA_INVALID_SENTINEL = (
-    "__cuevion_priority_candidate_prepare_schema_invalid__"
+_PREPARE_JSON_DECODE_INVALID_SENTINEL = (
+    "__cuevion_priority_candidate_prepare_json_decode_invalid__"
 )
-_PREPARE_COLLECTION_INVALID_SENTINEL = (
-    "__cuevion_priority_candidate_prepare_collection_invalid__"
+_PREPARE_ROOT_TYPE_INVALID_SENTINEL = (
+    "__cuevion_priority_candidate_prepare_root_type_invalid__"
+)
+_PREPARE_SCHEMA_VERSION_INVALID_SENTINEL = (
+    "__cuevion_priority_candidate_prepare_schema_version_invalid__"
+)
+_PREPARE_PROVIDER_AUTHORITY_SHAPE_INVALID_SENTINEL = (
+    "__cuevion_priority_candidate_prepare_provider_authority_shape_invalid__"
+)
+_PREPARE_LABELS_COLLECTION_INVALID_SENTINEL = (
+    "__cuevion_priority_candidate_prepare_labels_collection_invalid__"
+)
+_PREPARE_UNRESOLVED_ROUTING_NULL_INVALID_SENTINEL = (
+    "__cuevion_priority_candidate_prepare_unresolved_routing_null_invalid__"
+)
+_PREPARE_ROUTING_STATE_INVALID_SENTINEL = (
+    "__cuevion_priority_candidate_prepare_routing_state_invalid__"
+)
+_PREPARE_READY_ROUTING_SHAPE_INVALID_SENTINEL = (
+    "__cuevion_priority_candidate_prepare_ready_routing_shape_invalid__"
+)
+_PREPARE_NOISE_REASONS_COLLECTION_INVALID_SENTINEL = (
+    "__cuevion_priority_candidate_prepare_noise_reasons_collection_invalid__"
 )
 _PREPARE_REFERENCE_INVALID_SENTINEL = (
     "__cuevion_priority_candidate_prepare_reference_invalid__"
@@ -177,14 +198,23 @@ CANDIDATE_STORE_FAILURE_STAGES = frozenset(
         "store_commit_prepared_invalid",
         "store_existing_record_invalid",
         "store_prepare_canonical_invalid",
-        "store_prepare_collection_invalid",
+        "store_prepare_json_decode_invalid",
         "store_prepare_json_invalid",
+        "store_prepare_labels_collection_invalid",
+        "store_prepare_noise_reasons_collection_invalid",
+        "store_prepare_provider_authority_shape_invalid",
+        "store_prepare_python_schema_invalid",
+        "store_prepare_ready_routing_shape_invalid",
         "store_prepare_reference_invalid",
         "store_prepare_references_invalid",
-        "store_prepare_schema_invalid",
+        "store_prepare_root_type_invalid",
+        "store_prepare_routing_state_invalid",
+        "store_prepare_schema_version_invalid",
         "store_prepare_scope_invalid",
         "store_prepare_size_invalid",
+        "store_prepare_snapshot_mismatch",
         "store_prepare_temporal_invalid",
+        "store_prepare_unresolved_routing_null_invalid",
         "store_read_postcondition_invalid",
         "store_read_result_invalid",
         "store_read_transport",
@@ -876,15 +906,36 @@ class _CandidateDecodeFailure(Enum):
 
 _PREPARED_DECODE_FAILURE_STAGES = {
     _CandidateDecodeFailure.JSON: "store_prepare_json_invalid",
-    _CandidateDecodeFailure.SCHEMA: "store_prepare_schema_invalid",
+    _CandidateDecodeFailure.SCHEMA: "store_prepare_python_schema_invalid",
     _CandidateDecodeFailure.SCOPE: "store_prepare_scope_invalid",
     _CandidateDecodeFailure.REFERENCES: "store_prepare_references_invalid",
     _CandidateDecodeFailure.TEMPORAL: "store_prepare_temporal_invalid",
 }
 
 _PREPARE_SENTINEL_STAGES = {
-    _PREPARE_SCHEMA_INVALID_SENTINEL: "store_prepare_schema_invalid",
-    _PREPARE_COLLECTION_INVALID_SENTINEL: "store_prepare_collection_invalid",
+    _PREPARE_JSON_DECODE_INVALID_SENTINEL: "store_prepare_json_decode_invalid",
+    _PREPARE_ROOT_TYPE_INVALID_SENTINEL: "store_prepare_root_type_invalid",
+    _PREPARE_SCHEMA_VERSION_INVALID_SENTINEL: (
+        "store_prepare_schema_version_invalid"
+    ),
+    _PREPARE_PROVIDER_AUTHORITY_SHAPE_INVALID_SENTINEL: (
+        "store_prepare_provider_authority_shape_invalid"
+    ),
+    _PREPARE_LABELS_COLLECTION_INVALID_SENTINEL: (
+        "store_prepare_labels_collection_invalid"
+    ),
+    _PREPARE_UNRESOLVED_ROUTING_NULL_INVALID_SENTINEL: (
+        "store_prepare_unresolved_routing_null_invalid"
+    ),
+    _PREPARE_ROUTING_STATE_INVALID_SENTINEL: (
+        "store_prepare_routing_state_invalid"
+    ),
+    _PREPARE_READY_ROUTING_SHAPE_INVALID_SENTINEL: (
+        "store_prepare_ready_routing_shape_invalid"
+    ),
+    _PREPARE_NOISE_REASONS_COLLECTION_INVALID_SENTINEL: (
+        "store_prepare_noise_reasons_collection_invalid"
+    ),
     _PREPARE_REFERENCE_INVALID_SENTINEL: "store_prepare_reference_invalid",
     _PREPARE_TEMPORAL_INVALID_SENTINEL: "store_prepare_temporal_invalid",
     _PREPARE_SIZE_INVALID_SENTINEL: "store_prepare_size_invalid",
@@ -1180,19 +1231,35 @@ local function canonicalStringCollection(value)
   end
   return count==length
 end
-local function candidateCollectionsAreCanonical(record)
-  if type(record)~='table' then return false end
+local function candidateCollectionFailure(record)
+  if type(record)~='table' then return 'provider_authority_shape' end
   local providerAuthority=record['providerAuthority']
-  if not exactKeys(providerAuthority,{folder=true,labels=true},2) or
-    not canonicalStringCollection(providerAuthority['labels']) then return false end
+  if not exactKeys(providerAuthority,{folder=true,labels=true},2) then
+    return 'provider_authority_shape'
+  end
+  if not canonicalStringCollection(providerAuthority['labels']) then
+    return 'labels_collection'
+  end
   local routingState=record['routingState'];local routing=record['routing']
-  if routingState=='unresolved' then return routing==cjson.null end
-  if routingState~='ready' or not exactKeys(routing,{
+  if routingState=='unresolved' then
+    if routing~=cjson.null then return 'unresolved_routing_null' end
+    return nil
+  end
+  if routingState~='ready' then return 'routing_state' end
+  if not exactKeys(routing,{
     signal=true,uiSignal=true,internalClassification=true,category=true,
     finalVisibility=true,action=true,v7FinalPriority=true,
     noiseDisposition=true,noiseConfidence=true,noiseReasons=true,
-    classifierVersion=true,routingVersion=true},12) then return false end
-  return canonicalStringCollection(routing['noiseReasons'])
+    classifierVersion=true,routingVersion=true},12) then
+    return 'ready_routing_shape'
+  end
+  if not canonicalStringCollection(routing['noiseReasons']) then
+    return 'noise_reasons_collection'
+  end
+  return nil
+end
+local function candidateCollectionsAreCanonical(record)
+  return candidateCollectionFailure(record)==nil
 end
 """
 
@@ -1218,23 +1285,30 @@ _CANONICAL_COLLECTION_VALIDATOR_SCRIPT += _REFERENCE_VALIDATOR_SCRIPT
 _PREPARE_CONFIRMED_SCRIPT = _CANONICAL_COLLECTION_VALIDATOR_SCRIPT + r"""
 local ok,record=pcall(cjson.decode,ARGV[1])
 local maximum=tonumber(ARGV[7])
-if not ok or type(record)~='table' or
-  record['schemaVersion']~=tonumber(ARGV[3]) then return ARGV[8] end
-if not candidateCollectionsAreCanonical(record) then return ARGV[9] end
+if not ok then return ARGV[8] end
+if type(record)~='table' then return ARGV[9] end
+if record['schemaVersion']~=tonumber(ARGV[3]) then return ARGV[10] end
+local collectionFailure=candidateCollectionFailure(record)
+if collectionFailure=='provider_authority_shape' then return ARGV[11] end
+if collectionFailure=='labels_collection' then return ARGV[12] end
+if collectionFailure=='unresolved_routing_null' then return ARGV[13] end
+if collectionFailure=='routing_state' then return ARGV[14] end
+if collectionFailure=='ready_routing_shape' then return ARGV[15] end
+if collectionFailure=='noise_reasons_collection' then return ARGV[16] end
 if not exactReferences(record['positiveReferences'],maximum,false) then
-  return ARGV[10]
+  return ARGV[17]
 end
 local expectedVersion=tonumber(ARGV[2])
 if not expectedVersion or expectedVersion<0 or expectedVersion%1~=0 or
-  expectedVersion>=maximum then return ARGV[11] end
+  expectedVersion>=maximum then return ARGV[18] end
 local clock=redis.call('TIME')
 local seconds=tonumber(clock[1]);local micros=tonumber(clock[2])
-if not seconds or not micros then return ARGV[11] end
+if not seconds or not micros then return ARGV[18] end
 local now=seconds*1000+math.floor(micros/1000)
-if now<0 or now>maximum then return ARGV[11] end
+if now<0 or now>maximum then return ARGV[18] end
 local base=now+tonumber(ARGV[4])*1000
 local absolute=now+tonumber(ARGV[5])*1000
-if base>maximum or absolute>maximum then return ARGV[11] end
+if base>maximum or absolute>maximum then return ARGV[18] end
 local references=record['positiveReferences'];local positive=0
 for _,kind in ipairs(referenceKinds) do
   local expires=references[kind]
@@ -1247,7 +1321,7 @@ record['baseExpiresAt']=base;record['absoluteExpiresAt']=absolute
 record['graceExpiresAt']=0;record['state']='provider_confirmed'
 record['version']=expectedVersion+1;record['updatedAt']=now
 local encoded=cjson.encode(record)
-if string.len(encoded)>tonumber(ARGV[6]) then return ARGV[12] end
+if string.len(encoded)>tonumber(ARGV[6]) then return ARGV[19] end
 return encoded
 """
 
@@ -1814,8 +1888,15 @@ class PriorityCandidateStore:
                 CANDIDATE_ABSOLUTE_TTL_SECONDS,
                 CANDIDATE_MAX_SERIALIZED_RECORD_BYTES,
                 CANDIDATE_MAX_SAFE_INTEGER,
-                _PREPARE_SCHEMA_INVALID_SENTINEL,
-                _PREPARE_COLLECTION_INVALID_SENTINEL,
+                _PREPARE_JSON_DECODE_INVALID_SENTINEL,
+                _PREPARE_ROOT_TYPE_INVALID_SENTINEL,
+                _PREPARE_SCHEMA_VERSION_INVALID_SENTINEL,
+                _PREPARE_PROVIDER_AUTHORITY_SHAPE_INVALID_SENTINEL,
+                _PREPARE_LABELS_COLLECTION_INVALID_SENTINEL,
+                _PREPARE_UNRESOLVED_ROUTING_NULL_INVALID_SENTINEL,
+                _PREPARE_ROUTING_STATE_INVALID_SENTINEL,
+                _PREPARE_READY_ROUTING_SHAPE_INVALID_SENTINEL,
+                _PREPARE_NOISE_REASONS_COLLECTION_INVALID_SENTINEL,
                 _PREPARE_REFERENCE_INVALID_SENTINEL,
                 _PREPARE_TEMPORAL_INVALID_SENTINEL,
                 _PREPARE_SIZE_INVALID_SENTINEL,
@@ -1832,7 +1913,7 @@ class PriorityCandidateStore:
             raise CandidateStoreUnavailable(sentinel_stage)
         record = self._decode_prepared_exact(result, scope)
         if record.snapshot != snapshot:
-            raise CandidateStoreUnavailable("store_prepare_schema_invalid")
+            raise CandidateStoreUnavailable("store_prepare_snapshot_mismatch")
         if (
             record.version != expected_version + 1
             or record.state != "provider_confirmed"

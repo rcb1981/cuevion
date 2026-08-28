@@ -13,7 +13,12 @@ from unittest.mock import patch
 from . import candidate_store as candidate_module
 from .candidate_projection import populate_priority_candidates, project_priority_candidate
 from .candidate_store import CandidateStoreUnavailable, PriorityCandidateStore
-from .test_candidate_projection import gmail_authority, gmail_source
+from .test_candidate_projection import (
+    gmail_authority,
+    gmail_source,
+    imap_authority,
+    imap_source,
+)
 from .test_candidate_store import (
     SECRET,
     google_scope,
@@ -95,6 +100,240 @@ class CandidateRealRedisTests(unittest.TestCase):
             check=True,
         )
         return {"result": json.loads(completed.stdout)}
+
+    def _prepare_script_result(self, encoded: str) -> object:
+        return self._transport(
+            [
+                "EVAL",
+                candidate_module._PREPARE_CONFIRMED_SCRIPT,
+                0,
+                encoded,
+                0,
+                candidate_module.CANDIDATE_STORE_SCHEMA_VERSION,
+                candidate_module.CANDIDATE_BASE_TTL_SECONDS,
+                candidate_module.CANDIDATE_ABSOLUTE_TTL_SECONDS,
+                candidate_module.CANDIDATE_MAX_SERIALIZED_RECORD_BYTES,
+                candidate_module.CANDIDATE_MAX_SAFE_INTEGER,
+                candidate_module._PREPARE_JSON_DECODE_INVALID_SENTINEL,
+                candidate_module._PREPARE_ROOT_TYPE_INVALID_SENTINEL,
+                candidate_module._PREPARE_SCHEMA_VERSION_INVALID_SENTINEL,
+                candidate_module._PREPARE_PROVIDER_AUTHORITY_SHAPE_INVALID_SENTINEL,
+                candidate_module._PREPARE_LABELS_COLLECTION_INVALID_SENTINEL,
+                candidate_module._PREPARE_UNRESOLVED_ROUTING_NULL_INVALID_SENTINEL,
+                candidate_module._PREPARE_ROUTING_STATE_INVALID_SENTINEL,
+                candidate_module._PREPARE_READY_ROUTING_SHAPE_INVALID_SENTINEL,
+                candidate_module._PREPARE_NOISE_REASONS_COLLECTION_INVALID_SENTINEL,
+                candidate_module._PREPARE_REFERENCE_INVALID_SENTINEL,
+                candidate_module._PREPARE_TEMPORAL_INVALID_SENTINEL,
+                candidate_module._PREPARE_SIZE_INVALID_SENTINEL,
+            ]
+        )["result"]
+
+    def _assert_provider_source_round_trip(self, authority, source):
+        scope, intended = project_priority_candidate(authority, source)
+        template = candidate_module._template_payload(
+            SECRET,
+            scope,
+            intended,
+            candidate_module._empty_references(),
+        )
+        semantic_wire = json.loads(candidate_module._encode_wire(template))
+        prepared, prepared_record = self.store._prepare_confirmed(
+            scope,
+            intended,
+            candidate_module._empty_references(),
+            expected_version=0,
+        )
+        self.assertEqual(prepared_record.snapshot, intended)
+        committed = self.store._commit_confirmed(
+            scope,
+            intended,
+            mode="normal",
+            expected_raw=candidate_module._MISSING_SENTINEL,
+            prepared=prepared,
+            prepared_record=prepared_record,
+            expected_existing_expiry=0,
+        )
+        self.assertEqual(committed, prepared_record)
+        self.assertEqual(self.store.read_candidate(scope), committed)
+        repeated = self.store.upsert_confirmed(
+            scope,
+            intended,
+            expected_version=1,
+        )
+        self.assertEqual(repeated.version, 2)
+        self.assertEqual(repeated.snapshot, intended)
+        self.assertEqual(self.store.read_candidate(scope), repeated)
+        return scope, intended, template, semantic_wire
+
+    def test_exact_gmail_provider_source_prepare_commit_and_repeat(self) -> None:
+        source = gmail_source()
+        scope, intended, template, semantic_wire = (
+            self._assert_provider_source_round_trip(gmail_authority(), source)
+        )
+        self.assertIs(type(template["schemaVersion"]), int)
+        self.assertEqual(intended.routing_state, "unresolved")
+        self.assertIsNone(intended.routing)
+        self.assertIsNone(template["routing"])
+        self.assertIs(type(intended.provider_authority.labels), tuple)
+        self.assertTrue(intended.provider_authority.labels)
+        self.assertIs(type(semantic_wire["providerAuthority"]["labels"]), list)
+        self.assertIsNone(intended.conversation.rfc_root_message_id)
+        self.assertIsNone(intended.conversation.rfc_message_id)
+        self.assertIs(type(intended.conversation.provider_thread_id), str)
+        self.assertIs(type(intended.render.unread), bool)
+        self.assertIs(type(intended.render.flagged), bool)
+        self.assertEqual(scope.identity.provider_message_id, source["providerMessageId"])
+
+    def test_exact_imap_rfc_provider_source_prepare_commit_and_repeat(self) -> None:
+        source = imap_source()
+        scope, intended, template, semantic_wire = (
+            self._assert_provider_source_round_trip(imap_authority(), source)
+        )
+        self.assertIs(type(template["schemaVersion"]), int)
+        self.assertEqual(intended.routing_state, "unresolved")
+        self.assertIsNone(intended.routing)
+        self.assertIsNone(template["routing"])
+        self.assertEqual(intended.provider_authority.labels, ())
+        self.assertIsNone(semantic_wire["providerAuthority"]["labels"])
+        self.assertIsNone(intended.conversation.provider_thread_id)
+        self.assertIs(type(intended.conversation.rfc_root_message_id), str)
+        self.assertIs(type(intended.conversation.rfc_message_id), str)
+        self.assertIs(type(intended.render.unread), bool)
+        self.assertIs(type(intended.render.flagged), bool)
+        self.assertEqual(scope.identity.uid_validity, source["uidValidity"])
+        self.assertEqual(scope.identity.imap_uid, source["imapUid"])
+
+    def test_exact_imap_uid_provider_source_prepare_commit_and_repeat(self) -> None:
+        source = imap_source(
+            imapUid="124",
+            conversationId="imap:uid:mailbox-1:INBOX:456:124",
+            authorityKind="imap_uid",
+            rfcRootMessageId=None,
+            rfcMessageId=None,
+        )
+        scope, intended, template, semantic_wire = (
+            self._assert_provider_source_round_trip(imap_authority(), source)
+        )
+        self.assertIs(type(template["schemaVersion"]), int)
+        self.assertEqual(intended.routing_state, "unresolved")
+        self.assertIsNone(intended.routing)
+        self.assertIsNone(template["routing"])
+        self.assertEqual(intended.provider_authority.labels, ())
+        self.assertIsNone(semantic_wire["providerAuthority"]["labels"])
+        self.assertIsNone(intended.conversation.provider_thread_id)
+        self.assertIsNone(intended.conversation.rfc_root_message_id)
+        self.assertIsNone(intended.conversation.rfc_message_id)
+        self.assertIs(type(intended.render.unread), bool)
+        self.assertIs(type(intended.render.flagged), bool)
+        self.assertEqual(scope.identity.uid_validity, source["uidValidity"])
+        self.assertEqual(scope.identity.imap_uid, source["imapUid"])
+
+    def test_prepare_lua_predicates_return_exact_fixed_sentinels(self) -> None:
+        scope = google_scope(message_id="real-predicate-stage")
+        base = candidate_module._template_payload(
+            SECRET,
+            scope,
+            snapshot(),
+            candidate_module._empty_references(),
+        )
+
+        def encoded_with(change) -> str:
+            payload = json.loads(candidate_module._encode_wire(base))
+            change(payload)
+            return json.dumps(
+                payload,
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+
+        ready = candidate_module._routing_to_wire(ready_routing())
+        assert ready is not None
+        ready_with_empty_reasons = dict(ready)
+        ready_with_empty_reasons["noiseReasons"] = []
+        cases = (
+            (
+                "{",
+                candidate_module._PREPARE_JSON_DECODE_INVALID_SENTINEL,
+            ),
+            (
+                "null",
+                candidate_module._PREPARE_ROOT_TYPE_INVALID_SENTINEL,
+            ),
+            (
+                encoded_with(lambda payload: payload.__setitem__("schemaVersion", 1)),
+                candidate_module._PREPARE_SCHEMA_VERSION_INVALID_SENTINEL,
+            ),
+            (
+                encoded_with(lambda payload: payload["providerAuthority"].pop("folder")),
+                candidate_module._PREPARE_PROVIDER_AUTHORITY_SHAPE_INVALID_SENTINEL,
+            ),
+            (
+                encoded_with(
+                    lambda payload: payload["providerAuthority"].__setitem__(
+                        "labels", []
+                    )
+                ),
+                candidate_module._PREPARE_LABELS_COLLECTION_INVALID_SENTINEL,
+            ),
+            (
+                encoded_with(lambda payload: payload.__setitem__("routing", {})),
+                candidate_module._PREPARE_UNRESOLVED_ROUTING_NULL_INVALID_SENTINEL,
+            ),
+            (
+                encoded_with(
+                    lambda payload: payload.__setitem__("routingState", "invalid")
+                ),
+                candidate_module._PREPARE_ROUTING_STATE_INVALID_SENTINEL,
+            ),
+            (
+                encoded_with(
+                    lambda payload: (
+                        payload.__setitem__("routingState", "ready"),
+                        payload.__setitem__("routing", {}),
+                    )
+                ),
+                candidate_module._PREPARE_READY_ROUTING_SHAPE_INVALID_SENTINEL,
+            ),
+            (
+                encoded_with(
+                    lambda payload: (
+                        payload.__setitem__("routingState", "ready"),
+                        payload.__setitem__("routing", ready_with_empty_reasons),
+                    )
+                ),
+                candidate_module._PREPARE_NOISE_REASONS_COLLECTION_INVALID_SENTINEL,
+            ),
+        )
+        for encoded, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(self._prepare_script_result(encoded), expected)
+
+    def test_json_null_remains_cjson_null_in_canonical_positions(self) -> None:
+        encoded = json.dumps(
+            {
+                "providerAuthority": {"labels": None},
+                "routing": None,
+                "readyRouting": {"noiseReasons": None},
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        script = (
+            "local value=cjson.decode(ARGV[1]);"
+            "return {type(value['providerAuthority']['labels']),"
+            "tostring(value['providerAuthority']['labels']==cjson.null),"
+            "type(value['routing']),tostring(value['routing']==cjson.null),"
+            "type(value['readyRouting']['noiseReasons']),"
+            "tostring(value['readyRouting']['noiseReasons']==cjson.null)}"
+        )
+        result = self._transport(["EVAL", script, 0, encoded])["result"]
+        self.assertEqual(
+            result,
+            ["userdata", "true", "userdata", "true", "userdata", "true"],
+        )
 
     def test_unresolved_ready_and_repeated_writes_round_trip_exactly(self) -> None:
         cases = (
@@ -187,7 +426,7 @@ class CandidateRealRedisTests(unittest.TestCase):
                 self.store.upsert_confirmed(scope, intended, expected_version=0)
         self.assertEqual(
             raised.exception.stage,
-            "store_prepare_collection_invalid",
+            "store_prepare_noise_reasons_collection_invalid",
         )
         keys = self.store._scope_keys(scope)
         self.assertIsNone(self._transport(["GET", keys["record"]])["result"])
@@ -276,7 +515,10 @@ class CandidateRealRedisTests(unittest.TestCase):
         ):
             with self.assertRaises(CandidateStoreUnavailable) as schema:
                 self.store.upsert_confirmed(scope, base, expected_version=0)
-        self.assertEqual(schema.exception.stage, "store_prepare_schema_invalid")
+        self.assertEqual(
+            schema.exception.stage,
+            "store_prepare_schema_version_invalid",
+        )
 
         def invalid_reference(*args, **kwargs):
             payload = original(*args, **kwargs)

@@ -125,27 +125,64 @@ class MemoryRedis:
         return encoded
 
     @staticmethod
-    def _canonical_collections(payload: dict[str, object]) -> bool:
-        provider_labels = payload.get("providerAuthority", {}).get("labels")
-        if provider_labels is not None and not (
-            isinstance(provider_labels, list) and provider_labels
+    def _collection_failure(payload: object) -> str | None:
+        if not isinstance(payload, dict):
+            return "provider_authority_shape"
+        provider_authority = payload.get("providerAuthority")
+        if (
+            not isinstance(provider_authority, dict)
+            or set(provider_authority) != {"folder", "labels"}
         ):
-            return False
-        if payload.get("routingState") == "unresolved":
-            return payload.get("routing") is None
+            return "provider_authority_shape"
+        provider_labels = provider_authority["labels"]
+        if provider_labels is not None and not (
+            isinstance(provider_labels, list)
+            and bool(provider_labels)
+            and all(type(label) is str for label in provider_labels)
+        ):
+            return "labels_collection"
+        routing_state = payload.get("routingState")
+        if routing_state == "unresolved":
+            return (
+                None
+                if payload.get("routing") is None
+                else "unresolved_routing_null"
+            )
+        if routing_state != "ready":
+            return "routing_state"
         routing = payload.get("routing")
-        if not isinstance(routing, dict):
-            return False
-        noise_reasons = routing.get("noiseReasons")
-        return noise_reasons is None or (
-            isinstance(noise_reasons, list) and bool(noise_reasons)
-        )
+        if (
+            not isinstance(routing, dict)
+            or set(routing) != candidate_module._ROUTING_FIELDS
+        ):
+            return "ready_routing_shape"
+        noise_reasons = routing["noiseReasons"]
+        if noise_reasons is None or (
+            isinstance(noise_reasons, list)
+            and bool(noise_reasons)
+            and all(type(reason) is str for reason in noise_reasons)
+        ):
+            return None
+        return "noise_reasons_collection"
+
+    @classmethod
+    def _canonical_collections(cls, payload: object) -> bool:
+        return cls._collection_failure(payload) is None
 
     def _prepare(self, args: list[object]) -> object:
         template, expected_version = args[:2]
         payload = json.loads(template)
-        if not self._canonical_collections(payload):
-            return args[8]
+        collection_failure = self._collection_failure(payload)
+        collection_sentinel_indexes = {
+            "provider_authority_shape": 10,
+            "labels_collection": 11,
+            "unresolved_routing_null": 12,
+            "routing_state": 13,
+            "ready_routing_shape": 14,
+            "noise_reasons_collection": 15,
+        }
+        if collection_failure is not None:
+            return args[collection_sentinel_indexes[collection_failure]]
         now = self.current_ms
         base = now + int(args[3]) * 1_000
         absolute = now + int(args[4]) * 1_000
@@ -166,7 +203,7 @@ class MemoryRedis:
             }
         )
         encoded = self._encode(payload)
-        return args[11] if len(encoded.encode("ascii")) > int(args[5]) else encoded
+        return args[18] if len(encoded.encode("ascii")) > int(args[5]) else encoded
 
     def _set_encoded_record(
         self,
@@ -759,7 +796,15 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
             (lambda _encoded: "{sensitive-invalid-json", "store_prepare_json_invalid"),
             (
                 mutate_payload(lambda payload: payload["render"].pop("subject")),
-                "store_prepare_schema_invalid",
+                "store_prepare_python_schema_invalid",
+            ),
+            (
+                mutate_payload(
+                    lambda payload: payload["render"].__setitem__(
+                        "subject", "Different prepared subject"
+                    )
+                ),
+                "store_prepare_snapshot_mismatch",
             ),
             (
                 mutate_payload(
@@ -845,12 +890,40 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
         scope = google_scope(message_id="sentinel-stage")
         prepare_cases = (
             (
-                candidate_module._PREPARE_SCHEMA_INVALID_SENTINEL,
-                "store_prepare_schema_invalid",
+                candidate_module._PREPARE_JSON_DECODE_INVALID_SENTINEL,
+                "store_prepare_json_decode_invalid",
             ),
             (
-                candidate_module._PREPARE_COLLECTION_INVALID_SENTINEL,
-                "store_prepare_collection_invalid",
+                candidate_module._PREPARE_ROOT_TYPE_INVALID_SENTINEL,
+                "store_prepare_root_type_invalid",
+            ),
+            (
+                candidate_module._PREPARE_SCHEMA_VERSION_INVALID_SENTINEL,
+                "store_prepare_schema_version_invalid",
+            ),
+            (
+                candidate_module._PREPARE_PROVIDER_AUTHORITY_SHAPE_INVALID_SENTINEL,
+                "store_prepare_provider_authority_shape_invalid",
+            ),
+            (
+                candidate_module._PREPARE_LABELS_COLLECTION_INVALID_SENTINEL,
+                "store_prepare_labels_collection_invalid",
+            ),
+            (
+                candidate_module._PREPARE_UNRESOLVED_ROUTING_NULL_INVALID_SENTINEL,
+                "store_prepare_unresolved_routing_null_invalid",
+            ),
+            (
+                candidate_module._PREPARE_ROUTING_STATE_INVALID_SENTINEL,
+                "store_prepare_routing_state_invalid",
+            ),
+            (
+                candidate_module._PREPARE_READY_ROUTING_SHAPE_INVALID_SENTINEL,
+                "store_prepare_ready_routing_shape_invalid",
+            ),
+            (
+                candidate_module._PREPARE_NOISE_REASONS_COLLECTION_INVALID_SENTINEL,
+                "store_prepare_noise_reasons_collection_invalid",
             ),
             (
                 candidate_module._PREPARE_REFERENCE_INVALID_SENTINEL,
@@ -1182,7 +1255,7 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
                 store.upsert_confirmed(scope, ready, expected_version=0)
         self.assertEqual(
             raised.exception.stage,
-            "store_prepare_collection_invalid",
+            "store_prepare_noise_reasons_collection_invalid",
         )
         keys = store._scope_keys(scope)
         self.assertNotIn(keys["record"], redis.values)
