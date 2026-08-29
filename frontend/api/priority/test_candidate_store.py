@@ -170,40 +170,31 @@ class MemoryRedis:
         return cls._collection_failure(payload) is None
 
     def _prepare(self, args: list[object]) -> object:
-        template, expected_version = args[:2]
-        payload = json.loads(template)
-        collection_failure = self._collection_failure(payload)
-        collection_sentinel_indexes = {
-            "provider_authority_shape": 10,
-            "labels_collection": 11,
-            "unresolved_routing_null": 12,
-            "routing_state": 13,
-            "ready_routing_shape": 14,
-            "noise_reasons_collection": 15,
-        }
-        if collection_failure is not None:
-            return args[collection_sentinel_indexes[collection_failure]]
+        expected_version, base_seconds, absolute_seconds, maximum = args[:4]
+        if (
+            type(expected_version) is not int
+            or expected_version < 0
+            or expected_version >= int(maximum)
+        ):
+            return args[11]
+        reference_values = args[4:10]
+        if any(
+            type(expires_at) is not int
+            or expires_at < 0
+            or expires_at > int(maximum)
+            for expires_at in reference_values
+        ):
+            return args[10]
         now = self.current_ms
-        base = now + int(args[3]) * 1_000
-        absolute = now + int(args[4]) * 1_000
-        for kind, expires_at in payload["positiveReferences"].items():
-            payload["positiveReferences"][kind] = (
-                0 if expires_at <= now else min(expires_at, absolute)
-            )
-        payload.update(
-            {
-                "providerObservedAt": now,
-                "providerValidatedAt": now,
-                "baseExpiresAt": base,
-                "absoluteExpiresAt": absolute,
-                "graceExpiresAt": 0,
-                "state": "provider_confirmed",
-                "version": int(expected_version) + 1,
-                "updatedAt": now,
-            }
-        )
-        encoded = self._encode(payload)
-        return args[18] if len(encoded.encode("ascii")) > int(args[5]) else encoded
+        base = now + int(base_seconds) * 1_000
+        absolute = now + int(absolute_seconds) * 1_000
+        if base > int(maximum) or absolute > int(maximum):
+            return args[11]
+        normalized = [
+            0 if expires_at <= now else min(expires_at, absolute)
+            for expires_at in reference_values
+        ]
+        return [now, base, absolute, expected_version + 1, *normalized]
 
     def _set_encoded_record(
         self,
@@ -748,7 +739,7 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
         self.assertNotIn("sensitive-arbitrary-stage", str(bounded))
         self.assertNotIn("sensitive-arbitrary-stage", repr(bounded))
 
-    def test_prepared_record_failures_have_fixed_private_stages(self) -> None:
+    def test_prepare_metadata_failures_are_fixed_and_content_free(self) -> None:
         scope = google_scope(message_id="sensitive-provider-message-id")
         intended = replace(
             snapshot(),
@@ -771,66 +762,25 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
                 if (
                     command[0] == "EVAL"
                     and command[1] == candidate_module._PREPARE_CONFIRMED_SCRIPT
-                    and type(result.get("result")) is str
+                    and type(result.get("result")) is list
                 ):
                     return {"result": self.mutate(result["result"])}
                 return result
 
-        def mutate_payload(change):
-            def mutate(encoded: str) -> str:
-                payload = json.loads(encoded)
-                change(payload)
-                return MemoryRedis._encode(payload)
+        def changed(index: int, replacement):
+            def mutate(metadata: list[object]) -> list[object]:
+                result = list(metadata)
+                result[index] = replacement(result[index])
+                return result
 
             return mutate
 
-        def exponent_temporal(encoded: str) -> str:
-            observed = json.loads(encoded)["providerObservedAt"]
-            return encoded.replace(
-                f'"providerObservedAt":{observed}',
-                '"providerObservedAt":1.8e12',
-                1,
-            )
-
         cases = (
-            (lambda _encoded: "{sensitive-invalid-json", "store_prepare_json_invalid"),
-            (
-                mutate_payload(lambda payload: payload["render"].pop("subject")),
-                "store_prepare_python_schema_invalid",
-            ),
-            (
-                mutate_payload(
-                    lambda payload: payload["render"].__setitem__(
-                        "subject", "Different prepared subject"
-                    )
-                ),
-                "store_prepare_snapshot_mismatch",
-            ),
-            (
-                mutate_payload(
-                    lambda payload: payload.__setitem__("scopeDigest", "0" * 64)
-                ),
-                "store_prepare_scope_invalid",
-            ),
-            (
-                mutate_payload(
-                    lambda payload: payload.__setitem__(
-                        "providerObservedAt",
-                        float(payload["providerObservedAt"]),
-                    )
-                ),
-                "store_prepare_temporal_invalid",
-            ),
-            (exponent_temporal, "store_prepare_temporal_invalid"),
-            (
-                mutate_payload(
-                    lambda payload: payload["positiveReferences"].__setitem__(
-                        "manual_priority",
-                        0.5,
-                    )
-                ),
-                "store_prepare_references_invalid",
-            ),
+            (lambda metadata: metadata[:-1], "store_prepare_metadata_invalid"),
+            (changed(0, lambda _value: 0.5), "store_prepare_metadata_invalid"),
+            (changed(1, lambda value: value + 1), "store_prepare_temporal_invalid"),
+            (changed(3, lambda value: value + 1), "store_prepare_temporal_invalid"),
+            (changed(4, lambda _value: 1), "store_prepare_reference_invalid"),
         )
         for mutate, expected_stage in cases:
             with self.subTest(stage=expected_stage):
@@ -854,15 +804,44 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
                     "sensitive-sender@example.test",
                     "Sensitive Subject",
                     "Sensitive Snippet",
-                    "sensitive-invalid-json",
                 ):
                     self.assertNotIn(sensitive, output)
 
-        accepted = PriorityCandidateStore(
-            MemoryRedis(),
-            hmac_secret=SECRET,
-        ).upsert_confirmed(scope, intended, expected_version=0)
+        redis = MemoryRedis()
+        accepted = PriorityCandidateStore(redis, hmac_secret=SECRET).upsert_confirmed(
+            scope,
+            intended,
+            expected_version=0,
+        )
         self.assertIs(type(accepted.provider_observed_at), int)
+        prepare_command = next(
+            command
+            for command in redis.commands
+            if command[0] == "EVAL"
+            and command[1] == candidate_module._PREPARE_CONFIRMED_SCRIPT
+        )
+        self.assertNotIn("cjson", candidate_module._PREPARE_CONFIRMED_SCRIPT)
+        self.assertEqual(len(prepare_command[3:]), 12)
+        prepare_boundary = repr(prepare_command[3:])
+        for sensitive in (
+            "sensitive-provider-message-id",
+            "Sensitive Sender",
+            "sensitive-sender@example.test",
+            "Sensitive Subject",
+            "Sensitive Snippet",
+        ):
+            self.assertNotIn(sensitive, prepare_boundary)
+        raw = redis.values[
+            PriorityCandidateStore(redis, hmac_secret=SECRET)._scope_keys(scope)[
+                "record"
+            ]
+        ]
+        self.assertEqual(
+            raw,
+            candidate_module._encode_wire(
+                candidate_module._record_to_wire(SECRET, accepted)
+            ),
+        )
 
         original = candidate_module._record_to_wire
 
@@ -886,45 +865,66 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
             "store_prepare_canonical_invalid",
         )
 
+    def test_divergent_lua_json_rules_cannot_change_application_wire(self) -> None:
+        scope = imap_scope(uid="707")
+        intended = snapshot(provider="custom_imap")
+
+        class DivergentLuaTransport(MemoryRedis):
+            def __call__(self, command: list[object]) -> dict[str, object]:
+                if (
+                    command[0] == "EVAL"
+                    and command[1] == candidate_module._PREPARE_CONFIRMED_SCRIPT
+                ):
+                    self.assert_prepare_is_metadata_only(command)
+                return super().__call__(command)
+
+            @staticmethod
+            def assert_prepare_is_metadata_only(command: list[object]) -> None:
+                if len(command[3:]) != 12 or any(
+                    type(value) not in {int, str} for value in command[3:]
+                ):
+                    raise AssertionError("prepare accepted application JSON")
+                if any(
+                    type(value) is str and ("{" in value or "[" in value)
+                    for value in command[3:]
+                ):
+                    raise AssertionError("prepare accepted application JSON")
+
+        def divergent_json_value(value):
+            if isinstance(value, dict):
+                return {
+                    key: divergent_json_value(item)
+                    for key, item in value.items()
+                    if item is not None
+                }
+            if isinstance(value, list):
+                return [divergent_json_value(item) for item in value]
+            return value
+
+        redis = DivergentLuaTransport()
+        store = PriorityCandidateStore(redis, hmac_secret=SECRET)
+        written = store.upsert_confirmed(scope, intended, expected_version=0)
+        expected = candidate_module._encode_wire(
+            candidate_module._record_to_wire(SECRET, written)
+        )
+        raw = redis.values[store._scope_keys(scope)["record"]]
+        divergent = json.dumps(
+            divergent_json_value(json.loads(expected)),
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        self.assertNotEqual(divergent, expected)
+        self.assertEqual(raw, expected)
+        payload = json.loads(raw)
+        self.assertIsNone(payload["providerAuthority"]["labels"])
+        self.assertIsNone(payload["routing"])
+        self.assertIsNone(payload["conversation"]["providerThreadId"])
+
     def test_lua_sentinels_map_one_to_one_without_merging(self) -> None:
         scope = google_scope(message_id="sentinel-stage")
         prepare_cases = (
-            (
-                candidate_module._PREPARE_JSON_DECODE_INVALID_SENTINEL,
-                "store_prepare_json_decode_invalid",
-            ),
-            (
-                candidate_module._PREPARE_ROOT_TYPE_INVALID_SENTINEL,
-                "store_prepare_root_type_invalid",
-            ),
-            (
-                candidate_module._PREPARE_SCHEMA_VERSION_INVALID_SENTINEL,
-                "store_prepare_schema_version_invalid",
-            ),
-            (
-                candidate_module._PREPARE_PROVIDER_AUTHORITY_SHAPE_INVALID_SENTINEL,
-                "store_prepare_provider_authority_shape_invalid",
-            ),
-            (
-                candidate_module._PREPARE_LABELS_COLLECTION_INVALID_SENTINEL,
-                "store_prepare_labels_collection_invalid",
-            ),
-            (
-                candidate_module._PREPARE_UNRESOLVED_ROUTING_NULL_INVALID_SENTINEL,
-                "store_prepare_unresolved_routing_null_invalid",
-            ),
-            (
-                candidate_module._PREPARE_ROUTING_STATE_INVALID_SENTINEL,
-                "store_prepare_routing_state_invalid",
-            ),
-            (
-                candidate_module._PREPARE_READY_ROUTING_SHAPE_INVALID_SENTINEL,
-                "store_prepare_ready_routing_shape_invalid",
-            ),
-            (
-                candidate_module._PREPARE_NOISE_REASONS_COLLECTION_INVALID_SENTINEL,
-                "store_prepare_noise_reasons_collection_invalid",
-            ),
             (
                 candidate_module._PREPARE_REFERENCE_INVALID_SENTINEL,
                 "store_prepare_reference_invalid",
@@ -932,10 +932,6 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
             (
                 candidate_module._PREPARE_TEMPORAL_INVALID_SENTINEL,
                 "store_prepare_temporal_invalid",
-            ),
-            (
-                candidate_module._PREPARE_SIZE_INVALID_SENTINEL,
-                "store_prepare_size_invalid",
             ),
         )
 
@@ -1253,10 +1249,7 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
         with patch.object(candidate_module, "_routing_to_wire", side_effect=ambiguous):
             with self.assertRaises(CandidateStoreUnavailable) as raised:
                 store.upsert_confirmed(scope, ready, expected_version=0)
-        self.assertEqual(
-            raised.exception.stage,
-            "store_prepare_noise_reasons_collection_invalid",
-        )
+        self.assertEqual(raised.exception.stage, "store_prepare_canonical_invalid")
         keys = store._scope_keys(scope)
         self.assertNotIn(keys["record"], redis.values)
         for index_key in (
@@ -1553,9 +1546,24 @@ class CandidateIdentityAndCodecTests(unittest.TestCase):
         )
         redis = MemoryRedis()
         store = PriorityCandidateStore(redis, hmac_secret=SECRET)
-        with self.assertRaises(ValueError):
+        with self.assertRaises(CandidateStoreUnavailable) as oversized:
             store.upsert_confirmed(google_scope(), large_snapshot, expected_version=0)
-        self.assertFalse(any(command[0] == "EVAL" for command in redis.commands))
+        self.assertEqual(oversized.exception.stage, "store_prepare_size_invalid")
+        self.assertEqual(
+            sum(
+                command[0] == "EVAL"
+                and command[1] == candidate_module._PREPARE_CONFIRMED_SCRIPT
+                for command in redis.commands
+            ),
+            1,
+        )
+        self.assertFalse(
+            any(
+                command[0] == "EVAL"
+                and command[1] == candidate_module._UPSERT_CONFIRMED_SCRIPT
+                for command in redis.commands
+            )
+        )
         self.assertEqual(CANDIDATE_MAX_SERIALIZED_RECORD_BYTES, 4_096)
 
         ready_redis = MemoryRedis()

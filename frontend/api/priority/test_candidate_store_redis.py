@@ -101,43 +101,30 @@ class CandidateRealRedisTests(unittest.TestCase):
         )
         return {"result": json.loads(completed.stdout)}
 
-    def _prepare_script_result(self, encoded: str) -> object:
+    def _prepare_script_result(
+        self,
+        *,
+        expected_version: object = 0,
+        references: tuple[object, ...] = (0, 0, 0, 0, 0, 0),
+        maximum: object = candidate_module.CANDIDATE_MAX_SAFE_INTEGER,
+    ) -> object:
         return self._transport(
             [
                 "EVAL",
                 candidate_module._PREPARE_CONFIRMED_SCRIPT,
                 0,
-                encoded,
-                0,
-                candidate_module.CANDIDATE_STORE_SCHEMA_VERSION,
+                expected_version,
                 candidate_module.CANDIDATE_BASE_TTL_SECONDS,
                 candidate_module.CANDIDATE_ABSOLUTE_TTL_SECONDS,
-                candidate_module.CANDIDATE_MAX_SERIALIZED_RECORD_BYTES,
-                candidate_module.CANDIDATE_MAX_SAFE_INTEGER,
-                candidate_module._PREPARE_JSON_DECODE_INVALID_SENTINEL,
-                candidate_module._PREPARE_ROOT_TYPE_INVALID_SENTINEL,
-                candidate_module._PREPARE_SCHEMA_VERSION_INVALID_SENTINEL,
-                candidate_module._PREPARE_PROVIDER_AUTHORITY_SHAPE_INVALID_SENTINEL,
-                candidate_module._PREPARE_LABELS_COLLECTION_INVALID_SENTINEL,
-                candidate_module._PREPARE_UNRESOLVED_ROUTING_NULL_INVALID_SENTINEL,
-                candidate_module._PREPARE_ROUTING_STATE_INVALID_SENTINEL,
-                candidate_module._PREPARE_READY_ROUTING_SHAPE_INVALID_SENTINEL,
-                candidate_module._PREPARE_NOISE_REASONS_COLLECTION_INVALID_SENTINEL,
+                maximum,
+                *references,
                 candidate_module._PREPARE_REFERENCE_INVALID_SENTINEL,
                 candidate_module._PREPARE_TEMPORAL_INVALID_SENTINEL,
-                candidate_module._PREPARE_SIZE_INVALID_SENTINEL,
             ]
         )["result"]
 
     def _assert_provider_source_round_trip(self, authority, source):
         scope, intended = project_priority_candidate(authority, source)
-        template = candidate_module._template_payload(
-            SECRET,
-            scope,
-            intended,
-            candidate_module._empty_references(),
-        )
-        semantic_wire = json.loads(candidate_module._encode_wire(template))
         prepared, prepared_record = self.store._prepare_confirmed(
             scope,
             intended,
@@ -155,6 +142,16 @@ class CandidateRealRedisTests(unittest.TestCase):
             expected_existing_expiry=0,
         )
         self.assertEqual(committed, prepared_record)
+        raw = self._transport(
+            ["GET", self.store._scope_keys(scope)["record"]]
+        )["result"]
+        self.assertEqual(raw, prepared)
+        self.assertEqual(
+            raw,
+            candidate_module._encode_wire(
+                candidate_module._record_to_wire(SECRET, prepared_record)
+            ),
+        )
         self.assertEqual(self.store.read_candidate(scope), committed)
         repeated = self.store.upsert_confirmed(
             scope,
@@ -164,17 +161,17 @@ class CandidateRealRedisTests(unittest.TestCase):
         self.assertEqual(repeated.version, 2)
         self.assertEqual(repeated.snapshot, intended)
         self.assertEqual(self.store.read_candidate(scope), repeated)
-        return scope, intended, template, semantic_wire
+        return scope, intended, json.loads(prepared)
 
     def test_exact_gmail_provider_source_prepare_commit_and_repeat(self) -> None:
         source = gmail_source()
-        scope, intended, template, semantic_wire = (
+        scope, intended, semantic_wire = (
             self._assert_provider_source_round_trip(gmail_authority(), source)
         )
-        self.assertIs(type(template["schemaVersion"]), int)
+        self.assertIs(type(semantic_wire["schemaVersion"]), int)
         self.assertEqual(intended.routing_state, "unresolved")
         self.assertIsNone(intended.routing)
-        self.assertIsNone(template["routing"])
+        self.assertIsNone(semantic_wire["routing"])
         self.assertIs(type(intended.provider_authority.labels), tuple)
         self.assertTrue(intended.provider_authority.labels)
         self.assertIs(type(semantic_wire["providerAuthority"]["labels"]), list)
@@ -187,13 +184,13 @@ class CandidateRealRedisTests(unittest.TestCase):
 
     def test_exact_imap_rfc_provider_source_prepare_commit_and_repeat(self) -> None:
         source = imap_source()
-        scope, intended, template, semantic_wire = (
+        scope, intended, semantic_wire = (
             self._assert_provider_source_round_trip(imap_authority(), source)
         )
-        self.assertIs(type(template["schemaVersion"]), int)
+        self.assertIs(type(semantic_wire["schemaVersion"]), int)
         self.assertEqual(intended.routing_state, "unresolved")
         self.assertIsNone(intended.routing)
-        self.assertIsNone(template["routing"])
+        self.assertIsNone(semantic_wire["routing"])
         self.assertEqual(intended.provider_authority.labels, ())
         self.assertIsNone(semantic_wire["providerAuthority"]["labels"])
         self.assertIsNone(intended.conversation.provider_thread_id)
@@ -212,13 +209,13 @@ class CandidateRealRedisTests(unittest.TestCase):
             rfcRootMessageId=None,
             rfcMessageId=None,
         )
-        scope, intended, template, semantic_wire = (
+        scope, intended, semantic_wire = (
             self._assert_provider_source_round_trip(imap_authority(), source)
         )
-        self.assertIs(type(template["schemaVersion"]), int)
+        self.assertIs(type(semantic_wire["schemaVersion"]), int)
         self.assertEqual(intended.routing_state, "unresolved")
         self.assertIsNone(intended.routing)
-        self.assertIsNone(template["routing"])
+        self.assertIsNone(semantic_wire["routing"])
         self.assertEqual(intended.provider_authority.labels, ())
         self.assertIsNone(semantic_wire["providerAuthority"]["labels"])
         self.assertIsNone(intended.conversation.provider_thread_id)
@@ -229,110 +226,79 @@ class CandidateRealRedisTests(unittest.TestCase):
         self.assertEqual(scope.identity.uid_validity, source["uidValidity"])
         self.assertEqual(scope.identity.imap_uid, source["imapUid"])
 
-    def test_prepare_lua_predicates_return_exact_fixed_sentinels(self) -> None:
-        scope = google_scope(message_id="real-predicate-stage")
-        base = candidate_module._template_payload(
-            SECRET,
-            scope,
-            snapshot(),
-            candidate_module._empty_references(),
-        )
-
-        def encoded_with(change) -> str:
-            payload = json.loads(candidate_module._encode_wire(base))
-            change(payload)
-            return json.dumps(
-                payload,
-                allow_nan=False,
-                ensure_ascii=True,
-                separators=(",", ":"),
-                sort_keys=True,
+    def test_prepare_lua_returns_only_bounded_server_metadata(self) -> None:
+        self.assertNotIn("cjson", candidate_module._PREPARE_CONFIRMED_SCRIPT)
+        before = int(time.time() * 1_000)
+        result = self._prepare_script_result(
+            references=(
+                0,
+                before - 1,
+                before + 60_000,
+                candidate_module.CANDIDATE_MAX_SAFE_INTEGER,
+                0,
+                0,
             )
-
-        ready = candidate_module._routing_to_wire(ready_routing())
-        assert ready is not None
-        ready_with_empty_reasons = dict(ready)
-        ready_with_empty_reasons["noiseReasons"] = []
-        cases = (
-            (
-                "{",
-                candidate_module._PREPARE_JSON_DECODE_INVALID_SENTINEL,
-            ),
-            (
-                "null",
-                candidate_module._PREPARE_ROOT_TYPE_INVALID_SENTINEL,
-            ),
-            (
-                encoded_with(lambda payload: payload.__setitem__("schemaVersion", 1)),
-                candidate_module._PREPARE_SCHEMA_VERSION_INVALID_SENTINEL,
-            ),
-            (
-                encoded_with(lambda payload: payload["providerAuthority"].pop("folder")),
-                candidate_module._PREPARE_PROVIDER_AUTHORITY_SHAPE_INVALID_SENTINEL,
-            ),
-            (
-                encoded_with(
-                    lambda payload: payload["providerAuthority"].__setitem__(
-                        "labels", []
-                    )
-                ),
-                candidate_module._PREPARE_LABELS_COLLECTION_INVALID_SENTINEL,
-            ),
-            (
-                encoded_with(lambda payload: payload.__setitem__("routing", {})),
-                candidate_module._PREPARE_UNRESOLVED_ROUTING_NULL_INVALID_SENTINEL,
-            ),
-            (
-                encoded_with(
-                    lambda payload: payload.__setitem__("routingState", "invalid")
-                ),
-                candidate_module._PREPARE_ROUTING_STATE_INVALID_SENTINEL,
-            ),
-            (
-                encoded_with(
-                    lambda payload: (
-                        payload.__setitem__("routingState", "ready"),
-                        payload.__setitem__("routing", {}),
-                    )
-                ),
-                candidate_module._PREPARE_READY_ROUTING_SHAPE_INVALID_SENTINEL,
-            ),
-            (
-                encoded_with(
-                    lambda payload: (
-                        payload.__setitem__("routingState", "ready"),
-                        payload.__setitem__("routing", ready_with_empty_reasons),
-                    )
-                ),
-                candidate_module._PREPARE_NOISE_REASONS_COLLECTION_INVALID_SENTINEL,
-            ),
         )
-        for encoded, expected in cases:
-            with self.subTest(expected=expected):
-                self.assertEqual(self._prepare_script_result(encoded), expected)
-
-    def test_json_null_remains_cjson_null_in_canonical_positions(self) -> None:
-        encoded = json.dumps(
-            {
-                "providerAuthority": {"labels": None},
-                "routing": None,
-                "readyRouting": {"noiseReasons": None},
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        script = (
-            "local value=cjson.decode(ARGV[1]);"
-            "return {type(value['providerAuthority']['labels']),"
-            "tostring(value['providerAuthority']['labels']==cjson.null),"
-            "type(value['routing']),tostring(value['routing']==cjson.null),"
-            "type(value['readyRouting']['noiseReasons']),"
-            "tostring(value['readyRouting']['noiseReasons']==cjson.null)}"
-        )
-        result = self._transport(["EVAL", script, 0, encoded])["result"]
+        after = int(time.time() * 1_000)
+        self.assertIs(type(result), list)
+        self.assertEqual(len(result), 10)
+        self.assertTrue(all(type(value) is int for value in result))
+        now, base, absolute, version, *references = result
+        self.assertLessEqual(before, now)
+        self.assertLessEqual(now, after)
         self.assertEqual(
-            result,
-            ["userdata", "true", "userdata", "true", "userdata", "true"],
+            base,
+            now + candidate_module.CANDIDATE_BASE_TTL_SECONDS * 1_000,
+        )
+        self.assertEqual(
+            absolute,
+            now + candidate_module.CANDIDATE_ABSOLUTE_TTL_SECONDS * 1_000,
+        )
+        self.assertEqual(version, 1)
+        self.assertEqual(references[:2], [0, 0])
+        self.assertEqual(references[2], before + 60_000)
+        self.assertEqual(references[3], absolute)
+        self.assertEqual(
+            self._prepare_script_result(
+                references=(0.5, 0, 0, 0, 0, 0)
+            ),
+            candidate_module._PREPARE_REFERENCE_INVALID_SENTINEL,
+        )
+        self.assertEqual(
+            self._prepare_script_result(
+                expected_version=candidate_module.CANDIDATE_MAX_SAFE_INTEGER
+            ),
+            candidate_module._PREPARE_TEMPORAL_INVALID_SENTINEL,
+        )
+
+    def test_nested_provider_values_are_python_canonical_despite_cjson_rules(self) -> None:
+        scope = google_scope(message_id="real-python-canonical")
+        intended = snapshot(
+            routing_state="ready",
+            routing=replace(
+                ready_routing(),
+                noise_reasons=("automated_sender_evidence",),
+            ),
+        )
+        written = self.store.upsert_confirmed(
+            scope,
+            intended,
+            expected_version=0,
+        )
+        raw = self._transport(
+            ["GET", self.store._scope_keys(scope)["record"]]
+        )["result"]
+        expected = candidate_module._encode_wire(
+            candidate_module._record_to_wire(SECRET, written)
+        )
+        self.assertEqual(raw, expected)
+        self.assertEqual(
+            json.loads(raw)["providerAuthority"]["labels"],
+            list(intended.provider_authority.labels),
+        )
+        self.assertEqual(
+            json.loads(raw)["routing"]["noiseReasons"],
+            ["automated_sender_evidence"],
         )
 
     def test_unresolved_ready_and_repeated_writes_round_trip_exactly(self) -> None:
@@ -424,10 +390,7 @@ class CandidateRealRedisTests(unittest.TestCase):
         with patch.object(candidate_module, "_routing_to_wire", side_effect=ambiguous):
             with self.assertRaises(CandidateStoreUnavailable) as raised:
                 self.store.upsert_confirmed(scope, intended, expected_version=0)
-        self.assertEqual(
-            raised.exception.stage,
-            "store_prepare_noise_reasons_collection_invalid",
-        )
+        self.assertEqual(raised.exception.stage, "store_prepare_canonical_invalid")
         keys = self.store._scope_keys(scope)
         self.assertIsNone(self._transport(["GET", keys["record"]])["result"])
         self.assertEqual(self._transport(["TTL", keys["record"]])["result"], -2)
@@ -465,16 +428,56 @@ class CandidateRealRedisTests(unittest.TestCase):
                 snippet="p" * candidate_module.CANDIDATE_MAX_SNIPPET_BYTES,
             ),
         )
-        template = candidate_module._encode_wire(
-            candidate_module._template_payload(
-                SECRET,
-                scope,
-                bounded,
-                candidate_module._empty_references(),
-            )
+        now = 1_800_000_000_000
+        final_record = candidate_module.PriorityCandidateRecord(
+            scope=scope,
+            snapshot=bounded,
+            provider_observed_at=now,
+            provider_validated_at=now,
+            base_expires_at=(
+                now + candidate_module.CANDIDATE_BASE_TTL_SECONDS * 1_000
+            ),
+            absolute_expires_at=(
+                now + candidate_module.CANDIDATE_ABSOLUTE_TTL_SECONDS * 1_000
+            ),
+            grace_expires_at=0,
+            positive_references=candidate_module._empty_references(),
+            state="provider_confirmed",
+            version=1,
+            updated_at=now,
+        )
+        final_payload = candidate_module._record_to_wire(SECRET, final_record)
+        final_encoded = json.dumps(
+            final_payload,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        zero_placeholder_payload = dict(final_payload)
+        zero_placeholder_payload.update(
+            {
+                "providerObservedAt": 0,
+                "providerValidatedAt": 0,
+                "baseExpiresAt": 0,
+                "absoluteExpiresAt": 0,
+                "version": 0,
+                "updatedAt": 0,
+            }
+        )
+        zero_placeholder = json.dumps(
+            zero_placeholder_payload,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
         )
         self.assertLessEqual(
-            len(template.encode("ascii")),
+            len(zero_placeholder.encode("ascii")),
+            candidate_module.CANDIDATE_MAX_SERIALIZED_RECORD_BYTES,
+        )
+        self.assertGreater(
+            len(final_encoded.encode("ascii")),
             candidate_module.CANDIDATE_MAX_SERIALIZED_RECORD_BYTES,
         )
         with self.assertRaises(CandidateStoreUnavailable) as too_large:
@@ -499,43 +502,6 @@ class CandidateRealRedisTests(unittest.TestCase):
             expected_version=0,
         )
         self.assertEqual(accepted.snapshot, safely_bounded)
-
-        original = candidate_module._template_payload
-
-        def invalid_schema(*args, **kwargs):
-            payload = original(*args, **kwargs)
-            payload["schemaVersion"] = 1
-            return payload
-
-        self._transport(["FLUSHDB"])
-        with patch.object(
-            candidate_module,
-            "_template_payload",
-            side_effect=invalid_schema,
-        ):
-            with self.assertRaises(CandidateStoreUnavailable) as schema:
-                self.store.upsert_confirmed(scope, base, expected_version=0)
-        self.assertEqual(
-            schema.exception.stage,
-            "store_prepare_schema_version_invalid",
-        )
-
-        def invalid_reference(*args, **kwargs):
-            payload = original(*args, **kwargs)
-            payload["positiveReferences"]["manual_priority"] = 0.5
-            return payload
-
-        with patch.object(
-            candidate_module,
-            "_template_payload",
-            side_effect=invalid_reference,
-        ):
-            with self.assertRaises(CandidateStoreUnavailable) as reference:
-                self.store.upsert_confirmed(scope, base, expected_version=0)
-        self.assertEqual(
-            reference.exception.stage,
-            "store_prepare_reference_invalid",
-        )
 
         with self.assertRaises(CandidateStoreUnavailable) as temporal:
             self.store._prepare_confirmed(

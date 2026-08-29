@@ -59,41 +59,11 @@ _USER_OVERFLOW_SENTINEL = "__cuevion_priority_candidate_user_overflow__"
 _NAMESPACE_INVALIDATED_SENTINEL = (
     "__cuevion_priority_candidate_namespace_invalidated__"
 )
-_PREPARE_JSON_DECODE_INVALID_SENTINEL = (
-    "__cuevion_priority_candidate_prepare_json_decode_invalid__"
-)
-_PREPARE_ROOT_TYPE_INVALID_SENTINEL = (
-    "__cuevion_priority_candidate_prepare_root_type_invalid__"
-)
-_PREPARE_SCHEMA_VERSION_INVALID_SENTINEL = (
-    "__cuevion_priority_candidate_prepare_schema_version_invalid__"
-)
-_PREPARE_PROVIDER_AUTHORITY_SHAPE_INVALID_SENTINEL = (
-    "__cuevion_priority_candidate_prepare_provider_authority_shape_invalid__"
-)
-_PREPARE_LABELS_COLLECTION_INVALID_SENTINEL = (
-    "__cuevion_priority_candidate_prepare_labels_collection_invalid__"
-)
-_PREPARE_UNRESOLVED_ROUTING_NULL_INVALID_SENTINEL = (
-    "__cuevion_priority_candidate_prepare_unresolved_routing_null_invalid__"
-)
-_PREPARE_ROUTING_STATE_INVALID_SENTINEL = (
-    "__cuevion_priority_candidate_prepare_routing_state_invalid__"
-)
-_PREPARE_READY_ROUTING_SHAPE_INVALID_SENTINEL = (
-    "__cuevion_priority_candidate_prepare_ready_routing_shape_invalid__"
-)
-_PREPARE_NOISE_REASONS_COLLECTION_INVALID_SENTINEL = (
-    "__cuevion_priority_candidate_prepare_noise_reasons_collection_invalid__"
-)
 _PREPARE_REFERENCE_INVALID_SENTINEL = (
     "__cuevion_priority_candidate_prepare_reference_invalid__"
 )
 _PREPARE_TEMPORAL_INVALID_SENTINEL = (
     "__cuevion_priority_candidate_prepare_temporal_invalid__"
-)
-_PREPARE_SIZE_INVALID_SENTINEL = (
-    "__cuevion_priority_candidate_prepare_size_invalid__"
 )
 _REPAIR_SOURCE_INVALID_SENTINEL = (
     "__cuevion_priority_candidate_repair_source_invalid__"
@@ -198,23 +168,10 @@ CANDIDATE_STORE_FAILURE_STAGES = frozenset(
         "store_commit_prepared_invalid",
         "store_existing_record_invalid",
         "store_prepare_canonical_invalid",
-        "store_prepare_json_decode_invalid",
-        "store_prepare_json_invalid",
-        "store_prepare_labels_collection_invalid",
-        "store_prepare_noise_reasons_collection_invalid",
-        "store_prepare_provider_authority_shape_invalid",
-        "store_prepare_python_schema_invalid",
-        "store_prepare_ready_routing_shape_invalid",
+        "store_prepare_metadata_invalid",
         "store_prepare_reference_invalid",
-        "store_prepare_references_invalid",
-        "store_prepare_root_type_invalid",
-        "store_prepare_routing_state_invalid",
-        "store_prepare_schema_version_invalid",
-        "store_prepare_scope_invalid",
         "store_prepare_size_invalid",
-        "store_prepare_snapshot_mismatch",
         "store_prepare_temporal_invalid",
-        "store_prepare_unresolved_routing_null_invalid",
         "store_read_postcondition_invalid",
         "store_read_result_invalid",
         "store_read_transport",
@@ -820,6 +777,10 @@ def _record_to_wire(
     }
 
 
+class _CandidateRecordSizeExceeded(ValueError):
+    pass
+
+
 def _encode_wire(payload: dict[str, object]) -> str:
     encoded = json.dumps(
         payload,
@@ -829,7 +790,7 @@ def _encode_wire(payload: dict[str, object]) -> str:
         sort_keys=True,
     )
     if len(encoded.encode("ascii")) > CANDIDATE_MAX_SERIALIZED_RECORD_BYTES:
-        raise ValueError("invalid Priority candidate record")
+        raise _CandidateRecordSizeExceeded("invalid Priority candidate record")
     return encoded
 
 
@@ -904,41 +865,9 @@ class _CandidateDecodeFailure(Enum):
     TEMPORAL = "temporal"
 
 
-_PREPARED_DECODE_FAILURE_STAGES = {
-    _CandidateDecodeFailure.JSON: "store_prepare_json_invalid",
-    _CandidateDecodeFailure.SCHEMA: "store_prepare_python_schema_invalid",
-    _CandidateDecodeFailure.SCOPE: "store_prepare_scope_invalid",
-    _CandidateDecodeFailure.REFERENCES: "store_prepare_references_invalid",
-    _CandidateDecodeFailure.TEMPORAL: "store_prepare_temporal_invalid",
-}
-
 _PREPARE_SENTINEL_STAGES = {
-    _PREPARE_JSON_DECODE_INVALID_SENTINEL: "store_prepare_json_decode_invalid",
-    _PREPARE_ROOT_TYPE_INVALID_SENTINEL: "store_prepare_root_type_invalid",
-    _PREPARE_SCHEMA_VERSION_INVALID_SENTINEL: (
-        "store_prepare_schema_version_invalid"
-    ),
-    _PREPARE_PROVIDER_AUTHORITY_SHAPE_INVALID_SENTINEL: (
-        "store_prepare_provider_authority_shape_invalid"
-    ),
-    _PREPARE_LABELS_COLLECTION_INVALID_SENTINEL: (
-        "store_prepare_labels_collection_invalid"
-    ),
-    _PREPARE_UNRESOLVED_ROUTING_NULL_INVALID_SENTINEL: (
-        "store_prepare_unresolved_routing_null_invalid"
-    ),
-    _PREPARE_ROUTING_STATE_INVALID_SENTINEL: (
-        "store_prepare_routing_state_invalid"
-    ),
-    _PREPARE_READY_ROUTING_SHAPE_INVALID_SENTINEL: (
-        "store_prepare_ready_routing_shape_invalid"
-    ),
-    _PREPARE_NOISE_REASONS_COLLECTION_INVALID_SENTINEL: (
-        "store_prepare_noise_reasons_collection_invalid"
-    ),
     _PREPARE_REFERENCE_INVALID_SENTINEL: "store_prepare_reference_invalid",
     _PREPARE_TEMPORAL_INVALID_SENTINEL: "store_prepare_temporal_invalid",
-    _PREPARE_SIZE_INVALID_SENTINEL: "store_prepare_size_invalid",
 }
 
 _COMMIT_SENTINEL_STAGES = {
@@ -1282,47 +1211,38 @@ end
 
 _CANONICAL_COLLECTION_VALIDATOR_SCRIPT += _REFERENCE_VALIDATOR_SCRIPT
 
-_PREPARE_CONFIRMED_SCRIPT = _CANONICAL_COLLECTION_VALIDATOR_SCRIPT + r"""
-local ok,record=pcall(cjson.decode,ARGV[1])
-local maximum=tonumber(ARGV[7])
-if not ok then return ARGV[8] end
-if type(record)~='table' then return ARGV[9] end
-if record['schemaVersion']~=tonumber(ARGV[3]) then return ARGV[10] end
-local collectionFailure=candidateCollectionFailure(record)
-if collectionFailure=='provider_authority_shape' then return ARGV[11] end
-if collectionFailure=='labels_collection' then return ARGV[12] end
-if collectionFailure=='unresolved_routing_null' then return ARGV[13] end
-if collectionFailure=='routing_state' then return ARGV[14] end
-if collectionFailure=='ready_routing_shape' then return ARGV[15] end
-if collectionFailure=='noise_reasons_collection' then return ARGV[16] end
-if not exactReferences(record['positiveReferences'],maximum,false) then
-  return ARGV[17]
-end
-local expectedVersion=tonumber(ARGV[2])
+_PREPARE_CONFIRMED_SCRIPT = r"""
+local maximum=tonumber(ARGV[4])
+if not maximum or maximum<0 or maximum%1~=0 then return ARGV[12] end
+local expectedVersion=tonumber(ARGV[1])
 if not expectedVersion or expectedVersion<0 or expectedVersion%1~=0 or
-  expectedVersion>=maximum then return ARGV[18] end
+  expectedVersion>=maximum then return ARGV[12] end
+local baseSeconds=tonumber(ARGV[2]);local absoluteSeconds=tonumber(ARGV[3])
+if not baseSeconds or baseSeconds<=0 or baseSeconds%1~=0 or
+  not absoluteSeconds or absoluteSeconds<=0 or absoluteSeconds%1~=0 or
+  baseSeconds>absoluteSeconds then return ARGV[12] end
+local references={}
+for index=1,6 do
+  local expires=tonumber(ARGV[4+index])
+  if not expires or expires<0 or expires>maximum or expires%1~=0 then
+    return ARGV[11]
+  end
+  references[index]=expires
+end
 local clock=redis.call('TIME')
 local seconds=tonumber(clock[1]);local micros=tonumber(clock[2])
-if not seconds or not micros then return ARGV[18] end
+if not seconds or not micros then return ARGV[12] end
 local now=seconds*1000+math.floor(micros/1000)
-if now<0 or now>maximum then return ARGV[18] end
-local base=now+tonumber(ARGV[4])*1000
-local absolute=now+tonumber(ARGV[5])*1000
-if base>maximum or absolute>maximum then return ARGV[18] end
-local references=record['positiveReferences'];local positive=0
-for _,kind in ipairs(referenceKinds) do
-  local expires=references[kind]
+if now<0 or now>maximum then return ARGV[12] end
+local base=now+baseSeconds*1000
+local absolute=now+absoluteSeconds*1000
+if base>maximum or absolute>maximum then return ARGV[12] end
+for index=1,6 do
+  local expires=references[index]
   if expires<=now then expires=0 elseif expires>absolute then expires=absolute end
-  references[kind]=expires
-  if expires>positive then positive=expires end
+  references[index]=expires
 end
-record['providerObservedAt']=now;record['providerValidatedAt']=now
-record['baseExpiresAt']=base;record['absoluteExpiresAt']=absolute
-record['graceExpiresAt']=0;record['state']='provider_confirmed'
-record['version']=expectedVersion+1;record['updatedAt']=now
-local encoded=cjson.encode(record)
-if string.len(encoded)>tonumber(ARGV[6]) then return ARGV[19] end
-return encoded
+return {now,base,absolute,expectedVersion+1,unpack(references)}
 """
 
 _UPSERT_CONFIRMED_SCRIPT = _REFERENCE_VALIDATOR_SCRIPT + r"""
@@ -1709,53 +1629,6 @@ def _safe_redis_integer(value: object) -> int | None:
     return parsed if 0 <= parsed <= CANDIDATE_MAX_SAFE_INTEGER else None
 
 
-def _template_payload(
-    secret: str,
-    scope: PriorityCandidateScope,
-    snapshot: PriorityCandidateSnapshot,
-    references: tuple[PriorityCandidatePositiveReference, ...],
-) -> dict[str, object]:
-    snapshot.validate_for_scope(scope)
-    if (
-        type(references) is not tuple
-        or tuple(reference.kind for reference in references)
-        != _POSITIVE_REFERENCE_KINDS
-    ):
-        raise ValueError("invalid Priority candidate positive references")
-    return {
-        "schemaVersion": CANDIDATE_STORE_SCHEMA_VERSION,
-        "scopeDigest": derive_candidate_scope_digest(secret, scope),
-        "identityDigest": derive_candidate_identity_digest(secret, scope),
-        "mailboxId": scope.mailbox_id,
-        "mailboxAccountIdentity": scope.mailbox_account_identity,
-        "provider": scope.provider,
-        "identity": scope.identity.to_wire_dict(),
-        "conversation": _conversation_to_wire(snapshot.conversation),
-        "render": _render_to_wire(snapshot.render),
-        "routingState": snapshot.routing_state,
-        "routing": _routing_to_wire(snapshot.routing),
-        "providerAuthority": {
-            "folder": snapshot.provider_authority.folder,
-            "labels": (
-                list(snapshot.provider_authority.labels)
-                if snapshot.provider_authority.labels
-                else None
-            ),
-        },
-        "providerObservedAt": 0,
-        "providerValidatedAt": 0,
-        "baseExpiresAt": 0,
-        "absoluteExpiresAt": 0,
-        "graceExpiresAt": 0,
-        "positiveReferences": {
-            reference.kind: reference.expires_at for reference in references
-        },
-        "state": "provider_confirmed",
-        "version": 0,
-        "updatedAt": 0,
-    }
-
-
 class PriorityCandidateStore:
     """Strict candidate records plus bounded mailbox/user/namespace indexes."""
 
@@ -1844,27 +1717,6 @@ class PriorityCandidateStore:
             raise CandidateStoreUnavailable(failure_stage)
         return record
 
-    def _decode_prepared_exact(
-        self,
-        value: object,
-        scope: PriorityCandidateScope,
-    ) -> PriorityCandidateRecord:
-        record, failure = _decode_candidate_record_diagnostic(
-            value,
-            secret=self._hmac_secret,
-            expected_mailbox_scope=scope.mailbox_scope(),
-            expected_member_digest=derive_candidate_scope_digest(
-                self._hmac_secret, scope
-            ),
-        )
-        if failure is not None:
-            raise CandidateStoreUnavailable(
-                _PREPARED_DECODE_FAILURE_STAGES[failure]
-            )
-        if record is None or record.scope != scope:
-            raise CandidateStoreUnavailable("store_prepare_scope_invalid")
-        return record
-
     def _prepare_confirmed(
         self,
         scope: PriorityCandidateScope,
@@ -1873,33 +1725,35 @@ class PriorityCandidateStore:
         *,
         expected_version: int,
     ) -> tuple[str, PriorityCandidateRecord]:
-        template = _encode_wire(
-            _template_payload(self._hmac_secret, scope, snapshot, references)
-        )
+        if (
+            not isinstance(scope, PriorityCandidateScope)
+            or not isinstance(snapshot, PriorityCandidateSnapshot)
+        ):
+            raise ValueError("invalid Priority candidate write")
+        snapshot.validate_for_scope(scope)
+        if (
+            type(references) is not tuple
+            or len(references) != len(_POSITIVE_REFERENCE_KINDS)
+            or any(
+                not isinstance(reference, PriorityCandidatePositiveReference)
+                for reference in references
+            )
+            or tuple(reference.kind for reference in references)
+            != _POSITIVE_REFERENCE_KINDS
+        ):
+            raise CandidateStoreUnavailable("store_prepare_reference_invalid")
         result = self._command(
             [
                 "EVAL",
                 _PREPARE_CONFIRMED_SCRIPT,
                 0,
-                template,
                 expected_version,
-                CANDIDATE_STORE_SCHEMA_VERSION,
                 CANDIDATE_BASE_TTL_SECONDS,
                 CANDIDATE_ABSOLUTE_TTL_SECONDS,
-                CANDIDATE_MAX_SERIALIZED_RECORD_BYTES,
                 CANDIDATE_MAX_SAFE_INTEGER,
-                _PREPARE_JSON_DECODE_INVALID_SENTINEL,
-                _PREPARE_ROOT_TYPE_INVALID_SENTINEL,
-                _PREPARE_SCHEMA_VERSION_INVALID_SENTINEL,
-                _PREPARE_PROVIDER_AUTHORITY_SHAPE_INVALID_SENTINEL,
-                _PREPARE_LABELS_COLLECTION_INVALID_SENTINEL,
-                _PREPARE_UNRESOLVED_ROUTING_NULL_INVALID_SENTINEL,
-                _PREPARE_ROUTING_STATE_INVALID_SENTINEL,
-                _PREPARE_READY_ROUTING_SHAPE_INVALID_SENTINEL,
-                _PREPARE_NOISE_REASONS_COLLECTION_INVALID_SENTINEL,
+                *(reference.expires_at for reference in references),
                 _PREPARE_REFERENCE_INVALID_SENTINEL,
                 _PREPARE_TEMPORAL_INVALID_SENTINEL,
-                _PREPARE_SIZE_INVALID_SENTINEL,
             ],
             transport_stage="store_upsert_transport",
             result_stage="store_upsert_result_invalid",
@@ -1911,17 +1765,64 @@ class PriorityCandidateStore:
         )
         if sentinel_stage is not None:
             raise CandidateStoreUnavailable(sentinel_stage)
-        record = self._decode_prepared_exact(result, scope)
-        if record.snapshot != snapshot:
-            raise CandidateStoreUnavailable("store_prepare_snapshot_mismatch")
+        if type(result) is not list or len(result) != 10:
+            raise CandidateStoreUnavailable("store_prepare_metadata_invalid")
+        metadata = tuple(_safe_redis_integer(value) for value in result)
+        if any(value is None for value in metadata):
+            raise CandidateStoreUnavailable("store_prepare_metadata_invalid")
+        now, base, absolute, version, *normalized_expires = metadata
+        assert now is not None
+        assert base is not None
+        assert absolute is not None
+        assert version is not None
         if (
-            record.version != expected_version + 1
-            or record.state != "provider_confirmed"
-            or record.provider_observed_at != record.updated_at
+            version != expected_version + 1
+            or base != now + CANDIDATE_BASE_TTL_SECONDS * 1_000
+            or absolute != now + CANDIDATE_ABSOLUTE_TTL_SECONDS * 1_000
+            or base > absolute
         ):
             raise CandidateStoreUnavailable("store_prepare_temporal_invalid")
+        expected_expires = tuple(
+            0
+            if reference.expires_at <= now
+            else min(reference.expires_at, absolute)
+            for reference in references
+        )
+        if tuple(normalized_expires) != expected_expires:
+            raise CandidateStoreUnavailable("store_prepare_reference_invalid")
         try:
+            normalized_references = tuple(
+                PriorityCandidatePositiveReference(
+                    kind=kind,
+                    expires_at=expires_at,
+                )
+                for kind, expires_at in zip(
+                    _POSITIVE_REFERENCE_KINDS,
+                    normalized_expires,
+                    strict=True,
+                )
+            )
+            record = PriorityCandidateRecord(
+                scope=scope,
+                snapshot=snapshot,
+                provider_observed_at=now,
+                provider_validated_at=now,
+                base_expires_at=base,
+                absolute_expires_at=absolute,
+                grace_expires_at=0,
+                positive_references=normalized_references,
+                state="provider_confirmed",
+                version=version,
+                updated_at=now,
+            )
             canonical = _encode_wire(_record_to_wire(self._hmac_secret, record))
+        except _CandidateRecordSizeExceeded:
+            raise CandidateStoreUnavailable("store_prepare_size_invalid") from None
+        except Exception:
+            raise CandidateStoreUnavailable(
+                "store_prepare_canonical_invalid"
+            ) from None
+        try:
             canonical_record = self._decode_exact(
                 canonical,
                 scope,

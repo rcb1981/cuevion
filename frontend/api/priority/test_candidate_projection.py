@@ -702,40 +702,12 @@ class CandidatePopulationTests(unittest.TestCase):
         ]
         diagnostics = (
             (
-                candidate_store_module._PREPARE_JSON_DECODE_INVALID_SENTINEL,
-                "store_prepare_json_decode_invalid",
+                candidate_store_module._PREPARE_REFERENCE_INVALID_SENTINEL,
+                "store_prepare_reference_invalid",
             ),
             (
-                candidate_store_module._PREPARE_ROOT_TYPE_INVALID_SENTINEL,
-                "store_prepare_root_type_invalid",
-            ),
-            (
-                candidate_store_module._PREPARE_SCHEMA_VERSION_INVALID_SENTINEL,
-                "store_prepare_schema_version_invalid",
-            ),
-            (
-                candidate_store_module._PREPARE_PROVIDER_AUTHORITY_SHAPE_INVALID_SENTINEL,
-                "store_prepare_provider_authority_shape_invalid",
-            ),
-            (
-                candidate_store_module._PREPARE_LABELS_COLLECTION_INVALID_SENTINEL,
-                "store_prepare_labels_collection_invalid",
-            ),
-            (
-                candidate_store_module._PREPARE_UNRESOLVED_ROUTING_NULL_INVALID_SENTINEL,
-                "store_prepare_unresolved_routing_null_invalid",
-            ),
-            (
-                candidate_store_module._PREPARE_ROUTING_STATE_INVALID_SENTINEL,
-                "store_prepare_routing_state_invalid",
-            ),
-            (
-                candidate_store_module._PREPARE_READY_ROUTING_SHAPE_INVALID_SENTINEL,
-                "store_prepare_ready_routing_shape_invalid",
-            ),
-            (
-                candidate_store_module._PREPARE_NOISE_REASONS_COLLECTION_INVALID_SENTINEL,
-                "store_prepare_noise_reasons_collection_invalid",
+                candidate_store_module._PREPARE_TEMPORAL_INVALID_SENTINEL,
+                "store_prepare_temporal_invalid",
             ),
         )
         for sentinel, expected_stage in diagnostics:
@@ -882,9 +854,7 @@ class CandidatePopulationTests(unittest.TestCase):
                     and command[1]
                     == candidate_store_module._PREPARE_CONFIRMED_SCRIPT
                 ):
-                    return {
-                        "result": candidate_store_module._PREPARE_SIZE_INVALID_SENTINEL
-                    }
+                    return {"result": ["malformed-sensitive-metadata"]}
                 return super().__call__(command)
 
         diagnostic_source = gmail_source(
@@ -958,11 +928,11 @@ class CandidatePopulationTests(unittest.TestCase):
         self.assertEqual(imap_report.reason_codes, ("candidate_identity_invalid",))
         self.assertEqual(
             diagnostic_report.reason_codes,
-            ("store_prepare_size_invalid",),
+            ("store_prepare_metadata_invalid",),
         )
         self.assertIn("attempted=1 processed=1 written=0 skipped=1", output)
         self.assertIn("incomplete=True", output)
-        self.assertIn("store_prepare_size_invalid:1", output)
+        self.assertIn("store_prepare_metadata_invalid:1", output)
         for sensitive in (
             "sensitive-provider-id",
             "Sensitive Sender",
@@ -985,6 +955,7 @@ class CandidatePopulationTests(unittest.TestCase):
             "sensitive-diagnostic@example.test",
             "Sensitive Diagnostic Subject",
             "Sensitive Diagnostic Snippet",
+            "malformed-sensitive-metadata",
             "mailbox-1",
         ):
             self.assertNotIn(sensitive, output)
