@@ -198,8 +198,29 @@ class PriorityWorkflowRouteTests(unittest.TestCase):
             snapshot(),
             expected_version=0,
         )
-        result = self.process(write_payload("set_manual_priority", "priority"))
+        candidate_commands = len(self.candidate_redis.commands)
+        workflow_commands = len(self.redis.commands)
+        with self.assertLogs(
+            "api.priority.workflow_route",
+            level="INFO",
+        ) as captured:
+            result = self.process(
+                write_payload("set_manual_priority", "priority")
+            )
         self.assertEqual(result.status_code, 200)
+        self.assertEqual(
+            captured.output,
+            [
+                "INFO:api.priority.workflow_route:"
+                "Priority workflow candidate reference reconciliation "
+                "outcome=candidate_reference_reconciled"
+            ],
+        )
+        self.assertEqual(len(self.redis.commands) - workflow_commands, 1)
+        self.assertEqual(
+            len(self.candidate_redis.commands) - candidate_commands,
+            4,
+        )
         reconciled = self.candidate_store.read_candidate(candidate_scope)
         assert reconciled is not None
         self.assertEqual(reconciled.version, candidate.version + 1)
@@ -216,8 +237,29 @@ class PriorityWorkflowRouteTests(unittest.TestCase):
             mailbox_id="mailbox-1",
             account="primary@example.com",
         )
-        result = self.process(write_payload("set_waiting", "waiting_on_other"))
+        candidate_commands = len(self.candidate_redis.commands)
+        workflow_commands = len(self.redis.commands)
+        with self.assertLogs(
+            "api.priority.workflow_route",
+            level="INFO",
+        ) as captured:
+            result = self.process(
+                write_payload("set_waiting", "waiting_on_other")
+            )
         self.assertEqual(result.status_code, 200)
+        self.assertEqual(
+            captured.output,
+            [
+                "INFO:api.priority.workflow_route:"
+                "Priority workflow candidate reference reconciliation "
+                "outcome=candidate_missing"
+            ],
+        )
+        self.assertEqual(len(self.redis.commands) - workflow_commands, 1)
+        self.assertEqual(
+            len(self.candidate_redis.commands) - candidate_commands,
+            1,
+        )
         self.assertEqual(result.payload["record"]["waiting"], "waiting_on_other")
         self.assertIsNone(self.candidate_store.read_candidate(candidate_scope))
         self.assertFalse(
@@ -251,6 +293,66 @@ class PriorityWorkflowRouteTests(unittest.TestCase):
         observed = self.process(read_payload()).payload["records"][0]
         self.assertEqual(observed, result.payload["record"])
 
+    def test_every_fixed_workflow_reconciliation_outcome_uses_bounded_level(
+        self,
+    ):
+        cases = (
+            (
+                CandidateReferenceReconciliationResult.RECONCILED,
+                "INFO",
+            ),
+            (
+                CandidateReferenceReconciliationResult.CANDIDATE_MISSING,
+                "INFO",
+            ),
+            (
+                CandidateReferenceReconciliationResult.CANDIDATE_INELIGIBLE,
+                "WARNING",
+            ),
+            (
+                CandidateReferenceReconciliationResult.CAS_CONFLICT_EXHAUSTED,
+                "WARNING",
+            ),
+            (
+                CandidateReferenceReconciliationResult.STORE_UNAVAILABLE,
+                "WARNING",
+            ),
+        )
+        for outcome, level in cases:
+            with self.subTest(outcome=outcome.value):
+                candidate_commands = len(self.candidate_redis.commands)
+                workflow_commands = len(self.redis.commands)
+                with patch(
+                    "api.priority.workflow_route.reconcile_workflow_candidate_references",
+                    return_value=outcome,
+                ) as reconcile, self.assertLogs(
+                    "api.priority.workflow_route",
+                    level=level,
+                ) as captured:
+                    result = self.process(
+                        write_payload("set_manual_priority", "priority")
+                    )
+                self.assertEqual(result.status_code, 200)
+                self.assertEqual(
+                    set(result.payload),
+                    {"ok", "status", "record"},
+                )
+                self.assertNotIn("reconciliation", result.payload)
+                self.assertEqual(
+                    captured.output,
+                    [
+                        f"{level}:api.priority.workflow_route:"
+                        "Priority workflow candidate reference reconciliation "
+                        f"outcome={outcome.value}"
+                    ],
+                )
+                self.assertEqual(reconcile.call_count, 1)
+                self.assertEqual(len(self.redis.commands) - workflow_commands, 1)
+                self.assertEqual(
+                    len(self.candidate_redis.commands) - candidate_commands,
+                    0,
+                )
+
     def test_exhausted_candidate_cas_does_not_fail_accepted_workflow_write(self):
         with patch(
             "api.priority.workflow_route.reconcile_workflow_candidate_references",
@@ -270,6 +372,59 @@ class PriorityWorkflowRouteTests(unittest.TestCase):
         )
         observed = self.process(read_payload()).payload["records"][0]
         self.assertEqual(observed, result.payload["record"])
+
+    def test_reconciliation_log_excludes_exact_workflow_scope_and_storage_data(
+        self,
+    ):
+        mailbox_id = "privacy-mailbox-id"
+        provider_folder = "privacy-provider-folder"
+        uid_validity = "87654321"
+        imap_uid = "12345678"
+        self.authority_resolver.return_value = authority(
+            mailbox_id=mailbox_id,
+            provider="custom_imap",
+        )
+        payload = {
+            "operation": "set_waiting",
+            "mailboxId": mailbox_id,
+            "identity": {
+                "provider": "custom_imap",
+                "providerFolder": provider_folder,
+                "uidValidity": uid_validity,
+                "imapUid": imap_uid,
+            },
+            "value": "waiting_on_other",
+        }
+        with patch(
+            "api.priority.workflow_route.reconcile_workflow_candidate_references",
+            return_value=(
+                CandidateReferenceReconciliationResult.CANDIDATE_INELIGIBLE
+            ),
+        ), self.assertLogs(
+            "api.priority.workflow_route",
+            level="WARNING",
+        ) as captured:
+            result = self.process(payload)
+        self.assertEqual(result.status_code, 200)
+        output = "\n".join(captured.output)
+        self.assertEqual(
+            output,
+            "WARNING:api.priority.workflow_route:"
+            "Priority workflow candidate reference reconciliation "
+            "outcome=candidate_ineligible",
+        )
+        redis_key = next(iter(self.redis.values))
+        hmac_digest = redis_key.rsplit(":", 1)[-1]
+        for sensitive in (
+            mailbox_id,
+            provider_folder,
+            uid_validity,
+            imap_uid,
+            redis_key,
+            hmac_digest,
+            SECRET,
+        ):
+            self.assertNotIn(sensitive, output)
 
     def test_imap_mailbox_accepts_only_exact_imap_identity(self):
         self.authority_resolver.return_value = authority(provider="custom_imap")

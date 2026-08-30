@@ -15,6 +15,9 @@ from .candidate_projection import (
     populate_runtime_priority_candidates,
     project_priority_candidate,
 )
+from .candidate_reference_reconciliation import (
+    CandidateReferenceReconciliationResult,
+)
 from .candidate_store import PriorityCandidateStore
 from .store import PriorityWorkflowScope, PriorityWorkflowStore
 from .test_candidate_store import MemoryRedis, SECRET
@@ -383,13 +386,36 @@ class CandidatePopulationTests(unittest.TestCase):
                     value="returned_reply",
                 )
                 self.assertIsNone(candidate_store.read_candidate(candidate_scope))
-                report = populate_priority_candidates(
-                    authority,
-                    [source],
-                    store=candidate_store,
-                    workflow_store=workflow_store,
-                )
+                candidate_commands = len(candidate_redis.commands)
+                workflow_commands = len(workflow_redis.commands)
+                with self.assertLogs(
+                    "api.priority.candidate_projection",
+                    level="INFO",
+                ) as captured:
+                    report = populate_priority_candidates(
+                        authority,
+                        [source],
+                        store=candidate_store,
+                        workflow_store=workflow_store,
+                    )
                 self.assertEqual((report.written, report.incomplete), (1, False))
+                self.assertEqual(
+                    (report.attempted, report.processed, report.skipped),
+                    (1, 1, 0),
+                )
+                self.assertEqual(
+                    captured.output,
+                    [
+                        "INFO:api.priority.candidate_projection:"
+                        "Priority candidate workflow reference reconciliation "
+                        "outcome=candidate_reference_reconciled"
+                    ],
+                )
+                self.assertGreater(len(candidate_redis.commands), candidate_commands)
+                self.assertEqual(
+                    len(workflow_redis.commands) - workflow_commands,
+                    1,
+                )
                 candidate = candidate_store.read_candidate(candidate_scope)
                 assert candidate is not None
                 self.assertEqual(
@@ -410,6 +436,56 @@ class CandidatePopulationTests(unittest.TestCase):
                         for command in workflow_redis.commands
                     )
                 )
+
+    def test_workflow_record_absent_logs_info_without_population_change(self):
+        candidate_redis = MemoryRedis(current_ms=1_700_000_000_000)
+        candidate_store = PriorityCandidateStore(
+            candidate_redis,
+            hmac_secret=SECRET,
+        )
+        workflow_redis = WorkflowMemoryRedis()
+        workflow_store = PriorityWorkflowStore(
+            workflow_redis,
+            hmac_secret=SECRET,
+        )
+        with self.assertLogs(
+            "api.priority.candidate_projection",
+            level="INFO",
+        ) as captured:
+            report = populate_priority_candidates(
+                gmail_authority(),
+                [gmail_source()],
+                store=candidate_store,
+                workflow_store=workflow_store,
+            )
+        self.assertEqual(
+            (
+                report.attempted,
+                report.processed,
+                report.written,
+                report.skipped,
+                report.incomplete,
+                report.reason_counts,
+            ),
+            (1, 1, 1, 0, False, ()),
+        )
+        self.assertEqual(
+            captured.output,
+            [
+                "INFO:api.priority.candidate_projection:"
+                "Priority candidate workflow reference reconciliation "
+                "outcome=workflow_record_absent"
+            ],
+        )
+        self.assertEqual(len(workflow_redis.commands), 1)
+        self.assertEqual(workflow_redis.commands[0][2], 1)
+        scope, _snapshot = project_priority_candidate(
+            gmail_authority(),
+            gmail_source(),
+        )
+        candidate = candidate_store.read_candidate(scope)
+        assert candidate is not None
+        self.assertEqual(candidate.version, 1)
 
     def test_workflow_reconciliation_failure_does_not_stop_provider_population(
         self,
@@ -443,6 +519,96 @@ class CandidatePopulationTests(unittest.TestCase):
             sum("outcome=store_unavailable" in line for line in captured.output),
             2,
         )
+
+    def test_reconciliation_logs_exclude_provider_content_scope_and_storage(self):
+        gmail = gmail_authority(
+            mailbox_id="privacy-gmail-mailbox-id",
+            mailbox_account_identity="privacy-gmail-account@example.test",
+        )
+        gmail_row = gmail_source(
+            providerMessageId="privacy-gmail-provider-message-id",
+            providerThreadId="privacy-gmail-conversation-id",
+            senderDisplay="Privacy Gmail Sender",
+            senderAddress="privacy-gmail-sender@example.test",
+            subject="Privacy Gmail Subject",
+            snippet="Privacy Gmail Snippet",
+        )
+        imap = imap_authority(
+            mailbox_id="privacy-imap-mailbox-id",
+            mailbox_account_identity="privacy-imap-account@example.test",
+        )
+        imap_row = imap_source(
+            uidValidity="87654321",
+            imapUid="12345678",
+            conversationId="privacy-imap-conversation-id",
+            rfcRootMessageId="privacy-root@example.test",
+            rfcMessageId="privacy-message@example.test",
+            senderDisplay="Privacy IMAP Sender",
+            senderAddress="privacy-imap-sender@example.test",
+            subject="Privacy IMAP Subject",
+            snippet="Privacy IMAP Snippet",
+        )
+        workflow_commands = len(self.workflow_redis.commands)
+        with patch(
+            "api.priority.candidate_projection.reconcile_candidate_from_workflow_store",
+            return_value=CandidateReferenceReconciliationResult.RECONCILED,
+        ), self.assertLogs(
+            "api.priority.candidate_projection",
+            level="INFO",
+        ) as captured:
+            gmail_report = populate_priority_candidates(
+                gmail,
+                [gmail_row],
+                store=self.store,
+                workflow_store=self.workflow_store,
+            )
+            imap_report = populate_priority_candidates(
+                imap,
+                [imap_row],
+                store=self.store,
+                workflow_store=self.workflow_store,
+            )
+        self.assertEqual((gmail_report.written, imap_report.written), (1, 1))
+        self.assertEqual(
+            captured.output,
+            [
+                "INFO:api.priority.candidate_projection:"
+                "Priority candidate workflow reference reconciliation "
+                "outcome=candidate_reference_reconciled",
+                "INFO:api.priority.candidate_projection:"
+                "Priority candidate workflow reference reconciliation "
+                "outcome=candidate_reference_reconciled",
+            ],
+        )
+        self.assertEqual(len(self.workflow_redis.commands), workflow_commands)
+        output = "\n".join(captured.output)
+        redis_keys = tuple(
+            key for key in self.redis.values if ":record:" in key
+        )
+        hmac_digests = tuple(key.rsplit(":", 1)[-1] for key in redis_keys)
+        for sensitive in (
+            gmail.mailbox_id,
+            gmail.mailbox_account_identity,
+            gmail_row["providerMessageId"],
+            gmail_row["providerThreadId"],
+            gmail_row["senderDisplay"],
+            gmail_row["senderAddress"],
+            gmail_row["subject"],
+            gmail_row["snippet"],
+            imap.mailbox_id,
+            imap.mailbox_account_identity,
+            imap_row["uidValidity"],
+            imap_row["imapUid"],
+            imap_row["conversationId"],
+            imap_row["senderDisplay"],
+            imap_row["senderAddress"],
+            imap_row["subject"],
+            imap_row["snippet"],
+            *redis_keys,
+            *hmac_digests,
+            SECRET,
+        ):
+            self.assertNotIn(sensitive, output)
 
     def test_rejected_row_does_not_block_a_valid_row(self):
         result = populate_priority_candidates(

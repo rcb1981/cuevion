@@ -664,6 +664,11 @@ def populate_priority_candidates(
                     "Priority candidate workflow reference reconciliation outcome=%s",
                     reconciliation.value,
                 )
+            else:
+                logger.info(
+                    "Priority candidate workflow reference reconciliation outcome=%s",
+                    reconciliation.value,
+                )
 
     return _report(attempted, processed, written, reason_counts)
 

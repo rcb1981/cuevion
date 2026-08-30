@@ -269,6 +269,11 @@ def process_priority_workflow_request(
             "Priority workflow candidate reference reconciliation outcome=%s",
             reconciliation.value,
         )
+    else:
+        logger.info(
+            "Priority workflow candidate reference reconciliation outcome=%s",
+            reconciliation.value,
+        )
     return WorkflowRouteResponse(
         200,
         {
