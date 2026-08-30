@@ -460,25 +460,37 @@ type RenderModeCacheHarness = {
   ) => {
     mode: string;
     html?: string;
+    normalizedNativeHtml?: string;
     emailStyles?: string;
     remoteImageCount: number;
     cidImageCount: number;
     invalidImageCount: number;
   };
-  getCounts: () => { imported: number; compose: number };
+  getCounts: () => { imported: number; compose: number; nativeNormalization: number };
   getCacheSize: () => number;
+  getNormalizedInputs: () => string[];
+  expireOldestCachePolicy: () => void;
 };
 
 const loadRenderModeCacheHarness = () =>
   new Function(
     `let importedSanitizationCount = 0;
 let composeSanitizationCount = 0;
+let nativeNormalizationCount = 0;
+const normalizedInputs = [];
 
 function isComposeGeneratedHtml(value) {
   return /data-compose-(quote|signature)/i.test(value);
 }
 
+function normalizeNativeMessageHtmlForPane(html) {
+  nativeNormalizationCount += 1;
+  normalizedInputs.push(html);
+  return \`<div data-native-normalized="true">\${html}</div>\`;
+}
+
 function buildStubSanitizedResult(bodyHtml, options, sourceType) {
+  const sanitizedBodyHtml = bodyHtml.replace(/<script\\b[\\s\\S]*?<\\/script>/gi, "");
   const attachment = (options?.attachments ?? []).find(
     (candidate) => candidate.contentId === "logo",
   );
@@ -492,10 +504,15 @@ function buildStubSanitizedResult(bodyHtml, options, sourceType) {
       ? '<img src="https://tracker.example/image.png">'
       : '<div data-email-image-placeholder="true"></div>'
     : "";
+  const isNativeHtml = /^<p(?:\\s|>)/i.test(sanitizedBodyHtml);
+  const sanitizedHtml = isNativeHtml
+    ? sanitizedBodyHtml
+    : \`<table data-source="\${sourceType}" data-theme="\${options?.themeMode ?? "unset"}"><tr><td>\${sanitizedBodyHtml}\${cidMarkup}\${remoteMarkup}</td></tr></table>\`;
 
   return {
-    html: \`<table data-source="\${sourceType}" data-theme="\${options?.themeMode ?? "unset"}"><tr><td>\${bodyHtml}\${cidMarkup}\${remoteMarkup}</td></tr></table>\`,
-    emailStyles: sourceType === "imported" ? ".newsletter { color: #123; }" : "",
+    html: sanitizedHtml,
+    emailStyles:
+      sourceType === "imported" && !isNativeHtml ? ".newsletter { color: #123; }" : "",
     remoteImageCount,
     cidImageCount: /cid:logo/i.test(bodyHtml) && !attachment ? 1 : 0,
     invalidImageCount: 0,
@@ -519,11 +536,18 @@ return {
   getCounts: () => ({
     imported: importedSanitizationCount,
     compose: composeSanitizationCount,
+    nativeNormalization: nativeNormalizationCount,
   }),
   getCacheSize: () =>
-    typeof messageBodyRenderModeCache === "undefined"
+    typeof messageBodyRenderProjectionCache === "undefined"
       ? 0
-      : messageBodyRenderModeCache.length,
+      : messageBodyRenderProjectionCache.length,
+  getNormalizedInputs: () => [...normalizedInputs],
+  expireOldestCachePolicy: () => {
+    if (messageBodyRenderProjectionCache[0]) {
+      messageBodyRenderProjectionCache[0].policyVersion = "expired-policy";
+    }
+  },
 };`,
   )() as RenderModeCacheHarness;
 
@@ -550,7 +574,10 @@ const secondIdenticalExternalResult =
   );
 const thirdIdenticalExternalResult =
   identicalExternalHarness.resolveMessageBodyRenderMode(
-    identicalExternalMessage,
+    {
+      ...identicalExternalMessage,
+      attachments: [...identicalExternalMessage.attachments],
+    },
     identicalExternalOptions,
   );
 assert.equal(
@@ -560,6 +587,58 @@ assert.equal(
 );
 assert.strictEqual(firstIdenticalExternalResult, secondIdenticalExternalResult);
 assert.strictEqual(secondIdenticalExternalResult, thirdIdenticalExternalResult);
+
+const nativeProjectionHarness = loadRenderModeCacheHarness();
+const nativeMessage = {
+  body: [],
+  bodyHtml: "<p>Native message</p>",
+  attachments: [],
+};
+const firstNativeResult = nativeProjectionHarness.resolveMessageBodyRenderMode(
+  nativeMessage,
+  identicalExternalOptions,
+);
+const secondNativeResult = nativeProjectionHarness.resolveMessageBodyRenderMode(
+  nativeMessage,
+  identicalExternalOptions,
+);
+const recreatedNativeResult = nativeProjectionHarness.resolveMessageBodyRenderMode(
+  { ...nativeMessage, attachments: [] },
+  identicalExternalOptions,
+);
+assert.equal(firstNativeResult.mode, "native_html");
+assert.equal(nativeProjectionHarness.getCounts().imported, 1);
+assert.equal(
+  nativeProjectionHarness.getCounts().nativeNormalization,
+  1,
+  "unchanged native HTML must normalize only once across rerenders and recreation",
+);
+assert.strictEqual(firstNativeResult, secondNativeResult);
+assert.strictEqual(secondNativeResult, recreatedNativeResult);
+assert.match(firstNativeResult.normalizedNativeHtml ?? "", /data-native-normalized/);
+
+const sanitizerOrderHarness = loadRenderModeCacheHarness();
+const sanitizerOrderResult = sanitizerOrderHarness.resolveMessageBodyRenderMode(
+  {
+    body: [],
+    bodyHtml: '<p>Safe<script>alert("unsafe")</script></p>',
+    attachments: [],
+  },
+  identicalExternalOptions,
+);
+assert.equal(sanitizerOrderResult.mode, "native_html");
+assert.doesNotMatch(sanitizerOrderHarness.getNormalizedInputs()[0] ?? "", /script|unsafe/);
+assert.doesNotMatch(sanitizerOrderResult.normalizedNativeHtml ?? "", /script|unsafe/);
+assert.match(
+  renderModeCacheSource,
+  /normalizedNativeHtml:\s*normalizeNativeMessageHtmlForPane\(\s*sanitizedHtmlResult\.html,?\s*\)/,
+  "native normalization must consume only sanitizer-derived HTML",
+);
+assert.doesNotMatch(
+  renderModeCacheSource,
+  /normalizeNativeMessageHtmlForPane\(\s*messageBodyHtml\s*\)/,
+  "raw bodyHtml must never enter native normalization",
+);
 
 const bodyMutationHarness = loadRenderModeCacheHarness();
 const originalBodyResult = bodyMutationHarness.resolveMessageBodyRenderMode(
@@ -620,6 +699,25 @@ assert.notDeepEqual(firstCidResult, changedCidSourceResult);
 assert.notDeepEqual(changedCidSourceResult, changedCidMimeResult);
 assert.notDeepEqual(changedCidMimeResult, changedCidContentIdResult);
 
+const attachmentOrderHarness = loadRenderModeCacheHarness();
+const orderedAttachments = [
+  { contentId: "logo", inlineSrc: "data:image/png;base64,AAAA", mimeType: "image/png" },
+  { contentId: "other", inlineSrc: "data:image/png;base64,BBBB", mimeType: "image/png" },
+];
+attachmentOrderHarness.resolveMessageBodyRenderMode(
+  { body: [], bodyHtml: cidBodyHtml, attachments: orderedAttachments },
+  identicalExternalOptions,
+);
+attachmentOrderHarness.resolveMessageBodyRenderMode(
+  { body: [], bodyHtml: cidBodyHtml, attachments: [...orderedAttachments].reverse() },
+  identicalExternalOptions,
+);
+assert.equal(
+  attachmentOrderHarness.getCounts().imported,
+  2,
+  "attachment reordering must remain a cache miss",
+);
+
 const showImagesHarness = loadRenderModeCacheHarness();
 const remoteBodyHtml = '<table><tr><td><img src="https://tracker.example/image.png"></td></tr></table>';
 const remoteImagesOffResult = showImagesHarness.resolveMessageBodyRenderMode(
@@ -669,24 +767,82 @@ assert.equal(sourceTypeHarness.getCounts().compose, 1);
 assert.equal(importedResult.mode, "html");
 assert.equal(composeResult.mode, "compose_html");
 
+const policyVersionHarness = loadRenderModeCacheHarness();
+policyVersionHarness.resolveMessageBodyRenderMode(
+  identicalExternalMessage,
+  identicalExternalOptions,
+);
+policyVersionHarness.expireOldestCachePolicy();
+policyVersionHarness.resolveMessageBodyRenderMode(
+  identicalExternalMessage,
+  identicalExternalOptions,
+);
+assert.equal(
+  policyVersionHarness.getCounts().imported,
+  2,
+  "a cache policy-version mismatch must force a fresh sanitization",
+);
+
 const evictionHarness = loadRenderModeCacheHarness();
-for (let index = 0; index < 9; index += 1) {
-  evictionHarness.resolveMessageBodyRenderMode(
-    {
-      body: [],
-      bodyHtml: `<table><tr><td>Cache entry ${index}</td></tr></table>`,
-      attachments: [],
-    },
-    identicalExternalOptions,
-  );
-}
-assert.equal(evictionHarness.getCacheSize(), 8, "render cache must stay bounded at eight entries");
+const activeMessages = Array.from({ length: 65 }, (_, index) => ({
+  body: [],
+  bodyHtml: `<table><tr><td>Cache entry ${index}</td></tr></table>`,
+  attachments: [],
+}));
+activeMessages.forEach((message) => {
+  evictionHarness.resolveMessageBodyRenderMode(message, identicalExternalOptions);
+});
+assert.equal(evictionHarness.getCounts().imported, 65);
+assert.equal(
+  evictionHarness.getCacheSize(),
+  64,
+  "the structural render-projection cache must remain bounded",
+);
+activeMessages.forEach((message) => {
+  evictionHarness.resolveMessageBodyRenderMode(message, identicalExternalOptions);
+});
+assert.equal(
+  evictionHarness.getCounts().imported,
+  65,
+  "a live active set larger than eight must not cyclically self-evict",
+);
 evictionHarness.resolveMessageBodyRenderMode(
   { body: [], bodyHtml: "<table><tr><td>Cache entry 0</td></tr></table>", attachments: [] },
   identicalExternalOptions,
 );
 assert.equal(
   evictionHarness.getCounts().imported,
-  10,
-  "the least-recently-used entry must be sanitized again after eviction",
+  66,
+  "an evicted inactive structural entry must be recomputed for a recreated identity",
+);
+
+const renderThreadMessageStart = workspaceShellSource.indexOf(
+  "const renderThreadMessage = (",
+);
+const renderThreadMessageEnd = workspaceShellSource.indexOf(
+  "const renderThreadTimeline = (",
+  renderThreadMessageStart,
+);
+const renderThreadMessageSource = workspaceShellSource.slice(
+  renderThreadMessageStart,
+  renderThreadMessageEnd,
+);
+const collapsedBranchIndex = renderThreadMessageSource.indexOf("if (collapsed)");
+const bodyProjectionIndex = renderThreadMessageSource.indexOf(
+  "resolveMessageBodyRenderMode(threadMessage",
+);
+assert.ok(
+  collapsedBranchIndex >= 0 && bodyProjectionIndex > collapsedBranchIndex,
+  "collapsed thread members must return before resolving a body projection",
+);
+assert.doesNotMatch(
+  renderThreadMessageSource.slice(collapsedBranchIndex, bodyProjectionIndex),
+  /resolveMessageBodyRenderMode|sanitizeMessageBodyHtml|sanitizeComposeGeneratedHtml/,
+  "collapsed history must not sanitize or project hidden bodies",
+);
+
+assert.match(
+  emailHtmlStageSource,
+  /srcDoc=\{buildEmailStageDocument\(html, themeMode,/,
+  "theme changes must continue to flow into iframe presentation",
 );

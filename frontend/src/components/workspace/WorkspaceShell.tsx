@@ -7473,6 +7473,7 @@ type MessageBodyRenderMode =
   | {
       mode: "native_html";
       html: string;
+      normalizedNativeHtml: string;
       emailStyles: string;
       remoteImageCount: number;
       cidImageCount: number;
@@ -7500,7 +7501,7 @@ type MessageBodyRenderAttachmentIdentity = Pick<
   "contentId" | "inlineSrc" | "mimeType"
 >;
 
-type MessageBodyRenderModeCacheEntry = {
+type MessageBodyRenderProjectionCacheEntry = {
   policyVersion: typeof MESSAGE_BODY_RENDER_CACHE_POLICY_VERSION;
   sourceType: MessageBodyRenderSourceType;
   bodyHtml: string;
@@ -7511,8 +7512,13 @@ type MessageBodyRenderModeCacheEntry = {
 };
 
 const MESSAGE_BODY_RENDER_CACHE_POLICY_VERSION = "phase-2a.5-v1";
-const MESSAGE_BODY_RENDER_CACHE_MAX_ENTRIES = 8;
-const messageBodyRenderModeCache: MessageBodyRenderModeCacheEntry[] = [];
+const MESSAGE_BODY_RENDER_PROJECTION_CACHE_MAX_ENTRIES = 64;
+const MESSAGE_BODY_RENDER_PROJECTION_CACHE_MAX_VARIANTS_PER_IDENTITY = 4;
+const messageBodyRenderProjectionCache: MessageBodyRenderProjectionCacheEntry[] = [];
+const messageBodyRenderProjectionCacheByIdentity = new WeakMap<
+  object,
+  MessageBodyRenderProjectionCacheEntry[]
+>();
 
 function hasExactMessageBodyRenderAttachmentInputs(
   cachedAttachments: MessageBodyRenderAttachmentIdentity[],
@@ -7534,39 +7540,136 @@ function hasExactMessageBodyRenderAttachmentInputs(
   );
 }
 
-function readCachedMessageBodyRenderMode(
+function hasExactMessageBodyRenderProjectionInputs(
+  entry: MessageBodyRenderProjectionCacheEntry,
   bodyHtml: string,
   attachments: MessageBodyRenderAttachmentIdentity[] | undefined,
   allowRemoteImages: boolean,
   themeMode: "light" | "dark" | undefined,
   sourceType: MessageBodyRenderSourceType,
 ) {
-  for (let index = messageBodyRenderModeCache.length - 1; index >= 0; index -= 1) {
-    const entry = messageBodyRenderModeCache[index];
+  return (
+    entry.policyVersion === MESSAGE_BODY_RENDER_CACHE_POLICY_VERSION &&
+    entry.sourceType === sourceType &&
+    entry.bodyHtml === bodyHtml &&
+    entry.allowRemoteImages === allowRemoteImages &&
+    entry.themeMode === themeMode &&
+    hasExactMessageBodyRenderAttachmentInputs(entry.attachments, attachments)
+  );
+}
+
+function findCachedMessageBodyRenderProjection(
+  entries: MessageBodyRenderProjectionCacheEntry[],
+  bodyHtml: string,
+  attachments: MessageBodyRenderAttachmentIdentity[] | undefined,
+  allowRemoteImages: boolean,
+  themeMode: "light" | "dark" | undefined,
+  sourceType: MessageBodyRenderSourceType,
+) {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
 
     if (
-      entry.policyVersion !== MESSAGE_BODY_RENDER_CACHE_POLICY_VERSION ||
-      entry.sourceType !== sourceType ||
-      entry.bodyHtml !== bodyHtml ||
-      entry.allowRemoteImages !== allowRemoteImages ||
-      entry.themeMode !== themeMode ||
-      !hasExactMessageBodyRenderAttachmentInputs(entry.attachments, attachments)
+      hasExactMessageBodyRenderProjectionInputs(
+        entry,
+        bodyHtml,
+        attachments,
+        allowRemoteImages,
+        themeMode,
+        sourceType,
+      )
     ) {
-      continue;
+      return entry;
     }
-
-    if (index !== messageBodyRenderModeCache.length - 1) {
-      messageBodyRenderModeCache.splice(index, 1);
-      messageBodyRenderModeCache.push(entry);
-    }
-
-    return entry.result;
   }
 
   return null;
 }
 
-function cacheMessageBodyRenderMode(
+function promoteMessageBodyRenderProjectionCacheEntry(
+  entry: MessageBodyRenderProjectionCacheEntry,
+) {
+  const currentIndex = messageBodyRenderProjectionCache.indexOf(entry);
+
+  if (currentIndex >= 0) {
+    messageBodyRenderProjectionCache.splice(currentIndex, 1);
+  }
+
+  messageBodyRenderProjectionCache.push(entry);
+
+  if (
+    messageBodyRenderProjectionCache.length >
+    MESSAGE_BODY_RENDER_PROJECTION_CACHE_MAX_ENTRIES
+  ) {
+    messageBodyRenderProjectionCache.shift();
+  }
+}
+
+function rememberMessageBodyRenderProjectionForIdentity(
+  message: object,
+  entry: MessageBodyRenderProjectionCacheEntry,
+) {
+  const currentEntries = messageBodyRenderProjectionCacheByIdentity.get(message) ?? [];
+  const currentIndex = currentEntries.indexOf(entry);
+
+  if (currentIndex >= 0) {
+    currentEntries.splice(currentIndex, 1);
+  }
+
+  currentEntries.push(entry);
+
+  if (
+    currentEntries.length >
+    MESSAGE_BODY_RENDER_PROJECTION_CACHE_MAX_VARIANTS_PER_IDENTITY
+  ) {
+    currentEntries.shift();
+  }
+
+  messageBodyRenderProjectionCacheByIdentity.set(message, currentEntries);
+}
+
+function readCachedMessageBodyRenderProjection(
+  message: object,
+  bodyHtml: string,
+  attachments: MessageBodyRenderAttachmentIdentity[] | undefined,
+  allowRemoteImages: boolean,
+  themeMode: "light" | "dark" | undefined,
+  sourceType: MessageBodyRenderSourceType,
+) {
+  const identityEntry = findCachedMessageBodyRenderProjection(
+    messageBodyRenderProjectionCacheByIdentity.get(message) ?? [],
+    bodyHtml,
+    attachments,
+    allowRemoteImages,
+    themeMode,
+    sourceType,
+  );
+
+  if (identityEntry) {
+    promoteMessageBodyRenderProjectionCacheEntry(identityEntry);
+    return identityEntry.result;
+  }
+
+  const structuralEntry = findCachedMessageBodyRenderProjection(
+    messageBodyRenderProjectionCache,
+    bodyHtml,
+    attachments,
+    allowRemoteImages,
+    themeMode,
+    sourceType,
+  );
+
+  if (!structuralEntry) {
+    return null;
+  }
+
+  promoteMessageBodyRenderProjectionCacheEntry(structuralEntry);
+  rememberMessageBodyRenderProjectionForIdentity(message, structuralEntry);
+  return structuralEntry.result;
+}
+
+function cacheMessageBodyRenderProjection(
+  message: object,
   bodyHtml: string,
   attachments: MessageBodyRenderAttachmentIdentity[] | undefined,
   allowRemoteImages: boolean,
@@ -7574,7 +7677,7 @@ function cacheMessageBodyRenderMode(
   sourceType: MessageBodyRenderSourceType,
   result: MessageBodyRenderMode,
 ) {
-  messageBodyRenderModeCache.push({
+  const entry: MessageBodyRenderProjectionCacheEntry = {
     policyVersion: MESSAGE_BODY_RENDER_CACHE_POLICY_VERSION,
     sourceType,
     bodyHtml,
@@ -7586,11 +7689,10 @@ function cacheMessageBodyRenderMode(
     allowRemoteImages,
     themeMode,
     result,
-  });
+  };
 
-  if (messageBodyRenderModeCache.length > MESSAGE_BODY_RENDER_CACHE_MAX_ENTRIES) {
-    messageBodyRenderModeCache.shift();
-  }
+  rememberMessageBodyRenderProjectionForIdentity(message, entry);
+  promoteMessageBodyRenderProjectionCacheEntry(entry);
 }
 
 function resolveMessageBodyRenderMode(
@@ -7606,7 +7708,8 @@ function resolveMessageBodyRenderMode(
     : null;
   const cachedRenderMode =
     messageBodyHtml && sourceType
-      ? readCachedMessageBodyRenderMode(
+      ? readCachedMessageBodyRenderProjection(
+          message,
           messageBodyHtml,
           message.attachments,
           allowRemoteImages,
@@ -7653,14 +7756,32 @@ function resolveMessageBodyRenderMode(
       sanitizedHtmlResult.remoteImageCount > 0 ||
       hasRichHtmlMarkup;
 
-    renderMode = {
-      mode: sourceType === "compose" ? "compose_html" : isExternalHtml ? "html" : "native_html",
+    const sharedHtmlRenderFields = {
       html: sanitizedHtmlResult.html,
       emailStyles: sanitizedHtmlResult.emailStyles,
       remoteImageCount: sanitizedHtmlResult.remoteImageCount,
       cidImageCount: sanitizedHtmlResult.cidImageCount,
       invalidImageCount: sanitizedHtmlResult.invalidImageCount,
     };
+
+    renderMode =
+      sourceType === "compose"
+        ? {
+            mode: "compose_html",
+            ...sharedHtmlRenderFields,
+          }
+        : isExternalHtml
+          ? {
+              mode: "html",
+              ...sharedHtmlRenderFields,
+            }
+          : {
+              mode: "native_html",
+              ...sharedHtmlRenderFields,
+              normalizedNativeHtml: normalizeNativeMessageHtmlForPane(
+                sanitizedHtmlResult.html,
+              ),
+            };
   } else {
     renderMode = {
       mode: "plain",
@@ -7671,7 +7792,8 @@ function resolveMessageBodyRenderMode(
   }
 
   if (messageBodyHtml && sourceType) {
-    cacheMessageBodyRenderMode(
+    cacheMessageBodyRenderProjection(
+      message,
       messageBodyHtml,
       message.attachments,
       allowRemoteImages,
@@ -19577,7 +19699,7 @@ function MailboxView({
     });
     const normalizedNativeHtml =
       bodyRenderMode.mode === "native_html"
-        ? normalizeNativeMessageHtmlForPane(bodyRenderMode.html)
+        ? bodyRenderMode.normalizedNativeHtml
         : null;
     const reliableQuoteHtml =
       bodyRenderMode.mode === "plain"
@@ -54777,7 +54899,7 @@ export function WorkspaceShell({
         : null;
       const normalizedExternalReviewNativeHtml =
         externalReviewBodyRenderMode?.mode === "native_html"
-          ? normalizeNativeMessageHtmlForPane(externalReviewBodyRenderMode.html)
+          ? externalReviewBodyRenderMode.normalizedNativeHtml
           : null;
       const isExternalReviewProviderHtml = Boolean(
         inviteMessage?.bodyHtml &&
