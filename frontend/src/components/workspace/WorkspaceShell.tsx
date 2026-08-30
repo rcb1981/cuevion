@@ -327,6 +327,7 @@ import {
   INBOX_SNAPSHOT_MAX_MESSAGES,
   INBOX_SNAPSHOT_MAX_AGE_MS,
   INBOX_SNAPSHOT_RECENT_GUARD_MS,
+  type CanonicalConversationIdentity,
   type LiveInboxProvider,
   type LiveThreadIdentityContext,
   type ThreadIdentityAuthority,
@@ -12099,6 +12100,136 @@ type ThreadCategorizationCandidate = Pick<
     Pick<MailMessage, "category" | "categorySource" | "categoryConfidence">
   >;
 
+type MailboxConversationHistoryEntry = {
+  // Buckets retain only the existing message reference plus its parsed date.
+  // Bodies/bodyHtml are never copied into the pass-local index.
+  message: ThreadCategorizationCandidate;
+  dateMs: number;
+};
+
+type MailboxConversationHistoryIndex = {
+  mailboxId: InboxId;
+  entriesByIdentity: Map<string, MailboxConversationHistoryEntry[]>;
+  identityByMessage: WeakMap<object, CanonicalConversationIdentity>;
+};
+
+type MailboxNormalizationContext = {
+  // This context is created inside normalizeMailboxStore and becomes unreachable
+  // when that pass returns; it is never persisted or installed as module state.
+  mailboxStore: MailboxStore;
+  conversationHistoryByMailbox: Map<InboxId, MailboxConversationHistoryIndex>;
+};
+
+type MailboxConversationIndexObserver = {
+  onIndexBuild?: (mailboxId: InboxId) => void;
+  onHistoryCandidateVisit?: (mailboxId: InboxId) => void;
+  onBucketCandidateVisit?: (mailboxId: InboxId) => void;
+  onCanonicalIdentityResolution?: (mailboxId: InboxId) => void;
+};
+
+let mailboxConversationIndexObserver: MailboxConversationIndexObserver | null = null;
+
+function resolveThreadCategorizationCandidateDateMs(
+  candidate: ThreadCategorizationCandidate,
+  threadId: string,
+) {
+  return resolveMailDateMs({
+    id: candidate.id,
+    threadId,
+    sender: "",
+    subject: candidate.subject,
+    snippet: "",
+    time: "",
+    createdAt: candidate.createdAt,
+    from: "",
+    to: "",
+    timestamp: candidate.timestamp,
+    body: [],
+    priorityScore: "medium",
+    category: "Primary",
+    categorySource: "system",
+    categoryConfidence: "medium",
+  });
+}
+
+function resolveCanonicalConversationIdentityForMailboxIndex(
+  message: ThreadCategorizationCandidate,
+  mailboxId: InboxId,
+) {
+  mailboxConversationIndexObserver?.onCanonicalIdentityResolution?.(mailboxId);
+  return resolveCanonicalConversationIdentity(message, mailboxId);
+}
+
+function buildMailboxConversationHistoryIndex(
+  mailboxStore: MailboxStore,
+  mailboxId: InboxId,
+  seedIdentity?: {
+    message: ThreadCategorizationCandidate;
+    identity: CanonicalConversationIdentity;
+  },
+): MailboxConversationHistoryIndex {
+  mailboxConversationIndexObserver?.onIndexBuild?.(mailboxId);
+  const entriesByIdentity = new Map<string, MailboxConversationHistoryEntry[]>();
+  const identityByMessage = new WeakMap<object, CanonicalConversationIdentity>();
+  if (seedIdentity) {
+    identityByMessage.set(seedIdentity.message, seedIdentity.identity);
+  }
+
+  const mailboxCollections = mailboxStore[mailboxId];
+  if (!mailboxCollections) {
+    return { mailboxId, entriesByIdentity, identityByMessage };
+  }
+
+  canonicalFolderOrder.forEach((folder) => {
+    mailboxCollections[folder].forEach((message) => {
+      mailboxConversationIndexObserver?.onHistoryCandidateVisit?.(mailboxId);
+      const identity =
+        identityByMessage.get(message) ??
+        resolveCanonicalConversationIdentityForMailboxIndex(message, mailboxId);
+      identityByMessage.set(message, identity);
+      const bucket = entriesByIdentity.get(identity.key) ?? [];
+      bucket.push({
+        message,
+        dateMs: resolveThreadCategorizationCandidateDateMs(message, identity.key),
+      });
+      entriesByIdentity.set(identity.key, bucket);
+    });
+  });
+
+  return { mailboxId, entriesByIdentity, identityByMessage };
+}
+
+function createMailboxNormalizationContext(
+  mailboxStore: MailboxStore,
+): MailboxNormalizationContext {
+  return {
+    mailboxStore,
+    conversationHistoryByMailbox: new Map(),
+  };
+}
+
+function getMailboxConversationHistoryIndex(
+  context: MailboxNormalizationContext,
+  mailboxId: InboxId,
+  seedIdentity?: {
+    message: ThreadCategorizationCandidate;
+    identity: CanonicalConversationIdentity;
+  },
+) {
+  const existing = context.conversationHistoryByMailbox.get(mailboxId);
+  if (existing) {
+    return existing;
+  }
+
+  const index = buildMailboxConversationHistoryIndex(
+    context.mailboxStore,
+    mailboxId,
+    seedIdentity,
+  );
+  context.conversationHistoryByMailbox.set(mailboxId, index);
+  return index;
+}
+
 function getRecentThreadMessages<T extends ThreadCategorizationCandidate>(
   message: ThreadCategorizationCandidate,
   candidates: T[],
@@ -12167,8 +12298,16 @@ function resolveThreadDominantCategorization(
   message: ThreadCategorizationCandidate,
   mailboxId: InboxId,
   mailboxStore: MailboxStore,
+  normalizationContext?: MailboxNormalizationContext,
 ) {
-  const messageIdentity = resolveCanonicalConversationIdentity(message, mailboxId);
+  const applicableContext =
+    normalizationContext?.mailboxStore === mailboxStore
+      ? normalizationContext
+      : undefined;
+  const existingIndex = applicableContext?.conversationHistoryByMailbox.get(mailboxId);
+  const messageIdentity =
+    existingIndex?.identityByMessage.get(message) ??
+    resolveCanonicalConversationIdentityForMailboxIndex(message, mailboxId);
   if (message.threadIdentityContext && !messageIdentity.isAuthoritativeConversation) {
     return null;
   }
@@ -12178,20 +12317,50 @@ function resolveThreadDominantCategorization(
     return null;
   }
 
-  const threadHistory = canonicalFolderOrder.flatMap(
-    (folder) => mailboxCollections[folder],
+  const historyIndex = applicableContext
+    ? getMailboxConversationHistoryIndex(applicableContext, mailboxId, {
+        message,
+        identity: messageIdentity,
+      })
+    : buildMailboxConversationHistoryIndex(mailboxStore, mailboxId, {
+        message,
+        identity: messageIdentity,
+      });
+  const messageDateMs = resolveThreadCategorizationCandidateDateMs(
+    message,
+    messageIdentity.key,
   );
-  const recentThreadMessages = getRecentThreadMessages(message, threadHistory, {
-    mailboxId,
-    useSafeGrouping: true,
-  }).filter(
-    (
-      candidate,
-    ): candidate is MailMessage &
-      Required<
-        Pick<MailMessage, "category" | "categorySource" | "categoryConfidence">
-      > => Boolean(candidate.category && candidate.categorySource && candidate.categoryConfidence),
-  );
+  const recentWindowMs = 30 * 24 * 60 * 60 * 1000;
+  const recentThreadMessages = (
+    historyIndex.entriesByIdentity.get(messageIdentity.key) ?? []
+  ).reduce<
+    Array<
+      ThreadCategorizationCandidate &
+        Required<
+          Pick<MailMessage, "category" | "categorySource" | "categoryConfidence">
+        >
+    >
+  >((recentMessages, entry) => {
+    mailboxConversationIndexObserver?.onBucketCandidateVisit?.(mailboxId);
+    const candidate = entry.message;
+    if (
+      candidate.id !== message.id &&
+      (messageDateMs === 0 ||
+        entry.dateMs === 0 ||
+        Math.abs(messageDateMs - entry.dateMs) <= recentWindowMs) &&
+      candidate.category &&
+      candidate.categorySource &&
+      candidate.categoryConfidence
+    ) {
+      recentMessages.push(
+        candidate as ThreadCategorizationCandidate &
+          Required<
+            Pick<MailMessage, "category" | "categorySource" | "categoryConfidence">
+          >,
+      );
+    }
+    return recentMessages;
+  }, []);
 
   if (recentThreadMessages.length === 0) {
     return null;
@@ -12245,6 +12414,7 @@ function resolveCuevionCategorization(
   mailboxId: InboxId,
   senderCategoryLearning: SenderCategoryLearningStore,
   mailboxStore?: MailboxStore,
+  normalizationContext?: MailboxNormalizationContext,
 ): Pick<MailMessage, "category" | "categorySource" | "categoryConfidence"> {
   if (
     message.category &&
@@ -12285,6 +12455,7 @@ function resolveCuevionCategorization(
       message,
       mailboxId,
       mailboxStore,
+      normalizationContext,
     );
 
     if (
@@ -12326,6 +12497,7 @@ function resolveCuevionCategorization(
     message,
     mailboxId,
     mailboxStore,
+    normalizationContext,
   );
 
   if (!threadDominantCategorization) {
@@ -12436,6 +12608,7 @@ export function normalizeMailMessage(
   currentUserId: string,
   mailboxStore?: MailboxStore,
   isAIEnabled = true,
+  normalizationContext?: MailboxNormalizationContext,
 ): MailMessage {
   const {
     category: _category,
@@ -12453,6 +12626,7 @@ export function normalizeMailMessage(
     mailboxId,
     senderCategoryLearning,
     mailboxStore,
+    normalizationContext,
   );
   const resolvedSignal = inferHeuristicSignal(message);
   const owner = resolveImplicitOwner(message, messageOwnershipInteractions, mailboxId);
@@ -14279,6 +14453,7 @@ function normalizeMailboxStore(
   ];
   const signatureOwner = new Map<string, { mailboxId: InboxId; folder: MailFolder }>();
   const nextStore = {} as MailboxStore;
+  const normalizationContext = createMailboxNormalizationContext(store);
 
   for (const mailboxId of mailboxOrder) {
     const mailboxCollections = store[mailboxId];
@@ -14337,6 +14512,8 @@ function normalizeMailboxStore(
             messageOwnershipInteractions,
             currentUserId,
             store,
+            true,
+            normalizationContext,
           ),
         );
       }
@@ -14363,6 +14540,8 @@ function normalizeMailboxStore(
             messageOwnershipInteractions,
             currentUserId,
             store,
+            true,
+            normalizationContext,
           ),
         );
         return collections;
@@ -14373,6 +14552,24 @@ function normalizeMailboxStore(
 
   return nextStore;
 }
+
+export const workspaceShellConversationPerformanceTestSeam = {
+  normalizeMailboxStore,
+  createMailboxNormalizationContext,
+  resolveThreadDominantCategorization,
+  observeMailboxConversationIndex<T>(
+    observer: MailboxConversationIndexObserver,
+    run: () => T,
+  ): T {
+    const previousObserver = mailboxConversationIndexObserver;
+    mailboxConversationIndexObserver = observer;
+    try {
+      return run();
+    } finally {
+      mailboxConversationIndexObserver = previousObserver;
+    }
+  },
+};
 
 function normalizeMailboxStoreForLearningIdentity(
   store: MailboxStore,

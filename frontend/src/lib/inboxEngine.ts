@@ -274,6 +274,7 @@ function hasStrongReplyThreadEvidence(message: RenderedConversationMessage) {
 }
 
 function buildReplyParticipantKey(message: RenderedConversationMessage) {
+  canonicalConversationIdentityObserver?.onParticipantKeyBuild?.();
   const participants = [message.from, message.to, message.cc]
     .flatMap((value) => (value ?? "").split(/[,;]/))
     .map((value) => normalizeConversationParticipant(value))
@@ -282,6 +283,14 @@ function buildReplyParticipantKey(message: RenderedConversationMessage) {
 
   return Array.from(new Set(participants)).join(",");
 }
+
+type CanonicalConversationIdentityObserver = {
+  onIdentityResolution?: () => void;
+  onParticipantKeyBuild?: () => void;
+};
+
+let canonicalConversationIdentityObserver: CanonicalConversationIdentityObserver | null =
+  null;
 
 function inferThreadIdentityAuthority(
   message: RenderedConversationMessage,
@@ -312,11 +321,11 @@ export function resolveCanonicalConversationIdentity(
   message: RenderedConversationMessage,
   mailboxId?: string,
 ): CanonicalConversationIdentity {
+  canonicalConversationIdentityObserver?.onIdentityResolution?.();
   const normalizedSubject = normalizeThreadSubject(message.subject);
   const threadId = message.threadId?.trim();
   const resolvedMailboxId = message.threadIdentityContext?.mailboxId ?? mailboxId;
   const mailboxPrefix = resolvedMailboxId ? `${resolvedMailboxId}|` : "";
-  const participantKey = buildReplyParticipantKey(message);
   const authority = inferThreadIdentityAuthority(message);
 
   if (threadId && authority !== "heuristic") {
@@ -342,6 +351,7 @@ export function resolveCanonicalConversationIdentity(
   }
 
   if (hasStrongReplyThreadEvidence(message)) {
+    const participantKey = buildReplyParticipantKey(message);
     return {
       key: `conversation:${mailboxPrefix}${normalizedSubject}|${participantKey}`,
       authority: "heuristic",
@@ -367,6 +377,8 @@ export function resolveCanonicalConversationIdentity(
     };
   }
 
+  const participantKey = buildReplyParticipantKey(message);
+
   if (participantKey) {
     return {
       key: `conversation:${mailboxPrefix}${normalizedSubject}|${participantKey}`,
@@ -384,6 +396,21 @@ export function resolveCanonicalConversationIdentity(
     isAuthoritativeConversation: false,
   };
 }
+
+export const inboxEnginePerformanceTestSeam = {
+  observeCanonicalConversationIdentity<T>(
+    observer: CanonicalConversationIdentityObserver,
+    run: () => T,
+  ): T {
+    const previousObserver = canonicalConversationIdentityObserver;
+    canonicalConversationIdentityObserver = observer;
+    try {
+      return run();
+    } finally {
+      canonicalConversationIdentityObserver = previousObserver;
+    }
+  },
+};
 
 export function resolveSafeThreadGroupingKey(
   message: RenderedConversationMessage,

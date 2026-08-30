@@ -6,8 +6,14 @@ const {
   getVisiblePriorityBadgeForWorkspaceMessage,
   normalizeMailMessage,
   resolveVisibleCategoryLabelForMessageInContext,
+  workspaceShellConversationPerformanceTestSeam,
   workspaceShellPerformanceTestSeam,
 } = require("./WorkspaceShell.tsx") as typeof import("./WorkspaceShell");
+const {
+  inboxEnginePerformanceTestSeam,
+  resolveCanonicalConversationIdentity,
+  resolveMessageDateMs,
+} = require("../../lib/inboxEngine") as typeof import("../../lib/inboxEngine");
 const {
   writePersistedMessageOwnershipStateValue,
 } = require("../../lib/mailboxMessageIdentity") as typeof import("../../lib/mailboxMessageIdentity");
@@ -92,6 +98,48 @@ type KeywordEvidenceCounter = {
   includesAnyKeywordEvaluations: number;
   familyScansByName: Map<string, number>;
 };
+
+type ConversationIndexCounter = {
+  indexBuilds: number;
+  historyCandidateVisits: number;
+  bucketCandidateVisits: number;
+  canonicalIdentityResolutions: number;
+  indexBuildsByMailbox: Map<string, number>;
+};
+
+function createConversationIndexCounter(): ConversationIndexCounter {
+  return {
+    indexBuilds: 0,
+    historyCandidateVisits: 0,
+    bucketCandidateVisits: 0,
+    canonicalIdentityResolutions: 0,
+    indexBuildsByMailbox: new Map(),
+  };
+}
+
+function observeConversationIndex<T>(counter: ConversationIndexCounter, run: () => T) {
+  return workspaceShellConversationPerformanceTestSeam.observeMailboxConversationIndex(
+    {
+      onIndexBuild(mailboxId) {
+        counter.indexBuilds += 1;
+        counter.indexBuildsByMailbox.set(
+          mailboxId,
+          (counter.indexBuildsByMailbox.get(mailboxId) ?? 0) + 1,
+        );
+      },
+      onHistoryCandidateVisit() {
+        counter.historyCandidateVisits += 1;
+      },
+      onBucketCandidateVisit() {
+        counter.bucketCandidateVisits += 1;
+      },
+      onCanonicalIdentityResolution() {
+        counter.canonicalIdentityResolutions += 1;
+      },
+    },
+    run,
+  );
+}
 
 function createKeywordEvidenceCounter(): KeywordEvidenceCounter {
   return {
@@ -457,6 +505,745 @@ function createKeywordEvidenceSeed(
     attachments: [],
     ...overrides,
   });
+}
+
+type NormalizedMessage = ReturnType<typeof normalizeMailMessage>;
+type TestMailboxStore = Parameters<
+  typeof workspaceShellConversationPerformanceTestSeam.normalizeMailboxStore
+>[0];
+type TestOrderedMailbox = Parameters<
+  typeof workspaceShellConversationPerformanceTestSeam.normalizeMailboxStore
+>[1][number];
+
+function createConversationCollections(
+  overrides: Partial<{
+    Inbox: NormalizedMessage[];
+    Drafts: NormalizedMessage[];
+    Sent: NormalizedMessage[];
+    Archive: NormalizedMessage[];
+    Filtered: NormalizedMessage[];
+    Spam: NormalizedMessage[];
+    Trash: NormalizedMessage[];
+  }> = {},
+) {
+  return {
+    Inbox: [],
+    Drafts: [],
+    Sent: [],
+    Archive: [],
+    Filtered: [],
+    Spam: [],
+    Trash: [],
+    ...overrides,
+  };
+}
+
+function createConversationOrderedMailbox(mailboxId: string) {
+  return { id: mailboxId } as TestOrderedMailbox;
+}
+
+function createConversationMessage(
+  id: string,
+  options: {
+    mailboxId?: "main" | "promo";
+    threadId?: string;
+    subject?: string;
+    from?: string;
+    to?: string;
+    createdAt?: string;
+    folder?: string;
+    internalClassification?: MessageSeed["internalClassification"];
+    category?: NormalizedMessage["category"];
+    categorySource?: NormalizedMessage["categorySource"];
+    categoryConfidence?: NormalizedMessage["categoryConfidence"];
+  } = {},
+): NormalizedMessage {
+  const mailboxId = options.mailboxId ?? "main";
+  const providerThreadId = options.threadId ?? `thread-${id}`;
+  const normalized = normalizeMailMessage(
+    createSeed(id, {
+      serverMailboxId: mailboxId,
+      providerMessageId: `provider-${mailboxId}-${id}`,
+      providerThreadId,
+      threadId: `gmail:${mailboxId}:${providerThreadId}`,
+      threadIdentityContext: {
+        mailboxId,
+        provider: "google",
+        folder: options.folder ?? "INBOX",
+        uidValidity: "gmail-api",
+      },
+      threadIdentityAuthority: "gmail",
+      subject: options.subject ?? `Conversation ${id}`,
+      snippet: `Conversation snippet ${id}`,
+      sender: `Conversation Sender ${id}`,
+      from: options.from ?? `sender-${id}@example.test`,
+      to: options.to ?? `owner-${id}@example.test`,
+      createdAt: options.createdAt ?? "2026-08-30T08:00:00.000Z",
+      timestamp: options.createdAt ?? "2026-08-30T08:00:00.000Z",
+      body: [`Conversation body ${id}`],
+      bodyHtml: undefined,
+      attachments: [],
+      internalClassification: options.internalClassification ?? "business",
+      category: undefined,
+      categorySource: undefined,
+      categoryConfidence: undefined,
+    }),
+    mailboxId,
+    {},
+    {},
+    "user-1",
+  );
+
+  return {
+    ...normalized,
+    ...(options.category ? { category: options.category } : {}),
+    ...(options.categorySource ? { categorySource: options.categorySource } : {}),
+    ...(options.categoryConfidence
+      ? { categoryConfidence: options.categoryConfidence }
+      : {}),
+  };
+}
+
+function resolveLegacyThreadDominantCategorizationForTest(
+  message: NormalizedMessage,
+  mailboxId: "main" | "promo",
+  mailboxStore: TestMailboxStore,
+) {
+  const messageIdentity = resolveCanonicalConversationIdentity(message, mailboxId);
+  if (message.threadIdentityContext && !messageIdentity.isAuthoritativeConversation) {
+    return null;
+  }
+  const collections = mailboxStore[mailboxId];
+  if (!collections) {
+    return null;
+  }
+  const messageDateMs = resolveMessageDateMs(message);
+  const recentWindowMs = 30 * 24 * 60 * 60 * 1000;
+  const recent = [
+    ...collections.Trash,
+    ...collections.Spam,
+    ...collections.Filtered,
+    ...collections.Archive,
+    ...collections.Sent,
+    ...collections.Drafts,
+    ...collections.Inbox,
+  ].filter((candidate) => {
+    if (candidate.id === message.id) {
+      return false;
+    }
+    if (
+      resolveCanonicalConversationIdentity(candidate, mailboxId).key !==
+      messageIdentity.key
+    ) {
+      return false;
+    }
+    const candidateDateMs = resolveMessageDateMs(candidate);
+    return (
+      (messageDateMs === 0 ||
+        candidateDateMs === 0 ||
+        Math.abs(messageDateMs - candidateDateMs) <= recentWindowMs) &&
+      Boolean(
+        candidate.category &&
+          candidate.categorySource &&
+          candidate.categoryConfidence,
+      )
+    );
+  });
+  if (recent.length === 0) {
+    return null;
+  }
+  const scores = recent.reduce<Record<NormalizedMessage["category"], number>>(
+    (current, candidate) => {
+      const weight =
+        candidate.categorySource === "user"
+          ? 4
+          : candidate.categorySource === "learned"
+            ? 3
+            : candidate.categoryConfidence === "high"
+              ? 2
+              : candidate.categoryConfidence === "medium"
+                ? 1.25
+                : 0.5;
+      return {
+        ...current,
+        [candidate.category]: (current[candidate.category] ?? 0) + weight,
+      };
+    },
+    { Primary: 0, Promo: 0, Updates: 0 },
+  );
+  const ranked = Object.entries(scores).sort(
+    (first, second) => second[1] - first[1],
+  ) as Array<[NormalizedMessage["category"], number]>;
+  const [topCategory, topScore] = ranked[0] ?? [];
+  const secondScore = ranked[1]?.[1] ?? 0;
+  if (!topCategory || topScore < 2 || topScore - secondScore < 1.25) {
+    return null;
+  }
+  return {
+    category: topCategory,
+    confidence: topScore >= 4 ? ("high" as const) : ("medium" as const),
+  };
+}
+
+{
+  const identityFixtures = [
+    {
+      name: "Gmail provider thread",
+      message: {
+        id: "gmail",
+        subject: "Provider thread",
+        threadId: "gmail:main:provider-thread",
+        threadIdentityAuthority: "gmail" as const,
+      },
+      expected: {
+        key: "thread:main|gmail:main:provider-thread",
+        authority: "gmail",
+        isAuthoritativeConversation: true,
+      },
+    },
+    {
+      name: "RFC Message-ID thread",
+      message: {
+        id: "rfc",
+        subject: "RFC thread",
+        threadId: "imap:rfc:root%40example.com",
+        threadIdentityAuthority: "rfc" as const,
+      },
+      expected: {
+        key: "thread:main|imap:rfc:root%40example.com",
+        authority: "rfc",
+        isAuthoritativeConversation: true,
+      },
+    },
+    {
+      name: "IMAP UID unique message",
+      message: {
+        id: "imap",
+        subject: "Unique IMAP",
+        threadId: "imap:uid:main:INBOX:900:42",
+        threadIdentityAuthority: "unique_message" as const,
+      },
+      expected: {
+        key: "thread:main|imap:uid:main:INBOX:900:42",
+        authority: "unique_message",
+        isAuthoritativeConversation: false,
+      },
+    },
+    {
+      name: "heuristic reply",
+      message: {
+        id: "reply",
+        subject: "Re: Project Alpha",
+        from: "Alice <alice@example.test>",
+        to: "Bob <bob@example.test>",
+      },
+      expected: {
+        key: "conversation:main|project alpha|alice@example.test,bob@example.test",
+        authority: "heuristic",
+        isAuthoritativeConversation: false,
+      },
+    },
+    {
+      name: "generic subject unique message",
+      message: {
+        id: "generic-demo",
+        imapUid: "51",
+        subject: "Demo",
+        from: "artist@example.test",
+      },
+      expected: {
+        key: "message:main|51",
+        authority: "unique_message",
+        isAuthoritativeConversation: false,
+      },
+    },
+    {
+      name: "participant identity",
+      message: {
+        id: "participant",
+        subject: "Project Alpha",
+        from: "Alice <alice@example.test>",
+        to: "Bob <bob@example.test>",
+      },
+      expected: {
+        key: "conversation:main|project alpha|alice@example.test,bob@example.test",
+        authority: "heuristic",
+        isAuthoritativeConversation: false,
+      },
+    },
+    {
+      name: "sender fallback",
+      message: {
+        id: "fallback",
+        subject: "Project Alpha",
+        sender: "Fallback Sender",
+      },
+      expected: {
+        key: "fallback:main|project alpha|fallback sender",
+        authority: "heuristic",
+        isAuthoritativeConversation: false,
+      },
+    },
+  ];
+
+  identityFixtures.forEach((fixture) => {
+    assert.deepEqual(
+      resolveCanonicalConversationIdentity(fixture.message, "main"),
+      fixture.expected,
+      fixture.name,
+    );
+  });
+  assert.notEqual(
+    resolveCanonicalConversationIdentity(
+      {
+        id: "participant-a",
+        subject: "Same subject",
+        from: "alice@example.test",
+      },
+      "main",
+    ).key,
+    resolveCanonicalConversationIdentity(
+      {
+        id: "participant-b",
+        subject: "Same subject",
+        from: "bob@example.test",
+      },
+      "main",
+    ).key,
+  );
+}
+
+{
+  let identityResolutions = 0;
+  let participantKeyBuilds = 0;
+  inboxEnginePerformanceTestSeam.observeCanonicalConversationIdentity(
+    {
+      onIdentityResolution() {
+        identityResolutions += 1;
+      },
+      onParticipantKeyBuild() {
+        participantKeyBuilds += 1;
+      },
+    },
+    () => {
+      resolveCanonicalConversationIdentity(
+        {
+          id: "lazy-provider",
+          subject: "Provider",
+          threadId: "gmail:main:lazy-provider",
+          threadIdentityAuthority: "gmail",
+          from: "alice@example.test",
+          to: "bob@example.test",
+        },
+        "main",
+      );
+      resolveCanonicalConversationIdentity(
+        {
+          id: "lazy-heuristic",
+          subject: "Heuristic",
+          from: "alice@example.test",
+          to: "bob@example.test",
+        },
+        "main",
+      );
+      resolveCanonicalConversationIdentity(
+        {
+          id: "lazy-generic",
+          subject: "Demo",
+          from: "artist@example.test",
+          to: "demos@example.test",
+        },
+        "main",
+      );
+    },
+  );
+
+  assert.equal(identityResolutions, 3);
+  assert.equal(
+    participantKeyBuilds,
+    1,
+    "authoritative thread branches must bypass participant-key construction",
+  );
+}
+
+{
+  const counter = createConversationIndexCounter();
+  const messages = Array.from({ length: 100 }, (_, index) =>
+    createConversationMessage(`perf-n4-${index}`),
+  );
+  const store = {
+    main: createConversationCollections({ Inbox: messages }),
+  } as TestMailboxStore;
+  const normalized = observeConversationIndex(counter, () =>
+    workspaceShellConversationPerformanceTestSeam.normalizeMailboxStore(
+      store,
+      [createConversationOrderedMailbox("main")],
+      {},
+      {},
+      "user-1",
+    ),
+  );
+  const legacyIdentityLowerBound = messages.length * messages.length;
+  const legacyHistoryVisitCount = messages.length * messages.length;
+
+  assert.equal(normalized.main.Inbox.length, messages.length);
+  assert.equal(counter.indexBuilds, 1);
+  assert.equal(counter.historyCandidateVisits, 100);
+  assert.equal(counter.canonicalIdentityResolutions, 100);
+  assert.equal(counter.bucketCandidateVisits, 100);
+  assert.ok(legacyIdentityLowerBound > counter.canonicalIdentityResolutions);
+  assert.ok(legacyHistoryVisitCount > counter.historyCandidateVisits);
+  process.stdout.write(
+    `PERF-N4 100x100: identity before>=${legacyIdentityLowerBound}, after=${counter.canonicalIdentityResolutions}; history visits before=${legacyHistoryVisitCount}, index=${counter.historyCandidateVisits}, buckets=${counter.bucketCandidateVisits}\n`,
+  );
+}
+
+{
+  const counter = createConversationIndexCounter();
+  const messages = [
+    createConversationMessage("matching-a", { threadId: "matching-thread" }),
+    createConversationMessage("matching-b", { threadId: "matching-thread" }),
+  ];
+  const store = {
+    main: createConversationCollections({ Inbox: messages }),
+  } as TestMailboxStore;
+  observeConversationIndex(counter, () =>
+    workspaceShellConversationPerformanceTestSeam.normalizeMailboxStore(
+      store,
+      [createConversationOrderedMailbox("main")],
+      {},
+      {},
+      "user-1",
+    ),
+  );
+
+  assert.equal(counter.indexBuilds, 1);
+  assert.equal(
+    counter.canonicalIdentityResolutions,
+    2,
+    "matching history identities must be resolved once during index construction",
+  );
+  assert.equal(counter.bucketCandidateVisits, 4);
+}
+
+{
+  const counter = createConversationIndexCounter();
+  const messages = [
+    createConversationMessage("repeat-a", { threadId: "repeat-thread" }),
+    createConversationMessage("repeat-b", { threadId: "repeat-thread" }),
+  ];
+  const store = {
+    main: createConversationCollections({ Inbox: messages }),
+  } as TestMailboxStore;
+  const context =
+    workspaceShellConversationPerformanceTestSeam.createMailboxNormalizationContext(
+      store,
+    );
+  const [first, second] = observeConversationIndex(counter, () => [
+    workspaceShellConversationPerformanceTestSeam.resolveThreadDominantCategorization(
+      messages[0],
+      "main",
+      store,
+      context,
+    ),
+    workspaceShellConversationPerformanceTestSeam.resolveThreadDominantCategorization(
+      messages[0],
+      "main",
+      store,
+      context,
+    ),
+  ]);
+
+  assert.deepEqual(second, first);
+  assert.equal(counter.indexBuilds, 1);
+  assert.equal(counter.historyCandidateVisits, 2);
+  assert.equal(counter.canonicalIdentityResolutions, 2);
+  assert.equal(counter.bucketCandidateVisits, 4);
+}
+
+{
+  const counter = createConversationIndexCounter();
+  const mainMessage = createConversationMessage("mailbox-main", {
+    mailboxId: "main",
+    threadId: "shared-provider-thread",
+  });
+  const promoMessage = createConversationMessage("mailbox-promo", {
+    mailboxId: "promo",
+    threadId: "shared-provider-thread",
+  });
+  const store = {
+    main: createConversationCollections({ Inbox: [mainMessage] }),
+    promo: createConversationCollections({ Inbox: [promoMessage] }),
+  } as TestMailboxStore;
+  const normalized = observeConversationIndex(counter, () =>
+    workspaceShellConversationPerformanceTestSeam.normalizeMailboxStore(
+      store,
+      [
+        createConversationOrderedMailbox("main"),
+        createConversationOrderedMailbox("promo"),
+      ],
+      {},
+      {},
+      "user-1",
+    ),
+  );
+
+  assert.equal(normalized.main.Inbox.length, 1);
+  assert.equal(normalized.promo.Inbox.length, 1);
+  assert.equal(counter.indexBuilds, 2);
+  assert.equal(counter.indexBuildsByMailbox.get("main"), 1);
+  assert.equal(counter.indexBuildsByMailbox.get("promo"), 1);
+  assert.equal(counter.canonicalIdentityResolutions, 2);
+}
+
+{
+  const counter = createConversationIndexCounter();
+  const emptyStore = {
+    main: createConversationCollections(),
+  } as TestMailboxStore;
+  observeConversationIndex(counter, () =>
+    workspaceShellConversationPerformanceTestSeam.normalizeMailboxStore(
+      emptyStore,
+      [createConversationOrderedMailbox("main")],
+      {},
+      {},
+      "user-1",
+    ),
+  );
+  assert.equal(counter.indexBuilds, 0);
+  assert.equal(counter.historyCandidateVisits, 0);
+  assert.equal(counter.canonicalIdentityResolutions, 0);
+}
+
+{
+  const counter = createConversationIndexCounter();
+  const message = createConversationMessage("single-thread");
+  const store = {
+    main: createConversationCollections({ Inbox: [message] }),
+  } as TestMailboxStore;
+  const normalized = observeConversationIndex(counter, () =>
+    workspaceShellConversationPerformanceTestSeam.normalizeMailboxStore(
+      store,
+      [createConversationOrderedMailbox("main")],
+      {},
+      {},
+      "user-1",
+    ),
+  );
+  assert.equal(normalized.main.Inbox[0]?.category, message.category);
+  assert.equal(counter.indexBuilds, 1);
+  assert.equal(counter.historyCandidateVisits, 1);
+  assert.equal(counter.canonicalIdentityResolutions, 1);
+  assert.equal(counter.bucketCandidateVisits, 1);
+}
+
+{
+  const counter = createConversationIndexCounter();
+  const messages = Array.from({ length: 100 }, (_, index) =>
+    createConversationMessage(`bucket-${index}`, {
+      threadId: index < 40 ? "large-shared-thread" : `unique-thread-${index}`,
+    }),
+  );
+  const store = {
+    main: createConversationCollections({ Inbox: messages }),
+  } as TestMailboxStore;
+  observeConversationIndex(counter, () =>
+    workspaceShellConversationPerformanceTestSeam.normalizeMailboxStore(
+      store,
+      [createConversationOrderedMailbox("main")],
+      {},
+      {},
+      "user-1",
+    ),
+  );
+
+  assert.equal(counter.historyCandidateVisits, 100);
+  assert.equal(counter.canonicalIdentityResolutions, 100);
+  assert.equal(
+    counter.bucketCandidateVisits,
+    40 * 40 + 60,
+    "post-index evaluation must visit only each message's matching bucket",
+  );
+}
+
+{
+  const current = createConversationMessage("dominant-current", {
+    threadId: "dominant-thread",
+    internalClassification: "unknown",
+  });
+  const primaryHistory = createConversationMessage("dominant-primary", {
+    threadId: "dominant-thread",
+    category: "Primary",
+    categorySource: "user",
+    categoryConfidence: "high",
+  });
+  const promoHistory = createConversationMessage("dominant-promo", {
+    threadId: "dominant-thread",
+    category: "Promo",
+    categorySource: "user",
+    categoryConfidence: "high",
+  });
+  const promoSystemHistory = createConversationMessage("dominant-promo-system", {
+    threadId: "dominant-thread",
+    category: "Promo",
+    categorySource: "system",
+    categoryConfidence: "high",
+  });
+  const primarySystemHistory = createConversationMessage(
+    "dominant-primary-system",
+    {
+      threadId: "dominant-thread",
+      category: "Primary",
+      categorySource: "system",
+      categoryConfidence: "high",
+    },
+  );
+  const outsideWindow = createConversationMessage("dominant-old", {
+    threadId: "dominant-thread",
+    createdAt: "2026-06-01T08:00:00.000Z",
+    category: "Promo",
+    categorySource: "user",
+    categoryConfidence: "high",
+  });
+  const differentThread = createConversationMessage("dominant-different", {
+    threadId: "different-thread",
+    category: "Promo",
+    categorySource: "user",
+    categoryConfidence: "high",
+  });
+  const fixtures: Array<{
+    name: string;
+    store: TestMailboxStore;
+    expected: { category: NormalizedMessage["category"]; confidence: "high" | "medium" } | null;
+  }> = [
+    {
+      name: "dominant Primary and Demo coarse category",
+      store: {
+        main: createConversationCollections({
+          Inbox: [current, primaryHistory, primarySystemHistory],
+        }),
+      } as TestMailboxStore,
+      expected: { category: "Primary", confidence: "high" },
+    },
+    {
+      name: "dominant Promo across folders",
+      store: {
+        main: createConversationCollections({
+          Inbox: [current],
+          Archive: [promoHistory],
+          Sent: [promoSystemHistory],
+        }),
+      } as TestMailboxStore,
+      expected: { category: "Promo", confidence: "high" },
+    },
+    {
+      name: "mixed category",
+      store: {
+        main: createConversationCollections({
+          Inbox: [current, primaryHistory, promoSystemHistory],
+        }),
+      } as TestMailboxStore,
+      expected: { category: "Primary", confidence: "high" },
+    },
+    {
+      name: "tied weights",
+      store: {
+        main: createConversationCollections({
+          Inbox: [current, primaryHistory, promoHistory],
+        }),
+      } as TestMailboxStore,
+      expected: null,
+    },
+    {
+      name: "outside 30-day window",
+      store: {
+        main: createConversationCollections({ Inbox: [current, outsideWindow] }),
+      } as TestMailboxStore,
+      expected: null,
+    },
+    {
+      name: "no matching history",
+      store: {
+        main: createConversationCollections({ Inbox: [current, differentThread] }),
+      } as TestMailboxStore,
+      expected: null,
+    },
+    {
+      name: "single-message thread",
+      store: {
+        main: createConversationCollections({ Inbox: [current] }),
+      } as TestMailboxStore,
+      expected: null,
+    },
+  ];
+
+  fixtures.forEach((fixture) => {
+    const context =
+      workspaceShellConversationPerformanceTestSeam.createMailboxNormalizationContext(
+        fixture.store,
+      );
+    const indexed =
+      workspaceShellConversationPerformanceTestSeam.resolveThreadDominantCategorization(
+        current,
+        "main",
+        fixture.store,
+        context,
+      );
+    assert.deepEqual(indexed, fixture.expected, fixture.name);
+    assert.deepEqual(
+      indexed,
+      resolveLegacyThreadDominantCategorizationForTest(
+        current,
+        "main",
+        fixture.store,
+      ),
+      `${fixture.name} legacy equivalence`,
+    );
+  });
+
+  const isolatedStore = {
+    main: createConversationCollections({ Inbox: [current] }),
+    promo: createConversationCollections({ Inbox: [promoHistory] }),
+  } as TestMailboxStore;
+  const isolatedContext =
+    workspaceShellConversationPerformanceTestSeam.createMailboxNormalizationContext(
+      isolatedStore,
+    );
+  assert.equal(
+    workspaceShellConversationPerformanceTestSeam.resolveThreadDominantCategorization(
+      current,
+      "main",
+      isolatedStore,
+      isolatedContext,
+    ),
+    null,
+    "thread-dominant history must not cross mailbox boundaries",
+  );
+
+  const demoCurrent = createConversationMessage("dominant-demo-current", {
+    threadId: "dominant-demo-thread",
+    internalClassification: "demo",
+  });
+  const demoHistory = createConversationMessage("dominant-demo-history", {
+    threadId: "dominant-demo-thread",
+    internalClassification: "demo",
+    category: "Primary",
+    categorySource: "user",
+    categoryConfidence: "high",
+  });
+  const demoStore = {
+    main: createConversationCollections({ Inbox: [demoHistory] }),
+  } as TestMailboxStore;
+  const normalizedDemo = normalizeMailMessage(
+    demoCurrent,
+    "main",
+    {},
+    {},
+    "user-1",
+    demoStore,
+  );
+  assert.equal(normalizedDemo.internalClassification, "demo");
+  assert.equal(normalizedDemo.category, "Primary");
 }
 
 {
