@@ -2,7 +2,9 @@ import {
   Suspense,
   lazy,
   memo,
+  startTransition,
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -60,6 +62,7 @@ import {
   resizeFullMessageModalSize,
   resolveModalComposeReturnMessageId,
   resolveFullMessageModalMessageId,
+  shouldScheduleMessageOpenSideEffects,
   type FullMessageModalSize,
   type FullMessageModalInteractionState,
 } from "./fullMessageModalState";
@@ -8729,6 +8732,169 @@ function isMessageInSharedView(message: MailMessage) {
   return Boolean(message.isShared && !message.sharedContext);
 }
 
+type WorkspaceSharedMessageEntry = {
+  mailboxId: InboxId;
+  folder: MailFolder;
+  message: MailMessage;
+};
+
+type WorkspaceMessageLocation = {
+  mailboxId: InboxId;
+  folder: MailFolder;
+};
+
+function getWorkspaceSharedEntryIdentityKeys(
+  message: MailMessage,
+  storageMailboxId: InboxId,
+  currentUserId: string,
+) {
+  const workspaceId =
+    message.collaborationWorkspaceId?.trim().toLowerCase() || currentUserId;
+  const sourceMailboxId =
+    (message.collaborationMailboxId?.trim() as InboxId | undefined) ||
+    storageMailboxId;
+  const strictIdentityKeys = [
+    getCollaborationMailboxIdentityKey(
+      storageMailboxId,
+      message,
+      currentUserId,
+    ),
+    ...getCanonicalMessageIdentityKeys(message).map(
+      (identityKey) =>
+        `${workspaceId}::${buildMailboxScopedThreadGroupingKey(
+          identityKey,
+          sourceMailboxId,
+        )}`,
+    ),
+  ];
+  const normalizedSender = normalizeSenderLearningKey(
+    message.from || message.sender || "",
+  );
+  const normalizedSubject = normalizeThreadSubject(message.subject || "");
+
+  if (!normalizedSender || !normalizedSubject) {
+    return strictIdentityKeys;
+  }
+
+  return [
+    ...strictIdentityKeys,
+    `${workspaceId}::${buildMailboxScopedThreadGroupingKey(
+      `shared-source:${normalizedSender}::${normalizedSubject}`,
+      sourceMailboxId,
+    )}`,
+  ];
+}
+
+function buildWorkspaceSharedMessageProjection(
+  mailboxStore: MailboxStore,
+  currentUserId: string,
+) {
+  const shouldPreferEntry = (
+    candidate: WorkspaceSharedMessageEntry,
+    existing: WorkspaceSharedMessageEntry,
+  ) => {
+    const candidateHasActiveCollaboration = Boolean(
+      candidate.message.collaboration &&
+        candidate.message.collaboration.state !== "resolved",
+    );
+    const existingHasActiveCollaboration = Boolean(
+      existing.message.collaboration &&
+        existing.message.collaboration.state !== "resolved",
+    );
+
+    if (candidateHasActiveCollaboration !== existingHasActiveCollaboration) {
+      return candidateHasActiveCollaboration;
+    }
+
+    const candidateUpdatedAt = candidate.message.collaboration?.updatedAt ?? 0;
+    const existingUpdatedAt = existing.message.collaboration?.updatedAt ?? 0;
+
+    if (candidateUpdatedAt !== existingUpdatedAt) {
+      return candidateUpdatedAt > existingUpdatedAt;
+    }
+
+    const candidateTimestamp = Date.parse(
+      candidate.message.timestamp || candidate.message.time,
+    );
+    const existingTimestamp = Date.parse(
+      existing.message.timestamp || existing.message.time,
+    );
+
+    return (
+      Number.isFinite(candidateTimestamp) &&
+      (!Number.isFinite(existingTimestamp) ||
+        candidateTimestamp > existingTimestamp)
+    );
+  };
+  const sharedEntries = Object.entries(mailboxStore).flatMap(
+    ([entryMailboxId, collections]) =>
+      canonicalFolderOrder.flatMap((folder) =>
+        collections[folder].flatMap((message) =>
+          isMessageInSharedView(message)
+            ? [
+                {
+                  mailboxId: entryMailboxId as InboxId,
+                  folder,
+                  message,
+                },
+              ]
+            : [],
+        ),
+      ),
+  );
+  const entries: WorkspaceSharedMessageEntry[] = [];
+
+  sharedEntries.forEach((entry) => {
+    const entryIdentityKeys = getWorkspaceSharedEntryIdentityKeys(
+      entry.message,
+      entry.mailboxId,
+      currentUserId,
+    );
+    const existingEntryIndex = entries.findIndex((existingEntry) => {
+      const existingIdentityKeys = new Set(
+        getWorkspaceSharedEntryIdentityKeys(
+          existingEntry.message,
+          existingEntry.mailboxId,
+          currentUserId,
+        ),
+      );
+
+      return entryIdentityKeys.some((identityKey) =>
+        existingIdentityKeys.has(identityKey),
+      );
+    });
+
+    if (existingEntryIndex === -1) {
+      entries.push(entry);
+      return;
+    }
+
+    if (shouldPreferEntry(entry, entries[existingEntryIndex])) {
+      entries[existingEntryIndex] = entry;
+    }
+  });
+
+  const messages = entries.map((entry) => entry.message);
+  const locationByMessage = new WeakMap<MailMessage, WorkspaceMessageLocation>();
+  const locationById: Record<string, WorkspaceMessageLocation> = {};
+
+  entries.forEach((entry) => {
+    const location = {
+      mailboxId: entry.mailboxId,
+      folder: entry.folder,
+    };
+    locationByMessage.set(entry.message, location);
+    locationById[entry.message.id] = location;
+  });
+
+  return {
+    entries,
+    locationById,
+    locationByMessage,
+    messages,
+  };
+}
+
 export function buildSharedCollaborationProjection(thread: CollaborationThread): MailMessage {
   const projectionId = `shared-collaboration:${encodeURIComponent(
     getCollaborationThreadIdentityKey(thread),
@@ -16857,6 +17023,9 @@ function MailboxView({
       anchorKey: selection.key,
     };
   });
+  const pendingMessageOpenSideEffectsRef = useRef<MailMessage[]>([]);
+  const [pendingMessageOpenSideEffectsRevision, setPendingMessageOpenSideEffectsRevision] =
+    useState(0);
   const selectedMessageSelections = mailboxScopedSelectionState.selected;
   const primaryMessageSelection =
     selectedMessageSelections.find(
@@ -18252,9 +18421,13 @@ function MailboxView({
       return true;
     });
   };
-  const unifiedSpamEntries = (() => {
+  const unifiedSpamEntries = useMemo(() => {
     const seenIdentityKeys = new Set<string>();
-    const entries: Array<{ mailboxId: InboxId; folder: "Spam"; message: MailMessage }> = [];
+    const entries: Array<{
+      mailboxId: InboxId;
+      folder: "Spam";
+      message: MailMessage;
+    }> = [];
 
     orderedMailboxes.forEach((candidate) => {
       (mailboxStore[candidate.id]?.Spam ?? []).forEach((message) => {
@@ -18274,8 +18447,11 @@ function MailboxView({
     });
 
     return entries;
-  })();
-  const unifiedSpamMessages = unifiedSpamEntries.map((entry) => entry.message);
+  }, [mailboxStore, orderedMailboxes]);
+  const unifiedSpamMessages = useMemo(
+    () => unifiedSpamEntries.map((entry) => entry.message),
+    [unifiedSpamEntries],
+  );
   const hideBundleOrganizerManagedMessages =
     productAccess === "bundle" && !showBundleOrganizerManagedMail;
   const filterOrganizerManagedMessagesForMailboxView = (messages: MailMessage[]) =>
@@ -18327,146 +18503,15 @@ function MailboxView({
     Trash: visibleMailboxCollections.Trash,
   };
   const mailboxThreadMessages = canonicalFolderOrder.flatMap((folder) => messageCollections[folder]);
-  const getSharedEntryIdentityKeys = (
-    message: MailMessage,
-    storageMailboxId: InboxId,
-  ) => {
-    const workspaceId =
-      message.collaborationWorkspaceId?.trim().toLowerCase() ||
-      currentUserId;
-    const sourceMailboxId =
-      (message.collaborationMailboxId?.trim() as InboxId | undefined) ||
-      storageMailboxId;
-    const strictIdentityKeys = [
-      getCollaborationMailboxIdentityKey(
-        storageMailboxId,
-        message,
-        currentUserId,
-      ),
-      ...getCanonicalMessageIdentityKeys(message).map(
-        (identityKey) =>
-          `${workspaceId}::${buildMailboxScopedThreadGroupingKey(
-            identityKey,
-            sourceMailboxId,
-          )}`,
-      ),
-    ];
-    const normalizedSender = normalizeSenderLearningKey(message.from || message.sender || "");
-    const normalizedSubject = normalizeThreadSubject(message.subject || "");
-
-    if (!normalizedSender || !normalizedSubject) {
-      return strictIdentityKeys;
-    }
-
-    return [
-      ...strictIdentityKeys,
-      `${workspaceId}::${buildMailboxScopedThreadGroupingKey(
-        `shared-source:${normalizedSender}::${normalizedSubject}`,
-        sourceMailboxId,
-      )}`,
-    ];
-  };
-  const shouldPreferSharedEntry = (
-    candidate: { message: MailMessage },
-    existing: { message: MailMessage },
-  ) => {
-    const candidateHasActiveCollaboration = Boolean(
-      candidate.message.collaboration &&
-        candidate.message.collaboration.state !== "resolved",
-    );
-    const existingHasActiveCollaboration = Boolean(
-      existing.message.collaboration &&
-        existing.message.collaboration.state !== "resolved",
-    );
-
-    if (candidateHasActiveCollaboration !== existingHasActiveCollaboration) {
-      return candidateHasActiveCollaboration;
-    }
-
-    const candidateUpdatedAt = candidate.message.collaboration?.updatedAt ?? 0;
-    const existingUpdatedAt = existing.message.collaboration?.updatedAt ?? 0;
-
-    if (candidateUpdatedAt !== existingUpdatedAt) {
-      return candidateUpdatedAt > existingUpdatedAt;
-    }
-
-    const candidateTimestamp = Date.parse(candidate.message.timestamp || candidate.message.time);
-    const existingTimestamp = Date.parse(existing.message.timestamp || existing.message.time);
-
-    return (
-      Number.isFinite(candidateTimestamp) &&
-      (!Number.isFinite(existingTimestamp) || candidateTimestamp > existingTimestamp)
-    );
-  };
-  const workspaceSharedEntries = (() => {
-    const sharedEntries = Object.entries(mailboxStore).flatMap(
-      ([entryMailboxId, collections]) =>
-        canonicalFolderOrder.flatMap((folder) =>
-          collections[folder].flatMap((message) =>
-            isMessageInSharedView(message)
-              ? [
-                  {
-                    mailboxId: entryMailboxId as InboxId,
-                    folder,
-                    message,
-                  },
-                ]
-              : [],
-          ),
-        ),
-    );
-    const dedupedEntries: typeof sharedEntries = [];
-
-    sharedEntries.forEach((entry) => {
-      const entryIdentityKeys = getSharedEntryIdentityKeys(
-        entry.message,
-        entry.mailboxId,
-      );
-      const existingEntryIndex = dedupedEntries.findIndex((existingEntry) => {
-        const existingIdentityKeys = new Set(
-          getSharedEntryIdentityKeys(
-            existingEntry.message,
-            existingEntry.mailboxId,
-          ),
-        );
-
-        return entryIdentityKeys.some((identityKey) =>
-          existingIdentityKeys.has(identityKey),
-        );
-      });
-
-      if (existingEntryIndex === -1) {
-        dedupedEntries.push(entry);
-        return;
-      }
-
-      if (shouldPreferSharedEntry(entry, dedupedEntries[existingEntryIndex])) {
-        dedupedEntries[existingEntryIndex] = entry;
-      }
-    });
-
-    return dedupedEntries;
-  })();
-  const workspaceSharedMessages = workspaceSharedEntries.map((entry) => entry.message);
-  const workspaceMessageLocationByMessage = new WeakMap<
-    MailMessage,
-    { mailboxId: InboxId; folder: MailFolder }
-  >();
-  workspaceSharedEntries.forEach((entry) => {
-    workspaceMessageLocationByMessage.set(entry.message, {
-      mailboxId: entry.mailboxId,
-      folder: entry.folder,
-    });
-  });
-  const workspaceMessageLocationById = workspaceSharedEntries.reduce<
-    Record<string, { mailboxId: InboxId; folder: MailFolder }>
-  >((locations, entry) => {
-    locations[entry.message.id] = {
-      mailboxId: entry.mailboxId,
-      folder: entry.folder,
-    };
-    return locations;
-  }, {});
+  const {
+    entries: workspaceSharedEntries,
+    locationById: workspaceMessageLocationById,
+    locationByMessage: workspaceMessageLocationByMessage,
+    messages: workspaceSharedMessages,
+  } = useMemo(
+    () => buildWorkspaceSharedMessageProjection(mailboxStore, currentUserId),
+    [currentUserId, mailboxStore],
+  );
   const currentMailboxEntries: Array<{
     mailboxId: InboxId;
     folder: MailFolder;
@@ -18695,39 +18740,72 @@ function MailboxView({
       matchingThreadIds.has(resolveSafeThreadGroupingKey(message, mailboxId)),
     );
   };
-  const smartFolderEntries = activeSmartFolder
-    ? dedupeSmartFolderEntriesByCanonicalIdentity(
-        smartFolderScopeMailboxIds.flatMap((mailboxId) =>
-          getSmartFolderMessagesForMailbox(mailboxId, activeSmartFolder)
-            .filter((message) => !isArchivedInCuevionForMailbox(mailboxId, message))
-            .map((message) => ({
-              mailboxId,
-              folder: "Inbox" as const,
-              message,
-            })),
-        ),
-      )
-    : [];
-  const smartFolderMessages = smartFolderEntries.map((entry) => entry.message);
-  const smartFolderMessageLocationByMessage = new WeakMap<
-    MailMessage,
-    { mailboxId: InboxId; folder: MailFolder }
-  >();
-  smartFolderEntries.forEach((entry) => {
-    smartFolderMessageLocationByMessage.set(entry.message, {
-      mailboxId: entry.mailboxId,
-      folder: entry.folder,
+  const {
+    entries: smartFolderEntries,
+    locationById: smartFolderMessageLocationById,
+    locationByMessage: smartFolderMessageLocationByMessage,
+    messages: smartFolderMessages,
+  } = useMemo(() => {
+    const entries = activeSmartFolder
+      ? dedupeSmartFolderEntriesByCanonicalIdentity(
+          smartFolderScopeMailboxIds.flatMap((mailboxId) =>
+            getSmartFolderMessagesForMailbox(mailboxId, activeSmartFolder)
+              .filter(
+                (message) =>
+                  !isArchivedInCuevionForMailbox(mailboxId, message),
+              )
+              .map((message) => ({
+                mailboxId,
+                folder: "Inbox" as const,
+                message,
+              })),
+          ),
+        )
+      : [];
+    const messages = entries.map((entry) => entry.message);
+    const locationByMessage = new WeakMap<
+      MailMessage,
+      { mailboxId: InboxId; folder: MailFolder }
+    >();
+    const locationById: Record<
+      string,
+      { mailboxId: InboxId; folder: MailFolder }
+    > = {};
+
+    entries.forEach((entry) => {
+      const location = {
+        mailboxId: entry.mailboxId,
+        folder: entry.folder,
+      };
+      locationByMessage.set(entry.message, location);
+      locationById[entry.message.id] = location;
     });
-  });
-  const smartFolderMessageLocationById = smartFolderEntries.reduce<
-    Record<string, { mailboxId: InboxId; folder: MailFolder }>
-  >((locations, entry) => {
-    locations[entry.message.id] = {
-      mailboxId: entry.mailboxId,
-      folder: entry.folder,
+
+    return {
+      entries,
+      locationById,
+      locationByMessage,
+      messages,
     };
-    return locations;
-  }, {});
+  }, [
+    activeSmartFolder,
+    activeSmartFolderId,
+    effectiveFocusPreferencesByMailbox,
+    focusPreferences,
+    isSharedView,
+    mailbox,
+    mailboxStore,
+    managedInboxes,
+    manualLabelOverrides,
+    manualOrganizerInclusions,
+    manualPriorityOverrides,
+    orderedMailboxes,
+    productAccess,
+    senderCategoryLearning,
+    showBundleOrganizerManagedMail,
+    spamSuppressionKeys,
+    strictNormalPriorityAllowedMessageKeys,
+  ]);
   const currentMessageLocationById = activeSmartFolder
     ? smartFolderMessageLocationById
     : isSharedView
@@ -18860,65 +18938,124 @@ function MailboxView({
     hideBundleOrganizerManagedMessages &&
     hiddenOrganizerManagedFolderMessageCount > 0 &&
     normalAppFolderMessages.length === 0;
-  const visibleMessages = normalAppFolderMessages.filter((message) => {
-    const matchesSearch =
-      normalizedSearchQuery.length === 0 ||
-      `${message.sender} ${message.subject} ${message.snippet} ${message.from} ${message.to}`
-        .toLowerCase()
-        .includes(normalizedSearchQuery);
-
-    if (!matchesSearch) {
-      return false;
-    }
-
-    if (activeFilter === "Unread") {
-      return Boolean(message.unread);
-    }
-
-    if (activeFilter === "Priority") {
-      const included = isVisiblePriorityMessage(message);
-      return included;
-    }
-
-    if (activeFilter === "Review") {
-      return message.signal === "For review" || message.signal === "Shortlist";
-    }
-
-    return true;
-  });
-
-  // Thread-level dedup for the inbox list: show only the most recent message per
-  // conversation thread. Messages are grouped by resolveSafeThreadGroupingKey so
-  // legacy subject-only fallbacks like "demo" do not hide unrelated provider mail.
-  // Only the newest one (by resolveMailDateMs) is kept as the representative row.
-  // Older messages in the same thread remain accessible in the reading pane.
-  //
-  // Smart Folder views are saved filters over the same rendered conversation rows
-  // as the normal inbox, so they share this representative-thread dedupe too.
-  const threadDedupedMessages = dedupeMessagesForRenderedRows(
-    visibleMessages,
-    currentMessageLocationById,
-    currentMessageLocationByMessage,
-  );
-  const sharedRenderedMessages = dedupeMessagesForRenderedRows(
-    workspaceSharedMessages,
-    workspaceMessageLocationById,
-    workspaceMessageLocationByMessage,
-  );
-
-  const sortedMessages = [...threadDedupedMessages].sort((firstMessage, secondMessage) => {
-    const firstTime = resolveMailDateMs(firstMessage);
-    const secondTime = resolveMailDateMs(secondMessage);
-
-    return sortOrder === "desc"
-      ? secondTime - firstTime
-      : firstTime - secondTime;
-  });
   const getCurrentMessageSourceMailboxId = (message: MailMessage) =>
     currentMessageLocationByMessage.get(message)?.mailboxId ??
     (message.threadIdentityContext?.mailboxId as InboxId | undefined) ??
     (message.serverMailboxId as InboxId | undefined) ??
     mailbox.id;
+  const buildCurrentMessageSelection = (message: MailMessage) => {
+    const location = resolveAuthoritativeMessageLocation({
+      message,
+      exactLocation: currentMessageLocationByMessage.get(message) ?? null,
+      bareIdLocation: currentMessageLocationById[message.id] ?? null,
+    });
+    const sourceMailboxId =
+      location?.mailboxId ?? getCurrentMessageSourceMailboxId(message);
+
+    return buildMailboxScopedMessageSelection(
+      sourceMailboxId,
+      message,
+      location?.folder ?? activeFolder,
+    );
+  };
+
+  const {
+    selectableMessageRows,
+    selectableMessageSelections,
+    sharedRenderedMessages,
+    sortedMessages,
+    threadDedupedMessages,
+    visibleMessages,
+  } = useMemo(() => {
+    const nextVisibleMessages = normalAppFolderMessages.filter((message) => {
+      const matchesSearch =
+        normalizedSearchQuery.length === 0 ||
+        `${message.sender} ${message.subject} ${message.snippet} ${message.from} ${message.to}`
+          .toLowerCase()
+          .includes(normalizedSearchQuery);
+
+      if (!matchesSearch) {
+        return false;
+      }
+
+      if (activeFilter === "Unread") {
+        return Boolean(message.unread);
+      }
+
+      if (activeFilter === "Priority") {
+        return isVisiblePriorityMessage(message);
+      }
+
+      if (activeFilter === "Review") {
+        return message.signal === "For review" || message.signal === "Shortlist";
+      }
+
+      return true;
+    });
+
+    // Thread-level dedup for the inbox list: show only the most recent message per
+    // conversation thread. Smart Folders share this representative-thread policy.
+    const nextThreadDedupedMessages = dedupeMessagesForRenderedRows(
+      nextVisibleMessages,
+      currentMessageLocationById,
+      currentMessageLocationByMessage,
+    );
+    const nextSharedRenderedMessages = dedupeMessagesForRenderedRows(
+      workspaceSharedMessages,
+      workspaceMessageLocationById,
+      workspaceMessageLocationByMessage,
+    );
+    const nextSortedMessages = [...nextThreadDedupedMessages].sort(
+      (firstMessage, secondMessage) => {
+        const firstTime = resolveMailDateMs(firstMessage);
+        const secondTime = resolveMailDateMs(secondMessage);
+
+        return sortOrder === "desc"
+          ? secondTime - firstTime
+          : firstTime - secondTime;
+      },
+    );
+    const nextSelectableMessageRows = nextSortedMessages.map((message) => ({
+      message,
+      selection: buildCurrentMessageSelection(message),
+    }));
+
+    return {
+      selectableMessageRows: nextSelectableMessageRows,
+      selectableMessageSelections: nextSelectableMessageRows.map(
+        ({ selection }) => selection,
+      ),
+      sharedRenderedMessages: nextSharedRenderedMessages,
+      sortedMessages: nextSortedMessages,
+      threadDedupedMessages: nextThreadDedupedMessages,
+      visibleMessages: nextVisibleMessages,
+    };
+  }, [
+    activeFilter,
+    activeFolder,
+    activeSmartFolder,
+    activeSmartFolderId,
+    currentUserId,
+    effectiveFocusPreferencesByMailbox,
+    focusPreferences,
+    isSharedView,
+    mailbox,
+    mailboxStore,
+    managedInboxes,
+    manualLabelOverrides,
+    manualOrganizerInclusions,
+    manualPriorityOverrides,
+    normalizedSearchQuery,
+    orderedMailboxes,
+    productAccess,
+    senderCategoryLearning,
+    showBundleOrganizerManagedMail,
+    smartFolderMessages,
+    sortOrder,
+    spamSuppressionKeys,
+    strictNormalPriorityAllowedMessageKeys,
+    workspaceSharedMessages,
+  ]);
   const buildManualPriorityUpdateOptions = (
     message: MailMessage,
     options: Pick<
@@ -18936,27 +19073,6 @@ function MailboxView({
       sourceMessage: message,
     };
   };
-  const buildCurrentMessageSelection = (message: MailMessage) => {
-    const location = resolveAuthoritativeMessageLocation({
-      message,
-      exactLocation: currentMessageLocationByMessage.get(message) ?? null,
-      bareIdLocation: currentMessageLocationById[message.id] ?? null,
-    });
-    const sourceMailboxId = location?.mailboxId ?? getCurrentMessageSourceMailboxId(message);
-
-    return buildMailboxScopedMessageSelection(
-      sourceMailboxId,
-      message,
-      location?.folder ?? activeFolder,
-    );
-  };
-  const selectableMessageRows = sortedMessages.map((message) => ({
-    message,
-    selection: buildCurrentMessageSelection(message),
-  }));
-  const selectableMessageSelections = selectableMessageRows.map(
-    ({ selection }) => selection,
-  );
   const matchesPrimarySelection = (message: MailMessage) => {
     if (!primaryMessageSelection) {
       return false;
@@ -19012,6 +19128,16 @@ function MailboxView({
   const fullMessageModalMessage =
     fullMessageModalResolvedMessage?.id === fullMessageModalMessageId
       ? fullMessageModalResolvedMessage
+      : null;
+  const deferredSelectedMessage = useDeferredValue(selectedMessage);
+  const deferredFullMessageModalMessage = useDeferredValue(
+    fullMessageModalMessage,
+  );
+  const selectedMessageThreadRenderTarget =
+    deferredSelectedMessage === selectedMessage ? deferredSelectedMessage : null;
+  const fullMessageModalThreadRenderTarget =
+    deferredFullMessageModalMessage === fullMessageModalMessage
+      ? deferredFullMessageModalMessage
       : null;
   const activeDesktopThreadDisclosureState =
     reconcileDesktopThreadDisclosureState(
@@ -19425,12 +19551,54 @@ function MailboxView({
         return resolveMailDateMs(firstMessage) - resolveMailDateMs(secondMessage);
       });
   };
-  const selectedMessageThreadMessages = getThreadMessages(selectedMessage);
+  const {
+    fullMessageModalThreadMessages,
+    selectedMessageThreadMessages,
+  } = useMemo(() => {
+    const nextSelectedMessageThreadMessages = selectedMessageThreadRenderTarget
+      ? getThreadMessages(selectedMessageThreadRenderTarget)
+      : [];
+    const nextFullMessageModalThreadMessages =
+      fullMessageModalThreadRenderTarget === selectedMessageThreadRenderTarget
+        ? nextSelectedMessageThreadMessages
+        : fullMessageModalThreadRenderTarget
+          ? getThreadMessages(fullMessageModalThreadRenderTarget)
+          : [];
+
+    return {
+      fullMessageModalThreadMessages: nextFullMessageModalThreadMessages,
+      selectedMessageThreadMessages: nextSelectedMessageThreadMessages,
+    };
+  }, [
+    activeFolder,
+    activeSmartFolder,
+    activeSmartFolderId,
+    currentUserId,
+    effectiveFocusPreferencesByMailbox,
+    focusPreferences,
+    fullMessageModalThreadRenderTarget,
+    isSharedView,
+    mailbox,
+    mailboxStore,
+    managedInboxes,
+    manualLabelOverrides,
+    manualOrganizerInclusions,
+    manualPriorityOverrides,
+    orderedMailboxes,
+    primaryMessageSelection?.key,
+    productAccess,
+    selectedMessageThreadRenderTarget,
+    senderCategoryLearning,
+    showBundleOrganizerManagedMail,
+    smartFolderMessages,
+    spamSuppressionKeys,
+    strictNormalPriorityAllowedMessageKeys,
+    workspaceSharedMessages,
+  ]);
   const selectedConversationTitle = getConversationDisplaySubject(
     selectedMessageThreadMessages,
     selectedMessage?.subject,
   );
-  const fullMessageModalThreadMessages = getThreadMessages(fullMessageModalMessage);
   const fullMessageModalConversationTitle = getConversationDisplaySubject(
     fullMessageModalThreadMessages,
     fullMessageModalMessage?.subject,
@@ -19836,11 +20004,10 @@ function MailboxView({
     );
   };
   const renderThreadTimeline = (
-    message: MailMessage | null,
+    threadMessages: MailMessage[],
     density: "split" | "full",
     actionMessage: MailMessage | null,
   ) => {
-    const threadMessages = getThreadMessages(message);
     const initiallyExpandedMessageIds = resolveInitialExpandedThreadMessageIds(
       threadMessages.map((threadMessage) => threadMessage.id),
     );
@@ -21877,7 +22044,11 @@ function MailboxView({
     }
 
     const messageIdentityKeys = new Set(
-      getSharedEntryIdentityKeys(message, storageMailboxId),
+      getWorkspaceSharedEntryIdentityKeys(
+        message,
+        storageMailboxId,
+        currentUserId,
+      ),
     );
     const matchingCanonicalProjection = Object.entries(mailboxStore)
       .flatMap(([candidateMailboxId, collections]) =>
@@ -21893,9 +22064,11 @@ function MailboxView({
           return false;
         }
 
-        return getSharedEntryIdentityKeys(candidate, candidateMailboxId).some(
-          (identityKey) => messageIdentityKeys.has(identityKey),
-        );
+        return getWorkspaceSharedEntryIdentityKeys(
+          candidate,
+          candidateMailboxId,
+          currentUserId,
+        ).some((identityKey) => messageIdentityKeys.has(identityKey));
       });
 
     return (
@@ -24900,6 +25073,30 @@ function MailboxView({
     });
   };
 
+  const scheduleMessageOpenSideEffects = (message: MailMessage) => {
+    pendingMessageOpenSideEffectsRef.current.push(message);
+    setPendingMessageOpenSideEffectsRevision((current) => current + 1);
+  };
+
+  useEffect(() => {
+    if (pendingMessageOpenSideEffectsRevision === 0) {
+      return;
+    }
+
+    const pendingMessages = pendingMessageOpenSideEffectsRef.current.splice(0);
+
+    if (pendingMessages.length === 0) {
+      return;
+    }
+
+    startTransition(() => {
+      pendingMessages.forEach((message) => {
+        onRecordMessageOwnershipInteraction(message);
+        markInboxMessageReadOnOpen(message);
+      });
+    });
+  }, [pendingMessageOpenSideEffectsRevision]);
+
   const toggleMessageFlagState = async (messageId: string) => {
     if (shouldBlockSmartFolderMutation()) {
       return;
@@ -25027,6 +25224,7 @@ function MailboxView({
       triggerAutoRead?: boolean;
       sourceMailboxId?: InboxId;
       sourceMessage?: MailMessage;
+      recordOwnership?: boolean;
     },
   ) => {
     const targetRow =
@@ -25094,7 +25292,9 @@ function MailboxView({
         : { selected: [], primaryKey: null, anchorKey: null },
     );
     setIsFullMessageOpen(nextModalState.isOpen);
-    onRecordMessageOwnershipInteraction(targetRow.message);
+    if (options?.recordOwnership !== false) {
+      onRecordMessageOwnershipInteraction(targetRow.message);
+    }
   };
 
   const moveMessagesAcrossWorkspace = (
@@ -28417,17 +28617,25 @@ function MailboxView({
                               return;
                             }
 
+                            if (
+                              !shouldScheduleMessageOpenSideEffects(event.detail)
+                            ) {
+                              return;
+                            }
+
                             handleSelectMessage(activeFolder, message.id, {
+                              recordOwnership: false,
                               sourceMailboxId:
                                 collaborationStorageMailboxId,
                               sourceMessage: message,
                             });
-                            markInboxMessageReadOnOpen(message);
+                            scheduleMessageOpenSideEffects(message);
                           }}
                           onDoubleClick={(event) => {
                             fullMessageModalReturnFocusRef.current = event.currentTarget;
                             handleSelectMessage(activeFolder, message.id, {
                               openFull: true,
+                              recordOwnership: false,
                               sourceMailboxId:
                                 collaborationStorageMailboxId,
                               sourceMessage: message,
@@ -28758,10 +28966,20 @@ function MailboxView({
                       </div>
                     ) : null}
 
-                    {renderThreadTimeline(
-                      selectedMessage,
-                      "split",
-                      fullWidthMessage ?? selectedMessage,
+                    {selectedMessageThreadRenderTarget ? (
+                      renderThreadTimeline(
+                        selectedMessageThreadMessages,
+                        "split",
+                        fullWidthMessage ?? selectedMessage,
+                      )
+                    ) : (
+                      <div
+                        data-message-body-pending
+                        role="status"
+                        className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-5 text-[0.74rem] text-[var(--workspace-text-faint)]"
+                      >
+                        Loading message…
+                      </div>
                     )}
                   </div>
                   {selectedMessage.id === "main-1" ? (
@@ -28999,10 +29217,20 @@ function MailboxView({
                           </div>
                         ) : null}
 
-                        {renderThreadTimeline(
-                          fullMessageModalMessage,
-                          "full",
-                          null,
+                        {fullMessageModalThreadRenderTarget ? (
+                          renderThreadTimeline(
+                            fullMessageModalThreadMessages,
+                            "full",
+                            null,
+                          )
+                        ) : (
+                          <div
+                            data-full-message-body-pending
+                            role="status"
+                            className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-5 text-[0.74rem] text-[var(--workspace-text-faint)]"
+                          >
+                            Loading message…
+                          </div>
                         )}
                       </div>
                     </div>

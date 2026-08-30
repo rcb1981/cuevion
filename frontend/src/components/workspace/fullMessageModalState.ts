@@ -195,6 +195,10 @@ export type FullMessageModalInteractionState = {
   selectedMessageId: string | null;
 };
 
+export function shouldScheduleMessageOpenSideEffects(clickDetail: number) {
+  return clickDetail <= 1;
+}
+
 type FullMessageModalInteraction =
   | { type: "single-click"; messageId: string }
   | { type: "double-click"; messageId: string }
