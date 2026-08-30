@@ -4170,19 +4170,212 @@ function getSmartFolderRuleMatchValue(
   return atIndex === -1 ? normalizedSender : normalizedSender.slice(atIndex + 1);
 }
 
+type MessageClassificationTextSource = Pick<
+  MailMessage,
+  "subject" | "snippet" | "sender" | "from" | "body"
+> &
+  Partial<Pick<MailMessage, "to" | "attachments">>;
+
+type MessageClassificationTextProjection = {
+  subjectText: string;
+  snippetText: string;
+  senderText: string;
+  fromText: string;
+  toText: string;
+  bodyText: string;
+  attachmentNamesText: string;
+  subjectSnippetText: string;
+  senderFromText: string;
+  senderFromToText: string;
+  snippetBodyText: string;
+  subjectSnippetBodyText: string;
+  subjectSnippetBodySenderFromText: string;
+  subjectSnippetSenderFromBodyText: string;
+  subjectSnippetSenderFromToBodyText: string;
+};
+
+type MessageClassificationTextCacheEntry = {
+  policyVersion: typeof MESSAGE_CLASSIFICATION_TEXT_POLICY_VERSION;
+  subject: string;
+  snippet: string;
+  sender: string;
+  from: string;
+  to?: string;
+  body: string[];
+  attachmentNames: string[];
+  result: MessageClassificationTextProjection;
+};
+
+const MESSAGE_CLASSIFICATION_TEXT_POLICY_VERSION = "perf-n2-v1";
+const MESSAGE_CLASSIFICATION_TEXT_CACHE_MAX_ENTRIES = 64;
+// Identity entries disappear with their live message objects. Recreated messages
+// share only the 64-entry LRU below. A projection retains one lowercase body
+// primitive and five exact body-bearing variants; classifier decisions and
+// context-dependent routing results are never retained here.
+const messageClassificationTextCache: MessageClassificationTextCacheEntry[] = [];
+const messageClassificationTextCacheByIdentity = new WeakMap<
+  object,
+  MessageClassificationTextCacheEntry
+>();
+
+function hasExactMessageClassificationTextInputs(
+  entry: MessageClassificationTextCacheEntry,
+  message: MessageClassificationTextSource,
+) {
+  const attachments = message.attachments ?? [];
+
+  return (
+    entry.policyVersion === MESSAGE_CLASSIFICATION_TEXT_POLICY_VERSION &&
+    entry.subject === message.subject &&
+    entry.snippet === message.snippet &&
+    entry.sender === message.sender &&
+    entry.from === message.from &&
+    entry.to === message.to &&
+    entry.body.length === message.body.length &&
+    entry.body.every((paragraph, index) => paragraph === message.body[index]) &&
+    entry.attachmentNames.length === attachments.length &&
+    entry.attachmentNames.every(
+      (name, index) => name === attachments[index]?.name,
+    )
+  );
+}
+
+function promoteMessageClassificationTextCacheEntry(
+  entry: MessageClassificationTextCacheEntry,
+) {
+  const currentIndex = messageClassificationTextCache.indexOf(entry);
+  if (currentIndex >= 0) {
+    messageClassificationTextCache.splice(currentIndex, 1);
+  }
+
+  messageClassificationTextCache.push(entry);
+  if (
+    messageClassificationTextCache.length >
+    MESSAGE_CLASSIFICATION_TEXT_CACHE_MAX_ENTRIES
+  ) {
+    messageClassificationTextCache.shift();
+  }
+}
+
+function findCachedMessageClassificationText(
+  message: MessageClassificationTextSource,
+) {
+  const identityEntry = messageClassificationTextCacheByIdentity.get(message);
+  if (
+    identityEntry &&
+    hasExactMessageClassificationTextInputs(identityEntry, message)
+  ) {
+    if (messageClassificationTextCache.includes(identityEntry)) {
+      promoteMessageClassificationTextCacheEntry(identityEntry);
+    }
+    return identityEntry.result;
+  }
+
+  for (
+    let index = messageClassificationTextCache.length - 1;
+    index >= 0;
+    index -= 1
+  ) {
+    const entry = messageClassificationTextCache[index];
+    if (hasExactMessageClassificationTextInputs(entry, message)) {
+      promoteMessageClassificationTextCacheEntry(entry);
+      messageClassificationTextCacheByIdentity.set(message, entry);
+      return entry.result;
+    }
+  }
+
+  return null;
+}
+
+function joinClassificationTextWithBody(
+  prefix: string[],
+  bodyText: string,
+  bodyParagraphCount: number,
+) {
+  return [...prefix, ...(bodyParagraphCount > 0 ? [bodyText] : [])].join(" ");
+}
+
+function getMessageClassificationText(
+  message: MessageClassificationTextSource,
+): MessageClassificationTextProjection {
+  const cached = findCachedMessageClassificationText(message);
+  if (cached) {
+    return cached;
+  }
+
+  const subjectText = (message.subject ?? "").toLowerCase();
+  const snippetText = (message.snippet ?? "").toLowerCase();
+  const senderText = (message.sender ?? "").toLowerCase();
+  const fromText = (message.from ?? "").toLowerCase();
+  const toText = (message.to ?? "").toLowerCase();
+  const bodyText = (message.body ?? []).join(" ").toLowerCase();
+  const attachmentNames = (message.attachments ?? []).map(
+    (attachment) => attachment.name,
+  );
+  const attachmentNamesText = attachmentNames.join(" ").toLowerCase();
+  const bodyParagraphCount = message.body?.length ?? 0;
+  const result: MessageClassificationTextProjection = {
+    subjectText,
+    snippetText,
+    senderText,
+    fromText,
+    toText,
+    bodyText,
+    attachmentNamesText,
+    subjectSnippetText: [subjectText, snippetText].join(" "),
+    senderFromText: [senderText, fromText].join(" "),
+    senderFromToText: [senderText, fromText, toText].join(" "),
+    snippetBodyText: joinClassificationTextWithBody(
+      [snippetText],
+      bodyText,
+      bodyParagraphCount,
+    ),
+    subjectSnippetBodyText: joinClassificationTextWithBody(
+      [subjectText, snippetText],
+      bodyText,
+      bodyParagraphCount,
+    ),
+    subjectSnippetBodySenderFromText: [
+      subjectText,
+      snippetText,
+      ...(bodyParagraphCount > 0 ? [bodyText] : []),
+      senderText,
+      fromText,
+    ].join(" "),
+    subjectSnippetSenderFromBodyText: joinClassificationTextWithBody(
+      [subjectText, snippetText, senderText, fromText],
+      bodyText,
+      bodyParagraphCount,
+    ),
+    subjectSnippetSenderFromToBodyText: joinClassificationTextWithBody(
+      [subjectText, snippetText, senderText, fromText, toText],
+      bodyText,
+      bodyParagraphCount,
+    ),
+  };
+  const entry: MessageClassificationTextCacheEntry = {
+    policyVersion: MESSAGE_CLASSIFICATION_TEXT_POLICY_VERSION,
+    subject: message.subject,
+    snippet: message.snippet,
+    sender: message.sender,
+    from: message.from,
+    to: message.to,
+    body: [...message.body],
+    attachmentNames,
+    result,
+  };
+
+  promoteMessageClassificationTextCacheEntry(entry);
+  messageClassificationTextCacheByIdentity.set(message, entry);
+  return result;
+}
+
 function isBroadcastPromoMessage(
   message: Pick<MailMessage, "subject" | "snippet" | "sender" | "from" | "body">,
 ) {
-  const searchableText = [
-    message.subject,
-    message.snippet,
-    message.sender,
-    message.from,
-    ...(message.body ?? []),
-  ]
-    .join(" ")
-    .toLowerCase();
-  const subjectText = (message.subject ?? "").toLowerCase();
+  const classificationText = getMessageClassificationText(message);
+  const searchableText = classificationText.subjectSnippetSenderFromBodyText;
+  const subjectText = classificationText.subjectText;
   const hasSurveyResearchSignal = includesAnyKeyword(searchableText, [
     "onderzoek",
     "vragenlijst",
@@ -4250,18 +4443,10 @@ function hasMusicPromoSubjectMarker(subject: string) {
 }
 
 function isExplicitMusicPromoSendoutContext(message: PromoHeuristicMessage) {
+  const classificationText = getMessageClassificationText(message);
   const subjectText = message.subject ?? "";
-  const identityText = [message.sender, message.from].join(" ").toLowerCase();
-  const searchableText = [
-    message.subject,
-    message.snippet,
-    message.sender,
-    message.from,
-    message.to ?? "",
-    ...(message.body ?? []),
-  ]
-    .join(" ")
-    .toLowerCase();
+  const identityText = classificationText.senderFromText;
+  const searchableText = classificationText.subjectSnippetSenderFromToBodyText;
   const hasPromoSubjectMarker =
     hasMusicPromoSubjectMarker(subjectText) || /\(\s*promo\s*\)/i.test(subjectText);
   const hasMusicSenderContext = includesAnyKeyword(identityText, [
@@ -4312,17 +4497,9 @@ function isExplicitMusicPromoSendoutContext(message: PromoHeuristicMessage) {
 }
 
 function isPromoAccessRequestMessage(message: PromoHeuristicMessage) {
-  const subjectText = (message.subject ?? "").toLowerCase();
-  const searchableText = [
-    message.subject,
-    message.snippet,
-    message.sender,
-    message.from,
-    message.to ?? "",
-    ...(message.body ?? []),
-  ]
-    .join(" ")
-    .toLowerCase();
+  const classificationText = getMessageClassificationText(message);
+  const subjectText = classificationText.subjectText;
+  const searchableText = classificationText.subjectSnippetSenderFromToBodyText;
   const hasPromoRequestPattern =
     includesAnyKeyword(searchableText, [
       "i would like to receive promo",
@@ -4401,21 +4578,9 @@ function isPromoAccessRequestMessage(message: PromoHeuristicMessage) {
 }
 
 function isColdSalesOutreachWithoutFinanceEvidence(message: FinanceHeuristicMessage) {
-  const attachmentText = (message.attachments ?? [])
-    .map((attachment) => attachment.name)
-    .join(" ")
-    .toLowerCase();
-  const searchableText = [
-    message.subject,
-    message.snippet,
-    message.sender,
-    message.from,
-    message.to ?? "",
-    ...(message.body ?? []),
-    attachmentText,
-  ]
-    .join(" ")
-    .toLowerCase();
+  const classificationText = getMessageClassificationText(message);
+  const attachmentText = classificationText.attachmentNamesText;
+  const searchableText = `${classificationText.subjectSnippetSenderFromToBodyText} ${attachmentText}`;
   const coldOutreachKeywords = [
     "i came across your content",
     "came across your content",
@@ -4490,9 +4655,10 @@ function isColdSalesOutreachWithoutFinanceEvidence(message: FinanceHeuristicMess
 }
 
 function isProtectedMusicPromoContext(message: PromoHeuristicMessage) {
+  const classificationText = getMessageClassificationText(message);
   const subjectText = message.subject ?? "";
-  const identityText = [message.sender, message.from].join(" ").toLowerCase();
-  const bodyText = [message.snippet, ...(message.body ?? [])].join(" ").toLowerCase();
+  const identityText = classificationText.senderFromText;
+  const bodyText = classificationText.snippetBodyText;
   const labelWorxPromoboxText = [identityText, bodyText].join(" ");
   const hasLabelWorxPromoboxEvidence =
     identityText.includes("promobox-reply@label-worx.com") ||
@@ -4515,18 +4681,10 @@ function isProtectedMusicPromoContext(message: PromoHeuristicMessage) {
 }
 
 function isStrongDemoSubmissionMessage(message: PromoHeuristicMessage) {
+  const classificationText = getMessageClassificationText(message);
   const subjectText = message.subject ?? "";
-  const toText = (message.to ?? "").toLowerCase();
-  const searchableText = [
-    message.subject,
-    message.snippet,
-    message.sender,
-    message.from,
-    message.to ?? "",
-    ...(message.body ?? []),
-  ]
-    .join(" ")
-    .toLowerCase();
+  const toText = classificationText.toText;
+  const searchableText = classificationText.subjectSnippetSenderFromToBodyText;
   const hasExplicitDemoSubjectSignal =
     /\[\s*demo\s*\]/i.test(subjectText) ||
     /^demo\b/i.test(subjectText.trim());
@@ -4564,19 +4722,11 @@ function isStrongDemoSubmissionMessage(message: PromoHeuristicMessage) {
 }
 
 function isStrongMusicPromoMessage(message: PromoHeuristicMessage) {
+  const classificationText = getMessageClassificationText(message);
   const subjectText = message.subject ?? "";
-  const identityText = [message.sender, message.from].join(" ").toLowerCase();
-  const toText = (message.to ?? "").toLowerCase();
-  const searchableText = [
-    message.subject,
-    message.snippet,
-    message.sender,
-    message.from,
-    message.to ?? "",
-    ...(message.body ?? []),
-  ]
-    .join(" ")
-    .toLowerCase();
+  const identityText = classificationText.senderFromText;
+  const toText = classificationText.toText;
+  const searchableText = classificationText.subjectSnippetSenderFromToBodyText;
   const hasMusicReleaseContext = includesAnyKeyword(searchableText, [
     "remix",
     "track",
@@ -4623,17 +4773,9 @@ function isGenericRetailMarketingUpdateMessage(message: PromoHeuristicMessage) {
     return false;
   }
 
-  const subjectText = (message.subject ?? "").toLowerCase();
-  const searchableText = [
-    message.subject,
-    message.snippet,
-    message.sender,
-    message.from,
-    message.to ?? "",
-    ...(message.body ?? []),
-  ]
-    .join(" ")
-    .toLowerCase();
+  const classificationText = getMessageClassificationText(message);
+  const subjectText = classificationText.subjectText;
+  const searchableText = classificationText.subjectSnippetSenderFromToBodyText;
   const hasBusinessOrFinanceActionSignal = includesAnyKeyword(searchableText, [
     "contract",
     "agreement",
@@ -4679,17 +4821,9 @@ function isLowValueMarketingNewsletterEventUpdateMessage(message: PromoHeuristic
     return false;
   }
 
-  const subjectText = (message.subject ?? "").toLowerCase();
-  const searchableText = [
-    message.subject,
-    message.snippet,
-    message.sender,
-    message.from,
-    message.to ?? "",
-    ...(message.body ?? []),
-  ]
-    .join(" ")
-    .toLowerCase();
+  const classificationText = getMessageClassificationText(message);
+  const subjectText = classificationText.subjectText;
+  const searchableText = classificationText.subjectSnippetSenderFromToBodyText;
   const hasReplyThreadIndicator = /^(re|fw|fwd):/i.test(subjectText.trim());
   const hasRealBusinessActionSignal = includesAnyKeyword(searchableText, [
     "contract",
@@ -4782,6 +4916,7 @@ function resolveVisibleClassification(
   > &
     Partial<Pick<MailMessage, "to" | "collaboration" | "isShared" | "sharedContext">>,
 ): CuevionInternalClassification {
+  const classificationText = getMessageClassificationText(message);
   const signalClassification = (() => {
     switch (message.ui_signal ?? message.signal) {
       case "DEMO":
@@ -4812,21 +4947,12 @@ function resolveVisibleClassification(
 
   const isMarketingNewsletterUpdate = isMarketingNewsletterUpdateMessage(message);
   const subjectText = message.subject ?? "";
-  const senderText = message.sender ?? "";
   const isStrongDemoSubmission = isStrongDemoSubmissionMessage(message);
-  const explicitMusicPromoText = [
-    message.subject ?? "",
-    message.snippet ?? "",
-    message.sender ?? "",
-    message.from ?? "",
-    message.to ?? "",
-    ...(message.body ?? []),
-  ]
-    .join(" ")
-    .toLowerCase();
+  const explicitMusicPromoText =
+    classificationText.subjectSnippetSenderFromToBodyText;
   const looksLikeMusicReleasePromo =
     (message.signal === "Promo" || message.ui_signal === "PROMO") &&
-    senderText.toLowerCase().includes("promo") &&
+    classificationText.senderText.includes("promo") &&
     subjectText.includes("|") &&
     /\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b/i.test(
       subjectText,
@@ -4836,7 +4962,7 @@ function resolveVisibleClassification(
   const explicitPromoIdentitySignal =
     strongExplicitPromoSubjectSignal ||
     includesAnyKeyword(
-      [message.sender ?? "", message.from ?? "", message.to ?? ""].join(" ").toLowerCase(),
+      classificationText.senderFromToText,
       [
         "digital promo sound",
         "promo@",
@@ -10017,14 +10143,9 @@ function inferHeuristicSignal(
     return message.signal;
   }
 
+  const classificationText = getMessageClassificationText(message);
   const normalizedSender = normalizeSenderLearningKey(message.from || message.sender);
-  const searchableText = [
-    message.subject,
-    message.snippet,
-    ...(message.body ?? []),
-  ]
-    .join(" ")
-    .toLowerCase();
+  const searchableText = classificationText.subjectSnippetBodyText;
   const automatedSenderHints = [
     "no-reply",
     "noreply",
@@ -10171,7 +10292,7 @@ function inferHeuristicSignal(
   // full body/footer and are too broad ("ads", "advertentie") to override an
   // explicit subject like "Area53 Promo: …".  For everything else (promo detected
   // only in snippet/body) keep the existing billing-guard behaviour unchanged.
-  const subjectText = (message.subject ?? "").toLowerCase();
+  const subjectText = classificationText.subjectText;
   const includesPromoKeyword = (value: string) =>
     promoKeywords.some((keyword) =>
       keyword === "offer" ? /\boffer\b/.test(value) : value.includes(keyword),
@@ -10279,14 +10400,17 @@ function inferInternalClassification(
 }
 
 function refineUnknownInternalClassification(
-  message: Pick<MailMessageSeed, "subject" | "snippet">,
+  message: Pick<
+    MailMessageSeed,
+    "subject" | "snippet" | "sender" | "from" | "body"
+  >,
   classification: CuevionInternalClassification,
 ): CuevionInternalClassification {
   if (classification !== "unknown") {
     return classification;
   }
 
-  const searchableText = [message.subject, message.snippet].join(" ").toLowerCase();
+  const searchableText = getMessageClassificationText(message).subjectSnippetText;
   const hasClearMarketingNewsletterSignal = includesAnyKeyword(searchableText, [
     "watch",
     "summit",
@@ -10352,15 +10476,17 @@ function refineUnknownInternalClassification(
 function isRoyaltyStatementLikeMessage(
   message: Pick<MailMessageSeed, "subject" | "snippet" | "from" | "sender" | "body">,
 ) {
-  const searchableText = [
-    message.subject,
-    message.snippet,
-    message.from,
-    message.sender,
-    ...(message.body ?? []),
-  ]
-    .join(" ")
-    .toLowerCase();
+  const classificationText = getMessageClassificationText(message);
+  const searchableText = joinClassificationTextWithBody(
+    [
+      classificationText.subjectText,
+      classificationText.snippetText,
+      classificationText.fromText,
+      classificationText.senderText,
+    ],
+    classificationText.bodyText,
+    message.body.length,
+  );
 
   const hasStatementAvailabilitySignal = includesAnyKeyword(searchableText, [
     "statement availability",
@@ -10400,15 +10526,9 @@ function isRoyaltyStatementLikeMessage(
 function isMarketingNewsletterUpdateMessage(
   message: Pick<MailMessage, "subject" | "snippet" | "sender" | "from" | "body">,
 ) {
-  const searchableText = [
-    message.subject,
-    message.snippet,
-    message.sender,
-    message.from,
-    ...(message.body ?? []),
-  ]
-    .join(" ")
-    .toLowerCase();
+  const searchableText = getMessageClassificationText(
+    message,
+  ).subjectSnippetSenderFromBodyText;
 
   return includesAnyKeyword(searchableText, [
     "watch",
@@ -11278,17 +11398,10 @@ function getLocalAutoPriorityScore(
     | "isAutoReply"
   >,
 ) {
-  const searchableText = [
-    message.subject,
-    message.snippet,
-    ...(message.body ?? []),
-    message.sender,
-    message.from,
-  ]
-    .join(" ")
-    .toLowerCase();
-  const senderText = `${message.sender} ${message.from}`.toLowerCase();
-  const subjectText = message.subject.toLowerCase();
+  const classificationText = getMessageClassificationText(message);
+  const searchableText = classificationText.subjectSnippetBodySenderFromText;
+  const senderText = classificationText.senderFromText;
+  const subjectText = classificationText.subjectText;
   const hasAttachments = (message.attachments?.length ?? 0) > 0;
   const hasSharedContext = Boolean(message.sharedContext || message.isShared);
   const isPrimaryConfident =

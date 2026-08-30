@@ -3,7 +3,9 @@ import "sucrase/register/tsx.js";
 
 const {
   applyFocusPreferenceRoutingToMailboxCollections,
+  getVisiblePriorityBadgeForWorkspaceMessage,
   normalizeMailMessage,
+  resolveVisibleCategoryLabelForMessageInContext,
 } = require("./WorkspaceShell.tsx") as typeof import("./WorkspaceShell");
 const {
   writePersistedMessageOwnershipStateValue,
@@ -82,6 +84,51 @@ function cloneSeed(seed: MessageSeed): MessageSeed {
   };
 }
 
+type ClassificationJoinCounter = { count: number };
+
+function createClassificationCountingBody(
+  paragraphs: string[],
+  counter: ClassificationJoinCounter,
+) {
+  const body = [...paragraphs];
+  const nativeJoin = Array.prototype.join;
+
+  Object.defineProperty(body, "join", {
+    configurable: true,
+    value(separator?: string) {
+      if (separator === " ") {
+        counter.count += 1;
+      }
+      return nativeJoin.call(this, separator);
+    },
+  });
+
+  return body;
+}
+
+function withClassificationCountingBody(
+  message: ReturnType<typeof normalizeMailMessage>,
+  counter: ClassificationJoinCounter,
+  paragraphs = message.body,
+) {
+  return {
+    ...message,
+    body: createClassificationCountingBody([...paragraphs], counter),
+  };
+}
+
+function exerciseClassificationPaths(message: ReturnType<typeof normalizeMailMessage>) {
+  return {
+    normalLabel: resolveVisibleCategoryLabelForMessageInContext(message, false),
+    promoContextLabel: resolveVisibleCategoryLabelForMessageInContext(message, true),
+    priorityBadge: getVisiblePriorityBadgeForWorkspaceMessage(
+      message,
+      undefined,
+      mediumFocusPreferences,
+    ),
+  };
+}
+
 function decodeTestHtmlEntities(value: string) {
   return value
     .replace(/&lt;/gi, "<")
@@ -147,6 +194,211 @@ function withoutDocument<T>(run: () => T): T {
     if (previousDocumentDescriptor) {
       Object.defineProperty(globalRecord, "document", previousDocumentDescriptor);
     }
+  }
+}
+
+const classificationEquivalenceFixtures: Array<{
+  name: string;
+  overrides: Partial<MessageSeed>;
+  expectedVisibleLabel: ReturnType<
+    typeof resolveVisibleCategoryLabelForMessageInContext
+  >;
+  expectedSignal?: ReturnType<typeof normalizeMailMessage>["signal"];
+  expectedInternalClassification?: ReturnType<
+    typeof normalizeMailMessage
+  >["internalClassification"];
+}> = [
+  {
+    name: "strong demo submission",
+    overrides: {
+      subject: "[DEMO] Artist - Unreleased Track",
+      snippet: "Demo submission for feedback",
+      to: "demos@example.test",
+      body: ["Listen to my new track", "Private SoundCloud link"],
+    },
+    expectedVisibleLabel: "Demo",
+  },
+  {
+    name: "music promo",
+    overrides: {
+      subject: "[PROMO] Artist - Club Track",
+      snippet: "New release for your sets",
+      body: ["DJ support is appreciated", "Promo download page"],
+    },
+    expectedVisibleLabel: "Promo",
+  },
+  {
+    name: "protected LabelWorx promo context",
+    overrides: {
+      internalClassification: "workflow_update",
+      subject: "Artist - Club Track",
+      from: "LabelWorx <promobox-reply@label-worx.com>",
+      body: ["Your limited promo download package is ready"],
+    },
+    expectedVisibleLabel: "Promo",
+  },
+  {
+    name: "promo access request",
+    overrides: {
+      internalClassification: "promo",
+      subject: "Please add me to your mailing list",
+      snippet: "Please add me to your promo list",
+      body: ["I would like to receive promos for my radio show"],
+    },
+    expectedVisibleLabel: "Business",
+  },
+  {
+    name: "explicit promo sendout",
+    overrides: {
+      internalClassification: "workflow_update",
+      subject: "PROMO: Artist - New House Track",
+      snippet: "New track for your sets",
+      body: ["DJ support is appreciated within your DJ sets"],
+    },
+    expectedVisibleLabel: "Promo",
+  },
+  {
+    name: "broadcast promo",
+    overrides: {
+      internalClassification: "business",
+      subject: "Monthly label news",
+      snippet: "Read this email online",
+      body: ["View in browser", "Unsubscribe"],
+    },
+    expectedVisibleLabel: "Update",
+  },
+  {
+    name: "generic retail marketing",
+    overrides: {
+      internalClassification: "business",
+      subject: "Last chance sale",
+      snippet: "Save with this coupon",
+      body: ["Limited time discount", "Shop now", "Unsubscribe"],
+    },
+    expectedVisibleLabel: "Update",
+  },
+  {
+    name: "newsletter update",
+    overrides: {
+      internalClassification: "finance",
+      subject: "In brief newsletter",
+      snippet: "Watch the summit on demand",
+      body: ["Register for the webinar", "Join us"],
+    },
+    expectedVisibleLabel: "Update",
+  },
+  {
+    name: "low-value event update",
+    overrides: {
+      internalClassification: "business",
+      subject: "Conference passes available",
+      snippet: "Register now for the event",
+      body: ["Save 40% on show passes", "Unsubscribe"],
+    },
+    expectedVisibleLabel: "Update",
+  },
+  {
+    name: "cold sales outreach",
+    overrides: {
+      internalClassification: "finance",
+      subject: "Grow your content in a new market",
+      snippet: "We work with creators",
+      body: [
+        "I came across your content and see a huge audience in China.",
+        "We handle account setup, content translation and localization.",
+      ],
+    },
+    expectedVisibleLabel: "Other",
+  },
+  {
+    name: "royalty statement",
+    overrides: {
+      subject: "Your royalty statement is ready",
+      snippet: "Statement availability notification",
+      from: "Warner Music <royalties@example.test>",
+      body: ["Sign in to the artist royalties portal"],
+    },
+    expectedVisibleLabel: "Finance",
+    expectedInternalClassification: "royalty_statement",
+  },
+  {
+    name: "finance heuristic",
+    overrides: {
+      subject: "Invoice payment due",
+      snippet: "Please review the invoice",
+      body: ["Payment is due tomorrow"],
+    },
+    expectedVisibleLabel: "Finance",
+    expectedSignal: "Finance",
+    expectedInternalClassification: "finance",
+  },
+  {
+    name: "business heuristic",
+    overrides: {
+      subject: "Contract approval required",
+      snippet: "Please review the agreement",
+      body: ["Please confirm before the deadline"],
+    },
+    expectedVisibleLabel: "Business",
+    expectedSignal: "Priority",
+    expectedInternalClassification: "business",
+  },
+  {
+    name: "update heuristic",
+    overrides: {
+      subject: "Status update",
+      snippet: "The delivery is completed",
+      body: ["Delivery completed successfully"],
+    },
+    expectedVisibleLabel: "Update",
+    expectedSignal: "Update",
+    expectedInternalClassification: "workflow_update",
+  },
+  {
+    name: "unknown refinement to demo",
+    overrides: {
+      subject: "Demo submission",
+      snippet: "Unreleased track submission",
+      body: ["A private recording for consideration"],
+    },
+    expectedVisibleLabel: "Demo",
+    expectedSignal: "Other",
+    expectedInternalClassification: "demo",
+  },
+];
+
+for (const fixture of classificationEquivalenceFixtures) {
+  const message = normalizeMailMessage(
+    createSeed(`classification-equivalence-${fixture.name}`, {
+      signal: undefined,
+      ui_signal: undefined,
+      internalClassification: undefined,
+      final_visibility: undefined,
+      action: undefined,
+      bodyHtml: undefined,
+      attachments: [],
+      ...fixture.overrides,
+    }),
+    "main",
+    {},
+    {},
+    "user-1",
+  );
+
+  assert.equal(
+    resolveVisibleCategoryLabelForMessageInContext(message, false),
+    fixture.expectedVisibleLabel,
+    fixture.name,
+  );
+  if (fixture.expectedSignal !== undefined) {
+    assert.equal(message.signal, fixture.expectedSignal, fixture.name);
+  }
+  if (fixture.expectedInternalClassification !== undefined) {
+    assert.equal(
+      message.internalClassification,
+      fixture.expectedInternalClassification,
+      fixture.name,
+    );
   }
 }
 
@@ -249,6 +501,201 @@ withCountingDomDecoder((getCount) => {
     "attachment changes and unrelated File identities must miss",
   );
 });
+
+{
+  const counter = { count: 0 };
+  const normalized = normalizeMailMessage(
+    createSeed("classification-same-object-setup", { bodyHtml: undefined }),
+    "main",
+    {},
+    {},
+    "user-1",
+  );
+  const seed = withClassificationCountingBody(
+    {
+      ...normalized,
+      id: "classification-same-object",
+      internalClassification: "unknown",
+      subject: "Newsletter update",
+      snippet: "Please review the latest campaign",
+      body: ["Register now", "Unsubscribe"],
+    },
+    counter,
+  );
+  const firstResult = exerciseClassificationPaths(seed);
+
+  for (let pass = 0; pass < 10; pass += 1) {
+    assert.deepEqual(exerciseClassificationPaths(seed), firstResult);
+  }
+
+  assert.equal(
+    counter.count,
+    1,
+    "the same message must join classification body text once",
+  );
+}
+
+{
+  const counter = { count: 0 };
+  const normalized = normalizeMailMessage(
+    createSeed("classification-recreated-setup", { bodyHtml: undefined }),
+    "main",
+    {},
+    {},
+    "user-1",
+  );
+  const seed = {
+    ...normalized,
+    id: "classification-recreated",
+    internalClassification: "unknown" as const,
+    subject: "Classification recreated subject",
+    body: ["A stable first paragraph", "A stable second paragraph"],
+  };
+  const first = withClassificationCountingBody(seed, counter);
+  const recreated = withClassificationCountingBody(seed, counter);
+
+  assert.deepEqual(
+    exerciseClassificationPaths(recreated),
+    exerciseClassificationPaths(first),
+  );
+  assert.equal(
+    counter.count,
+    1,
+    "an exact recreated message must reuse classification text structurally",
+  );
+}
+
+{
+  const counter = { count: 0 };
+  const normalized = normalizeMailMessage(
+    createSeed("classification-invalidation-setup", { bodyHtml: undefined }),
+    "main",
+    {},
+    {},
+    "user-1",
+  );
+  const baseline = {
+    ...normalized,
+    id: "classification-invalidation",
+    internalClassification: "unknown",
+    subject: "Classification invalidation subject",
+    body: ["First paragraph", "Second paragraph"],
+  } as ReturnType<typeof normalizeMailMessage>;
+  const variants: Array<ReturnType<typeof normalizeMailMessage>> = [
+    baseline,
+    { ...baseline, subject: "Changed subject" },
+    { ...baseline, snippet: "Changed snippet" },
+    { ...baseline, sender: "Changed sender" },
+    { ...baseline, from: "changed-from@example.test" },
+    { ...baseline, to: "changed-to@example.test" },
+    { ...baseline, body: ["Changed body", "Second paragraph"] },
+    { ...baseline, body: ["Second paragraph", "First paragraph"] },
+    {
+      ...baseline,
+      attachments: [{ id: "changed-name", name: "changed-name.pdf", size: 128 }],
+    },
+  ];
+
+  variants.forEach((variant) => {
+    exerciseClassificationPaths(withClassificationCountingBody(variant, counter));
+  });
+
+  assert.equal(
+    counter.count,
+    variants.length,
+    "every classification-relevant text change must invalidate the projection",
+  );
+}
+
+{
+  const counter = { count: 0 };
+  const normalized = normalizeMailMessage(
+    createSeed("classification-eviction-setup", { bodyHtml: undefined }),
+    "main",
+    {},
+    {},
+    "user-1",
+  );
+  const oldest = {
+    ...normalized,
+    id: "classification-eviction-oldest",
+    subject: "Classification eviction oldest",
+  };
+  exerciseClassificationPaths(withClassificationCountingBody(oldest, counter));
+  for (let index = 0; index < 64; index += 1) {
+    exerciseClassificationPaths(
+      withClassificationCountingBody(
+        {
+          ...normalized,
+          id: `classification-eviction-fill-${index}`,
+          subject: `Classification eviction fill ${index}`,
+        },
+        counter,
+      ),
+    );
+  }
+  exerciseClassificationPaths(withClassificationCountingBody(oldest, counter));
+
+  assert.equal(
+    counter.count,
+    66,
+    "the oldest classification projection must evict after 64 structural entries",
+  );
+}
+
+{
+  const counter = { count: 0 };
+  const normalized = normalizeMailMessage(
+    createSeed("classification-pathological-setup", { bodyHtml: undefined }),
+    "main",
+    {},
+    {},
+    "user-1",
+  );
+  const messages = Array.from({ length: 64 }, (_, index) =>
+    withClassificationCountingBody(
+      {
+        ...normalized,
+        id: `classification-pathological-${index}`,
+        internalClassification: "unknown" as const,
+        subject:
+          index % 2 === 0 ? "Newsletter update" : "Please review contract",
+        body: [`Synthetic body ${index}`, "Unsubscribe or reply with approval"],
+      },
+      counter,
+    ),
+  );
+  const collections = {
+    Inbox: messages.map((message) => ({
+      ...message,
+      body: [...message.body],
+    })),
+    Drafts: [],
+    Sent: [],
+    Archive: [],
+    Filtered: [],
+    Spam: [],
+    Trash: [],
+  };
+
+  for (let pass = 0; pass < 10; pass += 1) {
+    messages.forEach(exerciseClassificationPaths);
+    const routed = applyFocusPreferenceRoutingToMailboxCollections(
+      collections,
+      pass % 2 === 0
+        ? mediumFocusPreferences
+        : { ...mediumFocusPreferences, updates: "low" },
+      {},
+    );
+    assert.equal(routed.Inbox.length + routed.Filtered.length, messages.length);
+  }
+
+  assert.equal(
+    counter.count,
+    64,
+    "64 messages across repeated classification and routing passes must join 64 bodies",
+  );
+}
 
 withCountingDomDecoder((getCount) => {
   const seed = createSeed("scope-isolation");
