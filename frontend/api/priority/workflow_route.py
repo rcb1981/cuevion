@@ -13,6 +13,7 @@ or any multi-user rollout.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from .authority import (
@@ -20,6 +21,16 @@ from .authority import (
     SemanticAuthorityError,
     parse_priority_message_identity,
     resolve_priority_authority,
+)
+from .candidate_reference_reconciliation import (
+    CandidateReferenceReconciliationResult,
+    RECONCILIATION_FAILURE_RESULTS,
+    reconcile_workflow_candidate_references,
+)
+from .candidate_store import (
+    PriorityCandidateScope,
+    PriorityCandidateStore,
+    build_runtime_candidate_store,
 )
 from .event_reference import EventReferenceError, resolve_priority_hmac_secret
 from .store import (
@@ -35,6 +46,7 @@ WORKFLOW_READ_OPERATION = "read"
 WORKFLOW_MANUAL_PRIORITY_OPERATION = "set_manual_priority"
 WORKFLOW_CLEARED_OPERATION = "set_cleared"
 WORKFLOW_WAITING_OPERATION = "set_waiting"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +170,7 @@ def process_priority_workflow_request(
     *,
     hmac_secret: str | None = None,
     store: PriorityWorkflowStore | None = None,
+    candidate_store: PriorityCandidateStore | None = None,
 ) -> WorkflowRouteResponse:
     request = _validate_payload(payload)
     if isinstance(request, WorkflowRouteResponse):
@@ -182,11 +195,14 @@ def process_priority_workflow_request(
         )
         for identity in request.identities
     )
+    resolved_secret: str | None = None
     try:
         workflow_store = store
         if workflow_store is None:
-            secret = hmac_secret or resolve_priority_hmac_secret()
-            workflow_store = build_runtime_workflow_store(hmac_secret=secret)
+            resolved_secret = hmac_secret or resolve_priority_hmac_secret()
+            workflow_store = build_runtime_workflow_store(
+                hmac_secret=resolved_secret
+            )
         if request.operation == WORKFLOW_READ_OPERATION:
             records = workflow_store.read_records(scopes)
             return WorkflowRouteResponse(
@@ -207,14 +223,6 @@ def process_priority_workflow_request(
             field=request.field,
             value=request.value,
         )
-        return WorkflowRouteResponse(
-            200,
-            {
-                "ok": True,
-                "status": "updated",
-                "record": record.to_wire_dict(scopes[0]),
-            },
-        )
     except EventReferenceError:
         return _error(
             503,
@@ -233,3 +241,39 @@ def process_priority_workflow_request(
             "workflow_storage_unavailable",
             "Priority workflow storage is temporarily unavailable.",
         )
+    try:
+        runtime_candidate_store = candidate_store
+        if runtime_candidate_store is None:
+            if resolved_secret is None:
+                resolved_secret = hmac_secret or resolve_priority_hmac_secret()
+            runtime_candidate_store = build_runtime_candidate_store(
+                hmac_secret=resolved_secret
+            )
+        candidate_scope = PriorityCandidateScope(
+            workspace_id=authority.workspace_id,
+            user_id=authority.user_id,
+            mailbox_id=authority.mailbox_id,
+            mailbox_account_identity=authority.mailbox_email,
+            provider=authority.provider,
+            identity=scopes[0].identity,
+        )
+        reconciliation = reconcile_workflow_candidate_references(
+            runtime_candidate_store,
+            candidate_scope,
+            record,
+        )
+    except Exception:
+        reconciliation = CandidateReferenceReconciliationResult.STORE_UNAVAILABLE
+    if reconciliation in RECONCILIATION_FAILURE_RESULTS:
+        logger.warning(
+            "Priority workflow candidate reference reconciliation outcome=%s",
+            reconciliation.value,
+        )
+    return WorkflowRouteResponse(
+        200,
+        {
+            "ok": True,
+            "status": "updated",
+            "record": record.to_wire_dict(scopes[0]),
+        },
+    )

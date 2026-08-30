@@ -12,7 +12,7 @@ import hmac
 import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Callable, Literal
 
@@ -43,6 +43,11 @@ POSITIVE_REFERENCE_MAX_SECONDS = {
 }
 
 _POSITIVE_REFERENCE_KINDS = tuple(POSITIVE_REFERENCE_MAX_SECONDS)
+_WORKFLOW_POSITIVE_REFERENCE_KINDS = (
+    "manual_priority",
+    "waiting",
+    "returned_reply",
+)
 _CANDIDATE_KEY_PREFIX = "cuevion:priority:candidate:v2:"
 _SCOPE_HMAC_INFO = b"cuevion/priority/candidate-scope/v1\x00"
 _MAILBOX_SCOPE_HMAC_INFO = b"cuevion/priority/candidate-mailbox-scope/v1\x00"
@@ -1245,6 +1250,45 @@ end
 return {now,base,absolute,expectedVersion+1,unpack(references)}
 """
 
+_PREPARE_WORKFLOW_REFERENCES_SCRIPT = r"""
+local expectedVersion=tonumber(ARGV[1]);local base=tonumber(ARGV[3])
+local absolute=tonumber(ARGV[4]);local maximum=tonumber(ARGV[11])
+if not maximum or maximum<0 or maximum%1~=0 then return ARGV[13] end
+if not expectedVersion or expectedVersion<1 or expectedVersion%1~=0 or
+  expectedVersion>=maximum or not base or base<0 or base>maximum or base%1~=0 or
+  not absolute or absolute<0 or absolute>maximum or absolute%1~=0 or
+  base>absolute then
+  return ARGV[13]
+end
+local requested={}
+local referenceMaximums={}
+for index=1,3 do
+  local expires=tonumber(ARGV[4+index]);local seconds=tonumber(ARGV[7+index])
+  if not expires or expires<0 or expires>maximum or expires%1~=0 or
+    not seconds or seconds<1 or seconds%1~=0 then return ARGV[12] end
+  requested[index]=expires;referenceMaximums[index]=seconds
+end
+local clock=redis.call('TIME');local seconds=tonumber(clock[1])
+local micros=tonumber(clock[2])
+if not seconds or not micros then return ARGV[13] end
+local now=seconds*1000+math.floor(micros/1000)
+if now<0 or now>maximum then return ARGV[13] end
+local normalized={}
+local hasPositive=false
+for index=1,3 do
+  local expires=requested[index]
+  if expires<=now then expires=0 else
+    expires=math.min(expires,absolute,now+referenceMaximums[index]*1000)
+  end
+  normalized[index]=expires
+  if expires>0 then hasPositive=true end
+end
+if hasPositive and (ARGV[2]~='provider_confirmed' or now>=base) then
+  return ARGV[14]
+end
+return {now,expectedVersion+1,unpack(normalized)}
+"""
+
 _UPSERT_CONFIRMED_SCRIPT = _REFERENCE_VALIDATOR_SCRIPT + r"""
 local function keyType(key)
   local value=redis.call('TYPE',key)
@@ -1336,6 +1380,103 @@ for index=2,4 do
 end
 return ARGV[4]
 """
+
+_RECONCILE_WORKFLOW_REFERENCES_SCRIPT = (
+    _CANONICAL_COLLECTION_VALIDATOR_SCRIPT
+    + r"""
+local function keyType(key)
+  local value=redis.call('TYPE',key)
+  if type(value)=='table' then return value['ok'] end
+  return value
+end
+local expectedTypes={{KEYS[1],'string'},{KEYS[2],'zset'},
+  {KEYS[3],'zset'},{KEYS[4],'zset'}}
+for _,item in ipairs(expectedTypes) do
+  local actual=keyType(item[1])
+  if actual~='none' and actual~=item[2] then return ARGV[21] end
+end
+local current=redis.call('GET',KEYS[1])
+if not current then return ARGV[15] end
+if current~=ARGV[1] then return ARGV[14] end
+local scores={redis.call('ZSCORE',KEYS[2],ARGV[9]),
+  redis.call('ZSCORE',KEYS[3],ARGV[9]),redis.call('ZSCORE',KEYS[4],ARGV[9])}
+if not scores[1] or not scores[2] or not scores[3] or
+  tonumber(scores[1])~=tonumber(scores[2]) or
+  tonumber(scores[1])~=tonumber(scores[3]) or
+  tonumber(scores[1])~=tonumber(ARGV[17]) then return ARGV[19] end
+local oldOk,oldRecord=pcall(cjson.decode,current)
+local newOk,newRecord=pcall(cjson.decode,ARGV[3])
+local maximum=tonumber(ARGV[12])
+if not oldOk or not newOk or type(oldRecord)~='table' or
+  type(newRecord)~='table' or string.len(ARGV[3])>tonumber(ARGV[11]) or
+  not candidateCollectionsAreCanonical(oldRecord) or
+  not candidateCollectionsAreCanonical(newRecord) or
+  not exactReferences(oldRecord['positiveReferences'],maximum,false) or
+  not exactReferences(newRecord['positiveReferences'],maximum,false) or
+  oldRecord['version']~=tonumber(ARGV[2]) or
+  newRecord['version']~=tonumber(ARGV[4]) or
+  newRecord['version']~=oldRecord['version']+1 or
+  newRecord['updatedAt']~=tonumber(ARGV[5]) or
+  newRecord['updatedAt']<oldRecord['updatedAt'] or
+  newRecord['providerObservedAt']~=oldRecord['providerObservedAt'] or
+  newRecord['providerValidatedAt']~=oldRecord['providerValidatedAt'] or
+  newRecord['baseExpiresAt']~=oldRecord['baseExpiresAt'] or
+  newRecord['absoluteExpiresAt']~=oldRecord['absoluteExpiresAt'] or
+  newRecord['graceExpiresAt']~=oldRecord['graceExpiresAt'] or
+  newRecord['state']~=oldRecord['state'] or
+  newRecord['positiveReferences']['manual_priority']~=tonumber(ARGV[6]) or
+  newRecord['positiveReferences']['waiting']~=tonumber(ARGV[7]) or
+  newRecord['positiveReferences']['returned_reply']~=tonumber(ARGV[8]) or
+  newRecord['positiveReferences']['semantic_promotion']~=
+    oldRecord['positiveReferences']['semantic_promotion'] or
+  newRecord['positiveReferences']['collaboration_priority']~=
+    oldRecord['positiveReferences']['collaboration_priority'] or
+  newRecord['positiveReferences']['assigned_review']~=
+    oldRecord['positiveReferences']['assigned_review'] then return ARGV[18] end
+local clock=redis.call('TIME');local seconds=tonumber(clock[1])
+local micros=tonumber(clock[2])
+if not seconds or not micros then return ARGV[20] end
+local now=seconds*1000+math.floor(micros/1000)
+if now<0 or now>maximum or newRecord['updatedAt']>now then return ARGV[20] end
+local workflowKinds={'manual_priority','waiting','returned_reply'}
+for index,kind in ipairs(workflowKinds) do
+  local expires=newRecord['positiveReferences'][kind]
+  local referenceMaximum=tonumber(ARGV[21+index])
+  if not referenceMaximum or referenceMaximum<1 or referenceMaximum%1~=0 or
+    (expires>0 and (expires<=now or expires>newRecord['absoluteExpiresAt'] or
+      expires>now+referenceMaximum*1000 or
+      newRecord['state']~='provider_confirmed' or
+      now>=newRecord['baseExpiresAt'])) then return ARGV[16] end
+end
+local positive=0
+for _,kind in ipairs({'manual_priority','waiting','returned_reply',
+  'semantic_promotion','collaboration_priority','assigned_review'}) do
+  local expires=newRecord['positiveReferences'][kind]
+  if expires>newRecord['absoluteExpiresAt'] then return ARGV[18] end
+  if expires>positive then positive=expires end
+end
+local expires=math.max(newRecord['baseExpiresAt'],positive)
+if expires>newRecord['absoluteExpiresAt'] then
+  expires=newRecord['absoluteExpiresAt']
+end
+if newRecord['state']=='provider_validation_grace' then
+  if newRecord['graceExpiresAt']<expires then expires=newRecord['graceExpiresAt'] end
+elseif newRecord['state']~='provider_confirmed' then return ARGV[18] end
+if expires<=now then
+  redis.call('DEL',KEYS[1])
+  for index=2,4 do redis.call('ZREM',KEYS[index],ARGV[9]) end
+  return ARGV[15]
+end
+local ttl=math.ceil((expires-now)/1000)
+if ttl<1 then return ARGV[20] end
+redis.call('SET',KEYS[1],ARGV[3],'EX',ttl)
+for index=2,4 do
+  redis.call('ZADD',KEYS[index],expires,ARGV[9])
+  redis.call('EXPIRE',KEYS[index],ARGV[10])
+end
+return ARGV[3]
+"""
+)
 
 _SET_POSITIVE_REFERENCE_SCRIPT = _CANONICAL_COLLECTION_VALIDATOR_SCRIPT + r"""
 local current=redis.call('GET',KEYS[1])
@@ -2205,6 +2346,267 @@ class PriorityCandidateStore:
             degraded=any(
                 record.state == "provider_validation_grace" for record in records
             ),
+        )
+
+    def _prepare_workflow_references(
+        self,
+        existing: PriorityCandidateRecord,
+        *,
+        manual_priority_expires_at: int,
+        waiting_expires_at: int,
+        returned_reply_expires_at: int,
+    ) -> tuple[str, PriorityCandidateRecord]:
+        requested = (
+            manual_priority_expires_at,
+            waiting_expires_at,
+            returned_reply_expires_at,
+        )
+        result = self._command(
+            [
+                "EVAL",
+                _PREPARE_WORKFLOW_REFERENCES_SCRIPT,
+                0,
+                existing.version,
+                existing.state,
+                existing.base_expires_at,
+                existing.absolute_expires_at,
+                *requested,
+                *(
+                    POSITIVE_REFERENCE_MAX_SECONDS[kind]
+                    for kind in _WORKFLOW_POSITIVE_REFERENCE_KINDS
+                ),
+                CANDIDATE_MAX_SAFE_INTEGER,
+                _PREPARE_REFERENCE_INVALID_SENTINEL,
+                _PREPARE_TEMPORAL_INVALID_SENTINEL,
+                _REFERENCE_REJECTED_SENTINEL,
+            ],
+            transport_stage="store_upsert_transport",
+            result_stage="store_prepare_metadata_invalid",
+        )
+        if result == _REFERENCE_REJECTED_SENTINEL:
+            raise CandidateReferenceRejected()
+        sentinel_stage = (
+            _PREPARE_SENTINEL_STAGES.get(result)
+            if type(result) is str
+            else None
+        )
+        if sentinel_stage is not None:
+            raise CandidateStoreUnavailable(sentinel_stage)
+        if type(result) is not list or len(result) != 5:
+            raise CandidateStoreUnavailable("store_prepare_metadata_invalid")
+        metadata = tuple(_safe_redis_integer(value) for value in result)
+        if any(value is None for value in metadata):
+            raise CandidateStoreUnavailable("store_prepare_metadata_invalid")
+        now, version, *normalized = metadata
+        assert now is not None
+        assert version is not None
+        if version != existing.version + 1:
+            raise CandidateStoreUnavailable("store_prepare_temporal_invalid")
+        expected_normalized = tuple(
+            0
+            if expires_at <= now
+            else min(
+                expires_at,
+                existing.absolute_expires_at,
+                now + POSITIVE_REFERENCE_MAX_SECONDS[kind] * 1_000,
+            )
+            for kind, expires_at in zip(
+                _WORKFLOW_POSITIVE_REFERENCE_KINDS,
+                requested,
+                strict=True,
+            )
+        )
+        if tuple(normalized) != expected_normalized:
+            raise CandidateStoreUnavailable("store_prepare_reference_invalid")
+        desired_by_kind = dict(
+            zip(
+                _WORKFLOW_POSITIVE_REFERENCE_KINDS,
+                expected_normalized,
+                strict=True,
+            )
+        )
+        try:
+            references = tuple(
+                PriorityCandidatePositiveReference(
+                    kind=reference.kind,
+                    expires_at=desired_by_kind.get(
+                        reference.kind,
+                        reference.expires_at,
+                    ),
+                )
+                for reference in existing.positive_references
+            )
+            prepared_record = replace(
+                existing,
+                positive_references=references,
+                version=version,
+                updated_at=now,
+            )
+            prepared = _encode_wire(
+                _record_to_wire(self._hmac_secret, prepared_record)
+            )
+        except _CandidateRecordSizeExceeded:
+            raise CandidateStoreUnavailable("store_prepare_size_invalid") from None
+        except Exception:
+            raise CandidateStoreUnavailable(
+                "store_prepare_canonical_invalid"
+            ) from None
+        try:
+            canonical_record = self._decode_exact(
+                prepared,
+                existing.scope,
+                failure_stage="store_prepare_canonical_invalid",
+            )
+        except CandidateStoreUnavailable:
+            raise
+        except Exception:
+            raise CandidateStoreUnavailable(
+                "store_prepare_canonical_invalid"
+            ) from None
+        if canonical_record != prepared_record:
+            raise CandidateStoreUnavailable("store_prepare_canonical_invalid")
+        return prepared, prepared_record
+
+    def _reconcile_workflow_reference_acknowledgement(
+        self,
+        prepared_record: PriorityCandidateRecord,
+        error: CandidateStoreUnavailable,
+    ) -> PriorityCandidateRecord:
+        try:
+            observed = self.read_candidate(prepared_record.scope)
+        except Exception:
+            raise error from None
+        if observed != prepared_record:
+            raise error from None
+        return observed
+
+    def _commit_workflow_references(
+        self,
+        existing_raw: str,
+        existing: PriorityCandidateRecord,
+        prepared: str,
+        prepared_record: PriorityCandidateRecord,
+    ) -> PriorityCandidateRecord | None:
+        keys = self._scope_keys(existing.scope)
+        workflow_expires = tuple(
+            prepared_record.positive_reference_expires_at(kind)
+            for kind in _WORKFLOW_POSITIVE_REFERENCE_KINDS
+        )
+        try:
+            result = self._command(
+                [
+                    "EVAL",
+                    _RECONCILE_WORKFLOW_REFERENCES_SCRIPT,
+                    4,
+                    keys["record"],
+                    keys["mailbox_index"],
+                    keys["user_index"],
+                    keys["namespace_index"],
+                    existing_raw,
+                    existing.version,
+                    prepared,
+                    prepared_record.version,
+                    prepared_record.updated_at,
+                    *workflow_expires,
+                    keys["member"],
+                    CANDIDATE_INDEX_TTL_SECONDS,
+                    CANDIDATE_MAX_SERIALIZED_RECORD_BYTES,
+                    CANDIDATE_MAX_SAFE_INTEGER,
+                    _CORRUPT_SENTINEL,
+                    _CONFLICT_SENTINEL,
+                    _MISSING_SENTINEL,
+                    _REFERENCE_REJECTED_SENTINEL,
+                    existing.logical_expires_at(),
+                    _COMMIT_PREPARED_INVALID_SENTINEL,
+                    _COMMIT_INDEX_INVALID_SENTINEL,
+                    _COMMIT_EXPIRY_INVALID_SENTINEL,
+                    _COMMIT_KEY_OR_MARKER_INVALID_SENTINEL,
+                    *(
+                        POSITIVE_REFERENCE_MAX_SECONDS[kind]
+                        for kind in _WORKFLOW_POSITIVE_REFERENCE_KINDS
+                    ),
+                ],
+                transport_stage="store_upsert_transport",
+                result_stage="store_upsert_result_invalid",
+            )
+        except CandidateStoreUnavailable as error:
+            return self._reconcile_workflow_reference_acknowledgement(
+                prepared_record,
+                error,
+            )
+        if result == _CONFLICT_SENTINEL:
+            raise CandidateVersionConflict()
+        if result == _REFERENCE_REJECTED_SENTINEL:
+            raise CandidateReferenceRejected()
+        if result == _MISSING_SENTINEL:
+            return None
+        if result == _CORRUPT_SENTINEL:
+            raise CandidateStoreUnavailable("store_existing_record_invalid")
+        sentinel_stage = (
+            _COMMIT_SENTINEL_STAGES.get(result)
+            if type(result) is str
+            else None
+        )
+        if sentinel_stage is not None:
+            raise CandidateStoreUnavailable(sentinel_stage)
+        if result != prepared:
+            return self._reconcile_workflow_reference_acknowledgement(
+                prepared_record,
+                CandidateStoreUnavailable("store_commit_ack_invalid"),
+            )
+        return prepared_record
+
+    def reconcile_workflow_positive_references(
+        self,
+        scope: PriorityCandidateScope,
+        *,
+        manual_priority_expires_at: int,
+        waiting_expires_at: int,
+        returned_reply_expires_at: int,
+        expected_version: int,
+    ) -> PriorityCandidateRecord | None:
+        requested = (
+            manual_priority_expires_at,
+            waiting_expires_at,
+            returned_reply_expires_at,
+        )
+        if (
+            not isinstance(scope, PriorityCandidateScope)
+            or type(expected_version) is not int
+            or not 1 <= expected_version < CANDIDATE_MAX_SAFE_INTEGER
+            or any(
+                type(expires_at) is not int
+                or not 0 <= expires_at <= CANDIDATE_MAX_SAFE_INTEGER
+                for expires_at in requested
+            )
+        ):
+            raise ValueError("invalid Priority candidate workflow references")
+        keys = self._scope_keys(scope)
+        current = self._command(
+            ["GET", keys["record"]],
+            transport_stage="store_upsert_transport",
+            result_stage="store_upsert_result_invalid",
+        )
+        if current is None:
+            return None
+        existing = self._decode_exact(
+            current,
+            scope,
+            failure_stage="store_existing_record_invalid",
+        )
+        if existing.version != expected_version:
+            raise CandidateVersionConflict()
+        prepared, prepared_record = self._prepare_workflow_references(
+            existing,
+            manual_priority_expires_at=manual_priority_expires_at,
+            waiting_expires_at=waiting_expires_at,
+            returned_reply_expires_at=returned_reply_expires_at,
+        )
+        return self._commit_workflow_references(
+            current,
+            existing,
+            prepared,
+            prepared_record,
         )
 
     def set_positive_reference(

@@ -31,7 +31,12 @@ from .candidate_store import (
     PriorityCandidateStore,
     build_runtime_candidate_store,
 )
+from .candidate_reference_reconciliation import (
+    RECONCILIATION_FAILURE_RESULTS,
+    reconcile_candidate_from_workflow_store,
+)
 from .event_reference import resolve_priority_hmac_secret
+from .store import PriorityWorkflowStore, build_runtime_workflow_store
 
 
 MAX_CURRENT_WINDOW_CANDIDATES = 100
@@ -561,6 +566,7 @@ def populate_priority_candidates(
     sources: object,
     *,
     store: PriorityCandidateStore,
+    workflow_store: PriorityWorkflowStore | None = None,
 ) -> PriorityCandidatePopulationReport:
     """Best-effort reconcile only rows observed in one current provider window."""
 
@@ -647,6 +653,17 @@ def populate_priority_candidates(
             count("candidate_snapshot_invalid")
             continue
         written += 1
+        if workflow_store is not None:
+            reconciliation = reconcile_candidate_from_workflow_store(
+                store,
+                workflow_store,
+                scope,
+            )
+            if reconciliation in RECONCILIATION_FAILURE_RESULTS:
+                logger.warning(
+                    "Priority candidate workflow reference reconciliation outcome=%s",
+                    reconciliation.value,
+                )
 
     return _report(attempted, processed, written, reason_counts)
 
@@ -659,6 +676,7 @@ def populate_runtime_priority_candidates(
     provider: object,
     sources: object,
     store: PriorityCandidateStore | None = None,
+    workflow_store: PriorityWorkflowStore | None = None,
     hmac_secret: str | None = None,
 ) -> PriorityCandidatePopulationReport:
     """Total server boundary used by Inbox routes; this function never raises."""
@@ -682,10 +700,16 @@ def populate_runtime_priority_candidates(
         )
 
     runtime_store = store
-    if runtime_store is None:
+    runtime_workflow_store = workflow_store
+    if runtime_store is None or runtime_workflow_store is None:
         try:
             secret = hmac_secret or resolve_priority_hmac_secret()
-            runtime_store = build_runtime_candidate_store(hmac_secret=secret)
+            if runtime_store is None:
+                runtime_store = build_runtime_candidate_store(hmac_secret=secret)
+            if runtime_workflow_store is None:
+                runtime_workflow_store = build_runtime_workflow_store(
+                    hmac_secret=secret
+                )
         except Exception:
             return _operational_report(
                 _report(
@@ -701,6 +725,7 @@ def populate_runtime_priority_candidates(
                 authority,
                 sources,
                 store=runtime_store,
+                workflow_store=runtime_workflow_store,
             )
         )
     except Exception:

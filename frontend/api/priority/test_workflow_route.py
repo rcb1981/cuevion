@@ -4,7 +4,12 @@ import unittest
 from unittest.mock import patch
 
 from .authority import PriorityAuthority, SemanticAuthorityError
+from .candidate_reference_reconciliation import (
+    CandidateReferenceReconciliationResult,
+)
+from .candidate_store import PriorityCandidateStore
 from .store import PriorityWorkflowStore
+from .test_candidate_store import MemoryRedis, google_scope, snapshot
 from .test_workflow_store import SECRET, WorkflowMemoryRedis
 from .workflow_route import process_priority_workflow_request
 
@@ -67,6 +72,11 @@ class PriorityWorkflowRouteTests(unittest.TestCase):
         self.current = authority()
         self.redis = WorkflowMemoryRedis()
         self.store = PriorityWorkflowStore(self.redis, hmac_secret=SECRET)
+        self.candidate_redis = MemoryRedis(current_ms=self.redis.clock_ms)
+        self.candidate_store = PriorityCandidateStore(
+            self.candidate_redis,
+            hmac_secret=SECRET,
+        )
         self.authority_patch = patch(
             "api.priority.workflow_route.resolve_priority_authority",
             return_value=self.current,
@@ -74,11 +84,16 @@ class PriorityWorkflowRouteTests(unittest.TestCase):
         self.authority_resolver = self.authority_patch.start()
         self.addCleanup(self.authority_patch.stop)
 
-    def process(self, payload: dict, *, store=None):
+    def process(self, payload: dict, *, store=None, candidate_store=None):
         return process_priority_workflow_request(
             (("Cookie", "session=opaque"),),
             payload,
             store=self.store if store is None else store,
+            candidate_store=(
+                self.candidate_store
+                if candidate_store is None
+                else candidate_store
+            ),
         )
 
     def test_unauthenticated_request_is_rejected_before_storage(self):
@@ -169,6 +184,92 @@ class PriorityWorkflowRouteTests(unittest.TestCase):
         self.assertEqual(observed["manualPriority"], "none")
         self.assertEqual(observed["cleared"], "active")
         self.assertEqual(observed["waiting"], "absent")
+
+    def test_successful_workflow_write_reconciles_existing_exact_candidate(self):
+        candidate_scope = google_scope(
+            message_id="gmail-message-1",
+            workspace_id="workspace-1",
+            user_id="user-1",
+            mailbox_id="mailbox-1",
+            account="primary@example.com",
+        )
+        candidate = self.candidate_store.upsert_confirmed(
+            candidate_scope,
+            snapshot(),
+            expected_version=0,
+        )
+        result = self.process(write_payload("set_manual_priority", "priority"))
+        self.assertEqual(result.status_code, 200)
+        reconciled = self.candidate_store.read_candidate(candidate_scope)
+        assert reconciled is not None
+        self.assertEqual(reconciled.version, candidate.version + 1)
+        self.assertEqual(
+            reconciled.positive_reference_expires_at("manual_priority"),
+            reconciled.absolute_expires_at,
+        )
+
+    def test_missing_candidate_is_noop_and_workflow_write_stays_successful(self):
+        candidate_scope = google_scope(
+            message_id="gmail-message-1",
+            workspace_id="workspace-1",
+            user_id="user-1",
+            mailbox_id="mailbox-1",
+            account="primary@example.com",
+        )
+        result = self.process(write_payload("set_waiting", "waiting_on_other"))
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.payload["record"]["waiting"], "waiting_on_other")
+        self.assertIsNone(self.candidate_store.read_candidate(candidate_scope))
+        self.assertFalse(
+            any(command[0] == "SCAN" for command in self.candidate_redis.commands)
+        )
+
+    def test_candidate_store_unavailable_does_not_fail_accepted_workflow_write(
+        self,
+    ):
+        unavailable = PriorityCandidateStore(
+            lambda _command: (_ for _ in ()).throw(
+                RuntimeError("sensitive-candidate-storage-detail")
+            ),
+            hmac_secret=SECRET,
+        )
+        with self.assertLogs(
+            "api.priority.workflow_route",
+            level="WARNING",
+        ) as captured:
+            result = self.process(
+                write_payload("set_cleared", "cleared"),
+                candidate_store=unavailable,
+            )
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.payload["record"]["cleared"], "cleared")
+        self.assertIn("outcome=store_unavailable", "\n".join(captured.output))
+        self.assertNotIn(
+            "sensitive-candidate-storage-detail",
+            "\n".join(captured.output),
+        )
+        observed = self.process(read_payload()).payload["records"][0]
+        self.assertEqual(observed, result.payload["record"])
+
+    def test_exhausted_candidate_cas_does_not_fail_accepted_workflow_write(self):
+        with patch(
+            "api.priority.workflow_route.reconcile_workflow_candidate_references",
+            return_value=(
+                CandidateReferenceReconciliationResult.CAS_CONFLICT_EXHAUSTED
+            ),
+        ), self.assertLogs(
+            "api.priority.workflow_route",
+            level="WARNING",
+        ) as captured:
+            result = self.process(write_payload("set_manual_priority", "priority"))
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.payload["record"]["manualPriority"], "priority")
+        self.assertIn(
+            "outcome=cas_conflict_exhausted",
+            "\n".join(captured.output),
+        )
+        observed = self.process(read_payload()).payload["records"][0]
+        self.assertEqual(observed, result.payload["record"])
 
     def test_imap_mailbox_accepts_only_exact_imap_identity(self):
         self.authority_resolver.return_value = authority(provider="custom_imap")

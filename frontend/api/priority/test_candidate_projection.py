@@ -16,7 +16,9 @@ from .candidate_projection import (
     project_priority_candidate,
 )
 from .candidate_store import PriorityCandidateStore
+from .store import PriorityWorkflowScope, PriorityWorkflowStore
 from .test_candidate_store import MemoryRedis, SECRET
+from .test_workflow_store import WorkflowMemoryRedis
 
 
 def gmail_authority(**overrides) -> PriorityCandidatePopulationAuthority:
@@ -308,6 +310,11 @@ class CandidatePopulationTests(unittest.TestCase):
     def setUp(self):
         self.redis = MemoryRedis()
         self.store = PriorityCandidateStore(self.redis, hmac_secret=SECRET)
+        self.workflow_redis = WorkflowMemoryRedis()
+        self.workflow_store = PriorityWorkflowStore(
+            self.workflow_redis,
+            hmac_secret=SECRET,
+        )
         self.authority = gmail_authority()
 
     def test_repeated_refresh_updates_one_record_and_absence_removes_nothing(self):
@@ -341,6 +348,101 @@ class CandidatePopulationTests(unittest.TestCase):
         self.assertEqual(self.store.read_candidate(second_scope).version, 1)
         page = self.store.read_mailbox_page(first_scope.mailbox_scope())
         self.assertEqual(page.total, 2)
+
+    def test_workflow_first_candidate_later_reconciles_exact_gmail_and_imap_identity(
+        self,
+    ):
+        for authority, source in (
+            (gmail_authority(), gmail_source()),
+            (imap_authority(), imap_source()),
+        ):
+            with self.subTest(provider=authority.provider):
+                candidate_redis = MemoryRedis(current_ms=1_700_000_000_000)
+                candidate_store = PriorityCandidateStore(
+                    candidate_redis,
+                    hmac_secret=SECRET,
+                )
+                workflow_redis = WorkflowMemoryRedis()
+                workflow_store = PriorityWorkflowStore(
+                    workflow_redis,
+                    hmac_secret=SECRET,
+                )
+                candidate_scope, _snapshot = project_priority_candidate(
+                    authority,
+                    source,
+                )
+                workflow_scope = PriorityWorkflowScope(
+                    workspace_id=candidate_scope.workspace_id,
+                    user_id=candidate_scope.user_id,
+                    mailbox_id=candidate_scope.mailbox_id,
+                    identity=candidate_scope.identity,
+                )
+                accepted = workflow_store.write_field(
+                    workflow_scope,
+                    field="waiting",
+                    value="returned_reply",
+                )
+                self.assertIsNone(candidate_store.read_candidate(candidate_scope))
+                report = populate_priority_candidates(
+                    authority,
+                    [source],
+                    store=candidate_store,
+                    workflow_store=workflow_store,
+                )
+                self.assertEqual((report.written, report.incomplete), (1, False))
+                candidate = candidate_store.read_candidate(candidate_scope)
+                assert candidate is not None
+                self.assertEqual(
+                    candidate.positive_reference_expires_at("returned_reply"),
+                    accepted.waiting_expires_at,
+                )
+                self.assertEqual(
+                    candidate.positive_reference_expires_at("waiting"),
+                    0,
+                )
+                self.assertEqual(len(workflow_redis.commands), 2)
+                exact_read = workflow_redis.commands[-1]
+                self.assertEqual(exact_read[0], "EVAL")
+                self.assertEqual(exact_read[2], 1)
+                self.assertFalse(
+                    any(
+                        command[0] == "SCAN"
+                        for command in workflow_redis.commands
+                    )
+                )
+
+    def test_workflow_reconciliation_failure_does_not_stop_provider_population(
+        self,
+    ):
+        workflow_redis = WorkflowMemoryRedis()
+        workflow_redis.unavailable = True
+        workflow_store = PriorityWorkflowStore(
+            workflow_redis,
+            hmac_secret=SECRET,
+        )
+        sources = [
+            gmail_source(),
+            gmail_source(
+                providerMessageId="gmail-message-2",
+                providerThreadId="gmail-thread-2",
+            ),
+        ]
+        with self.assertLogs(
+            "api.priority.candidate_projection",
+            level="WARNING",
+        ) as captured:
+            report = populate_priority_candidates(
+                self.authority,
+                sources,
+                store=self.store,
+                workflow_store=workflow_store,
+            )
+        self.assertEqual((report.processed, report.written), (2, 2))
+        self.assertFalse(report.incomplete)
+        self.assertEqual(
+            sum("outcome=store_unavailable" in line for line in captured.output),
+            2,
+        )
 
     def test_rejected_row_does_not_block_a_valid_row(self):
         result = populate_priority_candidates(
@@ -815,6 +917,7 @@ class CandidatePopulationTests(unittest.TestCase):
                 provider="google",
                 sources=[gmail_source()],
                 store=self.store,
+                workflow_store=self.workflow_store,
             )
         self.assertEqual(report.reason_codes, ("authority_invalid",))
 
@@ -885,6 +988,7 @@ class CandidatePopulationTests(unittest.TestCase):
                 provider="google",
                 sources=[sensitive_source],
                 store=self.store,
+                workflow_store=self.workflow_store,
             )
             store_report = populate_runtime_priority_candidates(
                 member=SimpleNamespace(
@@ -896,6 +1000,7 @@ class CandidatePopulationTests(unittest.TestCase):
                 provider="google",
                 sources=[gmail_source()],
                 store=sensitive_store,
+                workflow_store=self.workflow_store,
             )
             imap_report = populate_runtime_priority_candidates(
                 member=SimpleNamespace(
@@ -907,6 +1012,7 @@ class CandidatePopulationTests(unittest.TestCase):
                 provider="custom_imap",
                 sources=[sensitive_imap_source],
                 store=self.store,
+                workflow_store=self.workflow_store,
             )
             diagnostic_report = populate_runtime_priority_candidates(
                 member=SimpleNamespace(
@@ -921,6 +1027,7 @@ class CandidatePopulationTests(unittest.TestCase):
                     DiagnosticFailure(),
                     hmac_secret=SECRET,
                 ),
+                workflow_store=self.workflow_store,
             )
         output = "\n".join(captured.output)
         self.assertEqual(report.reason_codes, ("candidate_timestamp_invalid",))

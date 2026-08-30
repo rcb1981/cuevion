@@ -76,8 +76,12 @@ class MemoryRedis:
         args = command[3 + key_count :]
         if script == candidate_module._PREPARE_CONFIRMED_SCRIPT:
             return {"result": self._prepare(args)}
+        if script == candidate_module._PREPARE_WORKFLOW_REFERENCES_SCRIPT:
+            return {"result": self._prepare_workflow_references(args)}
         if script == candidate_module._UPSERT_CONFIRMED_SCRIPT:
             return {"result": self._commit(keys, args)}
+        if script == candidate_module._RECONCILE_WORKFLOW_REFERENCES_SCRIPT:
+            return {"result": self._reconcile_workflow_references(keys, args)}
         if script == candidate_module._SET_POSITIVE_REFERENCE_SCRIPT:
             return {"result": self._set_reference(keys, args)}
         if script == candidate_module._MARK_VALIDATION_FAILURE_SCRIPT:
@@ -208,6 +212,139 @@ class MemoryRedis:
         for key in keys[1:4]:
             self.sorted_sets.setdefault(key, {})[member] = expires_at
         return encoded
+
+    def _prepare_workflow_references(self, args: list[object]) -> object:
+        expected_version = args[0]
+        state = args[1]
+        base = args[2]
+        absolute = args[3]
+        maximum = args[10]
+        if (
+            type(expected_version) is not int
+            or expected_version < 1
+            or expected_version >= int(maximum)
+            or type(base) is not int
+            or type(absolute) is not int
+            or base < 0
+            or absolute < base
+        ):
+            return args[12]
+        requested = args[4:7]
+        reference_maximums = args[7:10]
+        if any(
+            type(expires_at) is not int
+            or expires_at < 0
+            or expires_at > int(maximum)
+            for expires_at in requested
+        ) or any(
+            type(seconds) is not int or seconds < 1
+            for seconds in reference_maximums
+        ):
+            return args[11]
+        normalized = [
+            0
+            if expires_at <= self.current_ms
+            else min(
+                expires_at,
+                absolute,
+                self.current_ms + int(seconds) * 1_000,
+            )
+            for expires_at, seconds in zip(
+                requested,
+                reference_maximums,
+                strict=True,
+            )
+        ]
+        if any(normalized) and (
+            state != "provider_confirmed" or self.current_ms >= base
+        ):
+            return args[13]
+        return [self.current_ms, expected_version + 1, *normalized]
+
+    def _reconcile_workflow_references(
+        self,
+        keys: list[object],
+        args: list[object],
+    ) -> object:
+        current = self.values.get(keys[0])
+        if current is None:
+            return args[14]
+        if current != args[0]:
+            return args[13]
+        member = args[8]
+        scores = [self.sorted_sets.get(key, {}).get(member) for key in keys[1:4]]
+        if (
+            any(score is None for score in scores)
+            or len(set(scores)) != 1
+            or scores[0] != int(args[16])
+        ):
+            return args[18]
+        prepared = args[2]
+        try:
+            old_payload = json.loads(current)
+            payload = json.loads(prepared)
+        except Exception:
+            return args[17]
+        old_application = dict(old_payload)
+        new_application = dict(payload)
+        for application in (old_application, new_application):
+            application.pop("version", None)
+            application.pop("updatedAt", None)
+            application.pop("positiveReferences", None)
+        workflow_kinds = candidate_module._WORKFLOW_POSITIVE_REFERENCE_KINDS
+        non_workflow_kinds = tuple(
+            kind
+            for kind in candidate_module._POSITIVE_REFERENCE_KINDS
+            if kind not in workflow_kinds
+        )
+        if (
+            old_application != new_application
+            or not self._canonical_collections(old_payload)
+            or not self._canonical_collections(payload)
+            or set(old_payload.get("positiveReferences", {}))
+            != set(candidate_module._POSITIVE_REFERENCE_KINDS)
+            or set(payload.get("positiveReferences", {}))
+            != set(candidate_module._POSITIVE_REFERENCE_KINDS)
+            or old_payload.get("version") != int(args[1])
+            or payload.get("version") != int(args[3])
+            or payload.get("version") != old_payload.get("version") + 1
+            or payload.get("updatedAt") != int(args[4])
+            or any(
+                payload["positiveReferences"][kind]
+                != old_payload["positiveReferences"][kind]
+                for kind in non_workflow_kinds
+            )
+            or tuple(
+                payload["positiveReferences"][kind]
+                for kind in workflow_kinds
+            )
+            != tuple(int(value) for value in args[5:8])
+        ):
+            return args[17]
+        if len(prepared.encode("utf-8")) > int(args[10]):
+            return args[17]
+        for index, kind in enumerate(workflow_kinds):
+            expires_at = payload["positiveReferences"][kind]
+            reference_maximum = int(args[21 + index])
+            if expires_at > 0 and (
+                expires_at <= self.current_ms
+                or expires_at > payload["absoluteExpiresAt"]
+                or expires_at > self.current_ms + reference_maximum * 1_000
+                or payload["state"] != "provider_confirmed"
+                or self.current_ms >= payload["baseExpiresAt"]
+            ):
+                return args[15]
+        positive = max(payload["positiveReferences"].values())
+        expires_at = min(
+            max(payload["baseExpiresAt"], positive),
+            payload["absoluteExpiresAt"],
+        )
+        if payload["state"] == "provider_validation_grace":
+            expires_at = min(expires_at, payload["graceExpiresAt"])
+        if expires_at <= self.current_ms:
+            self._delete_record(keys, member)
+            return args[14]
+        return self._set_encoded_record(keys, member, prepared, expires_at)
 
     def _commit(self, keys: list[object], args: list[object]) -> object:
         mode, expected_digest, expected_length, prepared, member = args[:5]
@@ -1688,6 +1825,143 @@ class CandidateIndexAndTimeTests(unittest.TestCase):
 
 
 class CandidateRetentionAndInvalidationTests(unittest.TestCase):
+    def test_atomic_workflow_reference_reconciliation_preserves_other_authorities(
+        self,
+    ) -> None:
+        redis = MemoryRedis()
+        store = PriorityCandidateStore(redis, hmac_secret=SECRET)
+        scope = google_scope(message_id="workflow-atomic")
+        record = store.upsert_confirmed(scope, snapshot(), expected_version=0)
+        for kind, lifetime in (
+            ("semantic_promotion", 3 * DAY_SECONDS),
+            ("collaboration_priority", 4 * DAY_SECONDS),
+            ("assigned_review", 5 * DAY_SECONDS),
+        ):
+            updated = store.set_positive_reference(
+                scope,
+                reference_kind=kind,
+                remaining_lifetime_seconds=lifetime,
+                expected_version=record.version,
+            )
+            assert updated is not None
+            record = updated
+        preserved = {
+            kind: record.positive_reference_expires_at(kind)
+            for kind in (
+                "semantic_promotion",
+                "collaboration_priority",
+                "assigned_review",
+            )
+        }
+        provider_times = (
+            record.provider_observed_at,
+            record.provider_validated_at,
+            record.base_expires_at,
+            record.absolute_expires_at,
+        )
+        previous_version = record.version
+        reconciled = store.reconcile_workflow_positive_references(
+            scope,
+            manual_priority_expires_at=(
+                record.absolute_expires_at + DAY_SECONDS * 1_000
+            ),
+            waiting_expires_at=redis.current_ms + DAY_SECONDS * 1_000,
+            returned_reply_expires_at=0,
+            expected_version=record.version,
+        )
+        assert reconciled is not None
+        self.assertEqual(reconciled.version, previous_version + 1)
+        self.assertEqual(
+            reconciled.positive_reference_expires_at("manual_priority"),
+            reconciled.absolute_expires_at,
+        )
+        self.assertEqual(
+            reconciled.positive_reference_expires_at("waiting"),
+            redis.current_ms + DAY_SECONDS * 1_000,
+        )
+        self.assertEqual(
+            reconciled.positive_reference_expires_at("returned_reply"),
+            0,
+        )
+        self.assertEqual(
+            {
+                kind: reconciled.positive_reference_expires_at(kind)
+                for kind in preserved
+            },
+            preserved,
+        )
+        self.assertEqual(
+            (
+                reconciled.provider_observed_at,
+                reconciled.provider_validated_at,
+                reconciled.base_expires_at,
+                reconciled.absolute_expires_at,
+            ),
+            provider_times,
+        )
+        keys = store._scope_keys(scope)
+        scores = tuple(
+            redis.sorted_sets[key][keys["member"]]
+            for key in (
+                keys["mailbox_index"],
+                keys["user_index"],
+                keys["namespace_index"],
+            )
+        )
+        self.assertEqual(scores, (reconciled.logical_expires_at(),) * 3)
+        self.assertEqual(
+            redis.expires_at[keys["record"]],
+            reconciled.logical_expires_at(),
+        )
+        raw_before_conflict = redis.values[keys["record"]]
+        with self.assertRaises(CandidateVersionConflict):
+            store.reconcile_workflow_positive_references(
+                scope,
+                manual_priority_expires_at=0,
+                waiting_expires_at=0,
+                returned_reply_expires_at=0,
+                expected_version=previous_version,
+            )
+        self.assertEqual(redis.values[keys["record"]], raw_before_conflict)
+        self.assertNotIn(
+            "cjson.encode",
+            candidate_module._RECONCILE_WORKFLOW_REFERENCES_SCRIPT,
+        )
+
+    def test_workflow_reference_reconciliation_missing_and_ineligible_are_bounded(
+        self,
+    ) -> None:
+        redis = MemoryRedis()
+        store = PriorityCandidateStore(redis, hmac_secret=SECRET)
+        missing_scope = google_scope(message_id="workflow-missing")
+        self.assertIsNone(
+            store.reconcile_workflow_positive_references(
+                missing_scope,
+                manual_priority_expires_at=0,
+                waiting_expires_at=0,
+                returned_reply_expires_at=0,
+                expected_version=1,
+            )
+        )
+        self.assertEqual(redis.values, {})
+
+        scope = google_scope(message_id="workflow-grace")
+        record = store.upsert_confirmed(scope, snapshot(), expected_version=0)
+        grace = store.mark_provider_validation_failure(
+            scope,
+            expected_version=record.version,
+        )
+        assert grace is not None
+        with self.assertRaises(CandidateReferenceRejected):
+            store.reconcile_workflow_positive_references(
+                scope,
+                manual_priority_expires_at=redis.current_ms + DAY_SECONDS * 1_000,
+                waiting_expires_at=0,
+                returned_reply_expires_at=0,
+                expected_version=grace.version,
+            )
+        self.assertEqual(store.read_candidate(scope), grace)
+
     def test_base_positive_reference_bounds_absolute_cap_and_no_negative_reference(self) -> None:
         redis = MemoryRedis()
         store = PriorityCandidateStore(redis, hmac_secret=SECRET)

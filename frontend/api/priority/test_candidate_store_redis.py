@@ -12,7 +12,11 @@ from unittest.mock import patch
 
 from . import candidate_store as candidate_module
 from .candidate_projection import populate_priority_candidates, project_priority_candidate
-from .candidate_store import CandidateStoreUnavailable, PriorityCandidateStore
+from .candidate_store import (
+    CandidateStoreUnavailable,
+    CandidateVersionConflict,
+    PriorityCandidateStore,
+)
 from .test_candidate_projection import (
     gmail_authority,
     gmail_source,
@@ -547,6 +551,126 @@ class CandidateRealRedisTests(unittest.TestCase):
             ["GET", self.store._scope_keys(scope)["record"]]
         )["result"]
         self.assertIsNone(json.loads(raw)["routing"]["noiseReasons"])
+
+    def test_workflow_references_commit_atomically_with_python_canonical_wire(
+        self,
+    ) -> None:
+        scope = google_scope(message_id="real-workflow-references")
+        record = self.store.upsert_confirmed(
+            scope,
+            snapshot(routing_state="ready", routing=ready_routing()),
+            expected_version=0,
+        )
+        for kind, lifetime in (
+            ("semantic_promotion", 61),
+            ("collaboration_priority", 62),
+            ("assigned_review", 63),
+        ):
+            updated = self.store.set_positive_reference(
+                scope,
+                reference_kind=kind,
+                remaining_lifetime_seconds=lifetime,
+                expected_version=record.version,
+            )
+            assert updated is not None
+            record = updated
+        preserved = {
+            kind: record.positive_reference_expires_at(kind)
+            for kind in (
+                "semantic_promotion",
+                "collaboration_priority",
+                "assigned_review",
+            )
+        }
+        previous_version = record.version
+        before = int(time.time() * 1_000)
+        reconciled = self.store.reconcile_workflow_positive_references(
+            scope,
+            manual_priority_expires_at=record.absolute_expires_at + 60_000,
+            waiting_expires_at=before + 45_000,
+            returned_reply_expires_at=before + 30_000,
+            expected_version=record.version,
+        )
+        after = int(time.time() * 1_000)
+        assert reconciled is not None
+        self.assertEqual(reconciled.version, previous_version + 1)
+        self.assertEqual(
+            reconciled.positive_reference_expires_at("manual_priority"),
+            reconciled.absolute_expires_at,
+        )
+        self.assertEqual(
+            reconciled.positive_reference_expires_at("waiting"),
+            before + 45_000,
+        )
+        self.assertEqual(
+            reconciled.positive_reference_expires_at("returned_reply"),
+            before + 30_000,
+        )
+        self.assertEqual(
+            {
+                kind: reconciled.positive_reference_expires_at(kind)
+                for kind in preserved
+            },
+            preserved,
+        )
+        keys = self.store._scope_keys(scope)
+        raw = self._transport(["GET", keys["record"]])["result"]
+        self.assertEqual(
+            raw,
+            candidate_module._encode_wire(
+                candidate_module._record_to_wire(SECRET, reconciled)
+            ),
+        )
+        scores = tuple(
+            int(self._transport(["ZSCORE", keys[name], keys["member"]])["result"])
+            for name in ("mailbox_index", "user_index", "namespace_index")
+        )
+        self.assertEqual(scores, (reconciled.logical_expires_at(),) * 3)
+        record_ttl = self._transport(["PTTL", keys["record"]])["result"]
+        self.assertGreater(
+            record_ttl,
+            reconciled.logical_expires_at() - after - 2_000,
+        )
+        self.assertLessEqual(
+            record_ttl,
+            reconciled.logical_expires_at() - before + 2_000,
+        )
+
+        with self.assertRaises(CandidateVersionConflict):
+            self.store.reconcile_workflow_positive_references(
+                scope,
+                manual_priority_expires_at=0,
+                waiting_expires_at=0,
+                returned_reply_expires_at=0,
+                expected_version=previous_version,
+            )
+        self.assertEqual(self._transport(["GET", keys["record"]])["result"], raw)
+
+        self._transport(
+            [
+                "ZADD",
+                keys["mailbox_index"],
+                reconciled.logical_expires_at() + 1,
+                keys["member"],
+            ]
+        )
+        with self.assertRaises(CandidateStoreUnavailable):
+            self.store.reconcile_workflow_positive_references(
+                scope,
+                manual_priority_expires_at=0,
+                waiting_expires_at=0,
+                returned_reply_expires_at=0,
+                expected_version=reconciled.version,
+            )
+        self.assertEqual(self._transport(["GET", keys["record"]])["result"], raw)
+        self.assertEqual(
+            json.loads(raw)["positiveReferences"]["manual_priority"],
+            reconciled.absolute_expires_at,
+        )
+        self.assertNotIn(
+            "cjson.encode",
+            candidate_module._RECONCILE_WORKFLOW_REFERENCES_SCRIPT,
+        )
 
     def test_provider_population_repairs_only_exact_malformed_v2(self) -> None:
         authority = gmail_authority()
