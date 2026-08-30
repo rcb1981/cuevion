@@ -8039,6 +8039,326 @@ function normalizeMessageBodyContent(
     htmlSource,
   };
 }
+
+type MessageSourceProjection = {
+  body: string[];
+  bodyHtml?: string;
+  htmlSource: "bodyHtml" | "escapedBodyHtml" | "body" | "escapedBody" | "none";
+  attachments: MailAttachment[];
+  threadId: string;
+};
+
+type MessageSourceAttachmentSnapshot =
+  | { kind: "string"; value: string }
+  | {
+      kind: "object";
+      keys: string[];
+      values: Record<string, unknown>;
+    };
+
+type MessageSourceIdentitySnapshot = Pick<
+  MailMessageSeed,
+  | "id"
+  | "serverMailboxId"
+  | "providerMessageId"
+  | "providerThreadId"
+  | "imapUid"
+  | "uidValidity"
+  | "rfcMessageId"
+  | "threadId"
+  | "threadIdentityAuthority"
+  | "subject"
+> & {
+  threadIdentityContext?: LiveThreadIdentityContext;
+};
+
+type MessageSourceProjectionCacheEntry = {
+  policyVersion: typeof MESSAGE_SOURCE_PROJECTION_POLICY_VERSION;
+  mailboxId: InboxId;
+  domDecodingAvailable: boolean;
+  sourceIdentity: MessageSourceIdentitySnapshot;
+  body: string[];
+  bodyHtml?: string;
+  attachmentsWereProvided: boolean;
+  attachments: MessageSourceAttachmentSnapshot[];
+  result: MessageSourceProjection;
+};
+
+const MESSAGE_SOURCE_PROJECTION_POLICY_VERSION = "perf-n1-v1";
+const MESSAGE_SOURCE_PROJECTION_CACHE_MAX_ENTRIES = 64;
+const messageSourceProjectionCache: MessageSourceProjectionCacheEntry[] = [];
+const messageSourceProjectionCacheByIdentity = new WeakMap<
+  object,
+  MessageSourceProjectionCacheEntry
+>();
+
+function snapshotMessageSourceIdentity(
+  message: MailMessageSeed,
+): MessageSourceIdentitySnapshot {
+  return {
+    id: message.id,
+    serverMailboxId: message.serverMailboxId,
+    providerMessageId: message.providerMessageId,
+    providerThreadId: message.providerThreadId,
+    imapUid: message.imapUid,
+    uidValidity: message.uidValidity,
+    rfcMessageId: message.rfcMessageId,
+    threadId: message.threadId,
+    threadIdentityAuthority: message.threadIdentityAuthority,
+    subject: message.subject,
+    threadIdentityContext: message.threadIdentityContext
+      ? { ...message.threadIdentityContext }
+      : undefined,
+  };
+}
+
+function hasExactMessageSourceIdentity(
+  cached: MessageSourceIdentitySnapshot,
+  message: MailMessageSeed,
+) {
+  const currentContext = message.threadIdentityContext;
+  const cachedContext = cached.threadIdentityContext;
+  const hasExactThreadContext =
+    cachedContext || currentContext
+      ? Boolean(
+          cachedContext &&
+            currentContext &&
+            cachedContext.mailboxId === currentContext.mailboxId &&
+            cachedContext.provider === currentContext.provider &&
+            cachedContext.folder === currentContext.folder &&
+            cachedContext.uidValidity === currentContext.uidValidity,
+        )
+      : true;
+
+  return (
+    cached.id === message.id &&
+    cached.serverMailboxId === message.serverMailboxId &&
+    cached.providerMessageId === message.providerMessageId &&
+    cached.providerThreadId === message.providerThreadId &&
+    cached.imapUid === message.imapUid &&
+    cached.uidValidity === message.uidValidity &&
+    cached.rfcMessageId === message.rfcMessageId &&
+    cached.threadId === message.threadId &&
+    cached.threadIdentityAuthority === message.threadIdentityAuthority &&
+    cached.subject === message.subject &&
+    hasExactThreadContext
+  );
+}
+
+function snapshotMessageSourceAttachment(
+  attachment: MailAttachmentInput,
+): MessageSourceAttachmentSnapshot {
+  if (typeof attachment === "string") {
+    return { kind: "string", value: attachment };
+  }
+
+  const keys = Object.keys(attachment).sort();
+  const values = Object.fromEntries(
+    keys.map((key) => {
+      const value = (attachment as unknown as Record<string, unknown>)[key];
+      return [
+        key,
+        key === "receivedSource" && value && typeof value === "object"
+          ? { ...(value as Record<string, unknown>) }
+          : value,
+      ];
+    }),
+  );
+
+  return { kind: "object", keys, values };
+}
+
+function hasExactMessageSourceAttachment(
+  cached: MessageSourceAttachmentSnapshot,
+  attachment: MailAttachmentInput,
+) {
+  if (cached.kind === "string" || typeof attachment === "string") {
+    return (
+      cached.kind === "string" &&
+      typeof attachment === "string" &&
+      cached.value === attachment
+    );
+  }
+
+  const currentKeys = Object.keys(attachment).sort();
+  if (
+    cached.keys.length !== currentKeys.length ||
+    cached.keys.some((key, index) => key !== currentKeys[index])
+  ) {
+    return false;
+  }
+
+  return cached.keys.every((key) => {
+    const cachedValue = cached.values[key];
+    const currentValue = (attachment as unknown as Record<string, unknown>)[key];
+
+    if (key !== "receivedSource") {
+      return Object.is(cachedValue, currentValue);
+    }
+
+    if (!cachedValue || !currentValue) {
+      return cachedValue === currentValue;
+    }
+    if (typeof cachedValue !== "object" || typeof currentValue !== "object") {
+      return false;
+    }
+
+    const cachedSource = cachedValue as Record<string, unknown>;
+    const currentSource = currentValue as Record<string, unknown>;
+    const cachedSourceKeys = Object.keys(cachedSource).sort();
+    const currentSourceKeys = Object.keys(currentSource).sort();
+
+    return (
+      cachedSourceKeys.length === currentSourceKeys.length &&
+      cachedSourceKeys.every(
+        (sourceKey, index) =>
+          sourceKey === currentSourceKeys[index] &&
+          Object.is(cachedSource[sourceKey], currentSource[sourceKey]),
+      )
+    );
+  });
+}
+
+function hasExactMessageSourceProjectionInputs(
+  entry: MessageSourceProjectionCacheEntry,
+  message: MailMessageSeed,
+  mailboxId: InboxId,
+  domDecodingAvailable: boolean,
+) {
+  const currentAttachments = message.attachments ?? [];
+
+  return (
+    entry.policyVersion === MESSAGE_SOURCE_PROJECTION_POLICY_VERSION &&
+    entry.mailboxId === mailboxId &&
+    entry.domDecodingAvailable === domDecodingAvailable &&
+    hasExactMessageSourceIdentity(entry.sourceIdentity, message) &&
+    entry.bodyHtml === message.bodyHtml &&
+    entry.body.length === message.body.length &&
+    entry.body.every((paragraph, index) => paragraph === message.body[index]) &&
+    entry.attachmentsWereProvided === Boolean(message.attachments) &&
+    entry.attachments.length === currentAttachments.length &&
+    entry.attachments.every((attachment, index) =>
+      hasExactMessageSourceAttachment(attachment, currentAttachments[index]),
+    )
+  );
+}
+
+function promoteMessageSourceProjectionCacheEntry(
+  entry: MessageSourceProjectionCacheEntry,
+) {
+  const currentIndex = messageSourceProjectionCache.indexOf(entry);
+  if (currentIndex >= 0) {
+    messageSourceProjectionCache.splice(currentIndex, 1);
+  }
+
+  messageSourceProjectionCache.push(entry);
+  if (messageSourceProjectionCache.length > MESSAGE_SOURCE_PROJECTION_CACHE_MAX_ENTRIES) {
+    messageSourceProjectionCache.shift();
+  }
+}
+
+function findCachedMessageSourceProjection(
+  message: MailMessageSeed,
+  mailboxId: InboxId,
+  domDecodingAvailable: boolean,
+) {
+  const identityEntry = messageSourceProjectionCacheByIdentity.get(message);
+  if (
+    identityEntry &&
+    hasExactMessageSourceProjectionInputs(
+      identityEntry,
+      message,
+      mailboxId,
+      domDecodingAvailable,
+    )
+  ) {
+    if (messageSourceProjectionCache.includes(identityEntry)) {
+      promoteMessageSourceProjectionCacheEntry(identityEntry);
+    }
+    return identityEntry.result;
+  }
+
+  for (let index = messageSourceProjectionCache.length - 1; index >= 0; index -= 1) {
+    const entry = messageSourceProjectionCache[index];
+    if (
+      hasExactMessageSourceProjectionInputs(
+        entry,
+        message,
+        mailboxId,
+        domDecodingAvailable,
+      )
+    ) {
+      promoteMessageSourceProjectionCacheEntry(entry);
+      messageSourceProjectionCacheByIdentity.set(message, entry);
+      return entry.result;
+    }
+  }
+
+  return null;
+}
+
+function getNormalizedMessageSourceProjection(
+  message: MailMessageSeed,
+  mailboxId: InboxId,
+): MessageSourceProjection {
+  const domDecodingAvailable = typeof document !== "undefined";
+  const cached = findCachedMessageSourceProjection(
+    message,
+    mailboxId,
+    domDecodingAvailable,
+  );
+  if (cached) {
+    return cached;
+  }
+
+  const normalizedBodyContent = normalizeMessageBodyContent(
+    message.body,
+    message.bodyHtml,
+  );
+  const result: MessageSourceProjection = {
+    body: normalizedBodyContent.body,
+    bodyHtml: normalizedBodyContent.bodyHtml,
+    htmlSource: normalizedBodyContent.htmlSource,
+    attachments: (message.attachments ?? []).map((attachment) =>
+      normalizeMailAttachment(attachment),
+    ),
+    threadId: resolveMailThreadId(message),
+  };
+  const entry: MessageSourceProjectionCacheEntry = {
+    policyVersion: MESSAGE_SOURCE_PROJECTION_POLICY_VERSION,
+    mailboxId,
+    domDecodingAvailable,
+    sourceIdentity: snapshotMessageSourceIdentity(message),
+    body: [...message.body],
+    bodyHtml: message.bodyHtml,
+    attachmentsWereProvided: Boolean(message.attachments),
+    attachments: (message.attachments ?? []).map(snapshotMessageSourceAttachment),
+    result,
+  };
+
+  promoteMessageSourceProjectionCacheEntry(entry);
+  messageSourceProjectionCacheByIdentity.set(message, entry);
+  return result;
+}
+
+function rememberNormalizedMessageSourceProjectionForIdentity(
+  message: MailMessage,
+  mailboxId: InboxId,
+  result: MessageSourceProjection,
+) {
+  messageSourceProjectionCacheByIdentity.set(message, {
+    policyVersion: MESSAGE_SOURCE_PROJECTION_POLICY_VERSION,
+    mailboxId,
+    domDecodingAvailable: typeof document !== "undefined",
+    sourceIdentity: snapshotMessageSourceIdentity(message),
+    body: [...message.body],
+    bodyHtml: message.bodyHtml,
+    attachmentsWereProvided: Boolean(message.attachments),
+    attachments: (message.attachments ?? []).map(snapshotMessageSourceAttachment),
+    result,
+  });
+}
+
 const LEARNED_CATEGORY_MIN_COUNT = 2;
 const HIGH_CONFIDENCE_LEARNING_COUNT = 3;
 const AUTO_CATEGORY_BEHAVIOR_MIN_COUNT = 2;
@@ -11666,10 +11986,7 @@ export function normalizeMailMessage(
     behaviorSuggestionDismissed: _behaviorSuggestionDismissed,
     ...baseMessage
   } = message;
-  const normalizedBodyContent = normalizeMessageBodyContent(
-    baseMessage.body,
-    baseMessage.bodyHtml,
-  );
+  const normalizedSource = getNormalizedMessageSourceProjection(message, mailboxId);
   const categorization = resolveCuevionCategorization(
     message,
     mailboxId,
@@ -11693,17 +12010,14 @@ export function normalizeMailMessage(
         ? "royalty_statement"
         : inferInternalClassification({ ...message, signal: resolvedSignal }, mailboxId)),
   );
-  const normalizedAttachments = (message.attachments ?? []).map((attachment) =>
-    normalizeMailAttachment(attachment),
-  );
   const normalizedUiSignal =
     message.ui_signal === "NEW" ? undefined : message.ui_signal;
 
-  return {
+  const normalizedMessage: MailMessage = {
     ...baseMessage,
-    body: normalizedBodyContent.body,
-    bodyHtml: normalizedBodyContent.bodyHtml,
-    threadId: resolveMailThreadId(message),
+    body: normalizedSource.body,
+    bodyHtml: normalizedSource.bodyHtml,
+    threadId: normalizedSource.threadId,
     signal: resolvedSignal,
     // The backend emits ui_signal = "NEW" for every unclassified (unknown-category)
     // message. "NEW" is not handled in any frontend switch and falls through to the
@@ -11714,7 +12028,7 @@ export function normalizeMailMessage(
     // backend could not assign a category but the frontend keyword scan can.
     // Strip it here so the heuristic signal takes effect downstream.
     ui_signal: normalizedUiSignal,
-    attachments: normalizedAttachments,
+    attachments: normalizedSource.attachments,
     internalClassification,
     suggestionDismissed: message.suggestionDismissed,
     behaviorSuggestionDismissed: message.behaviorSuggestionDismissed,
@@ -11739,7 +12053,7 @@ export function normalizeMailMessage(
           sender: message.sender,
           subject: message.subject,
           snippet: message.snippet,
-          body: normalizedBodyContent.body,
+          body: normalizedSource.body,
           signal: resolvedSignal,
           ui_signal: normalizedUiSignal,
           internalClassification,
@@ -11749,11 +12063,18 @@ export function normalizeMailMessage(
           noiseConfidence: message.noiseConfidence,
           noiseReasons: message.noiseReasons,
           isAutoReply: message.isAutoReply,
-          attachments: normalizedAttachments,
+          attachments: normalizedSource.attachments,
           category: categorization.category,
         }, senderCategoryLearning)
       : undefined,
   };
+
+  rememberNormalizedMessageSourceProjectionForIdentity(
+    normalizedMessage,
+    mailboxId,
+    normalizedSource,
+  );
+  return normalizedMessage;
 }
 
 function hasLearnedShowLessBehavior(
