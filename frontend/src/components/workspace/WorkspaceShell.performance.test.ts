@@ -6,6 +6,7 @@ const {
   getVisiblePriorityBadgeForWorkspaceMessage,
   normalizeMailMessage,
   resolveVisibleCategoryLabelForMessageInContext,
+  workspaceShellPerformanceTestSeam,
 } = require("./WorkspaceShell.tsx") as typeof import("./WorkspaceShell");
 const {
   writePersistedMessageOwnershipStateValue,
@@ -85,6 +86,42 @@ function cloneSeed(seed: MessageSeed): MessageSeed {
 }
 
 type ClassificationJoinCounter = { count: number };
+
+type KeywordEvidenceCounter = {
+  familyScans: number;
+  includesAnyKeywordEvaluations: number;
+  familyScansByName: Map<string, number>;
+};
+
+function createKeywordEvidenceCounter(): KeywordEvidenceCounter {
+  return {
+    familyScans: 0,
+    includesAnyKeywordEvaluations: 0,
+    familyScansByName: new Map(),
+  };
+}
+
+function observeKeywordEvidence<T>(counter: KeywordEvidenceCounter, run: () => T) {
+  return workspaceShellPerformanceTestSeam.observeMessageKeywordEvidence(
+    {
+      onFamilyScan(familyName) {
+        counter.familyScans += 1;
+        counter.familyScansByName.set(
+          familyName,
+          (counter.familyScansByName.get(familyName) ?? 0) + 1,
+        );
+      },
+      onIncludesAnyKeywordEvaluation() {
+        counter.includesAnyKeywordEvaluations += 1;
+      },
+    },
+    run,
+  );
+}
+
+function getFamilyScanCount(counter: KeywordEvidenceCounter, familyName: string) {
+  return counter.familyScansByName.get(familyName) ?? 0;
+}
 
 function createClassificationCountingBody(
   paragraphs: string[],
@@ -400,6 +437,417 @@ for (const fixture of classificationEquivalenceFixtures) {
       fixture.name,
     );
   }
+}
+
+function createKeywordEvidenceSeed(
+  id: string,
+  overrides: Partial<MessageSeed> = {},
+): MessageSeed {
+  return createSeed(id, {
+    signal: undefined,
+    ui_signal: undefined,
+    internalClassification: "business",
+    subject: `Opaque subject ${id}`,
+    snippet: `Neutral snippet ${id}`,
+    sender: `Neutral Sender ${id}`,
+    from: `${id}@example.test`,
+    to: `owner-${id}@example.test`,
+    body: [`Neutral body ${id}`],
+    bodyHtml: undefined,
+    attachments: [],
+    ...overrides,
+  });
+}
+
+{
+  const counter = createKeywordEvidenceCounter();
+  const message = createKeywordEvidenceSeed("perf-n3-same-live");
+  const firstResult = observeKeywordEvidence(counter, () =>
+    workspaceShellPerformanceTestSeam.inferHeuristicSignal(message),
+  );
+  const scansAfterFirstCall = counter.familyScans;
+  const includesAfterFirstCall = counter.includesAnyKeywordEvaluations;
+
+  for (let pass = 0; pass < 10; pass += 1) {
+    assert.equal(
+      observeKeywordEvidence(counter, () =>
+        workspaceShellPerformanceTestSeam.inferHeuristicSignal(message),
+      ),
+      firstResult,
+    );
+  }
+
+  assert.ok(scansAfterFirstCall > 0, "the first heuristic call must request evidence");
+  assert.equal(counter.familyScans, scansAfterFirstCall);
+  assert.equal(counter.includesAnyKeywordEvaluations, includesAfterFirstCall);
+  assert.ok(
+    [...counter.familyScansByName.values()].every((count) => count === 1),
+    "each requested family must scan once for the same live message",
+  );
+}
+
+{
+  const counter = createKeywordEvidenceCounter();
+  const message = createKeywordEvidenceSeed("perf-n3-recreated");
+  const firstResult = observeKeywordEvidence(counter, () =>
+    workspaceShellPerformanceTestSeam.inferHeuristicSignal(message),
+  );
+  const scansAfterFirstCall = counter.familyScans;
+  const includesAfterFirstCall = counter.includesAnyKeywordEvaluations;
+  const recreatedResult = observeKeywordEvidence(counter, () =>
+    workspaceShellPerformanceTestSeam.inferHeuristicSignal(cloneSeed(message)),
+  );
+
+  assert.equal(recreatedResult, firstResult);
+  assert.equal(counter.familyScans, scansAfterFirstCall);
+  assert.equal(counter.includesAnyKeywordEvaluations, includesAfterFirstCall);
+}
+
+{
+  const counter = createKeywordEvidenceCounter();
+  const source = createKeywordEvidenceSeed("perf-n3-normalized-transfer");
+  const normalized = observeKeywordEvidence(counter, () =>
+    normalizeMailMessage(source, "main", {}, {}, "user-1"),
+  );
+  const scansAfterNormalization = counter.familyScans;
+  const includesAfterNormalization = counter.includesAnyKeywordEvaluations;
+  normalized.signal = undefined;
+
+  observeKeywordEvidence(counter, () =>
+    workspaceShellPerformanceTestSeam.inferHeuristicSignal(normalized),
+  );
+
+  assert.ok(scansAfterNormalization > 0);
+  assert.equal(
+    counter.familyScans,
+    scansAfterNormalization,
+    "an exactly equivalent normalized output identity must inherit keyword evidence",
+  );
+  assert.equal(counter.includesAnyKeywordEvaluations, includesAfterNormalization);
+}
+
+{
+  const counter = createKeywordEvidenceCounter();
+  const baseline = createKeywordEvidenceSeed("perf-n3-invalidation");
+  observeKeywordEvidence(counter, () =>
+    workspaceShellPerformanceTestSeam.inferHeuristicSignal(baseline),
+  );
+
+  const marketingAfterBaseline = getFamilyScanCount(
+    counter,
+    "heuristic.marketingNewsletter",
+  );
+  const automatedAfterBaseline = getFamilyScanCount(
+    counter,
+    "heuristic.automatedSender",
+  );
+  observeKeywordEvidence(counter, () =>
+    workspaceShellPerformanceTestSeam.inferHeuristicSignal(
+      cloneSeed({ ...baseline, subject: "Changed opaque subject" }),
+    ),
+  );
+  assert.equal(
+    getFamilyScanCount(counter, "heuristic.marketingNewsletter"),
+    marketingAfterBaseline + 1,
+    "subject changes must invalidate subject-bearing evidence",
+  );
+  assert.equal(
+    getFamilyScanCount(counter, "heuristic.automatedSender"),
+    automatedAfterBaseline,
+    "subject changes must not invalidate sender-only evidence",
+  );
+
+  const marketingBeforeSnippet = getFamilyScanCount(
+    counter,
+    "heuristic.marketingNewsletter",
+  );
+  observeKeywordEvidence(counter, () =>
+    workspaceShellPerformanceTestSeam.inferHeuristicSignal(
+      cloneSeed({ ...baseline, snippet: "Changed opaque snippet" }),
+    ),
+  );
+  assert.equal(
+    getFamilyScanCount(counter, "heuristic.marketingNewsletter"),
+    marketingBeforeSnippet + 1,
+    "snippet changes must invalidate snippet-bearing evidence",
+  );
+
+  const automatedBeforeSender = getFamilyScanCount(
+    counter,
+    "heuristic.automatedSender",
+  );
+  observeKeywordEvidence(counter, () =>
+    workspaceShellPerformanceTestSeam.inferHeuristicSignal(
+      cloneSeed({ ...baseline, sender: "Changed Neutral Sender" }),
+    ),
+  );
+  assert.equal(
+    getFamilyScanCount(counter, "heuristic.automatedSender"),
+    automatedBeforeSender + 1,
+    "sender changes must invalidate sender-derived evidence",
+  );
+
+  const automatedBeforeFrom = getFamilyScanCount(
+    counter,
+    "heuristic.automatedSender",
+  );
+  observeKeywordEvidence(counter, () =>
+    workspaceShellPerformanceTestSeam.inferHeuristicSignal(
+      cloneSeed({ ...baseline, from: "changed-from@example.test" }),
+    ),
+  );
+  assert.equal(
+    getFamilyScanCount(counter, "heuristic.automatedSender"),
+    automatedBeforeFrom + 1,
+    "from changes must invalidate sender-derived evidence",
+  );
+
+  const promoAccessBeforeTo = getFamilyScanCount(counter, "promoAccess.request");
+  const marketingBeforeTo = getFamilyScanCount(
+    counter,
+    "heuristic.marketingNewsletter",
+  );
+  observeKeywordEvidence(counter, () =>
+    workspaceShellPerformanceTestSeam.inferHeuristicSignal(
+      cloneSeed({ ...baseline, to: "changed-owner@example.test" }),
+    ),
+  );
+  assert.equal(
+    getFamilyScanCount(counter, "promoAccess.request"),
+    promoAccessBeforeTo + 1,
+    "to changes must invalidate recipient-bearing evidence",
+  );
+  assert.equal(
+    getFamilyScanCount(counter, "heuristic.marketingNewsletter"),
+    marketingBeforeTo,
+    "to changes must not invalidate subject/snippet/body-only evidence",
+  );
+
+  const marketingBeforeBody = getFamilyScanCount(
+    counter,
+    "heuristic.marketingNewsletter",
+  );
+  observeKeywordEvidence(counter, () =>
+    workspaceShellPerformanceTestSeam.inferHeuristicSignal(
+      cloneSeed({ ...baseline, body: ["Changed opaque body"] }),
+    ),
+  );
+  assert.equal(
+    getFamilyScanCount(counter, "heuristic.marketingNewsletter"),
+    marketingBeforeBody + 1,
+    "body changes must invalidate body-bearing evidence",
+  );
+
+  const scansBeforeAttachment = new Map(counter.familyScansByName);
+  observeKeywordEvidence(counter, () =>
+    workspaceShellPerformanceTestSeam.inferHeuristicSignal(
+      cloneSeed({
+        ...baseline,
+        attachments: [{ id: "attachment", name: "changed-name.pdf" }],
+      }),
+    ),
+  );
+  const attachmentInvalidatedFamilies = [...counter.familyScansByName]
+    .filter(([familyName, count]) => count > (scansBeforeAttachment.get(familyName) ?? 0))
+    .map(([familyName]) => familyName);
+  assert.ok(attachmentInvalidatedFamilies.length > 0);
+  assert.ok(
+    attachmentInvalidatedFamilies.every((familyName) =>
+      familyName.startsWith("coldOutreach."),
+    ),
+    "attachment names must invalidate only attachment-bearing evidence",
+  );
+}
+
+{
+  const counter = createKeywordEvidenceCounter();
+  const message = createKeywordEvidenceSeed("perf-n3-policy-version");
+  observeKeywordEvidence(counter, () =>
+    workspaceShellPerformanceTestSeam.inferHeuristicSignal(message),
+  );
+  const initialScans = counter.familyScans;
+
+  workspaceShellPerformanceTestSeam.withMessageKeywordEvidencePolicyVersion(
+    "perf-n3-test-policy-v2",
+    () =>
+      observeKeywordEvidence(counter, () =>
+        workspaceShellPerformanceTestSeam.inferHeuristicSignal(message),
+      ),
+  );
+
+  assert.equal(
+    counter.familyScans,
+    initialScans * 2,
+    "a PERF-N3 policy-version change must miss every requested evidence family",
+  );
+}
+
+{
+  const counter = createKeywordEvidenceCounter();
+  const message = createKeywordEvidenceSeed("perf-n3-explicit-signal", {
+    signal: "Priority",
+  });
+  const signal = observeKeywordEvidence(counter, () =>
+    workspaceShellPerformanceTestSeam.inferHeuristicSignal(message),
+  );
+
+  assert.equal(signal, "Priority");
+  assert.equal(counter.familyScans, 0);
+  assert.equal(counter.includesAnyKeywordEvaluations, 0);
+}
+
+{
+  const counter = createKeywordEvidenceCounter();
+  const source = createKeywordEvidenceSeed("perf-n3-dynamic-state");
+  const withoutOwner = observeKeywordEvidence(counter, () =>
+    normalizeMailMessage(source, "main", {}, {}, "user-1"),
+  );
+  const scansAfterFirstNormalization = counter.familyScans;
+  const ownership = writePersistedMessageOwnershipStateValue(
+    {},
+    source,
+    { userId: "user-1", count: 3 },
+    { mailboxId: "main" },
+  );
+  const ownedByCurrentUser = observeKeywordEvidence(counter, () =>
+    normalizeMailMessage(cloneSeed(source), "main", {}, ownership, "user-1"),
+  );
+  const viewedByOtherUser = observeKeywordEvidence(counter, () =>
+    normalizeMailMessage(cloneSeed(source), "main", {}, ownership, "user-2"),
+  );
+
+  assert.equal(counter.familyScans, scansAfterFirstNormalization);
+  assert.equal(withoutOwner.owner, undefined);
+  assert.equal(ownedByCurrentUser.focusSignal, "attention");
+  assert.equal(viewedByOtherUser.focusSignal, null);
+
+  const normalCollections = {
+    Inbox: [ownedByCurrentUser],
+    Drafts: [],
+    Sent: [],
+    Archive: [],
+    Filtered: [],
+    Spam: [],
+    Trash: [],
+  };
+  const normal = observeKeywordEvidence(counter, () =>
+    applyFocusPreferenceRoutingToMailboxCollections(
+      normalCollections,
+      mediumFocusPreferences,
+      {},
+    ),
+  );
+  const low = observeKeywordEvidence(counter, () =>
+    applyFocusPreferenceRoutingToMailboxCollections(
+      normalCollections,
+      { ...mediumFocusPreferences, business: "low" },
+      {},
+    ),
+  );
+  assert.equal(counter.familyScans, scansAfterFirstNormalization);
+  assert.deepEqual(normal.Inbox.map((entry) => entry.id), [source.id]);
+  assert.deepEqual(low.Filtered.map((entry) => entry.id), [source.id]);
+}
+
+{
+  const counter = createKeywordEvidenceCounter();
+  const source = createKeywordEvidenceSeed("perf-n3-provider-scalars", {
+    unread: true,
+    flagged: false,
+  });
+  observeKeywordEvidence(counter, () =>
+    normalizeMailMessage(source, "main", {}, {}, "user-1"),
+  );
+  const scansAfterFirstNormalization = counter.familyScans;
+  const changedScalars = observeKeywordEvidence(counter, () =>
+    normalizeMailMessage(
+      cloneSeed({ ...source, unread: false, flagged: true, labelIds: ["STARRED"] }),
+      "main",
+      {},
+      {},
+      "user-1",
+    ),
+  );
+
+  assert.equal(counter.familyScans, scansAfterFirstNormalization);
+  assert.equal(changedScalars.unread, false);
+  assert.equal(changedScalars.flagged, true);
+}
+
+{
+  const counter = createKeywordEvidenceCounter();
+  const source = createKeywordEvidenceSeed("perf-n3-learning", {
+    internalClassification: "unknown",
+  });
+  const beforeLearning = observeKeywordEvidence(counter, () =>
+    normalizeMailMessage(source, "main", {}, {}, "user-1"),
+  );
+  const scansAfterFirstNormalization = counter.familyScans;
+  const afterLearning = observeKeywordEvidence(counter, () =>
+    normalizeMailMessage(
+      cloneSeed(source),
+      "main",
+      {
+        [`${source.id}@example.test`]: {
+          learnedCategory: "Promo",
+          learnedFromCount: 2,
+          autoCategoryEnabled: false,
+          mailboxAction: "move",
+        },
+      },
+      {},
+      "user-1",
+    ),
+  );
+
+  assert.equal(counter.familyScans, scansAfterFirstNormalization);
+  assert.equal(beforeLearning.category, "Primary");
+  assert.equal(afterLearning.category, "Promo");
+  assert.equal(afterLearning.categorySource, "learned");
+}
+
+{
+  const counter = createKeywordEvidenceCounter();
+  const messages = Array.from({ length: 100 }, (_, index) =>
+    createKeywordEvidenceSeed(`perf-n3-synthetic-${index}`, {
+      subject: `Opaque synthetic subject ${index}`,
+      snippet: `Neutral synthetic snippet ${index}`,
+      sender: `Synthetic Sender ${index}`,
+      from: `synthetic-${index}@example.test`,
+      to: `synthetic-owner-${index}@example.test`,
+      body: [`Neutral synthetic body ${index}`],
+    }),
+  );
+  let scansAfterFirstPass = 0;
+  let includesAfterFirstPass = 0;
+
+  for (let pass = 0; pass < 10; pass += 1) {
+    const normalized = observeKeywordEvidence(counter, () =>
+      messages.map((message) =>
+        normalizeMailMessage(
+          message,
+          "main",
+          {},
+          {},
+          pass % 2 === 0 ? "user-1" : "user-2",
+        ),
+      ),
+    );
+    assert.equal(normalized.length, messages.length);
+    if (pass === 0) {
+      scansAfterFirstPass = counter.familyScans;
+      includesAfterFirstPass = counter.includesAnyKeywordEvaluations;
+    }
+  }
+
+  const historicalRepeatedScanLowerBound = scansAfterFirstPass * 10;
+  assert.ok(scansAfterFirstPass > 0);
+  assert.equal(counter.familyScans, scansAfterFirstPass);
+  assert.equal(counter.includesAnyKeywordEvaluations, includesAfterFirstPass);
+  assert.ok(historicalRepeatedScanLowerBound > counter.familyScans);
+  process.stdout.write(
+    `PERF-N3 synthetic keyword-family scans: before>=${historicalRepeatedScanLowerBound}, after=${counter.familyScans}\n`,
+  );
 }
 
 withCountingDomDecoder((getCount) => {

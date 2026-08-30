@@ -4171,10 +4171,10 @@ function getSmartFolderRuleMatchValue(
 }
 
 type MessageClassificationTextSource = Pick<
-  MailMessage,
+  MailMessageSeed,
   "subject" | "snippet" | "sender" | "from" | "body"
 > &
-  Partial<Pick<MailMessage, "to" | "attachments">>;
+  Partial<Pick<MailMessageSeed, "to" | "attachments">>;
 
 type MessageClassificationTextProjection = {
   subjectText: string;
@@ -4192,6 +4192,24 @@ type MessageClassificationTextProjection = {
   subjectSnippetBodySenderFromText: string;
   subjectSnippetSenderFromBodyText: string;
   subjectSnippetSenderFromToBodyText: string;
+  keywordEvidence: Map<KeywordEvidenceKey, MessageKeywordEvidenceEntry>;
+};
+
+type MessageClassificationTextValueKey = Exclude<
+  keyof MessageClassificationTextProjection,
+  "keywordEvidence"
+>;
+
+type KeywordEvidenceKey = readonly string[] | symbol;
+
+type MessageKeywordEvidenceEntry = {
+  policyVersion: string;
+  value: boolean | number;
+};
+
+type MessageKeywordEvidenceObserver = {
+  onFamilyScan?: (familyName: string) => void;
+  onIncludesAnyKeywordEvaluation?: () => void;
 };
 
 type MessageClassificationTextCacheEntry = {
@@ -4202,21 +4220,76 @@ type MessageClassificationTextCacheEntry = {
   from: string;
   to?: string;
   body: string[];
-  attachmentNames: string[];
+  attachmentNames: Array<string | undefined>;
   result: MessageClassificationTextProjection;
 };
 
 const MESSAGE_CLASSIFICATION_TEXT_POLICY_VERSION = "perf-n2-v1";
 const MESSAGE_CLASSIFICATION_TEXT_CACHE_MAX_ENTRIES = 64;
+const MESSAGE_KEYWORD_EVIDENCE_POLICY_VERSION = "perf-n3-v1";
+let activeMessageKeywordEvidencePolicyVersion =
+  MESSAGE_KEYWORD_EVIDENCE_POLICY_VERSION;
+let messageKeywordEvidenceObserver: MessageKeywordEvidenceObserver | null = null;
 // Identity entries disappear with their live message objects. Recreated messages
 // share only the 64-entry LRU below. A projection retains one lowercase body
-// primitive and five exact body-bearing variants; classifier decisions and
+// primitive and five exact body-bearing variants. PERF-N3 adds only lazy
+// booleans/small counts keyed by stable family identity; evidence never stores
+// another haystack/body copy or a separate history. Classifier decisions and
 // context-dependent routing results are never retained here.
 const messageClassificationTextCache: MessageClassificationTextCacheEntry[] = [];
 const messageClassificationTextCacheByIdentity = new WeakMap<
   object,
   MessageClassificationTextCacheEntry
 >();
+
+function hasExactKeywordEvidenceInputs(
+  left: MessageClassificationTextProjection,
+  right: MessageClassificationTextProjection,
+  inputKeys: readonly MessageClassificationTextValueKey[],
+) {
+  return inputKeys.every((key) => left[key] === right[key]);
+}
+
+function getMessageKeywordEvidence<T extends boolean | number>(
+  projection: MessageClassificationTextProjection,
+  familyKey: KeywordEvidenceKey,
+  familyName: string,
+  inputKeys: readonly MessageClassificationTextValueKey[],
+  compute: () => T,
+): T {
+  const current = projection.keywordEvidence.get(familyKey);
+  if (current?.policyVersion === activeMessageKeywordEvidencePolicyVersion) {
+    return current.value as T;
+  }
+
+  for (
+    let index = messageClassificationTextCache.length - 1;
+    index >= 0;
+    index -= 1
+  ) {
+    const candidateProjection = messageClassificationTextCache[index].result;
+    if (
+      candidateProjection === projection ||
+      !hasExactKeywordEvidenceInputs(candidateProjection, projection, inputKeys)
+    ) {
+      continue;
+    }
+
+    const candidate = candidateProjection.keywordEvidence.get(familyKey);
+    if (candidate?.policyVersion === activeMessageKeywordEvidencePolicyVersion) {
+      projection.keywordEvidence.set(familyKey, candidate);
+      return candidate.value as T;
+    }
+  }
+
+  messageKeywordEvidenceObserver?.onFamilyScan?.(familyName);
+  const value = compute();
+  projection.keywordEvidence.set(familyKey, {
+    policyVersion: activeMessageKeywordEvidencePolicyVersion,
+    value,
+  });
+  return value;
+}
 
 function hasExactMessageClassificationTextInputs(
   entry: MessageClassificationTextCacheEntry,
@@ -4235,7 +4308,10 @@ function hasExactMessageClassificationTextInputs(
     entry.body.every((paragraph, index) => paragraph === message.body[index]) &&
     entry.attachmentNames.length === attachments.length &&
     entry.attachmentNames.every(
-      (name, index) => name === attachments[index]?.name,
+      (name, index) => {
+        const attachment = attachments[index];
+        return name === (typeof attachment === "string" ? undefined : attachment?.name);
+      },
     )
   );
 }
@@ -4309,8 +4385,8 @@ function getMessageClassificationText(
   const fromText = (message.from ?? "").toLowerCase();
   const toText = (message.to ?? "").toLowerCase();
   const bodyText = (message.body ?? []).join(" ").toLowerCase();
-  const attachmentNames = (message.attachments ?? []).map(
-    (attachment) => attachment.name,
+  const attachmentNames = (message.attachments ?? []).map((attachment) =>
+    typeof attachment === "string" ? undefined : attachment.name,
   );
   const attachmentNamesText = attachmentNames.join(" ").toLowerCase();
   const bodyParagraphCount = message.body?.length ?? 0;
@@ -4352,6 +4428,7 @@ function getMessageClassificationText(
       bodyText,
       bodyParagraphCount,
     ),
+    keywordEvidence: new Map(),
   };
   const entry: MessageClassificationTextCacheEntry = {
     policyVersion: MESSAGE_CLASSIFICATION_TEXT_POLICY_VERSION,
@@ -4369,6 +4446,321 @@ function getMessageClassificationText(
   messageClassificationTextCacheByIdentity.set(message, entry);
   return result;
 }
+
+function rememberMessageClassificationTextProjectionForIdentity(
+  source: MessageClassificationTextSource,
+  normalizedMessage: MailMessage,
+) {
+  const entry = messageClassificationTextCacheByIdentity.get(source);
+  if (
+    entry &&
+    hasExactMessageClassificationTextInputs(entry, source) &&
+    hasExactMessageClassificationTextInputs(entry, normalizedMessage)
+  ) {
+    messageClassificationTextCacheByIdentity.set(normalizedMessage, entry);
+  }
+}
+
+const EXPLICIT_PROMO_MUSIC_SENDER_KEYWORDS = [
+  "music",
+  "artist",
+  "dj",
+  "edm",
+  "records",
+  "recordings",
+  "label",
+  "promo",
+] as const;
+const EXPLICIT_PROMO_MUSIC_RELEASE_KEYWORDS = [
+  "house/edm",
+  "edm",
+  "track",
+  "ep",
+  "single",
+  "remix",
+  "release",
+  "collaboration ep",
+  "new house",
+  "new track",
+  "new single",
+] as const;
+const EXPLICIT_PROMO_SUPPORT_KEYWORDS = [
+  "dj support",
+  "support is appreciated",
+  "within your dj sets",
+  "dj sets",
+  "spotify playlists",
+  "spotify playlist",
+  "radio shows",
+  "radio show",
+  "youtube channels",
+  "youtube channel",
+  "promo support",
+  "release promo",
+  "promo download",
+  "for your sets",
+] as const;
+const PROMO_ACCESS_REQUEST_KEYWORDS = [
+  "i would like to receive promo",
+  "i would like to receive promos",
+  "would like to receive promo",
+  "would like to receive promos",
+  "can you send me promos",
+  "could you send me promos",
+  "please send me promos",
+  "send me your promos",
+  "send me promos",
+  "please add me to your promo list",
+  "add me to your promo list",
+  "add me to promo list",
+  "receive promos for my radio show",
+  "receive promo for my radio show",
+  "promo for my radio show",
+  "promo access",
+  "request promo",
+  "request promos",
+] as const;
+const PROMO_ACCESS_RELEASE_KEYWORDS = [
+  "track",
+  "release",
+  "single",
+  "ep",
+  "remix",
+  "out now",
+  "out on",
+] as const;
+const PROMO_ACCESS_LINK_KEYWORDS = [
+  "soundcloud",
+  "spotify.link",
+  "listen link",
+  "download link",
+  "download/listen",
+  "promo download page",
+  "promo download package",
+  "dj promo package",
+  "disco.ac",
+  "hypeddit",
+  "toneden",
+] as const;
+const PROMO_ACCESS_SENDOUT_KEYWORDS = [
+  "sending over my new",
+  "sending you my new",
+  "new single",
+  "new ep",
+  "new release",
+  "support this release",
+  "support this track",
+  "support the release",
+  "support the track",
+  "promo campaign",
+] as const;
+const COLD_OUTREACH_KEYWORDS = [
+  "i came across your content",
+  "came across your content",
+  "grow your content",
+  "new market",
+  "huge audience in china",
+  "we help creators",
+  "we work with creators",
+  "launch and grow your presence",
+  "launch and grow their presence",
+  "grow their presence in china",
+  "we handle",
+  "account setup",
+  "chinese platforms",
+  "content translation",
+  "translation & localization",
+  "translation and localization",
+  "localization",
+  "localisation",
+] as const;
+const COLD_OUTREACH_PERSONAL_KEYWORDS = [
+  "i came across your content",
+  "came across your content",
+  "i genuinely believe",
+  "strong potential to connect",
+] as const;
+const COLD_OUTREACH_SERVICE_KEYWORDS = [
+  "we work with creators",
+  "we help creators",
+  "launch and grow your presence",
+  "we handle",
+  "account setup",
+  "content translation",
+  "localization",
+  "localisation",
+] as const;
+const STRONG_FINANCE_EVIDENCE_KEYWORDS = [
+  "invoice",
+  "receipt",
+  "royalty statement",
+  "royalty statements",
+  "royalties statement",
+  "payment",
+  "payout",
+  "billing",
+  "tax",
+  "vat",
+  "transaction",
+  "account statement",
+  "financial statement",
+  "amount due",
+  "payment failed",
+  "payment received",
+  "payment confirmation",
+  "bank transfer",
+  "wire transfer",
+  "factuur",
+  "ontvangstbewijs",
+  "betalingsoverzicht",
+] as const;
+const LABELWORX_PROMOBOX_KEYWORDS = [
+  "labelworx promobox",
+  "label-worx promobox",
+  "labelworx promo box",
+  "label-worx promo box",
+] as const;
+const PROMO_DOWNLOAD_EVIDENCE_KEYWORDS = [
+  "promo download page",
+  "promo download package",
+  "limited promo download package",
+] as const;
+const DEMO_SUBMISSION_LANGUAGE_KEYWORDS = [
+  "listen to my new track",
+  "share your thoughts",
+  "feedback",
+  "demo submission",
+  "new track",
+] as const;
+const DEMO_PRIVATE_LINK_KEYWORDS = [
+  "soundcloud",
+  "dropbox",
+  "drive.google",
+  "google drive",
+  "disco.ac",
+] as const;
+const STRONG_MUSIC_RELEASE_KEYWORDS = [
+  "remix",
+  "track",
+  "release",
+  "upcoming single",
+  "out now",
+  "out on",
+  "club-ready",
+  "for your sets",
+] as const;
+const PROMO_SERVICING_DOWNLOAD_KEYWORDS = [
+  "promo download page",
+  "limited promo download package",
+  "promotional mail out",
+] as const;
+const PROMOBOX_MUSIC_CONTEXT_KEYWORDS = [
+  "club",
+  "dancefloor",
+  "tech house",
+] as const;
+const PROMO_SERVICING_PLATFORM_KEYWORDS = ["inflyte", "fatdrop"] as const;
+const BUSINESS_OR_FINANCE_ACTION_KEYWORDS = [
+  "contract",
+  "agreement",
+  "invoice",
+  "payment",
+  "approve",
+  "approval",
+  "rights",
+  "license",
+  "legal",
+  "finance",
+  "please review",
+  "please confirm",
+  "please send",
+  "can you",
+  "could you",
+] as const;
+const RETAIL_MARKETING_KEYWORDS = [
+  "offer",
+  "discount",
+  "sale",
+  "save",
+  "coupon",
+  "promo code",
+  "cart",
+  "shop",
+  "store",
+  "limited time",
+  "last chance",
+  "ends tomorrow",
+  "unsubscribe",
+] as const;
+const LOW_VALUE_BUSINESS_ACTION_KEYWORDS = [
+  "contract",
+  "agreement",
+  "invoice",
+  "payment",
+  "approve",
+  "approval",
+  "deadline",
+  "signature",
+  "rights",
+  "license",
+  "legal",
+  "finance",
+  "please review",
+  "please confirm",
+  "please send",
+  "can you",
+  "could you",
+  "need your",
+  "let me know",
+  "proposal",
+  "collaboration",
+  "schedule a call",
+] as const;
+const MUSIC_PROMO_PLATFORM_KEYWORDS = [
+  "promobox",
+  "inflyte",
+  "fatdrop",
+  "disco.ac",
+  "digital promo sound",
+] as const;
+const MUSIC_PROMO_CONTENT_KEYWORDS = [
+  "track",
+  "remix",
+  "release",
+  "club",
+  "dj support",
+  "for your sets",
+  "soundcloud",
+] as const;
+const LOW_VALUE_EVENT_MARKETING_KEYWORDS = [
+  "save 10%",
+  "save 20%",
+  "save 30%",
+  "save 40%",
+  "save 50%",
+  "get your pass",
+  "get your passes",
+  "show pass",
+  "show passes",
+  "conference",
+  "trade show",
+  "seminar",
+  "seminars",
+  "workshop",
+  "workshops",
+  "event marketing",
+  "offer",
+  "discount",
+  "sale",
+  "limited time",
+  "register now",
+  "unsubscribe",
+  "newsletter",
+  "sponsor",
+  "booth",
+  "expo",
+  "summit",
+] as const;
 
 function isBroadcastPromoMessage(
   message: Pick<MailMessage, "subject" | "snippet" | "sender" | "from" | "body">,
@@ -4449,45 +4841,28 @@ function isExplicitMusicPromoSendoutContext(message: PromoHeuristicMessage) {
   const searchableText = classificationText.subjectSnippetSenderFromToBodyText;
   const hasPromoSubjectMarker =
     hasMusicPromoSubjectMarker(subjectText) || /\(\s*promo\s*\)/i.test(subjectText);
-  const hasMusicSenderContext = includesAnyKeyword(identityText, [
-    "music",
-    "artist",
-    "dj",
-    "edm",
-    "records",
-    "recordings",
-    "label",
-    "promo",
-  ]);
-  const hasMusicReleaseContext = includesAnyKeyword(searchableText, [
-    "house/edm",
-    "edm",
-    "track",
-    "ep",
-    "single",
-    "remix",
-    "release",
-    "collaboration ep",
-    "new house",
-    "new track",
-    "new single",
-  ]);
-  const hasPromoSupportContext = includesAnyKeyword(searchableText, [
-    "dj support",
-    "support is appreciated",
-    "within your dj sets",
-    "dj sets",
-    "spotify playlists",
-    "spotify playlist",
-    "radio shows",
-    "radio show",
-    "youtube channels",
-    "youtube channel",
-    "promo support",
-    "release promo",
-    "promo download",
-    "for your sets",
-  ]);
+  const hasMusicSenderContext = getMessageKeywordEvidence(
+    classificationText,
+    EXPLICIT_PROMO_MUSIC_SENDER_KEYWORDS,
+    "explicitPromo.musicSender",
+    ["senderFromText"],
+    () => includesAnyKeyword(identityText, EXPLICIT_PROMO_MUSIC_SENDER_KEYWORDS),
+  );
+  const hasMusicReleaseContext = getMessageKeywordEvidence(
+    classificationText,
+    EXPLICIT_PROMO_MUSIC_RELEASE_KEYWORDS,
+    "explicitPromo.musicRelease",
+    ["subjectSnippetSenderFromToBodyText"],
+    () =>
+      includesAnyKeyword(searchableText, EXPLICIT_PROMO_MUSIC_RELEASE_KEYWORDS),
+  );
+  const hasPromoSupportContext = getMessageKeywordEvidence(
+    classificationText,
+    EXPLICIT_PROMO_SUPPORT_KEYWORDS,
+    "explicitPromo.support",
+    ["subjectSnippetSenderFromToBodyText"],
+    () => includesAnyKeyword(searchableText, EXPLICIT_PROMO_SUPPORT_KEYWORDS),
+  );
 
   return (
     hasPromoSubjectMarker &&
@@ -4501,26 +4876,13 @@ function isPromoAccessRequestMessage(message: PromoHeuristicMessage) {
   const subjectText = classificationText.subjectText;
   const searchableText = classificationText.subjectSnippetSenderFromToBodyText;
   const hasPromoRequestPattern =
-    includesAnyKeyword(searchableText, [
-      "i would like to receive promo",
-      "i would like to receive promos",
-      "would like to receive promo",
-      "would like to receive promos",
-      "can you send me promos",
-      "could you send me promos",
-      "please send me promos",
-      "send me your promos",
-      "send me promos",
-      "please add me to your promo list",
-      "add me to your promo list",
-      "add me to promo list",
-      "receive promos for my radio show",
-      "receive promo for my radio show",
-      "promo for my radio show",
-      "promo access",
-      "request promo",
-      "request promos",
-    ]) ||
+    getMessageKeywordEvidence(
+      classificationText,
+      PROMO_ACCESS_REQUEST_KEYWORDS,
+      "promoAccess.request",
+      ["subjectSnippetSenderFromToBodyText"],
+      () => includesAnyKeyword(searchableText, PROMO_ACCESS_REQUEST_KEYWORDS),
+    ) ||
     /\b(?:receive|get|send me|add me to|include me on|promo access)\b.{0,80}\bpromos?\b/.test(
       searchableText,
     );
@@ -4531,42 +4893,29 @@ function isPromoAccessRequestMessage(message: PromoHeuristicMessage) {
 
   const hasSpecificReleaseSubject =
     /\s[-–—]\s/.test(subjectText) &&
-    includesAnyKeyword(searchableText, [
-      "track",
-      "release",
-      "single",
-      "ep",
-      "remix",
-      "out now",
-      "out on",
-    ]);
+    getMessageKeywordEvidence(
+      classificationText,
+      PROMO_ACCESS_RELEASE_KEYWORDS,
+      "promoAccess.release",
+      ["subjectSnippetSenderFromToBodyText"],
+      () => includesAnyKeyword(searchableText, PROMO_ACCESS_RELEASE_KEYWORDS),
+    );
   const hasDownloadOrListenLink =
     /https?:\/\/|www\./.test(searchableText) ||
-    includesAnyKeyword(searchableText, [
-      "soundcloud",
-      "spotify.link",
-      "listen link",
-      "download link",
-      "download/listen",
-      "promo download page",
-      "promo download package",
-      "dj promo package",
-      "disco.ac",
-      "hypeddit",
-      "toneden",
-    ]);
-  const hasSpecificSendoutLanguage = includesAnyKeyword(searchableText, [
-    "sending over my new",
-    "sending you my new",
-    "new single",
-    "new ep",
-    "new release",
-    "support this release",
-    "support this track",
-    "support the release",
-    "support the track",
-    "promo campaign",
-  ]);
+    getMessageKeywordEvidence(
+      classificationText,
+      PROMO_ACCESS_LINK_KEYWORDS,
+      "promoAccess.link",
+      ["subjectSnippetSenderFromToBodyText"],
+      () => includesAnyKeyword(searchableText, PROMO_ACCESS_LINK_KEYWORDS),
+    );
+  const hasSpecificSendoutLanguage = getMessageKeywordEvidence(
+    classificationText,
+    PROMO_ACCESS_SENDOUT_KEYWORDS,
+    "promoAccess.sendout",
+    ["subjectSnippetSenderFromToBodyText"],
+    () => includesAnyKeyword(searchableText, PROMO_ACCESS_SENDOUT_KEYWORDS),
+  );
 
   return !(
     isExplicitMusicPromoSendoutContext(message) ||
@@ -4581,72 +4930,39 @@ function isColdSalesOutreachWithoutFinanceEvidence(message: FinanceHeuristicMess
   const classificationText = getMessageClassificationText(message);
   const attachmentText = classificationText.attachmentNamesText;
   const searchableText = `${classificationText.subjectSnippetSenderFromToBodyText} ${attachmentText}`;
-  const coldOutreachKeywords = [
-    "i came across your content",
-    "came across your content",
-    "grow your content",
-    "new market",
-    "huge audience in china",
-    "we help creators",
-    "we work with creators",
-    "launch and grow your presence",
-    "launch and grow their presence",
-    "grow their presence in china",
-    "we handle",
-    "account setup",
-    "chinese platforms",
-    "content translation",
-    "translation & localization",
-    "translation and localization",
-    "localization",
-    "localisation",
-  ];
-  const coldOutreachHitCount = coldOutreachKeywords.filter((keyword) =>
-    searchableText.includes(keyword),
-  ).length;
+  const coldOutreachHitCount = getMessageKeywordEvidence(
+    classificationText,
+    COLD_OUTREACH_KEYWORDS,
+    "coldOutreach.hitCount",
+    ["subjectSnippetSenderFromToBodyText", "attachmentNamesText"],
+    () =>
+      COLD_OUTREACH_KEYWORDS.filter((keyword) => searchableText.includes(keyword))
+        .length,
+  );
   const hasColdOutreachPattern =
     coldOutreachHitCount >= 2 ||
-    (includesAnyKeyword(searchableText, [
-      "i came across your content",
-      "came across your content",
-      "i genuinely believe",
-      "strong potential to connect",
-    ]) &&
-      includesAnyKeyword(searchableText, [
-        "we work with creators",
-        "we help creators",
-        "launch and grow your presence",
-        "we handle",
-        "account setup",
-        "content translation",
-        "localization",
-        "localisation",
-      ]));
+    (getMessageKeywordEvidence(
+      classificationText,
+      COLD_OUTREACH_PERSONAL_KEYWORDS,
+      "coldOutreach.personal",
+      ["subjectSnippetSenderFromToBodyText", "attachmentNamesText"],
+      () => includesAnyKeyword(searchableText, COLD_OUTREACH_PERSONAL_KEYWORDS),
+    ) &&
+      getMessageKeywordEvidence(
+        classificationText,
+        COLD_OUTREACH_SERVICE_KEYWORDS,
+        "coldOutreach.service",
+        ["subjectSnippetSenderFromToBodyText", "attachmentNamesText"],
+        () => includesAnyKeyword(searchableText, COLD_OUTREACH_SERVICE_KEYWORDS),
+      ));
   const hasStrongFinanceEvidence =
-    includesAnyKeyword(searchableText, [
-      "invoice",
-      "receipt",
-      "royalty statement",
-      "royalty statements",
-      "royalties statement",
-      "payment",
-      "payout",
-      "billing",
-      "tax",
-      "vat",
-      "transaction",
-      "account statement",
-      "financial statement",
-      "amount due",
-      "payment failed",
-      "payment received",
-      "payment confirmation",
-      "bank transfer",
-      "wire transfer",
-      "factuur",
-      "ontvangstbewijs",
-      "betalingsoverzicht",
-    ]) ||
+    getMessageKeywordEvidence(
+      classificationText,
+      STRONG_FINANCE_EVIDENCE_KEYWORDS,
+      "coldOutreach.finance",
+      ["subjectSnippetSenderFromToBodyText", "attachmentNamesText"],
+      () => includesAnyKeyword(searchableText, STRONG_FINANCE_EVIDENCE_KEYWORDS),
+    ) ||
     /\b(?:invoice|receipt|royalt(?:y|ies)|payout|payment|billing|vat|tax|transaction)\b/.test(
       attachmentText,
     );
@@ -4662,17 +4978,20 @@ function isProtectedMusicPromoContext(message: PromoHeuristicMessage) {
   const labelWorxPromoboxText = [identityText, bodyText].join(" ");
   const hasLabelWorxPromoboxEvidence =
     identityText.includes("promobox-reply@label-worx.com") ||
-    includesAnyKeyword(labelWorxPromoboxText, [
-      "labelworx promobox",
-      "label-worx promobox",
-      "labelworx promo box",
-      "label-worx promo box",
-    ]);
-  const hasPromoDownloadEvidence = includesAnyKeyword(bodyText, [
-    "promo download page",
-    "promo download package",
-    "limited promo download package",
-  ]);
+    getMessageKeywordEvidence(
+      classificationText,
+      LABELWORX_PROMOBOX_KEYWORDS,
+      "protectedPromo.labelWorx",
+      ["senderFromText", "snippetBodyText"],
+      () => includesAnyKeyword(labelWorxPromoboxText, LABELWORX_PROMOBOX_KEYWORDS),
+    );
+  const hasPromoDownloadEvidence = getMessageKeywordEvidence(
+    classificationText,
+    PROMO_DOWNLOAD_EVIDENCE_KEYWORDS,
+    "protectedPromo.download",
+    ["snippetBodyText"],
+    () => includesAnyKeyword(bodyText, PROMO_DOWNLOAD_EVIDENCE_KEYWORDS),
+  );
 
   return (
     hasLabelWorxPromoboxEvidence &&
@@ -4700,20 +5019,20 @@ function isStrongDemoSubmissionMessage(message: PromoHeuristicMessage) {
     return false;
   }
 
-  const hasDirectSubmissionLanguage = includesAnyKeyword(searchableText, [
-    "listen to my new track",
-    "share your thoughts",
-    "feedback",
-    "demo submission",
-    "new track",
-  ]);
-  const hasPrivateSubmissionLink = includesAnyKeyword(searchableText, [
-    "soundcloud",
-    "dropbox",
-    "drive.google",
-    "google drive",
-    "disco.ac",
-  ]);
+  const hasDirectSubmissionLanguage = getMessageKeywordEvidence(
+    classificationText,
+    DEMO_SUBMISSION_LANGUAGE_KEYWORDS,
+    "strongDemo.submission",
+    ["subjectSnippetSenderFromToBodyText"],
+    () => includesAnyKeyword(searchableText, DEMO_SUBMISSION_LANGUAGE_KEYWORDS),
+  );
+  const hasPrivateSubmissionLink = getMessageKeywordEvidence(
+    classificationText,
+    DEMO_PRIVATE_LINK_KEYWORDS,
+    "strongDemo.privateLink",
+    ["subjectSnippetSenderFromToBodyText"],
+    () => includesAnyKeyword(searchableText, DEMO_PRIVATE_LINK_KEYWORDS),
+  );
 
   return (
     toText.includes("demos@") ||
@@ -4727,27 +5046,32 @@ function isStrongMusicPromoMessage(message: PromoHeuristicMessage) {
   const identityText = classificationText.senderFromText;
   const toText = classificationText.toText;
   const searchableText = classificationText.subjectSnippetSenderFromToBodyText;
-  const hasMusicReleaseContext = includesAnyKeyword(searchableText, [
-    "remix",
-    "track",
-    "release",
-    "upcoming single",
-    "out now",
-    "out on",
-    "club-ready",
-    "for your sets",
-  ]);
+  const hasMusicReleaseContext = getMessageKeywordEvidence(
+    classificationText,
+    STRONG_MUSIC_RELEASE_KEYWORDS,
+    "strongMusic.release",
+    ["subjectSnippetSenderFromToBodyText"],
+    () => includesAnyKeyword(searchableText, STRONG_MUSIC_RELEASE_KEYWORDS),
+  );
   const hasPromoboxEvidence =
     identityText.includes("promobox-reply@label-worx.com") ||
     searchableText.includes("promobox");
-  const hasPromoServicingDownloadEvidence = includesAnyKeyword(searchableText, [
-    "promo download page",
-    "limited promo download package",
-    "promotional mail out",
-  ]);
+  const hasPromoServicingDownloadEvidence = getMessageKeywordEvidence(
+    classificationText,
+    PROMO_SERVICING_DOWNLOAD_KEYWORDS,
+    "strongMusic.servicingDownload",
+    ["subjectSnippetSenderFromToBodyText"],
+    () => includesAnyKeyword(searchableText, PROMO_SERVICING_DOWNLOAD_KEYWORDS),
+  );
   const hasPromoboxMusicReleaseContext =
     hasMusicReleaseContext ||
-    includesAnyKeyword(searchableText, ["club", "dancefloor", "tech house"]) ||
+    getMessageKeywordEvidence(
+      classificationText,
+      PROMOBOX_MUSIC_CONTEXT_KEYWORDS,
+      "strongMusic.promoboxContext",
+      ["subjectSnippetSenderFromToBodyText"],
+      () => includesAnyKeyword(searchableText, PROMOBOX_MUSIC_CONTEXT_KEYWORDS),
+    ) ||
     ((toText.includes("promos@") || toText.includes("promo@")) &&
       /\s[-–:]\s/.test(subjectText));
 
@@ -4759,7 +5083,13 @@ function isStrongMusicPromoMessage(message: PromoHeuristicMessage) {
     isExplicitMusicPromoSendoutContext(message) ||
     hasMusicPromoSubjectMarker(subjectText) ||
     identityText.includes("digital promo sound") ||
-    includesAnyKeyword(searchableText, ["inflyte", "fatdrop"]) ||
+    getMessageKeywordEvidence(
+      classificationText,
+      PROMO_SERVICING_PLATFORM_KEYWORDS,
+      "strongMusic.servicingPlatform",
+      ["subjectSnippetSenderFromToBodyText"],
+      () => includesAnyKeyword(searchableText, PROMO_SERVICING_PLATFORM_KEYWORDS),
+    ) ||
     (identityText.includes("disco-mailer.net") && hasMusicReleaseContext) ||
     (hasPromoboxEvidence &&
       hasPromoServicingDownloadEvidence &&
@@ -4776,44 +5106,26 @@ function isGenericRetailMarketingUpdateMessage(message: PromoHeuristicMessage) {
   const classificationText = getMessageClassificationText(message);
   const subjectText = classificationText.subjectText;
   const searchableText = classificationText.subjectSnippetSenderFromToBodyText;
-  const hasBusinessOrFinanceActionSignal = includesAnyKeyword(searchableText, [
-    "contract",
-    "agreement",
-    "invoice",
-    "payment",
-    "approve",
-    "approval",
-    "rights",
-    "license",
-    "legal",
-    "finance",
-    "please review",
-    "please confirm",
-    "please send",
-    "can you",
-    "could you",
-  ]);
+  const hasBusinessOrFinanceActionSignal = getMessageKeywordEvidence(
+    classificationText,
+    BUSINESS_OR_FINANCE_ACTION_KEYWORDS,
+    "retailMarketing.businessAction",
+    ["subjectSnippetSenderFromToBodyText"],
+    () => includesAnyKeyword(searchableText, BUSINESS_OR_FINANCE_ACTION_KEYWORDS),
+  );
   const isReplyOrForwardThread = /^(re|fw|fwd):/i.test(subjectText.trim());
 
   if (hasBusinessOrFinanceActionSignal || isReplyOrForwardThread) {
     return false;
   }
 
-  return includesAnyKeyword(searchableText, [
-    "offer",
-    "discount",
-    "sale",
-    "save",
-    "coupon",
-    "promo code",
-    "cart",
-    "shop",
-    "store",
-    "limited time",
-    "last chance",
-    "ends tomorrow",
-    "unsubscribe",
-  ]);
+  return getMessageKeywordEvidence(
+    classificationText,
+    RETAIL_MARKETING_KEYWORDS,
+    "retailMarketing.marketing",
+    ["subjectSnippetSenderFromToBodyText"],
+    () => includesAnyKeyword(searchableText, RETAIL_MARKETING_KEYWORDS),
+  );
 }
 
 function isLowValueMarketingNewsletterEventUpdateMessage(message: PromoHeuristicMessage) {
@@ -4825,46 +5137,27 @@ function isLowValueMarketingNewsletterEventUpdateMessage(message: PromoHeuristic
   const subjectText = classificationText.subjectText;
   const searchableText = classificationText.subjectSnippetSenderFromToBodyText;
   const hasReplyThreadIndicator = /^(re|fw|fwd):/i.test(subjectText.trim());
-  const hasRealBusinessActionSignal = includesAnyKeyword(searchableText, [
-    "contract",
-    "agreement",
-    "invoice",
-    "payment",
-    "approve",
-    "approval",
-    "deadline",
-    "signature",
-    "rights",
-    "license",
-    "legal",
-    "finance",
-    "please review",
-    "please confirm",
-    "please send",
-    "can you",
-    "could you",
-    "need your",
-    "let me know",
-    "proposal",
-    "collaboration",
-    "schedule a call",
-  ]);
-  const hasMusicPromoPlatformSignal = includesAnyKeyword(searchableText, [
-    "promobox",
-    "inflyte",
-    "fatdrop",
-    "disco.ac",
-    "digital promo sound",
-  ]);
-  const hasMusicPromoContentSignal = includesAnyKeyword(searchableText, [
-    "track",
-    "remix",
-    "release",
-    "club",
-    "dj support",
-    "for your sets",
-    "soundcloud",
-  ]);
+  const hasRealBusinessActionSignal = getMessageKeywordEvidence(
+    classificationText,
+    LOW_VALUE_BUSINESS_ACTION_KEYWORDS,
+    "lowValue.businessAction",
+    ["subjectSnippetSenderFromToBodyText"],
+    () => includesAnyKeyword(searchableText, LOW_VALUE_BUSINESS_ACTION_KEYWORDS),
+  );
+  const hasMusicPromoPlatformSignal = getMessageKeywordEvidence(
+    classificationText,
+    MUSIC_PROMO_PLATFORM_KEYWORDS,
+    "lowValue.promoPlatform",
+    ["subjectSnippetSenderFromToBodyText"],
+    () => includesAnyKeyword(searchableText, MUSIC_PROMO_PLATFORM_KEYWORDS),
+  );
+  const hasMusicPromoContentSignal = getMessageKeywordEvidence(
+    classificationText,
+    MUSIC_PROMO_CONTENT_KEYWORDS,
+    "lowValue.promoContent",
+    ["subjectSnippetSenderFromToBodyText"],
+    () => includesAnyKeyword(searchableText, MUSIC_PROMO_CONTENT_KEYWORDS),
+  );
 
   if (
     hasReplyThreadIndicator ||
@@ -4877,35 +5170,13 @@ function isLowValueMarketingNewsletterEventUpdateMessage(message: PromoHeuristic
   return (
     isGenericRetailMarketingUpdateMessage(message) ||
     /\bsave\s+\d{1,2}%\b/.test(searchableText) ||
-    includesAnyKeyword(searchableText, [
-      "save 10%",
-      "save 20%",
-      "save 30%",
-      "save 40%",
-      "save 50%",
-      "get your pass",
-      "get your passes",
-      "show pass",
-      "show passes",
-      "conference",
-      "trade show",
-      "seminar",
-      "seminars",
-      "workshop",
-      "workshops",
-      "event marketing",
-      "offer",
-      "discount",
-      "sale",
-      "limited time",
-      "register now",
-      "unsubscribe",
-      "newsletter",
-      "sponsor",
-      "booth",
-      "expo",
-      "summit",
-    ])
+    getMessageKeywordEvidence(
+      classificationText,
+      LOW_VALUE_EVENT_MARKETING_KEYWORDS,
+      "lowValue.eventMarketing",
+      ["subjectSnippetSenderFromToBodyText"],
+      () => includesAnyKeyword(searchableText, LOW_VALUE_EVENT_MARKETING_KEYWORDS),
+    )
   );
 }
 
@@ -10129,7 +10400,140 @@ function resolveMessageFocusSignal(
   return null;
 }
 
-function includesAnyKeyword(value: string, keywords: string[]) {
+const HEURISTIC_AUTOMATED_SENDER_KEYWORDS = [
+  "no-reply",
+  "noreply",
+  "notifications@",
+  "notification@",
+  "newsletter@",
+  "updates@",
+  "mailer-daemon",
+  "donotreply",
+  "do-not-reply",
+] as const;
+const HEURISTIC_PRIORITY_KEYWORDS = [
+  "urgent",
+  "asap",
+  "action required",
+  "approval",
+  "approve",
+  "contract",
+  "invoice",
+  "payment",
+  "deadline",
+  "due today",
+  "due tomorrow",
+  "please review",
+  "signature",
+  "confirm",
+  "wire",
+] as const;
+const HEURISTIC_UPDATE_KEYWORDS = [
+  "update",
+  "updated",
+  "status",
+  "fyi",
+  "recap",
+  "summary",
+  "confirmed",
+  "scheduled",
+  "completed",
+  "resolved",
+  "sent",
+  "delivered",
+  "receipt",
+] as const;
+const HEURISTIC_PROMO_KEYWORDS = [
+  "unsubscribe",
+  "newsletter",
+  "promotion",
+  "promo",
+  "offer",
+  "discount",
+  "sale",
+  "campaign",
+  "webinar",
+  "announcement",
+  "register now",
+  "limited time",
+  // Dutch promo indicators — required for custom IMAP promo inboxes (e.g. Area53)
+  // where emails use Dutch promotional vocabulary not covered by the English list.
+  "afmelden", // unsubscribe
+  "uitschrijven", // unsubscribe (verb form)
+  "nieuwsbrief", // newsletter
+  "aanbieding", // offer/deal
+  "korting", // discount
+  "promotie", // promotion
+  // Music promo-servicing signals — track pitch and distribution platform
+  // identifiers that appear in promo emails but not in English/Dutch word lists.
+  "soundcloud.com", // private SoundCloud track share links (track pitches)
+  "inflyte", // Inflyte promo distribution platform
+  "fatdrop", // Fatdrop promo distribution platform
+  "for your sets", // DJ promo phrase ("hope you'll love it for your sets")
+] as const;
+const HEURISTIC_GOOGLE_SECURITY_KEYWORDS = [
+  "verification",
+  "2-step",
+  "two-step",
+  "password",
+  "security alert",
+  "sign-in",
+  "login",
+  "account access",
+  "beveiligingsmelding",
+  "beveiligingswaarschuwing",
+  "tweestapsverificatie",
+  "app-wachtwoord",
+  "ingelogd",
+  "inloggen",
+  "accounttoegang",
+  "verificatiecode",
+  "wachtwoord",
+  "beveiliging",
+] as const;
+const HEURISTIC_META_BILLING_KEYWORDS = [
+  "meta for business",
+  "ads",
+  "receipt",
+  "payment",
+  "billing",
+  "invoice",
+  "account update",
+  "ad account",
+  "ontvangstbewijs",
+  "betalingsoverzicht",
+  "dit is geen factuur",
+  "factuur",
+  "advertentie is goedgekeurd",
+  "advertentie goedgekeurd",
+  "advertentie",
+  "advertenties",
+  "account-id",
+  "producttype",
+  "reden factuur",
+  "uitgaven van advertenties",
+] as const;
+const HEURISTIC_MARKETING_NEWSLETTER_KEYWORDS = [
+  "watch",
+  "summit",
+  "on demand",
+  "newsletter",
+  "in brief newsletter",
+  "marketing",
+  "event",
+  "sessions",
+  "webinar",
+  "register",
+  "replay",
+  "join us",
+] as const;
+const HEURISTIC_PROMO_SUBJECT_EVIDENCE_KEY = Symbol("heuristicPromo.subject");
+const HEURISTIC_PROMO_SEARCHABLE_EVIDENCE_KEY = Symbol(
+  "heuristicPromo.subjectSnippetBody",
+);
+
+function includesAnyKeyword(value: string, keywords: readonly string[]) {
+  messageKeywordEvidenceObserver?.onIncludesAnyKeywordEvaluation?.();
   return keywords.some((keyword) => value.includes(keyword));
 }
 
@@ -10146,141 +10550,33 @@ function inferHeuristicSignal(
   const classificationText = getMessageClassificationText(message);
   const normalizedSender = normalizeSenderLearningKey(message.from || message.sender);
   const searchableText = classificationText.subjectSnippetBodyText;
-  const automatedSenderHints = [
-    "no-reply",
-    "noreply",
-    "notifications@",
-    "notification@",
-    "newsletter@",
-    "updates@",
-    "mailer-daemon",
-    "donotreply",
-    "do-not-reply",
-  ];
-  const priorityKeywords = [
-    "urgent",
-    "asap",
-    "action required",
-    "approval",
-    "approve",
-    "contract",
-    "invoice",
-    "payment",
-    "deadline",
-    "due today",
-    "due tomorrow",
-    "please review",
-    "signature",
-    "confirm",
-    "wire",
-  ];
-  const updateKeywords = [
-    "update",
-    "updated",
-    "status",
-    "fyi",
-    "recap",
-    "summary",
-    "confirmed",
-    "scheduled",
-    "completed",
-    "resolved",
-    "sent",
-    "delivered",
-    "receipt",
-  ];
-  const promoKeywords = [
-    "unsubscribe",
-    "newsletter",
-    "promotion",
-    "promo",
-    "offer",
-    "discount",
-    "sale",
-    "campaign",
-    "webinar",
-    "announcement",
-    "register now",
-    "limited time",
-    // Dutch promo indicators — required for custom IMAP promo inboxes (e.g. Area53)
-    // where emails use Dutch promotional vocabulary not covered by the English list.
-    "afmelden",       // unsubscribe
-    "uitschrijven",   // unsubscribe (verb form)
-    "nieuwsbrief",    // newsletter
-    "aanbieding",     // offer/deal
-    "korting",        // discount
-    "promotie",       // promotion
-    // Music promo-servicing signals — track pitch and distribution platform
-    // identifiers that appear in promo emails but not in English/Dutch word lists.
-    "soundcloud.com",  // private SoundCloud track share links (track pitches)
-    "inflyte",         // Inflyte promo distribution platform
-    "fatdrop",         // Fatdrop promo distribution platform
-    "for your sets",   // DJ promo phrase ("hope you'll love it for your sets")
-  ];
-  const googleSecurityKeywords = [
-    "verification",
-    "2-step",
-    "two-step",
-    "password",
-    "security alert",
-    "sign-in",
-    "login",
-    "account access",
-    "beveiligingsmelding",
-    "beveiligingswaarschuwing",
-    "tweestapsverificatie",
-    "app-wachtwoord",
-    "ingelogd",
-    "inloggen",
-    "accounttoegang",
-    "verificatiecode",
-    "wachtwoord",
-    "beveiliging",
-  ];
-  const metaBillingKeywords = [
-    "meta for business",
-    "ads",
-    "receipt",
-    "payment",
-    "billing",
-    "invoice",
-    "account update",
-    "ad account",
-    "ontvangstbewijs",
-    "betalingsoverzicht",
-    "dit is geen factuur",
-    "factuur",
-    "advertentie is goedgekeurd",
-    "advertentie goedgekeurd",
-    "advertentie",
-    "advertenties",
-    "account-id",
-    "producttype",
-    "reden factuur",
-    "uitgaven van advertenties",
-  ];
-  const hasClearMarketingNewsletterSignal = includesAnyKeyword(searchableText, [
-    "watch",
-    "summit",
-    "on demand",
-    "newsletter",
-    "in brief newsletter",
-    "marketing",
-    "event",
-    "sessions",
-    "webinar",
-    "register",
-    "replay",
-    "join us",
-  ]);
-  const isAutomatedSender = includesAnyKeyword(normalizedSender, automatedSenderHints);
-  const isGoogleSecurityAuthMail = includesAnyKeyword(
-    searchableText,
-    googleSecurityKeywords,
+  const hasClearMarketingNewsletterSignal = getMessageKeywordEvidence(
+    classificationText,
+    HEURISTIC_MARKETING_NEWSLETTER_KEYWORDS,
+    "heuristic.marketingNewsletter",
+    ["subjectSnippetBodyText"],
+    () => includesAnyKeyword(searchableText, HEURISTIC_MARKETING_NEWSLETTER_KEYWORDS),
   );
-  const isMetaBillingSystemMail = includesAnyKeyword(
-    searchableText,
-    metaBillingKeywords,
+  const isAutomatedSender = getMessageKeywordEvidence(
+    classificationText,
+    HEURISTIC_AUTOMATED_SENDER_KEYWORDS,
+    "heuristic.automatedSender",
+    ["senderText", "fromText"],
+    () => includesAnyKeyword(normalizedSender, HEURISTIC_AUTOMATED_SENDER_KEYWORDS),
+  );
+  const isGoogleSecurityAuthMail = getMessageKeywordEvidence(
+    classificationText,
+    HEURISTIC_GOOGLE_SECURITY_KEYWORDS,
+    "heuristic.googleSecurity",
+    ["subjectSnippetBodyText"],
+    () => includesAnyKeyword(searchableText, HEURISTIC_GOOGLE_SECURITY_KEYWORDS),
+  );
+  const isMetaBillingSystemMail = getMessageKeywordEvidence(
+    classificationText,
+    HEURISTIC_META_BILLING_KEYWORDS,
+    "heuristic.metaBilling",
+    ["subjectSnippetBodyText"],
+    () => includesAnyKeyword(searchableText, HEURISTIC_META_BILLING_KEYWORDS),
   );
   const isGenericRetailMarketingUpdate =
     isLowValueMarketingNewsletterEventUpdateMessage(message);
@@ -10294,23 +10590,47 @@ function inferHeuristicSignal(
   // only in snippet/body) keep the existing billing-guard behaviour unchanged.
   const subjectText = classificationText.subjectText;
   const includesPromoKeyword = (value: string) =>
-    promoKeywords.some((keyword) =>
+    HEURISTIC_PROMO_KEYWORDS.some((keyword) =>
       keyword === "offer" ? /\boffer\b/.test(value) : value.includes(keyword),
     );
-  const isPromoInSubject = includesPromoKeyword(subjectText);
+  const isPromoInSubject = getMessageKeywordEvidence(
+    classificationText,
+    HEURISTIC_PROMO_SUBJECT_EVIDENCE_KEY,
+    "heuristic.promoSubject",
+    ["subjectText"],
+    () => includesPromoKeyword(subjectText),
+  );
   const isPromo =
-    includesPromoKeyword(searchableText) &&
+    getMessageKeywordEvidence(
+      classificationText,
+      HEURISTIC_PROMO_SEARCHABLE_EVIDENCE_KEY,
+      "heuristic.promoSearchable",
+      ["subjectSnippetBodyText"],
+      () => includesPromoKeyword(searchableText),
+    ) &&
     !isPromoAccessRequest &&
     !isGoogleSecurityAuthMail &&
     (!isMetaBillingSystemMail || isPromoInSubject);
   const isPriority =
-    includesAnyKeyword(searchableText, priorityKeywords) &&
+    getMessageKeywordEvidence(
+      classificationText,
+      HEURISTIC_PRIORITY_KEYWORDS,
+      "heuristic.priority",
+      ["subjectSnippetBodyText"],
+      () => includesAnyKeyword(searchableText, HEURISTIC_PRIORITY_KEYWORDS),
+    ) &&
     !isPromo &&
     !hasClearMarketingNewsletterSignal;
   const isUpdate =
     message.isAutoReply ||
     isGoogleSecurityAuthMail ||
-    includesAnyKeyword(searchableText, updateKeywords) ||
+    getMessageKeywordEvidence(
+      classificationText,
+      HEURISTIC_UPDATE_KEYWORDS,
+      "heuristic.update",
+      ["subjectSnippetBodyText"],
+      () => includesAnyKeyword(searchableText, HEURISTIC_UPDATE_KEYWORDS),
+    ) ||
     (isAutomatedSender && !isPromo);
 
   if (
@@ -10343,6 +10663,34 @@ function inferHeuristicSignal(
 
   return "Other";
 }
+
+export const workspaceShellPerformanceTestSeam = {
+  inferHeuristicSignal,
+  observeMessageKeywordEvidence<T>(
+    observer: MessageKeywordEvidenceObserver,
+    run: () => T,
+  ): T {
+    const previousObserver = messageKeywordEvidenceObserver;
+    messageKeywordEvidenceObserver = observer;
+    try {
+      return run();
+    } finally {
+      messageKeywordEvidenceObserver = previousObserver;
+    }
+  },
+  withMessageKeywordEvidencePolicyVersion<T>(
+    policyVersion: string,
+    run: () => T,
+  ): T {
+    const previousPolicyVersion = activeMessageKeywordEvidencePolicyVersion;
+    activeMessageKeywordEvidencePolicyVersion = policyVersion;
+    try {
+      return run();
+    } finally {
+      activeMessageKeywordEvidencePolicyVersion = previousPolicyVersion;
+    }
+  },
+};
 
 function inferInternalClassification(
   message: Pick<
@@ -12187,6 +12535,7 @@ export function normalizeMailMessage(
     mailboxId,
     normalizedSource,
   );
+  rememberMessageClassificationTextProjectionForIdentity(message, normalizedMessage);
   return normalizedMessage;
 }
 
