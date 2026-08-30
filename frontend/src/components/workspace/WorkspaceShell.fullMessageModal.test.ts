@@ -476,12 +476,12 @@ recordCorrectionExpectation("full-message action extraction and split preservati
   );
   assert.match(
     workspaceShellSource,
-    /renderThreadTimeline\(\s*fullMessageModalThreadMessages,\s*"full",\s*null/,
+    /renderThreadTimeline\(\s*fullMessageModalMessage,\s*"full",\s*null/,
     "the full-message conversation renderer must own content only",
   );
   assert.match(
     workspaceShellSource,
-    /renderThreadTimeline\(\s*selectedMessageThreadMessages,\s*"split",\s*fullWidthMessage \?\? selectedMessage/,
+    /renderThreadTimeline\(\s*selectedMessage,\s*"split",\s*fullWidthMessage \?\? selectedMessage/,
     "split view must retain its existing action source and placement",
   );
 });
@@ -961,12 +961,12 @@ assert.match(
 );
 assert.match(
   workspaceShellSource,
-  /data-full-message-modal-message-id=\{fullMessageModalMessage\.id\}[\s\S]*actions=\{renderMessageActions\(fullMessageModalMessage, "full"\)\}[\s\S]*renderThreadTimeline\(\s*fullMessageModalThreadMessages,\s*"full",\s*null/,
+  /data-full-message-modal-message-id=\{fullMessageModalMessage\.id\}[\s\S]*actions=\{renderMessageActions\(fullMessageModalMessage, "full"\)\}[\s\S]*renderThreadTimeline\(\s*fullMessageModalMessage,\s*"full",\s*null/,
   "the modal toolbar and content must reuse the established action and message renderers",
 );
 assert.match(
   workspaceShellSource,
-  /renderThreadTimeline\(\s*selectedMessageThreadMessages,\s*"split",\s*fullWidthMessage \?\? selectedMessage/,
+  /renderThreadTimeline\(\s*selectedMessage,\s*"split",\s*fullWidthMessage \?\? selectedMessage/,
   "the split pane must keep using the same action renderer",
 );
 assert.equal(

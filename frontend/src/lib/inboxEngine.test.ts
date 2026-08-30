@@ -1373,7 +1373,7 @@ test("WorkspaceShell lazily resolves Smart Folder labels from a local thread ind
     /function doesMessageMatchSmartFolder\([\s\S]*?\n}\n\nfunction hasSignatureContent/,
   )?.[0];
   const smartFolderRuntimeSource = workspaceShellSource.match(
-    /const resolveSmartFolderContentLabelForMessage = \([\s\S]*?const \{\s*entries: smartFolderEntries,/,
+    /const resolveSmartFolderContentLabelForMessage = \([\s\S]*?const smartFolderEntries =/,
   )?.[0];
 
   assert.ok(smartFolderEvaluatorSource, "Smart Folder rule evaluator must exist");
