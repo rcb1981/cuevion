@@ -27,6 +27,8 @@ from .candidate_reference_reconciliation import (
     RECONCILIATION_FAILURE_RESULTS,
     reconcile_workflow_candidate_references,
 )
+from .candidate_recovery import synchronize_runtime_workflow_recovery_queue
+from .candidate_recovery_store import PriorityCandidateRecoveryStore
 from .candidate_store import (
     PriorityCandidateScope,
     PriorityCandidateStore,
@@ -171,6 +173,7 @@ def process_priority_workflow_request(
     hmac_secret: str | None = None,
     store: PriorityWorkflowStore | None = None,
     candidate_store: PriorityCandidateStore | None = None,
+    recovery_store: PriorityCandidateRecoveryStore | None = None,
 ) -> WorkflowRouteResponse:
     request = _validate_payload(payload)
     if isinstance(request, WorkflowRouteResponse):
@@ -241,6 +244,14 @@ def process_priority_workflow_request(
             "workflow_storage_unavailable",
             "Priority workflow storage is temporarily unavailable.",
         )
+    candidate_scope = PriorityCandidateScope(
+        workspace_id=authority.workspace_id,
+        user_id=authority.user_id,
+        mailbox_id=authority.mailbox_id,
+        mailbox_account_identity=authority.mailbox_email,
+        provider=authority.provider,
+        identity=scopes[0].identity,
+    )
     try:
         runtime_candidate_store = candidate_store
         if runtime_candidate_store is None:
@@ -249,14 +260,6 @@ def process_priority_workflow_request(
             runtime_candidate_store = build_runtime_candidate_store(
                 hmac_secret=resolved_secret
             )
-        candidate_scope = PriorityCandidateScope(
-            workspace_id=authority.workspace_id,
-            user_id=authority.user_id,
-            mailbox_id=authority.mailbox_id,
-            mailbox_account_identity=authority.mailbox_email,
-            provider=authority.provider,
-            identity=scopes[0].identity,
-        )
         reconciliation = reconcile_workflow_candidate_references(
             runtime_candidate_store,
             candidate_scope,
@@ -274,6 +277,13 @@ def process_priority_workflow_request(
             "Priority workflow candidate reference reconciliation outcome=%s",
             reconciliation.value,
         )
+    synchronize_runtime_workflow_recovery_queue(
+        candidate_scope,
+        record,
+        reconciliation,
+        recovery_store=recovery_store,
+        hmac_secret=resolved_secret or hmac_secret,
+    )
     return WorkflowRouteResponse(
         200,
         {

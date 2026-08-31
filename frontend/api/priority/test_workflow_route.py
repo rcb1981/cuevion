@@ -6,9 +6,11 @@ from unittest.mock import patch
 from .authority import PriorityAuthority, SemanticAuthorityError
 from .candidate_reference_reconciliation import (
     CandidateReferenceReconciliationResult,
+    workflow_reference_expiries,
 )
 from .candidate_store import PriorityCandidateStore
-from .store import PriorityWorkflowStore
+from .store import PriorityWorkflowScope, PriorityWorkflowStore
+from .test_candidate_recovery import FakeRecoveryStore, recovery_scope
 from .test_candidate_store import MemoryRedis, google_scope, snapshot
 from .test_workflow_store import SECRET, WorkflowMemoryRedis
 from .workflow_route import process_priority_workflow_request
@@ -77,6 +79,7 @@ class PriorityWorkflowRouteTests(unittest.TestCase):
             self.candidate_redis,
             hmac_secret=SECRET,
         )
+        self.recovery_store = FakeRecoveryStore()
         self.authority_patch = patch(
             "api.priority.workflow_route.resolve_priority_authority",
             return_value=self.current,
@@ -84,7 +87,14 @@ class PriorityWorkflowRouteTests(unittest.TestCase):
         self.authority_resolver = self.authority_patch.start()
         self.addCleanup(self.authority_patch.stop)
 
-    def process(self, payload: dict, *, store=None, candidate_store=None):
+    def process(
+        self,
+        payload: dict,
+        *,
+        store=None,
+        candidate_store=None,
+        recovery_store=None,
+    ):
         return process_priority_workflow_request(
             (("Cookie", "session=opaque"),),
             payload,
@@ -93,6 +103,11 @@ class PriorityWorkflowRouteTests(unittest.TestCase):
                 self.candidate_store
                 if candidate_store is None
                 else candidate_store
+            ),
+            recovery_store=(
+                self.recovery_store
+                if recovery_store is None
+                else recovery_store
             ),
         )
 
@@ -229,7 +244,7 @@ class PriorityWorkflowRouteTests(unittest.TestCase):
             reconciled.absolute_expires_at,
         )
 
-    def test_missing_candidate_is_noop_and_workflow_write_stays_successful(self):
+    def test_missing_candidate_queues_waiting_with_authoritative_expiry(self):
         candidate_scope = google_scope(
             message_id="gmail-message-1",
             workspace_id="workspace-1",
@@ -242,7 +257,10 @@ class PriorityWorkflowRouteTests(unittest.TestCase):
         with self.assertLogs(
             "api.priority.workflow_route",
             level="INFO",
-        ) as captured:
+        ) as captured, self.assertLogs(
+            "api.priority.candidate_recovery",
+            level="INFO",
+        ) as recovery_captured:
             result = self.process(
                 write_payload("set_waiting", "waiting_on_other")
             )
@@ -255,6 +273,14 @@ class PriorityWorkflowRouteTests(unittest.TestCase):
                 "outcome=candidate_missing"
             ],
         )
+        self.assertEqual(
+            recovery_captured.output,
+            [
+                "INFO:api.priority.candidate_recovery:"
+                "Priority workflow recovery queue synchronization "
+                "outcome=recovery_queued"
+            ],
+        )
         self.assertEqual(len(self.redis.commands) - workflow_commands, 1)
         self.assertEqual(
             len(self.candidate_redis.commands) - candidate_commands,
@@ -262,8 +288,210 @@ class PriorityWorkflowRouteTests(unittest.TestCase):
         )
         self.assertEqual(result.payload["record"]["waiting"], "waiting_on_other")
         self.assertIsNone(self.candidate_store.read_candidate(candidate_scope))
+        queued = self.recovery_store.records[recovery_scope()]
+        workflow_record = self.store.read_records(
+            (
+                PriorityWorkflowScope(
+                    workspace_id="workspace-1",
+                    user_id="user-1",
+                    mailbox_id="mailbox-1",
+                    identity=recovery_scope().identity,
+                ),
+            )
+        )[0]
+        self.assertEqual(
+            queued.authority_expires_at,
+            max(workflow_reference_expiries(workflow_record)),
+        )
         self.assertFalse(
             any(command[0] == "SCAN" for command in self.candidate_redis.commands)
+        )
+
+    def test_missing_candidate_queues_manual_and_returned_but_not_neutral(self):
+        manual_identity = {
+            "provider": "google",
+            "providerMessageId": "manual",
+        }
+        returned_identity = {
+            "provider": "google",
+            "providerMessageId": "returned",
+        }
+        neutral_identity = {
+            "provider": "google",
+            "providerMessageId": "neutral",
+        }
+        manual = self.process(
+            write_payload(
+                "set_manual_priority",
+                "priority",
+                identity=manual_identity,
+            )
+        )
+        returned = self.process(
+            write_payload(
+                "set_waiting",
+                "returned_reply",
+                identity=returned_identity,
+            )
+        )
+        neutral = self.process(
+            write_payload(
+                "set_manual_priority",
+                "removed",
+                identity=neutral_identity,
+            )
+        )
+        self.assertEqual(
+            (manual.status_code, returned.status_code, neutral.status_code),
+            (200, 200, 200),
+        )
+        self.assertIn(recovery_scope("manual"), self.recovery_store.records)
+        self.assertIn(recovery_scope("returned"), self.recovery_store.records)
+        self.assertNotIn(recovery_scope("neutral"), self.recovery_store.records)
+
+    def test_workflow_writes_do_not_invoke_provider_network_adapters(self):
+        with patch("urllib.request.urlopen") as gmail_network, patch(
+            "imaplib.IMAP4_SSL"
+        ) as imap_network:
+            gmail = self.process(
+                write_payload("set_manual_priority", "priority")
+            )
+            self.authority_resolver.return_value = authority(
+                provider="custom_imap"
+            )
+            imap = self.process(
+                write_payload(
+                    "set_waiting",
+                    "waiting_on_other",
+                    identity=IMAP_IDENTITY,
+                )
+            )
+
+        self.assertEqual((gmail.status_code, imap.status_code), (200, 200))
+        gmail_network.assert_not_called()
+        imap_network.assert_not_called()
+
+    def test_neutral_writes_cancel_queued_items_but_remaining_manual_updates(self):
+        removed_identity = {
+            "provider": "google",
+            "providerMessageId": "removed",
+        }
+        cleared_identity = {
+            "provider": "google",
+            "providerMessageId": "cleared",
+        }
+        retained_identity = {
+            "provider": "google",
+            "providerMessageId": "retained",
+        }
+        for identity in (removed_identity, cleared_identity, retained_identity):
+            self.process(
+                write_payload(
+                    "set_manual_priority",
+                    "priority",
+                    identity=identity,
+                )
+            )
+
+        self.process(
+            write_payload(
+                "set_manual_priority",
+                "removed",
+                identity=removed_identity,
+            )
+        )
+        self.process(
+            write_payload("set_cleared", "cleared", identity=cleared_identity)
+        )
+        self.process(
+            write_payload(
+                "set_waiting",
+                "waiting_on_other",
+                identity=retained_identity,
+            )
+        )
+        retained_before = self.recovery_store.records[recovery_scope("retained")]
+        self.process(
+            write_payload("set_waiting", "absent", identity=retained_identity)
+        )
+        retained_after = self.recovery_store.records[recovery_scope("retained")]
+
+        self.assertNotIn(recovery_scope("removed"), self.recovery_store.records)
+        self.assertNotIn(recovery_scope("cleared"), self.recovery_store.records)
+        self.assertIn(recovery_scope("retained"), self.recovery_store.records)
+        self.assertGreater(retained_after.generation, retained_before.generation)
+        self.assertGreater(
+            retained_after.authority_expires_at,
+            retained_after.updated_at,
+        )
+
+    def test_reconciled_candidate_cancels_stale_recovery_item(self):
+        first = self.process(write_payload("set_manual_priority", "priority"))
+        self.assertEqual(first.status_code, 200)
+        self.assertIn(recovery_scope(), self.recovery_store.records)
+        self.candidate_redis.current_ms = first.payload["record"]["updatedAt"]
+        self.candidate_store.upsert_confirmed(
+            google_scope(
+                workspace_id="workspace-1",
+                user_id="user-1",
+                mailbox_id="mailbox-1",
+                account="primary@example.com",
+            ),
+            snapshot(),
+            expected_version=0,
+        )
+        second = self.process(write_payload("set_waiting", "waiting_on_other"))
+        self.assertEqual(second.status_code, 200)
+        self.assertNotIn(recovery_scope(), self.recovery_store.records)
+        self.assertIn(recovery_scope(), self.recovery_store.cancelled)
+
+    def test_queue_unavailable_and_capacity_do_not_change_workflow_success(self):
+        unavailable = FakeRecoveryStore()
+        unavailable.unavailable = True
+        with self.assertLogs(
+            "api.priority.candidate_recovery",
+            level="WARNING",
+        ) as unavailable_logs:
+            unavailable_result = self.process(
+                write_payload("set_manual_priority", "priority"),
+                recovery_store=unavailable,
+            )
+
+        capacity = FakeRecoveryStore()
+        capacity.capacity = "mailbox"
+        with self.assertLogs(
+            "api.priority.candidate_recovery",
+            level="WARNING",
+        ) as capacity_logs:
+            capacity_result = self.process(
+                write_payload(
+                    "set_waiting",
+                    "waiting_on_other",
+                    identity={
+                        "provider": "google",
+                        "providerMessageId": "capacity",
+                    },
+                ),
+                recovery_store=capacity,
+            )
+
+        self.assertEqual(unavailable_result.status_code, 200)
+        self.assertEqual(capacity_result.status_code, 200)
+        self.assertEqual(
+            set(unavailable_result.payload),
+            {"ok", "status", "record"},
+        )
+        self.assertEqual(
+            set(capacity_result.payload),
+            {"ok", "status", "record"},
+        )
+        self.assertIn(
+            "outcome=queue_unavailable",
+            "\n".join(unavailable_logs.output),
+        )
+        self.assertIn(
+            "outcome=queue_capacity",
+            "\n".join(capacity_logs.output),
         )
 
     def test_candidate_store_unavailable_does_not_fail_accepted_workflow_write(
@@ -403,7 +631,10 @@ class PriorityWorkflowRouteTests(unittest.TestCase):
         ), self.assertLogs(
             "api.priority.workflow_route",
             level="WARNING",
-        ) as captured:
+        ) as captured, self.assertLogs(
+            "api.priority.candidate_recovery",
+            level="WARNING",
+        ) as recovery_captured:
             result = self.process(payload)
         self.assertEqual(result.status_code, 200)
         output = "\n".join(captured.output)
@@ -413,9 +644,17 @@ class PriorityWorkflowRouteTests(unittest.TestCase):
             "Priority workflow candidate reference reconciliation "
             "outcome=candidate_ineligible",
         )
+        recovery_output = "\n".join(recovery_captured.output)
+        self.assertEqual(
+            recovery_output,
+            "WARNING:api.priority.candidate_recovery:"
+            "Priority workflow recovery queue synchronization "
+            "outcome=recovery_not_synchronized",
+        )
         redis_key = next(iter(self.redis.values))
         hmac_digest = redis_key.rsplit(":", 1)[-1]
         for sensitive in (
+            "privacy-sender@example.com",
             mailbox_id,
             provider_folder,
             uid_validity,
@@ -425,6 +664,7 @@ class PriorityWorkflowRouteTests(unittest.TestCase):
             SECRET,
         ):
             self.assertNotIn(sensitive, output)
+            self.assertNotIn(sensitive, recovery_output)
 
     def test_imap_mailbox_accepts_only_exact_imap_identity(self):
         self.authority_resolver.return_value = authority(provider="custom_imap")
