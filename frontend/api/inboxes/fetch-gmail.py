@@ -47,11 +47,28 @@ from .authenticated_gmail import (
     validate_focus_preferences,
     valid_identifier,
 )
-from .gmail_snapshot import read_gmail_folder_snapshot
+from .gmail_snapshot import (
+    GmailExactMessageRecoveryResult,
+    read_gmail_folder_snapshot,
+    recover_exact_gmail_inbox_message,
+)
+from api.priority.candidate_recovery import (
+    ProviderCandidateRecoveryResult,
+    process_priority_candidate_recovery,
+)
+from api.priority.candidate_recovery_store import (
+    PriorityCandidateRecoveryMailboxScope,
+    build_runtime_recovery_store,
+)
 from api.priority.candidate_projection import (
+    PriorityCandidatePopulationAuthority,
+    populate_priority_candidates,
     populate_runtime_priority_candidates,
 )
+from api.priority.candidate_store import build_runtime_candidate_store
+from api.priority.event_reference import resolve_priority_hmac_secret
 from api.priority.semantic_config import read_new_inbound_client_mode
+from api.priority.store import build_runtime_workflow_store
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
 DEFAULT_FETCH_LIMIT = 50
@@ -94,7 +111,13 @@ def _gmail_request(access_token: str, path: str) -> tuple[dict | None, dict | No
                 return None, {"code": "gmail_response_invalid"}
             return payload, None
     except HTTPError as error:
-        return None, {"code": gmail_http_error_code(error.code, "gmail_fetch_failed")}
+        return None, {
+            "code": (
+                "gmail_message_not_found"
+                if error.code == 404
+                else gmail_http_error_code(error.code, "gmail_fetch_failed")
+            )
+        }
     except (URLError, TimeoutError):
         return None, {"code": "gmail_unavailable"}
 
@@ -125,6 +148,109 @@ def _request_with_one_refresh(context: dict, path: str):
         context = refreshed["context"]
         payload, error = _gmail_request(context["access_token"], path)
     return payload, error, context, None
+
+
+def _run_gmail_priority_candidate_recovery(
+    *,
+    member: object,
+    context: dict,
+    focus_preferences: dict | None,
+    recovery_store=None,
+    candidate_store=None,
+    workflow_store=None,
+    hmac_secret: str | None = None,
+    request_with_one_refresh=None,
+):
+    """Run one bounded Google-only drain after a successful mailbox refresh."""
+
+    secret = hmac_secret
+    if recovery_store is None or candidate_store is None or workflow_store is None:
+        secret = secret or resolve_priority_hmac_secret()
+    if recovery_store is None:
+        recovery_store = build_runtime_recovery_store(hmac_secret=secret)
+    if candidate_store is None:
+        candidate_store = build_runtime_candidate_store(hmac_secret=secret)
+    if workflow_store is None:
+        workflow_store = build_runtime_workflow_store(hmac_secret=secret)
+
+    authority = PriorityCandidatePopulationAuthority(
+        workspace_id=getattr(member, "workspace_id"),
+        user_id=getattr(member, "user_id"),
+        mailbox_id=context["mailbox_id"],
+        mailbox_account_identity=context["mailbox_email"].casefold(),
+        provider="google",
+    )
+    mailbox_scope = PriorityCandidateRecoveryMailboxScope(
+        workspace_id=authority.workspace_id,
+        user_id=authority.user_id,
+        mailbox_id=authority.mailbox_id,
+        mailbox_account_identity=authority.mailbox_account_identity,
+        provider="google",
+    )
+    current_context = context
+    authentication_retry_consumed = bool(context.get("refresh_attempted"))
+    request_boundary = request_with_one_refresh or _request_with_one_refresh
+
+    def bounded_request(request_context: dict, request_path: str):
+        nonlocal authentication_retry_consumed
+        if (
+            authentication_retry_consumed
+            and not request_context.get("refresh_attempted")
+        ):
+            request_context = {**request_context, "refresh_attempted": True}
+        payload, error, next_context, refresh_failure = request_boundary(
+            request_context,
+            request_path,
+        )
+        if (
+            isinstance(next_context, dict)
+            and next_context.get("refresh_attempted")
+        ) or refresh_failure is not None:
+            authentication_retry_consumed = True
+        return payload, error, next_context, refresh_failure
+
+    def recover_provider(recovery_scope):
+        nonlocal current_context
+        identity = recovery_scope.identity
+        if (
+            identity.provider != "google"
+            or not valid_identifier(identity.provider_message_id)
+        ):
+            return ProviderCandidateRecoveryResult.RETRY
+        recovered = recover_exact_gmail_inbox_message(
+            current_context,
+            provider_message_id=identity.provider_message_id,
+            request_with_one_refresh=bounded_request,
+            focus_preferences=focus_preferences,
+            message_parser=message_from_bytes,
+        )
+        current_context = recovered.context
+        if (
+            recovered.result
+            is GmailExactMessageRecoveryResult.TERMINAL_ABSENT
+        ):
+            return ProviderCandidateRecoveryResult.TERMINAL_ABSENT
+        if (
+            recovered.result is not GmailExactMessageRecoveryResult.RECOVERED
+            or recovered.candidate_source is None
+        ):
+            return ProviderCandidateRecoveryResult.RETRY
+        population = populate_priority_candidates(
+            authority,
+            [recovered.candidate_source],
+            store=candidate_store,
+        )
+        if population.written != 1 or population.incomplete:
+            return ProviderCandidateRecoveryResult.RETRY
+        return ProviderCandidateRecoveryResult.RECOVERED
+
+    return process_priority_candidate_recovery(
+        mailbox_scope,
+        recovery_store=recovery_store,
+        candidate_store=candidate_store,
+        workflow_store=workflow_store,
+        provider_recovery=recover_provider,
+    )
 
 
 class handler(BaseHTTPRequestHandler):
@@ -210,6 +336,9 @@ class handler(BaseHTTPRequestHandler):
         ):
             _send_gmail_error(self, {"code": "gmail_response_invalid"})
             return
+        latest_context = snapshot_result.get("context")
+        if isinstance(latest_context, dict):
+            context = latest_context
 
         previews = [
             message
@@ -235,6 +364,15 @@ class handler(BaseHTTPRequestHandler):
                 )
             except Exception:
                 pass
+
+        try:
+            _run_gmail_priority_candidate_recovery(
+                member=resolution.get("memberAuthority"),
+                context=context,
+                focus_preferences=focus_preferences,
+            )
+        except Exception:
+            pass
 
         send_json(
             self,

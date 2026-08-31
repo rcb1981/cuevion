@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 import json
+import base64
+import importlib
 import unittest
 from email.message import Message
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from urllib.parse import unquote
 
 import imap_connect_preview
 
 from . import candidate_store as candidate_store_module
+from .authority import PriorityMessageIdentity
+from .candidate_recovery import CandidateRecoveryConsumerResult
+from .candidate_recovery_store import (
+    PriorityCandidateRecoveryClaim,
+    PriorityCandidateRecoveryMailboxScope,
+    PriorityCandidateRecoveryRecord,
+    PriorityCandidateRecoveryScope,
+)
 from .candidate_projection import (
     PriorityCandidatePopulationAuthority,
     populate_priority_candidates,
@@ -18,10 +29,14 @@ from .candidate_projection import (
 from .candidate_reference_reconciliation import (
     CandidateReferenceReconciliationResult,
 )
-from .candidate_store import PriorityCandidateStore
+from .candidate_store import PriorityCandidateScope, PriorityCandidateStore
 from .store import PriorityWorkflowScope, PriorityWorkflowStore
 from .test_candidate_store import MemoryRedis, SECRET
+from .test_candidate_recovery import FakeRecoveryStore
 from .test_workflow_store import WorkflowMemoryRedis
+
+
+fetch_gmail = importlib.import_module("api.inboxes.fetch-gmail")
 
 
 def gmail_authority(**overrides) -> PriorityCandidatePopulationAuthority:
@@ -88,6 +103,52 @@ def imap_source(**overrides) -> dict:
     }
     values.update(overrides)
     return values
+
+
+def gmail_recovery_context(*, refresh_attempted: bool = False) -> dict:
+    return {
+        "mailbox_id": "mailbox-1",
+        "mailbox_email": "owner@gmail.test",
+        "owner_email": "owner@example.test",
+        "access_token": "recovery-access-token",
+        "scope": "https://www.googleapis.com/auth/gmail.readonly",
+        "refresh_attempted": refresh_attempted,
+    }
+
+
+def gmail_recovery_detail(
+    message_id: str,
+    *,
+    thread_id: str | None = None,
+    labels: list[str] | None = None,
+) -> dict:
+    raw = (
+        f"Message-Id: <{message_id}@example.test>\r\n"
+        "Date: Tue, 01 Jul 2025 10:00:00 +0000\r\n"
+        "From: Sender Name <sender@example.test>\r\n"
+        "To: owner@gmail.test\r\n"
+        "Subject: Provider subject\r\n"
+        "\r\n"
+        "Provider snippet"
+    ).encode("utf-8")
+    return {
+        "id": message_id,
+        "threadId": thread_id or f"thread-{message_id}",
+        "labelIds": labels if labels is not None else ["INBOX", "UNREAD", "STARRED"],
+        "internalDate": "1751364000123",
+        "raw": base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii"),
+    }
+
+
+class ScopedFakeRecoveryStore(FakeRecoveryStore):
+    def claim_due(self, mailbox_scope, *, limit=8):
+        if self.unavailable:
+            return super().claim_due(mailbox_scope, limit=limit)
+        return tuple(
+            claim
+            for claim in self.claims
+            if claim.record.scope.mailbox_scope == mailbox_scope
+        )[:limit]
 
 
 class CandidateProjectionTests(unittest.TestCase):
@@ -609,6 +670,459 @@ class CandidatePopulationTests(unittest.TestCase):
             SECRET,
         ):
             self.assertNotIn(sensitive, output)
+
+
+class GmailExactRecoveryDrainTests(unittest.TestCase):
+    def setUp(self):
+        self.workflow_redis = WorkflowMemoryRedis()
+        self.workflow_store = PriorityWorkflowStore(
+            self.workflow_redis,
+            hmac_secret=SECRET,
+        )
+        self.candidate_redis = MemoryRedis(
+            current_ms=self.workflow_redis.clock_ms,
+        )
+        self.candidate_store = PriorityCandidateStore(
+            self.candidate_redis,
+            hmac_secret=SECRET,
+        )
+        self.recovery_store = ScopedFakeRecoveryStore()
+        self.member = SimpleNamespace(
+            workspace_id="workspace-1",
+            user_id="user-1",
+        )
+        self.context = gmail_recovery_context()
+
+    def _mailbox_scope(
+        self,
+        *,
+        mailbox_id: str = "mailbox-1",
+        mailbox_account_identity: str = "owner@gmail.test",
+        provider: str = "google",
+    ) -> PriorityCandidateRecoveryMailboxScope:
+        return PriorityCandidateRecoveryMailboxScope(
+            workspace_id="workspace-1",
+            user_id="user-1",
+            mailbox_id=mailbox_id,
+            mailbox_account_identity=mailbox_account_identity,
+            provider=provider,
+        )
+
+    def _queue_google(
+        self,
+        message_id: str,
+        *,
+        mailbox_scope: PriorityCandidateRecoveryMailboxScope | None = None,
+    ) -> PriorityWorkflowScope:
+        mailbox_scope = mailbox_scope or self._mailbox_scope()
+        identity = PriorityMessageIdentity(
+            provider="google",
+            provider_message_id=message_id,
+        )
+        workflow_scope = PriorityWorkflowScope(
+            workspace_id=mailbox_scope.workspace_id,
+            user_id=mailbox_scope.user_id,
+            mailbox_id=mailbox_scope.mailbox_id,
+            identity=identity,
+        )
+        written = self.workflow_store.write_field(
+            workflow_scope,
+            field="manualPriority",
+            value="priority",
+        )
+        record = PriorityCandidateRecoveryRecord(
+            scope=PriorityCandidateRecoveryScope(mailbox_scope, identity),
+            workflow_version=written.version,
+            authority_expires_at=written.manual_expires_at,
+            enqueued_at=written.updated_at,
+            updated_at=written.updated_at,
+            attempt_count=0,
+            generation=1,
+        )
+        claim_number = len(self.recovery_store.claims) + 1
+        claim = PriorityCandidateRecoveryClaim(
+            record=record,
+            identity_digest=f"{claim_number:064x}",
+            lease_token=f"{claim_number + 100:064x}",
+            claimed_at=record.updated_at,
+            lease_expires_at=min(
+                record.updated_at + 90_000,
+                record.authority_expires_at,
+            ),
+            raw_record=f"opaque-record-{claim_number}",
+        )
+        self.recovery_store.claims = (*self.recovery_store.claims, claim)
+        return workflow_scope
+
+    def _run(self, *, request_with_one_refresh=None):
+        return fetch_gmail._run_gmail_priority_candidate_recovery(
+            member=self.member,
+            context=self.context,
+            focus_preferences=None,
+            recovery_store=self.recovery_store,
+            candidate_store=self.candidate_store,
+            workflow_store=self.workflow_store,
+            request_with_one_refresh=request_with_one_refresh,
+        )
+
+    def test_successful_route_populates_window_then_runs_isolated_drain(self):
+        preview = {
+            "providerMessageId": "window-message",
+            "providerThreadId": "window-thread",
+            "labelIds": ["INBOX"],
+        }
+        snapshot_result = {
+            "status": "ok",
+            "context": self.context,
+            "snapshot": {
+                "messages": [preview],
+                "uidValidity": "gmail-api",
+            },
+            "error": None,
+            "refresh_failure": None,
+            "_priorityCandidateSources": [gmail_source()],
+        }
+        request_handler = SimpleNamespace(headers={})
+        order: list[str] = []
+        sent: list[tuple[int, dict]] = []
+
+        def populate(**_kwargs):
+            order.append("ordinary-population")
+            return SimpleNamespace()
+
+        def drain(**_kwargs):
+            order.append("recovery-drain")
+            raise RuntimeError("recovery unavailable")
+
+        with patch.object(
+            fetch_gmail,
+            "read_json_body",
+            return_value=({"mailboxId": "mailbox-1"}, None),
+        ), patch.object(
+            fetch_gmail,
+            "resolve_authenticated_gmail",
+            return_value={
+                "status": "ok",
+                "context": self.context,
+                "memberAuthority": self.member,
+            },
+        ), patch.object(
+            fetch_gmail,
+            "read_gmail_folder_snapshot",
+            return_value=snapshot_result,
+        ) as full_refresh, patch.object(
+            fetch_gmail,
+            "populate_runtime_priority_candidates",
+            side_effect=populate,
+        ), patch.object(
+            fetch_gmail,
+            "_run_gmail_priority_candidate_recovery",
+            side_effect=drain,
+        ) as recovery_drain, patch.object(
+            fetch_gmail,
+            "read_new_inbound_client_mode",
+            return_value="off",
+        ), patch.object(
+            fetch_gmail,
+            "send_json",
+            side_effect=lambda _handler, status, payload: sent.append(
+                (status, payload)
+            ),
+        ):
+            fetch_gmail.handler._handle_post(request_handler)
+
+        self.assertEqual(order, ["ordinary-population", "recovery-drain"])
+        full_refresh.assert_called_once()
+        recovery_drain.assert_called_once()
+        self.assertEqual(sent[0][0], 200)
+        self.assertTrue(sent[0][1]["ok"])
+
+    def test_failed_mailbox_snapshot_never_runs_recovery_drain(self):
+        request_handler = SimpleNamespace(headers={})
+        with patch.object(
+            fetch_gmail,
+            "read_json_body",
+            return_value=({"mailboxId": "mailbox-1"}, None),
+        ), patch.object(
+            fetch_gmail,
+            "resolve_authenticated_gmail",
+            return_value={
+                "status": "ok",
+                "context": self.context,
+                "memberAuthority": self.member,
+            },
+        ), patch.object(
+            fetch_gmail,
+            "read_gmail_folder_snapshot",
+            return_value={
+                "status": "error",
+                "context": self.context,
+                "snapshot": None,
+                "error": {"code": "gmail_rate_limited"},
+                "refresh_failure": None,
+            },
+        ), patch.object(
+            fetch_gmail,
+            "populate_runtime_priority_candidates",
+        ) as population, patch.object(
+            fetch_gmail,
+            "_run_gmail_priority_candidate_recovery",
+        ) as recovery_drain, patch.object(fetch_gmail, "send_json"):
+            fetch_gmail.handler._handle_post(request_handler)
+
+        population.assert_not_called()
+        recovery_drain.assert_not_called()
+
+    def test_google_scope_and_eight_claim_bound_without_list_or_recursion(self):
+        other_mailbox = self._mailbox_scope(mailbox_id="mailbox-2")
+        other_account = self._mailbox_scope(
+            mailbox_account_identity="other@gmail.test"
+        )
+        self._queue_google("other-mailbox", mailbox_scope=other_mailbox)
+        self._queue_google("other-account", mailbox_scope=other_account)
+        imap_identity = PriorityMessageIdentity(
+            provider="custom_imap",
+            provider_folder="INBOX",
+            uid_validity="456",
+            imap_uid="123",
+        )
+        imap_record = PriorityCandidateRecoveryRecord(
+            scope=PriorityCandidateRecoveryScope(
+                self._mailbox_scope(
+                    mailbox_account_identity="owner@imap.test",
+                    provider="custom_imap",
+                ),
+                imap_identity,
+            ),
+            workflow_version=1,
+            authority_expires_at=self.workflow_redis.clock_ms + 60_000,
+            enqueued_at=self.workflow_redis.clock_ms,
+            updated_at=self.workflow_redis.clock_ms,
+            attempt_count=0,
+            generation=1,
+        )
+        self.recovery_store.claims = (
+            *self.recovery_store.claims,
+            PriorityCandidateRecoveryClaim(
+                record=imap_record,
+                identity_digest="f" * 64,
+                lease_token="e" * 64,
+                claimed_at=imap_record.updated_at,
+                lease_expires_at=imap_record.updated_at + 60_000,
+                raw_record="opaque-imap-record",
+            ),
+        )
+        empty_request = Mock()
+        empty = self._run(request_with_one_refresh=empty_request)
+        self.assertEqual(empty.claimed, 0)
+        empty_request.assert_not_called()
+
+        self.recovery_store.claims = ()
+        message_ids = [f"bounded-{index}" for index in range(10)]
+        for message_id in message_ids:
+            self._queue_google(message_id)
+        requested_paths: list[str] = []
+
+        def request(context: dict, request_path: str):
+            requested_paths.append(request_path)
+            encoded_id = request_path.split("/messages/", 1)[1].split("?", 1)[0]
+            message_id = unquote(encoded_id)
+            return gmail_recovery_detail(message_id), None, context, None
+
+        with patch.object(fetch_gmail, "read_gmail_folder_snapshot") as refresh:
+            report = self._run(request_with_one_refresh=request)
+        self.assertEqual(report.claimed, 8)
+        self.assertEqual(report.completed, 8)
+        self.assertEqual(len(requested_paths), 8)
+        self.assertTrue(
+            all(path.endswith("?format=raw") for path in requested_paths)
+        )
+        self.assertFalse(any(path.startswith("/messages?") for path in requested_paths))
+        refresh.assert_not_called()
+
+    def test_one_authentication_refresh_caps_eight_claims_at_nine_gets(self):
+        for index in range(8):
+            self._queue_google(f"auth-{index}")
+        provider_calls: list[tuple[str, str]] = []
+
+        def gmail_request(access_token: str, request_path: str):
+            provider_calls.append((access_token, request_path))
+            if len(provider_calls) == 1:
+                return None, {"code": "gmail_token_invalid"}
+            encoded_id = request_path.split("/messages/", 1)[1].split("?", 1)[0]
+            return gmail_recovery_detail(unquote(encoded_id)), None
+
+        refreshed_context = {
+            **self.context,
+            "access_token": "refreshed-recovery-token",
+            "refresh_attempted": True,
+        }
+        with patch.object(
+            fetch_gmail,
+            "_gmail_request",
+            side_effect=gmail_request,
+        ), patch.object(
+            fetch_gmail,
+            "refresh_gmail_context",
+            return_value={"status": "ok", "context": refreshed_context},
+        ) as refresh:
+            report = self._run()
+
+        self.assertEqual(report.completed, 8)
+        self.assertEqual(len(provider_calls), 9)
+        refresh.assert_called_once()
+        self.assertEqual(
+            {token for token, _path in provider_calls[2:]},
+            {"refreshed-recovery-token"},
+        )
+
+    def test_existing_candidate_avoids_get_and_recovery_matches_window_shape(self):
+        self._queue_google("gmail-message-1")
+        expected_scope, expected_snapshot = project_priority_candidate(
+            gmail_authority(),
+            gmail_source(),
+        )
+        self.candidate_store.upsert_confirmed(
+            expected_scope,
+            expected_snapshot,
+            expected_version=0,
+        )
+        request = Mock()
+        present = self._run(request_with_one_refresh=request)
+        self.assertEqual(present.completed, 1)
+        request.assert_not_called()
+
+        self.setUp()
+        self._queue_google("gmail-message-1")
+
+        def exact_request(context: dict, _request_path: str):
+            return (
+                gmail_recovery_detail(
+                    "gmail-message-1",
+                    thread_id="gmail-thread-1",
+                ),
+                None,
+                context,
+                None,
+            )
+
+        recovered = self._run(request_with_one_refresh=exact_request)
+        self.assertEqual(
+            recovered.result_counts,
+            ((CandidateRecoveryConsumerResult.PROVIDER_RECOVERED.value, 1),),
+        )
+        record = self.candidate_store.read_candidate(expected_scope)
+        assert record is not None
+        self.assertEqual(record.snapshot, expected_snapshot)
+        self.assertEqual(
+            record.snapshot.conversation.provider_thread_id,
+            "gmail-thread-1",
+        )
+
+    def test_terminal_absence_leaves_workflow_authority_untouched(self):
+        for message_id, response in (
+            (
+                "deleted-message",
+                (
+                    None,
+                    {"code": "gmail_message_not_found"},
+                ),
+            ),
+            (
+                "archived-message",
+                (
+                    gmail_recovery_detail(
+                        "archived-message",
+                        labels=["STARRED"],
+                    ),
+                    None,
+                ),
+            ),
+        ):
+            with self.subTest(message_id=message_id):
+                self.setUp()
+                workflow_scope = self._queue_google(message_id)
+
+                def request(context: dict, _request_path: str):
+                    payload, error = response
+                    return payload, error, context, None
+
+                report = self._run(request_with_one_refresh=request)
+                self.assertEqual(report.completed, 1)
+                self.assertEqual(
+                    report.result_counts,
+                    ((
+                        CandidateRecoveryConsumerResult.PROVIDER_TERMINAL_ABSENT.value,
+                        1,
+                    ),),
+                )
+                self.assertEqual(len(self.recovery_store.acked), 1)
+                durable = self.workflow_store.read_records((workflow_scope,))[0]
+                self.assertEqual(durable.manual_priority, "priority")
+                scope = PriorityCandidateScope(
+                    workspace_id="workspace-1",
+                    user_id="user-1",
+                    mailbox_id="mailbox-1",
+                    mailbox_account_identity="owner@gmail.test",
+                    provider="google",
+                    identity=workflow_scope.identity,
+                )
+                self.assertIsNone(self.candidate_store.read_candidate(scope))
+
+    def test_persistence_and_reconciliation_failures_retry_without_ack(self):
+        self._queue_google("persistence-failure")
+
+        def request(context: dict, _request_path: str):
+            return (
+                gmail_recovery_detail("persistence-failure"),
+                None,
+                context,
+                None,
+            )
+
+        with patch.object(
+            fetch_gmail,
+            "populate_priority_candidates",
+            return_value=SimpleNamespace(written=0, incomplete=True),
+        ):
+            persistence = self._run(request_with_one_refresh=request)
+        self.assertEqual(persistence.completed, 0)
+        self.assertEqual(persistence.rescheduled, 1)
+        self.assertFalse(self.recovery_store.acked)
+
+        self.setUp()
+        self._queue_google("reconciliation-failure")
+
+        def reconciliation_request(context: dict, _request_path: str):
+            return (
+                gmail_recovery_detail("reconciliation-failure"),
+                None,
+                context,
+                None,
+            )
+
+        with patch(
+            "api.priority.candidate_recovery.reconcile_workflow_candidate_references",
+            return_value=CandidateReferenceReconciliationResult.STORE_UNAVAILABLE,
+        ):
+            reconciliation = self._run(
+                request_with_one_refresh=reconciliation_request
+            )
+        self.assertEqual(reconciliation.completed, 0)
+        self.assertEqual(reconciliation.rescheduled, 1)
+        self.assertFalse(self.recovery_store.acked)
+
+
+class CandidatePopulationContinuationTests(unittest.TestCase):
+    def setUp(self):
+        self.redis = MemoryRedis()
+        self.store = PriorityCandidateStore(self.redis, hmac_secret=SECRET)
+        self.workflow_redis = WorkflowMemoryRedis()
+        self.workflow_store = PriorityWorkflowStore(
+            self.workflow_redis,
+            hmac_secret=SECRET,
+        )
+        self.authority = gmail_authority()
 
     def test_rejected_row_does_not_block_a_valid_row(self):
         result = populate_priority_candidates(

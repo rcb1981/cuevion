@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from .authority import PriorityMessageIdentity
 from .candidate_recovery import (
     CandidateRecoveryConsumerResult,
+    ProviderCandidateRecoveryResult,
     RecoveryQueueSynchronizationResult,
     process_priority_candidate_recovery,
     synchronize_workflow_recovery_queue,
@@ -199,12 +200,13 @@ class CandidateRecoveryTests(unittest.TestCase):
         self.recovery_store.claims = (claim_for(record),)
         return record
 
-    def _process(self):
+    def _process(self, provider_recovery=None):
         return process_priority_candidate_recovery(
             recovery_mailbox(),
             recovery_store=self.recovery_store,
             candidate_store=self.candidate_store,
             workflow_store=self.workflow_store,
+            provider_recovery=provider_recovery,
         )
 
     def test_positive_missing_synchronization_enqueues_actual_expiry(self) -> None:
@@ -331,8 +333,11 @@ class CandidateRecoveryTests(unittest.TestCase):
             snapshot(),
             expected_version=0,
         )
+        provider_recovery = Mock(
+            return_value=ProviderCandidateRecoveryResult.RECOVERED
+        )
         with self.assertLogs("api.priority.candidate_recovery", level="INFO") as captured:
-            report = self._process()
+            report = self._process(provider_recovery)
         self.assertEqual(report.claimed, 1)
         self.assertEqual(report.completed, 1)
         self.assertEqual(report.rescheduled, 0)
@@ -349,6 +354,7 @@ class CandidateRecoveryTests(unittest.TestCase):
             written.manual_expires_at,
         )
         self.assertNotIn("gmail-message-1", "\n".join(captured.output))
+        provider_recovery.assert_not_called()
 
     def test_candidate_still_missing_is_rescheduled_for_future_provider(self) -> None:
         written = self._write(field="waiting", value="returned_reply")
@@ -363,6 +369,126 @@ class CandidateRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(len(self.recovery_store.retried), 1)
         self.assertFalse(self.recovery_store.acked)
+
+    def test_provider_recovered_requires_canonical_candidate_before_ack(self) -> None:
+        written = self._write(field="manualPriority", value="priority")
+        self._queue_claim(written)
+        callback_calls: list[PriorityCandidateRecoveryScope] = []
+
+        def recover(scope):
+            callback_calls.append(scope)
+            self.candidate_store.upsert_confirmed(
+                candidate_scope(),
+                snapshot(),
+                expected_version=0,
+            )
+            return ProviderCandidateRecoveryResult.RECOVERED
+
+        report = self._process(recover)
+        self.assertEqual(callback_calls, [recovery_scope()])
+        self.assertEqual(report.completed, 1)
+        self.assertEqual(report.rescheduled, 0)
+        self.assertEqual(
+            report.result_counts,
+            ((CandidateRecoveryConsumerResult.PROVIDER_RECOVERED.value, 1),),
+        )
+        self.assertEqual(len(self.recovery_store.acked), 1)
+        observed = self.candidate_store.read_candidate(candidate_scope())
+        assert observed is not None
+        self.assertEqual(
+            observed.positive_reference_expires_at("manual_priority"),
+            written.manual_expires_at,
+        )
+
+        self.setUp()
+        written = self._write(field="manualPriority", value="priority")
+        self._queue_claim(written)
+        missing = self._process(
+            lambda _scope: ProviderCandidateRecoveryResult.RECOVERED
+        )
+        self.assertEqual(missing.completed, 0)
+        self.assertEqual(missing.rescheduled, 1)
+        self.assertFalse(self.recovery_store.acked)
+        self.assertEqual(len(self.recovery_store.retried), 1)
+
+    def test_provider_terminal_absent_removes_only_transport_record(self) -> None:
+        written = self._write(field="waiting", value="returned_reply")
+        self._queue_claim(written)
+        report = self._process(
+            lambda _scope: ProviderCandidateRecoveryResult.TERMINAL_ABSENT
+        )
+        self.assertEqual(report.completed, 1)
+        self.assertEqual(
+            report.result_counts,
+            ((
+                CandidateRecoveryConsumerResult.PROVIDER_TERMINAL_ABSENT.value,
+                1,
+            ),),
+        )
+        self.assertEqual(len(self.recovery_store.acked), 1)
+        self.assertFalse(self.recovery_store.retried)
+        durable = self.workflow_store.read_records((workflow_scope(),))[0]
+        self.assertEqual(durable.version, written.version)
+        self.assertEqual(durable.waiting, "returned_reply")
+        self.assertEqual(durable.waiting_expires_at, written.waiting_expires_at)
+
+    def test_provider_retry_exception_and_invalid_result_use_normal_backoff(self) -> None:
+        callbacks = (
+            lambda _scope: ProviderCandidateRecoveryResult.RETRY,
+            lambda _scope: (_ for _ in ()).throw(RuntimeError("provider")),
+            lambda _scope: "recovered",
+        )
+        for callback in callbacks:
+            with self.subTest(callback=callback):
+                self.setUp()
+                written = self._write(field="manualPriority", value="priority")
+                self._queue_claim(written)
+                report = self._process(callback)
+                self.assertEqual(report.completed, 0)
+                self.assertEqual(report.rescheduled, 1)
+                self.assertEqual(len(self.recovery_store.retried), 1)
+                self.assertFalse(self.recovery_store.acked)
+
+    def test_final_authority_reread_wins_after_provider_callback(self) -> None:
+        positive = self._write(field="manualPriority", value="priority")
+        self._queue_claim(positive)
+
+        def recover(_scope):
+            self._write(field="manualPriority", value="removed")
+            return ProviderCandidateRecoveryResult.RECOVERED
+
+        report = self._process(recover)
+        self.assertEqual(report.completed, 1)
+        self.assertEqual(
+            report.result_counts,
+            ((CandidateRecoveryConsumerResult.AUTHORITY_NEUTRAL.value, 1),),
+        )
+        self.assertEqual(len(self.recovery_store.acked), 1)
+        self.assertFalse(self.recovery_store.retried)
+
+    def test_stale_terminal_and_retry_workers_cannot_finish_newer_generation(self) -> None:
+        written = self._write(field="manualPriority", value="priority")
+        self._queue_claim(written)
+        self.recovery_store.ack_result = RecoveryAckResult.CLAIM_LOST
+        terminal = self._process(
+            lambda _scope: ProviderCandidateRecoveryResult.TERMINAL_ABSENT
+        )
+        self.assertEqual(
+            terminal.result_counts,
+            ((CandidateRecoveryConsumerResult.CLAIM_LOST.value, 1),),
+        )
+        self.assertEqual(terminal.completed, 0)
+
+        self.recovery_store.ack_result = RecoveryAckResult.COMPLETED
+        self.recovery_store.retry_result = RecoveryRetryResult.CLAIM_LOST
+        retry = self._process(
+            lambda _scope: ProviderCandidateRecoveryResult.RETRY
+        )
+        self.assertEqual(
+            retry.result_counts,
+            ((CandidateRecoveryConsumerResult.CLAIM_LOST.value, 1),),
+        )
+        self.assertEqual(retry.rescheduled, 0)
 
     def test_absent_neutral_and_expired_current_authority_are_terminal(self) -> None:
         cases = ("absent", "removed", "cleared", "expired")

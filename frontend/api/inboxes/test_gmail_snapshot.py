@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -448,6 +448,178 @@ class GmailSnapshotTransportRetryTests(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertEqual(result["error"]["code"], error_code)
         self.assertEqual(len(paths), 1)
+
+
+class GmailExactMessageRecoveryTests(unittest.TestCase):
+    def test_exact_helper_uses_one_raw_get_no_list_and_threads_context(self):
+        message_id = "exact-message-1"
+        detail = gmail_detail(message_id)
+        detail["threadId"] = "gmail-authoritative-thread"
+        paths: list[str] = []
+        updated_context = {
+            **gmail_context(),
+            "access_token": "updated-test-token",
+            "refresh_attempted": True,
+        }
+
+        def request(_context: dict, request_path: str):
+            paths.append(request_path)
+            return detail, None, updated_context, None
+
+        with patch.object(
+            gmail_snapshot,
+            "_parse_gmail_message_detail_with_candidate_source",
+            wraps=gmail_snapshot._parse_gmail_message_detail_with_candidate_source,
+        ) as strict_parser:
+            recovered = gmail_snapshot.recover_exact_gmail_inbox_message(
+                gmail_context(),
+                provider_message_id=message_id,
+                request_with_one_refresh=request,
+            )
+
+        self.assertIs(
+            recovered.result,
+            gmail_snapshot.GmailExactMessageRecoveryResult.RECOVERED,
+        )
+        self.assertIs(recovered.context, updated_context)
+        self.assertEqual(
+            paths,
+            ["/messages/exact-message-1?format=raw"],
+        )
+        self.assertFalse(any(path.startswith("/messages?") for path in paths))
+        assert recovered.candidate_source is not None
+        self.assertEqual(
+            recovered.candidate_source["providerThreadId"],
+            "gmail-authoritative-thread",
+        )
+        self.assertTrue(strict_parser.call_args.kwargs["strict"])
+        self.assertEqual(
+            strict_parser.call_args.kwargs["requested_message_id"],
+            message_id,
+        )
+
+    def test_exact_helper_retries_identity_thread_and_malformed_failures(self):
+        message_id = "exact-message-1"
+        cases = (
+            {**gmail_detail("different-message"), "id": "different-message"},
+            {**gmail_detail(message_id), "threadId": None},
+            {**gmail_detail(message_id), "threadId": ""},
+            {**gmail_detail(message_id), "threadId": ["invalid"]},
+            {**gmail_detail(message_id), "labelIds": "INBOX"},
+            {**gmail_detail(message_id), "raw": "not-valid-base64!"},
+            [],
+        )
+        for payload in cases:
+            with self.subTest(payload=payload):
+                request = Mock(
+                    return_value=(payload, None, gmail_context(), None)
+                )
+                recovered = gmail_snapshot.recover_exact_gmail_inbox_message(
+                    gmail_context(),
+                    provider_message_id=message_id,
+                    request_with_one_refresh=request,
+                )
+                self.assertIs(
+                    recovered.result,
+                    gmail_snapshot.GmailExactMessageRecoveryResult.RETRY,
+                )
+                self.assertIsNone(recovered.candidate_source)
+                request.assert_called_once()
+
+    def test_exact_helper_terminally_classifies_non_inbox_and_404(self):
+        message_id = "exact-message-1"
+        for labels in (
+            ["TRASH"],
+            ["INBOX", "TRASH"],
+            ["INBOX", "SPAM"],
+            ["INBOX", "SENT"],
+            ["INBOX", "DRAFT"],
+        ):
+            with self.subTest(labels=labels):
+                detail = {**gmail_detail(message_id), "labelIds": labels}
+                recovered = gmail_snapshot.recover_exact_gmail_inbox_message(
+                    gmail_context(),
+                    provider_message_id=message_id,
+                    request_with_one_refresh=Mock(
+                        return_value=(detail, None, gmail_context(), None)
+                    ),
+                )
+                self.assertIs(
+                    recovered.result,
+                    gmail_snapshot.GmailExactMessageRecoveryResult.TERMINAL_ABSENT,
+                )
+                self.assertIsNone(recovered.candidate_source)
+
+        not_found = gmail_snapshot.recover_exact_gmail_inbox_message(
+            gmail_context(),
+            provider_message_id=message_id,
+            request_with_one_refresh=Mock(
+                return_value=(
+                    None,
+                    {"code": "gmail_message_not_found"},
+                    gmail_context(),
+                    None,
+                )
+            ),
+        )
+        self.assertIs(
+            not_found.result,
+            gmail_snapshot.GmailExactMessageRecoveryResult.TERMINAL_ABSENT,
+        )
+
+        with patch.object(
+            fetch_gmail,
+            "urlopen",
+            side_effect=HTTPError(
+                "https://gmail.test/message",
+                404,
+                "not found",
+                {},
+                None,
+            ),
+        ):
+            _payload, error = fetch_gmail._gmail_request(
+                ACCESS_TOKEN,
+                "/messages/exact-message-1?format=raw",
+            )
+        self.assertEqual(error, {"code": "gmail_message_not_found"})
+
+    def test_exact_helper_keeps_provider_and_refresh_failures_retryable(self):
+        message_id = "exact-message-1"
+        cases = (
+            ({"code": "gmail_token_invalid"}, None),
+            ({"code": "gmail_permission_denied"}, None),
+            ({"code": "gmail_rate_limited"}, None),
+            ({"code": "gmail_fetch_failed"}, None),
+            ({"code": "gmail_unavailable"}, None),
+            (
+                {"code": "gmail_token_invalid"},
+                {
+                    "status": "error",
+                    "status_code": 503,
+                    "error": {"code": "oauth_token_store_unavailable"},
+                },
+            ),
+        )
+        for error, refresh_failure in cases:
+            with self.subTest(error=error, refresh_failure=refresh_failure):
+                recovered = gmail_snapshot.recover_exact_gmail_inbox_message(
+                    gmail_context(),
+                    provider_message_id=message_id,
+                    request_with_one_refresh=Mock(
+                        return_value=(
+                            None,
+                            error,
+                            gmail_context(refresh_attempted=True),
+                            refresh_failure,
+                        )
+                    ),
+                )
+                self.assertIs(
+                    recovered.result,
+                    gmail_snapshot.GmailExactMessageRecoveryResult.RETRY,
+                )
+                self.assertTrue(recovered.context["refresh_attempted"])
 
 
 if __name__ == "__main__":

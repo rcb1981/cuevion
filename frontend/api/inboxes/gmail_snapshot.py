@@ -3,8 +3,10 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+from dataclasses import dataclass
 from email import message_from_bytes
 from email.errors import MessageError
+from enum import Enum
 from typing import Callable
 from urllib.parse import quote, urlencode
 
@@ -20,11 +22,25 @@ GMAIL_ARCHIVE_QUERY = (
 DEFAULT_GMAIL_SNAPSHOT_LIMIT = 50
 MAX_GMAIL_SNAPSHOT_LIMIT = 100
 _ARCHIVE_EXCLUDED_LABELS = {"INBOX", "TRASH", "SPAM", "DRAFT", "SENT"}
+_INBOX_EXCLUDED_LABELS = _ARCHIVE_EXCLUDED_LABELS - {"INBOX"}
 
 GmailRequestWithOneRefresh = Callable[
     [dict, str],
     tuple[dict | None, dict | None, dict, dict | None],
 ]
+
+
+class GmailExactMessageRecoveryResult(str, Enum):
+    RECOVERED = "recovered"
+    TERMINAL_ABSENT = "terminal_absent"
+    RETRY = "retry"
+
+
+@dataclass(frozen=True, slots=True)
+class GmailExactMessageRecovery:
+    result: GmailExactMessageRecoveryResult
+    context: dict
+    candidate_source: dict | None = None
 
 
 def _result(
@@ -290,6 +306,90 @@ def parse_gmail_message_detail(
         message_parser=message_parser,
     )
     return parsed[0] if parsed is not None else None
+
+
+def recover_exact_gmail_inbox_message(
+    context: dict,
+    *,
+    provider_message_id: str,
+    request_with_one_refresh: GmailRequestWithOneRefresh,
+    focus_preferences: dict | None = None,
+    message_parser=message_from_bytes,
+) -> GmailExactMessageRecovery:
+    """Fetch one exact Gmail message and produce its canonical source shape."""
+
+    retry = GmailExactMessageRecoveryResult.RETRY
+    if (
+        not isinstance(context, dict)
+        or not valid_identifier(provider_message_id)
+        or not callable(request_with_one_refresh)
+        or not callable(message_parser)
+    ):
+        return GmailExactMessageRecovery(retry, context)
+
+    detail_payload, error, next_context, refresh_failure = (
+        request_with_one_refresh(
+            context,
+            f"/messages/{quote(provider_message_id, safe='')}?format=raw",
+        )
+    )
+    if not isinstance(next_context, dict):
+        next_context = context
+    if refresh_failure is not None:
+        return GmailExactMessageRecovery(retry, next_context)
+    if isinstance(error, dict):
+        if error.get("code") == "gmail_message_not_found":
+            return GmailExactMessageRecovery(
+                GmailExactMessageRecoveryResult.TERMINAL_ABSENT,
+                next_context,
+            )
+        return GmailExactMessageRecovery(retry, next_context)
+    if not isinstance(detail_payload, dict):
+        return GmailExactMessageRecovery(retry, next_context)
+
+    returned_message_id = detail_payload.get("id")
+    if (
+        not valid_identifier(returned_message_id)
+        or returned_message_id != provider_message_id
+    ):
+        return GmailExactMessageRecovery(retry, next_context)
+    if not valid_identifier(detail_payload.get("threadId")):
+        return GmailExactMessageRecovery(retry, next_context)
+
+    raw_labels = detail_payload.get("labelIds")
+    if (
+        not isinstance(raw_labels, list)
+        or any(not valid_identifier(label) for label in raw_labels)
+        or len(set(raw_labels)) != len(raw_labels)
+    ):
+        return GmailExactMessageRecovery(retry, next_context)
+    if (
+        "INBOX" not in raw_labels
+        or _INBOX_EXCLUDED_LABELS.intersection(raw_labels)
+    ):
+        return GmailExactMessageRecovery(
+            GmailExactMessageRecoveryResult.TERMINAL_ABSENT,
+            next_context,
+        )
+
+    parsed = _parse_gmail_message_detail_with_candidate_source(
+        detail_payload,
+        context=next_context,
+        provider_folder="Inbox",
+        requested_message_id=provider_message_id,
+        index=0,
+        focus_preferences=focus_preferences,
+        strict=True,
+        message_parser=message_parser,
+    )
+    if parsed is None:
+        return GmailExactMessageRecovery(retry, next_context)
+    _preview, candidate_source = parsed
+    return GmailExactMessageRecovery(
+        GmailExactMessageRecoveryResult.RECOVERED,
+        next_context,
+        candidate_source,
+    )
 
 
 def read_gmail_folder_snapshot(

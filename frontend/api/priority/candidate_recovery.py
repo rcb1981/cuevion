@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import Enum
+from typing import Callable
 
 from .candidate_recovery_store import (
     RECOVERY_MAX_CLAIM_RECORDS,
@@ -63,10 +64,24 @@ class CandidateRecoveryConsumerResult(str, Enum):
     AUTHORITY_NEUTRAL = "authority_neutral"
     AUTHORITY_EXPIRED = "authority_expired"
     PROVIDER_RECOVERY_PENDING = "provider_recovery_pending"
+    PROVIDER_RECOVERED = "provider_recovered"
+    PROVIDER_TERMINAL_ABSENT = "provider_terminal_absent"
     RECONCILIATION_FAILED = "reconciliation_failed"
     RETRY_EXHAUSTED = "retry_exhausted"
     CLAIM_LOST = "claim_lost"
     STORE_UNAVAILABLE = "store_unavailable"
+
+
+class ProviderCandidateRecoveryResult(str, Enum):
+    RECOVERED = "recovered"
+    TERMINAL_ABSENT = "terminal_absent"
+    RETRY = "retry"
+
+
+ProviderCandidateRecoveryCallback = Callable[
+    [PriorityCandidateRecoveryScope],
+    ProviderCandidateRecoveryResult,
+]
 
 
 _CONSUMER_WARNING_RESULTS = frozenset(
@@ -322,8 +337,9 @@ def process_priority_candidate_recovery(
     candidate_store: PriorityCandidateStore,
     workflow_store: PriorityWorkflowStore,
     limit: int = RECOVERY_MAX_CLAIM_RECORDS,
+    provider_recovery: ProviderCandidateRecoveryCallback | None = None,
 ) -> CandidateRecoveryConsumerReport:
-    """Process only authority cleanup and candidate-present reconciliation."""
+    """Reconcile candidates, optionally recovering a missing provider record."""
 
     if (
         not isinstance(mailbox_scope, PriorityCandidateRecoveryMailboxScope)
@@ -332,6 +348,7 @@ def process_priority_candidate_recovery(
         or not isinstance(workflow_store, PriorityWorkflowStore)
         or type(limit) is not int
         or not 1 <= limit <= RECOVERY_MAX_CLAIM_RECORDS
+        or (provider_recovery is not None and not callable(provider_recovery))
     ):
         raise ValueError("invalid Priority candidate recovery consumer")
     try:
@@ -407,7 +424,8 @@ def process_priority_candidate_recovery(
         except Exception:
             finish(*_retry_result(recovery_store, claim))
             continue
-        if candidate is None:
+        provider_recovered = False
+        if candidate is None and provider_recovery is None:
             result, is_completed, is_rescheduled = _retry_result(
                 recovery_store, claim
             )
@@ -416,7 +434,86 @@ def process_priority_candidate_recovery(
             finish(result, is_completed, is_rescheduled)
             continue
 
-        latest = _read_workflow(workflow_store, claim.record.scope)
+        if candidate is None:
+            try:
+                provider_result = provider_recovery(claim.record.scope)
+            except Exception:
+                provider_result = ProviderCandidateRecoveryResult.RETRY
+            if not isinstance(
+                provider_result,
+                ProviderCandidateRecoveryResult,
+            ):
+                provider_result = ProviderCandidateRecoveryResult.RETRY
+
+            latest = _read_workflow(workflow_store, claim.record.scope)
+            if latest is None:
+                finish(*_retry_result(recovery_store, claim))
+                continue
+            if latest.version == 0:
+                finish(
+                    *_ack_result(
+                        recovery_store,
+                        claim,
+                        CandidateRecoveryConsumerResult.AUTHORITY_ABSENT,
+                    )
+                )
+                continue
+            if _authority_expiry(latest) == 0:
+                finish(
+                    *_ack_result(
+                        recovery_store,
+                        claim,
+                        CandidateRecoveryConsumerResult.AUTHORITY_NEUTRAL,
+                    )
+                )
+                continue
+            if (
+                provider_result
+                is ProviderCandidateRecoveryResult.TERMINAL_ABSENT
+            ):
+                finish(
+                    *_ack_result(
+                        recovery_store,
+                        claim,
+                        CandidateRecoveryConsumerResult.PROVIDER_TERMINAL_ABSENT,
+                    )
+                )
+                continue
+            if provider_result is ProviderCandidateRecoveryResult.RETRY:
+                result, is_completed, is_rescheduled = _retry_result(
+                    recovery_store, claim
+                )
+                if (
+                    result
+                    is CandidateRecoveryConsumerResult.RECONCILIATION_FAILED
+                ):
+                    result = (
+                        CandidateRecoveryConsumerResult.PROVIDER_RECOVERY_PENDING
+                    )
+                finish(result, is_completed, is_rescheduled)
+                continue
+            try:
+                candidate = candidate_store.read_candidate(candidate_scope)
+            except Exception:
+                finish(*_retry_result(recovery_store, claim))
+                continue
+            if candidate is None:
+                result, is_completed, is_rescheduled = _retry_result(
+                    recovery_store, claim
+                )
+                if (
+                    result
+                    is CandidateRecoveryConsumerResult.RECONCILIATION_FAILED
+                ):
+                    result = (
+                        CandidateRecoveryConsumerResult.PROVIDER_RECOVERY_PENDING
+                    )
+                finish(result, is_completed, is_rescheduled)
+                continue
+            provider_recovered = True
+        else:
+            latest = _read_workflow(workflow_store, claim.record.scope)
+
         if latest is None:
             finish(*_retry_result(recovery_store, claim))
             continue
@@ -452,7 +549,11 @@ def process_priority_candidate_recovery(
                 *_ack_result(
                     recovery_store,
                     claim,
-                    CandidateRecoveryConsumerResult.CANDIDATE_ALREADY_PRESENT,
+                    (
+                        CandidateRecoveryConsumerResult.PROVIDER_RECOVERED
+                        if provider_recovered
+                        else CandidateRecoveryConsumerResult.CANDIDATE_ALREADY_PRESENT
+                    ),
                 )
             )
             continue
