@@ -61,6 +61,63 @@ def uid_thread_id(uid, uid_validity="77", mailbox_key="mailbox-1", folder="INBOX
     )
 
 
+def v2_message(*headers):
+    return message_from_string("\n".join(headers) + "\n\nBody")
+
+
+def resolve_v2(
+    message,
+    uid="1",
+    uid_validity="77",
+    mailbox_key="mailbox-1",
+    folder="INBOX",
+):
+    return imap_connect_preview.resolve_custom_imap_thread_authority_v2(
+        message,
+        uid,
+        mailbox_key,
+        folder,
+        uid_validity,
+    )
+
+
+def resolve_v2_batch(
+    messages,
+    uid_validity="77",
+    mailbox_key="mailbox-1",
+    folder="INBOX",
+):
+    return imap_connect_preview.resolve_custom_imap_thread_authorities_v2(
+        messages,
+        mailbox_key,
+        folder,
+        uid_validity,
+    )
+
+
+def v2_rfc_thread_id(message_id, mailbox_key="mailbox-1"):
+    return imap_connect_preview.build_bounded_thread_identity(
+        "imap:v2:rfc",
+        mailbox_key,
+        message_id,
+    )
+
+
+def v2_uid_thread_id(
+    uid,
+    uid_validity="77",
+    mailbox_key="mailbox-1",
+    folder="INBOX",
+):
+    return imap_connect_preview.build_bounded_thread_identity(
+        "imap:v2:uid",
+        mailbox_key,
+        folder,
+        uid_validity,
+        uid,
+    )
+
+
 class MessageIdNormalizationTests(unittest.TestCase):
     def test_normalizes_brackets_whitespace_and_domain_case(self):
         self.assertEqual(
@@ -551,6 +608,217 @@ class CustomImapThreadResolutionTests(unittest.TestCase):
         self.assertRegex(first_suffix, r"^[0-9a-f]{24}$")
         self.assertRegex(second_suffix, r"^[0-9a-f]{24}$")
         self.assertNotEqual(first_suffix, second_suffix)
+
+
+class CustomImapThreadResolutionV2Tests(unittest.TestCase):
+    def test_references_root_uses_first_valid_normalized_token(self):
+        authority = resolve_v2(
+            v2_message(
+                "Message-ID: <child@EXAMPLE.COM>",
+                "References: malformed <root@EXAMPLE.COM> <parent@example.com>",
+                "In-Reply-To: <parent@example.com>",
+            )
+        )
+
+        self.assertEqual(
+            authority,
+            {
+                "conversation_id": v2_rfc_thread_id("root@example.com"),
+                "authority_kind": "rfc",
+                "rfc_root_message_id": "root@example.com",
+                "rfc_message_id": "child@example.com",
+            },
+        )
+
+    def test_multiple_references_preserve_order_and_select_first(self):
+        authority = resolve_v2(
+            v2_message(
+                "Message-ID: <child@example.com>",
+                "References: <first@example.com> <second@example.com>",
+                "References: <third@example.com>",
+            )
+        )
+
+        self.assertEqual(authority["rfc_root_message_id"], "first@example.com")
+        self.assertEqual(
+            authority["conversation_id"],
+            v2_rfc_thread_id("first@example.com"),
+        )
+
+    def test_direct_in_reply_to_is_the_root_without_references(self):
+        authority = resolve_v2(
+            v2_message(
+                "Message-ID: <child@example.com>",
+                "In-Reply-To: <Parent@EXAMPLE.COM>",
+            )
+        )
+
+        self.assertEqual(authority["rfc_root_message_id"], "Parent@example.com")
+        self.assertEqual(
+            authority["conversation_id"],
+            v2_rfc_thread_id("Parent@example.com"),
+        )
+
+    def test_multi_hop_parent_windows_never_change_grandchild_authority(self):
+        grandchild = v2_message(
+            "Message-ID: <grandchild@example.com>",
+            "In-Reply-To: <parent@example.com>",
+        )
+        parent = v2_message(
+            "Message-ID: <parent@example.com>",
+            "In-Reply-To: <grandparent@example.com>",
+        )
+        ancestry_parent = v2_message(
+            "Message-ID: <parent@example.com>",
+            "References: <root@example.com> <grandparent@example.com>",
+        )
+        grandparent = v2_message("Message-ID: <grandparent@example.com>")
+        expected = resolve_v2(grandchild, uid="3")
+
+        windows = (
+            [(grandchild, "3")],
+            [(grandchild, "3"), (parent, "2")],
+            [(grandchild, "3"), (parent, "2"), (grandparent, "1")],
+            [(grandchild, "3"), (ancestry_parent, "2")],
+        )
+        for messages in windows:
+            with self.subTest(size=len(messages)):
+                self.assertEqual(resolve_v2_batch(messages)[0], expected)
+        self.assertEqual(expected["rfc_root_message_id"], "parent@example.com")
+
+    def test_message_id_only_is_the_root_and_needs_no_uid_data(self):
+        authority = resolve_v2(
+            v2_message("Message-ID: <Only@EXAMPLE.COM>"),
+            uid=None,
+            uid_validity=None,
+            folder="",
+        )
+
+        self.assertEqual(authority["rfc_root_message_id"], "Only@example.com")
+        self.assertEqual(authority["rfc_message_id"], "Only@example.com")
+
+    def test_malformed_ancestry_and_local_ambiguity_are_fail_closed(self):
+        malformed_ancestry = resolve_v2(
+            v2_message(
+                "Message-ID: <self@example.com>",
+                "References: <<broken@example.com>>",
+                "In-Reply-To: <broken@example.com",
+            )
+        )
+        ambiguous = v2_message(
+            "Message-ID: <first@example.com>",
+            "Message-ID: <second@example.com>",
+            "References: <root@example.com>",
+            "In-Reply-To: <parent@example.com>",
+        )
+
+        self.assertEqual(
+            malformed_ancestry["rfc_root_message_id"],
+            "self@example.com",
+        )
+        self.assertEqual(
+            resolve_v2(ambiguous, uid="9"),
+            {
+                "conversation_id": v2_uid_thread_id("9"),
+                "authority_kind": "imap_uid",
+                "rfc_root_message_id": None,
+                "rfc_message_id": None,
+            },
+        )
+
+    def test_cross_message_duplicate_presence_and_order_are_non_authoritative(self):
+        exact = v2_message("Message-ID: <duplicate@example.com>")
+        duplicate = v2_message("Message-ID: <duplicate@example.com>")
+        expected = resolve_v2(exact, uid="1")
+
+        self.assertEqual(resolve_v2_batch([(exact, "1")])[0], expected)
+        self.assertEqual(
+            resolve_v2_batch([(exact, "1"), (duplicate, "2")])[0],
+            expected,
+        )
+        self.assertEqual(
+            resolve_v2_batch([(duplicate, "2"), (exact, "1")])[1],
+            expected,
+        )
+        self.assertEqual(expected["authority_kind"], "rfc")
+
+    def test_uid_fallback_requires_exact_namespace_and_remains_distinct(self):
+        headerless = v2_message("Subject: Headerless")
+        authority = resolve_v2(headerless, uid="42", uid_validity="900")
+
+        self.assertEqual(
+            authority,
+            {
+                "conversation_id": v2_uid_thread_id(
+                    "42",
+                    uid_validity="900",
+                ),
+                "authority_kind": "imap_uid",
+                "rfc_root_message_id": None,
+                "rfc_message_id": None,
+            },
+        )
+        self.assertIsNone(resolve_v2(headerless, uid="0", uid_validity="900"))
+        self.assertIsNone(resolve_v2(headerless, uid="42", uid_validity="0"))
+        self.assertIsNone(resolve_v2(headerless, uid="42", folder=" INBOX"))
+        self.assertNotEqual(
+            authority["conversation_id"],
+            resolve_v2(
+                headerless,
+                uid="42",
+                uid_validity="901",
+            )["conversation_id"],
+        )
+        self.assertNotEqual(
+            authority["conversation_id"],
+            resolve_v2(
+                headerless,
+                uid="43",
+                uid_validity="900",
+            )["conversation_id"],
+        )
+
+    def test_exact_message_matches_batch_with_unrelated_surrounding_records(self):
+        target = v2_message(
+            "Message-ID: <target@example.com>",
+            "In-Reply-To: <parent@example.com>",
+        )
+        unrelated = v2_message(
+            "Message-ID: <unrelated@example.com>",
+            "References: <other-root@example.com>",
+        )
+        expected = resolve_v2(target, uid="7")
+
+        self.assertEqual(
+            resolve_v2_batch(
+                [(unrelated, "6"), (target, "7"), (unrelated, "8")]
+            )[1],
+            expected,
+        )
+        other_mailbox = resolve_v2(target, uid="7", mailbox_key="mailbox-2")
+        self.assertNotEqual(
+            expected["conversation_id"],
+            other_mailbox["conversation_id"],
+        )
+
+    def test_fresh_invocations_and_long_hash_scope_are_deterministic_and_bounded(self):
+        message = v2_message(
+            f"Message-ID: <{'x' * 480}@EXAMPLE.COM>",
+        )
+        first = resolve_v2(message, mailbox_key="mailbox-" + "m" * 300)
+        second = resolve_v2(message, mailbox_key="mailbox-" + "m" * 300)
+        changed = resolve_v2(message, mailbox_key="mailbox-" + "m" * 299 + "n")
+
+        self.assertEqual(first, second)
+        self.assertLessEqual(
+            len(first["conversation_id"]),
+            imap_connect_preview.MAX_THREAD_ID_LENGTH,
+        )
+        self.assertRegex(
+            first["conversation_id"].rsplit("~", 1)[1],
+            r"^[0-9a-f]{24}$",
+        )
+        self.assertNotEqual(first["conversation_id"], changed["conversation_id"])
 
 
 class CustomImapPreviewIntegrationTests(unittest.TestCase):

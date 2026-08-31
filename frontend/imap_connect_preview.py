@@ -346,6 +346,95 @@ def build_bounded_thread_identity(prefix: str, *components: Any) -> str:
     return f"{''.join(bounded_parts)}{suffix}"
 
 
+def _is_canonical_imap_thread_folder(value: Any) -> bool:
+    return (
+        type(value) is str
+        and value == value.strip()
+        and 1 <= len(value) <= 1_024
+        and not any(
+            ord(character) < 32 or ord(character) == 127
+            for character in value
+        )
+    )
+
+
+def _is_canonical_imap_uid(value: Any) -> bool:
+    return (
+        type(value) is str
+        and re.fullmatch(r"[1-9][0-9]*", value) is not None
+    )
+
+
+def resolve_custom_imap_thread_authority_v2(
+    message: Message,
+    imap_uid: str | None,
+    mailbox_key: str,
+    folder: str,
+    uid_validity: str | None,
+) -> dict[str, Any] | None:
+    """Resolve deterministic conversation authority from one exact IMAP message."""
+    metadata = extract_message_thread_metadata(message, imap_uid, "")
+    own_message_id = metadata["message_id"]
+
+    if not metadata["message_id_ambiguous"]:
+        references = metadata["references"]
+        root_message_id = (
+            references[0]
+            if references
+            else metadata["in_reply_to"] or own_message_id
+        )
+        if root_message_id:
+            return {
+                "conversation_id": build_bounded_thread_identity(
+                    "imap:v2:rfc",
+                    mailbox_key,
+                    root_message_id,
+                ),
+                "authority_kind": "rfc",
+                "rfc_root_message_id": root_message_id,
+                "rfc_message_id": own_message_id,
+            }
+
+    if (
+        _is_canonical_imap_thread_folder(folder)
+        and is_canonical_uid_validity(uid_validity)
+        and _is_canonical_imap_uid(imap_uid)
+    ):
+        return {
+            "conversation_id": build_bounded_thread_identity(
+                "imap:v2:uid",
+                mailbox_key,
+                folder,
+                uid_validity,
+                imap_uid,
+            ),
+            "authority_kind": "imap_uid",
+            "rfc_root_message_id": None,
+            "rfc_message_id": None,
+        }
+
+    return None
+
+
+def resolve_custom_imap_thread_authorities_v2(
+    messages: list[tuple[Message, str | None]],
+    mailbox_key: str,
+    folder: str,
+    uid_validity: str | None,
+) -> list[dict[str, Any] | None]:
+    """Map the exact-message v2 resolver without cross-message authority."""
+    return [
+        resolve_custom_imap_thread_authority_v2(
+            message,
+            imap_uid,
+            mailbox_key,
+            folder,
+            uid_validity,
+        )
+        for message, imap_uid in messages
+    ]
+
+
 def _resolve_in_reply_to_root(
     direct_parent_id: str,
     records_by_message_id: dict[str, dict[str, Any]],
