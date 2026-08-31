@@ -107,6 +107,60 @@ type ConversationIndexCounter = {
   indexBuildsByMailbox: Map<string, number>;
 };
 
+type MessageSourceProjectionCounter = {
+  requests: number;
+  identityHits: number;
+  structuralLookups: number;
+  structuralProbes: number;
+  structuralHits: number;
+  cacheMisses: number;
+  expensiveProjections: number;
+};
+
+function createMessageSourceProjectionCounter(): MessageSourceProjectionCounter {
+  return {
+    requests: 0,
+    identityHits: 0,
+    structuralLookups: 0,
+    structuralProbes: 0,
+    structuralHits: 0,
+    cacheMisses: 0,
+    expensiveProjections: 0,
+  };
+}
+
+function observeMessageSourceProjections<T>(
+  counter: MessageSourceProjectionCounter,
+  run: () => T,
+) {
+  return workspaceShellConversationPerformanceTestSeam.observeMessageSourceProjections(
+    {
+      onRequest() {
+        counter.requests += 1;
+      },
+      onIdentityHit() {
+        counter.identityHits += 1;
+      },
+      onStructuralLookup() {
+        counter.structuralLookups += 1;
+      },
+      onStructuralProbe() {
+        counter.structuralProbes += 1;
+      },
+      onStructuralHit() {
+        counter.structuralHits += 1;
+      },
+      onCacheMiss() {
+        counter.cacheMisses += 1;
+      },
+      onExpensiveProjection() {
+        counter.expensiveProjections += 1;
+      },
+    },
+    run,
+  );
+}
+
 function createConversationIndexCounter(): ConversationIndexCounter {
   return {
     indexBuilds: 0,
@@ -1635,6 +1689,219 @@ function resolveLegacyThreadDominantCategorizationForTest(
   process.stdout.write(
     `PERF-N3 synthetic keyword-family scans: before>=${historicalRepeatedScanLowerBound}, after=${counter.familyScans}\n`,
   );
+}
+
+function projectSourcePass(messages: MessageSeed[]) {
+  const counter = createMessageSourceProjectionCounter();
+  observeMessageSourceProjections(counter, () => {
+    messages.forEach((message) =>
+      normalizeMailMessage(message, "main", {}, {}, "user-1"),
+    );
+  });
+  return counter;
+}
+
+{
+  const messages = Array.from({ length: 64 }, (_, index) =>
+    createSeed(`perf-n5-same-live-${index}`),
+  );
+  const firstPass = projectSourcePass(messages);
+  const secondPass = projectSourcePass(messages);
+  const thirdPass = projectSourcePass(messages);
+
+  assert.equal(firstPass.expensiveProjections, 64);
+  assert.equal(secondPass.expensiveProjections, 0);
+  assert.equal(thirdPass.expensiveProjections, 0);
+  assert.equal(secondPass.identityHits, 64);
+  assert.equal(thirdPass.identityHits, 64);
+}
+
+{
+  const messages = Array.from({ length: 64 }, (_, index) =>
+    createSeed(`perf-n5-recreated-64-${index}`),
+  );
+  const firstPass = projectSourcePass(messages.map(cloneSeed));
+  const secondPass = projectSourcePass(messages.map(cloneSeed));
+  const thirdPass = projectSourcePass(messages.map(cloneSeed));
+
+  assert.equal(firstPass.expensiveProjections, 64);
+  assert.equal(secondPass.expensiveProjections, 0);
+  assert.equal(thirdPass.expensiveProjections, 0);
+  assert.equal(secondPass.structuralHits, 64);
+  assert.equal(thirdPass.structuralHits, 64);
+}
+
+{
+  const messages = Array.from({ length: 100 }, (_, index) =>
+    createSeed(`perf-n5-recreated-100-${index}`),
+  );
+  const firstPass = projectSourcePass(messages.map(cloneSeed));
+  const secondPass = projectSourcePass(messages.map(cloneSeed));
+  const thirdPass = projectSourcePass(messages.map(cloneSeed));
+
+  assert.equal(firstPass.expensiveProjections, 100);
+  assert.equal(secondPass.expensiveProjections, 100);
+  assert.equal(thirdPass.expensiveProjections, 100);
+  assert.equal(secondPass.cacheMisses, 100);
+  assert.equal(thirdPass.cacheMisses, 100);
+}
+
+{
+  const messages = Array.from({ length: 100 }, (_, index) =>
+    createSeed(`perf-n5-alternating-100-${index}`),
+  );
+  const firstPass = projectSourcePass(messages.map(cloneSeed));
+  const reversePass = projectSourcePass([...messages].reverse().map(cloneSeed));
+
+  assert.equal(firstPass.expensiveProjections, 100);
+  assert.equal(reversePass.expensiveProjections, 36);
+  assert.equal(reversePass.structuralHits, 64);
+  assert.equal(reversePass.cacheMisses, 36);
+}
+
+{
+  type OwnershipStore = Parameters<typeof normalizeMailMessage>[3];
+  const orderedMailboxes = [createConversationOrderedMailbox("main")];
+  const sourceMessages = Array.from({ length: 100 }, (_, index) =>
+    createSeed(`perf-n5-policy-separation-${index}`),
+  );
+  let currentStore = {
+    main: createConversationCollections(),
+  } as TestMailboxStore;
+  let currentPolicy: {
+    ownership: OwnershipStore;
+    currentUserId: string;
+  } = {
+    ownership: {},
+    currentUserId: "user-1",
+  };
+  let currentSourceKey: string | null = null;
+  let hydrationCalls = 0;
+  const initialHydrationCounter = createMessageSourceProjectionCounter();
+  const initialResult = observeMessageSourceProjections(
+    initialHydrationCounter,
+    () =>
+      workspaceShellConversationPerformanceTestSeam.coordinateConnectedSnapshotSourceIngestion(
+        {
+          previousSourceKey: currentSourceKey,
+          sourceKey: "connected-source-v1",
+          currentPolicy,
+          hydrate(policy) {
+            hydrationCalls += 1;
+            currentStore = {
+              main: createConversationCollections({
+                Inbox: sourceMessages.map((message) =>
+                  normalizeMailMessage(
+                    message,
+                    "main",
+                    {},
+                    policy.ownership,
+                    policy.currentUserId,
+                  ),
+                ),
+              }),
+            } as TestMailboxStore;
+          },
+        },
+      ),
+  );
+  currentSourceKey = initialResult.sourceKey;
+
+  assert.equal(initialResult.didHydrate, true);
+  assert.equal(hydrationCalls, 1);
+  assert.equal(initialHydrationCounter.expensiveProjections, 100);
+
+  const selectedMessage = currentStore.main.Inbox[0];
+  currentPolicy = {
+    ...currentPolicy,
+    ownership: writePersistedMessageOwnershipStateValue(
+      currentPolicy.ownership,
+      selectedMessage,
+      { userId: "user-1", count: 1 },
+      { mailboxId: "main" },
+    ),
+  };
+  const policyOnlyHydrationCounter = createMessageSourceProjectionCounter();
+  const policyOnlyResult = observeMessageSourceProjections(
+    policyOnlyHydrationCounter,
+    () =>
+      workspaceShellConversationPerformanceTestSeam.coordinateConnectedSnapshotSourceIngestion(
+        {
+          previousSourceKey: currentSourceKey,
+          sourceKey: "connected-source-v1",
+          currentPolicy,
+          hydrate() {
+            hydrationCalls += 1;
+            sourceMessages.forEach((message) =>
+              normalizeMailMessage(
+                cloneSeed(message),
+                "main",
+                {},
+                currentPolicy.ownership,
+                currentPolicy.currentUserId,
+              ),
+            );
+          },
+        },
+      ),
+  );
+
+  assert.equal(policyOnlyResult.didHydrate, false);
+  assert.equal(hydrationCalls, 1);
+  assert.equal(policyOnlyHydrationCounter.requests, 0);
+  assert.equal(policyOnlyHydrationCounter.expensiveProjections, 0);
+
+  const policyNormalizationCounter = createMessageSourceProjectionCounter();
+  currentStore = observeMessageSourceProjections(policyNormalizationCounter, () =>
+    workspaceShellConversationPerformanceTestSeam.normalizeMailboxStore(
+      currentStore,
+      orderedMailboxes,
+      {},
+      currentPolicy.ownership,
+      currentPolicy.currentUserId,
+    ),
+  );
+
+  assert.equal(policyNormalizationCounter.requests, 100);
+  assert.equal(policyNormalizationCounter.identityHits, 100);
+  assert.equal(policyNormalizationCounter.expensiveProjections, 0);
+  assert.equal(currentStore.main.Inbox[0]?.owner?.userId, "user-1");
+
+  const changedSource = cloneSeed({
+    ...sourceMessages[0],
+    body: ["Changed provider body & current policy"],
+    bodyHtml: "<p>Changed provider body &amp; current policy</p>",
+  });
+  let changedMessage: NormalizedMessage | null = null;
+  const sourceChangeCounter = createMessageSourceProjectionCounter();
+  const sourceChangeResult = observeMessageSourceProjections(
+    sourceChangeCounter,
+    () =>
+      workspaceShellConversationPerformanceTestSeam.coordinateConnectedSnapshotSourceIngestion(
+        {
+          previousSourceKey: currentSourceKey,
+          sourceKey: "connected-source-v2",
+          currentPolicy,
+          hydrate(policy) {
+            hydrationCalls += 1;
+            changedMessage = normalizeMailMessage(
+              changedSource,
+              "main",
+              {},
+              policy.ownership,
+              policy.currentUserId,
+            );
+          },
+        },
+      ),
+  );
+
+  assert.equal(sourceChangeResult.didHydrate, true);
+  assert.equal(hydrationCalls, 2);
+  assert.equal(sourceChangeCounter.requests, 1);
+  assert.equal(sourceChangeCounter.expensiveProjections, 1);
+  assert.equal(changedMessage?.owner?.userId, "user-1");
+  assert.deepEqual(changedMessage?.body, ["Changed provider body & current policy"]);
 }
 
 withCountingDomDecoder((getCount) => {

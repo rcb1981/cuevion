@@ -8490,6 +8490,18 @@ const messageSourceProjectionCacheByIdentity = new WeakMap<
   MessageSourceProjectionCacheEntry
 >();
 
+type MessageSourceProjectionObserver = {
+  onRequest?: () => void;
+  onIdentityHit?: () => void;
+  onStructuralLookup?: () => void;
+  onStructuralProbe?: () => void;
+  onStructuralHit?: () => void;
+  onCacheMiss?: () => void;
+  onExpensiveProjection?: () => void;
+};
+
+let messageSourceProjectionObserver: MessageSourceProjectionObserver | null = null;
+
 function snapshotMessageSourceIdentity(
   message: MailMessageSeed,
 ): MessageSourceIdentitySnapshot {
@@ -8670,13 +8682,16 @@ function findCachedMessageSourceProjection(
       domDecodingAvailable,
     )
   ) {
+    messageSourceProjectionObserver?.onIdentityHit?.();
     if (messageSourceProjectionCache.includes(identityEntry)) {
       promoteMessageSourceProjectionCacheEntry(identityEntry);
     }
     return identityEntry.result;
   }
 
+  messageSourceProjectionObserver?.onStructuralLookup?.();
   for (let index = messageSourceProjectionCache.length - 1; index >= 0; index -= 1) {
+    messageSourceProjectionObserver?.onStructuralProbe?.();
     const entry = messageSourceProjectionCache[index];
     if (
       hasExactMessageSourceProjectionInputs(
@@ -8686,6 +8701,7 @@ function findCachedMessageSourceProjection(
         domDecodingAvailable,
       )
     ) {
+      messageSourceProjectionObserver?.onStructuralHit?.();
       promoteMessageSourceProjectionCacheEntry(entry);
       messageSourceProjectionCacheByIdentity.set(message, entry);
       return entry.result;
@@ -8699,6 +8715,7 @@ function getNormalizedMessageSourceProjection(
   message: MailMessageSeed,
   mailboxId: InboxId,
 ): MessageSourceProjection {
+  messageSourceProjectionObserver?.onRequest?.();
   const domDecodingAvailable = typeof document !== "undefined";
   const cached = findCachedMessageSourceProjection(
     message,
@@ -8709,6 +8726,8 @@ function getNormalizedMessageSourceProjection(
     return cached;
   }
 
+  messageSourceProjectionObserver?.onCacheMiss?.();
+  messageSourceProjectionObserver?.onExpensiveProjection?.();
   const normalizedBodyContent = normalizeMessageBodyContent(
     message.body,
     message.bodyHtml,
@@ -14553,10 +14572,43 @@ function normalizeMailboxStore(
   return nextStore;
 }
 
+function coordinateConnectedSnapshotSourceIngestion<TPolicy>(input: {
+  previousSourceKey: string | null;
+  sourceKey: string;
+  currentPolicy: TPolicy;
+  hydrate: (currentPolicy: TPolicy) => void;
+}) {
+  if (input.previousSourceKey === input.sourceKey) {
+    return {
+      sourceKey: input.previousSourceKey,
+      didHydrate: false,
+    };
+  }
+
+  input.hydrate(input.currentPolicy);
+  return {
+    sourceKey: input.sourceKey,
+    didHydrate: true,
+  };
+}
+
 export const workspaceShellConversationPerformanceTestSeam = {
   normalizeMailboxStore,
   createMailboxNormalizationContext,
   resolveThreadDominantCategorization,
+  coordinateConnectedSnapshotSourceIngestion,
+  observeMessageSourceProjections<T>(
+    observer: MessageSourceProjectionObserver,
+    run: () => T,
+  ): T {
+    const previousObserver = messageSourceProjectionObserver;
+    messageSourceProjectionObserver = observer;
+    try {
+      return run();
+    } finally {
+      messageSourceProjectionObserver = previousObserver;
+    }
+  },
   observeMailboxConversationIndex<T>(
     observer: MailboxConversationIndexObserver,
     run: () => T,
@@ -54178,73 +54230,95 @@ export function WorkspaceShell({
     setMailboxResetToken((current) => current + 1);
   }, [mailboxOrderKey]);
 
-  useEffect(() => {
-    const snapshots = readLiveInboxSnapshots(
-      buildTrustedLiveInboxSnapshotContexts(savedManagedInboxes),
-    );
-    const connectedSnapshots = orderedMailboxes
-      .map((mailbox) => ({
-        mailbox,
-        snapshot: snapshots[mailbox.id],
-      }))
-      .filter(
-        (entry): entry is {
-          mailbox: OrderedMailbox;
-          snapshot: NonNullable<(typeof snapshots)[string]>;
-        } => Boolean(entry.snapshot?.messages.length),
-      );
-
-    if (connectedSnapshots.length === 0) {
-      return;
-    }
-
-    setMailboxStore((currentStore) => {
-      const nextStore = { ...currentStore };
-
-      connectedSnapshots.forEach(({ mailbox, snapshot }) => {
-        const currentCollections =
-          nextStore[mailbox.id] ?? createEmptyMailboxCollections();
-        const hydratedSnapshot = hydrateLiveInboxSnapshot(snapshot);
-        const threadIdentityContext = hydratedSnapshot.context;
-
-        if (!threadIdentityContext) {
-          return;
-        }
-
-        nextStore[mailbox.id] = {
-          ...currentCollections,
-          Inbox: mergeLiveInboxMessages(
-            mailbox.id,
-            hydratedSnapshot.messages,
-            currentCollections.Inbox,
-            currentStore,
-            { threadIdentityContext },
-          ),
-        };
-      });
-
-      const normalizedStore = normalizeMailboxStore(
-        nextStore,
-        orderedMailboxes,
-        senderCategoryLearning,
-        messageOwnershipInteractions,
-        currentWorkspaceUserId,
-        manualPriorityOverrides,
-      );
-      return applyCurrentFocusPreferencesToLiveMailboxStore(
-        normalizedStore,
-        connectedSnapshots.map(({ mailbox }) => mailbox.id),
-      );
-    });
-  }, [
-    effectiveFocusPreferencesByMailbox,
-    liveMailboxSyncKey,
-    manualPriorityOverrides,
-    messageUnreadOverrides,
+  const connectedSnapshotSourceKeyRef = useRef<string | null>(null);
+  const connectedSnapshotIngestionPolicyRef = useRef({
+    orderedMailboxes,
+    savedManagedInboxes,
     senderCategoryLearning,
     messageOwnershipInteractions,
     currentWorkspaceUserId,
-  ]);
+    manualPriorityOverrides,
+    mergeLiveInboxMessages,
+    applyCurrentFocusPreferencesToLiveMailboxStore,
+  });
+  connectedSnapshotIngestionPolicyRef.current = {
+    orderedMailboxes,
+    savedManagedInboxes,
+    senderCategoryLearning,
+    messageOwnershipInteractions,
+    currentWorkspaceUserId,
+    manualPriorityOverrides,
+    mergeLiveInboxMessages,
+    applyCurrentFocusPreferencesToLiveMailboxStore,
+  };
+
+  useEffect(() => {
+    const result = coordinateConnectedSnapshotSourceIngestion({
+      previousSourceKey: connectedSnapshotSourceKeyRef.current,
+      sourceKey: liveMailboxSyncKey,
+      currentPolicy: connectedSnapshotIngestionPolicyRef.current,
+      hydrate: (currentPolicy) => {
+        const snapshots = readLiveInboxSnapshots(
+          buildTrustedLiveInboxSnapshotContexts(currentPolicy.savedManagedInboxes),
+        );
+        const connectedSnapshots = currentPolicy.orderedMailboxes
+          .map((mailbox) => ({
+            mailbox,
+            snapshot: snapshots[mailbox.id],
+          }))
+          .filter(
+            (entry): entry is {
+              mailbox: OrderedMailbox;
+              snapshot: NonNullable<(typeof snapshots)[string]>;
+            } => Boolean(entry.snapshot?.messages.length),
+          );
+
+        if (connectedSnapshots.length === 0) {
+          return;
+        }
+
+        setMailboxStore((currentStore) => {
+          const nextStore = { ...currentStore };
+
+          connectedSnapshots.forEach(({ mailbox, snapshot }) => {
+            const currentCollections =
+              nextStore[mailbox.id] ?? createEmptyMailboxCollections();
+            const hydratedSnapshot = hydrateLiveInboxSnapshot(snapshot);
+            const threadIdentityContext = hydratedSnapshot.context;
+
+            if (!threadIdentityContext) {
+              return;
+            }
+
+            nextStore[mailbox.id] = {
+              ...currentCollections,
+              Inbox: currentPolicy.mergeLiveInboxMessages(
+                mailbox.id,
+                hydratedSnapshot.messages,
+                currentCollections.Inbox,
+                currentStore,
+                { threadIdentityContext },
+              ),
+            };
+          });
+
+          const normalizedStore = normalizeMailboxStore(
+            nextStore,
+            currentPolicy.orderedMailboxes,
+            currentPolicy.senderCategoryLearning,
+            currentPolicy.messageOwnershipInteractions,
+            currentPolicy.currentWorkspaceUserId,
+            currentPolicy.manualPriorityOverrides,
+          );
+          return currentPolicy.applyCurrentFocusPreferencesToLiveMailboxStore(
+            normalizedStore,
+            connectedSnapshots.map(({ mailbox }) => mailbox.id),
+          );
+        });
+      },
+    });
+    connectedSnapshotSourceKeyRef.current = result.sourceKey;
+  }, [liveMailboxSyncKey]);
 
   useEffect(() => {
     if (typeof window === "undefined" || collaborationInviteRoute) {
