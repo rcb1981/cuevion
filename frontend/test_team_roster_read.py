@@ -206,14 +206,6 @@ class TeamRosterReadTests(unittest.TestCase):
                 "status": "active",
             },
         )
-        self.assertIsNone(
-            team_members._normalize_member_record(
-                record,
-                "workspace-a",
-                "legacy-recipient",
-                require_authoritative_member_id=True,
-            )
-        )
 
     def test_secure_v2_membership_is_roster_visible_without_token_fields(self):
         record = {
@@ -221,7 +213,7 @@ class TeamRosterReadTests(unittest.TestCase):
             "workspaceId": "wsp_AaZz09_-",
             "email": "teammate@example.test",
             "verifiedRecipientEmail": "teammate@example.test",
-            "memberUserId": "usr_recipient",
+            "memberUserId": "usr_AAAAAAAAAAAAAAAAAAAAAA",
             "displayName": "Team Mate",
             "accessLevel": "Shared",
             "status": "active",
@@ -242,7 +234,7 @@ class TeamRosterReadTests(unittest.TestCase):
                 "displayName": "Team Mate",
                 "accessLevel": "Shared",
                 "status": "active",
-                "memberUserId": "usr_recipient",
+                "memberUserId": "usr_AAAAAAAAAAAAAAAAAAAAAA",
             },
         )
         self.assertIsNone(
@@ -309,7 +301,7 @@ class TeamRosterReadTests(unittest.TestCase):
             team_authority.project_team_member({**record, "status": "removed"})
         )
 
-    def test_list_store_omits_legacy_rows_without_authoritative_user_ids(self):
+    def test_list_store_preserves_mixed_order_and_excludes_removed_rows(self):
         legacy = self.stored_member(email="legacy@example.test")
         modern = {
             "v": 2,
@@ -328,6 +320,14 @@ class TeamRosterReadTests(unittest.TestCase):
         records = {
             "legacy@example.test": legacy,
             "modern@example.test": modern,
+            "removed@example.test": self.stored_member(
+                email="removed@example.test",
+                status="removed",
+                inviteToken=None,
+                updatedAt=1_800_000_000_200,
+                removedAt=1_800_000_000_200,
+                revokedAt=1_800_000_000_200,
+            ),
         }
 
         with patch.object(
@@ -337,7 +337,14 @@ class TeamRosterReadTests(unittest.TestCase):
         ), patch.object(
             team_members,
             "_read_durable_value",
-            return_value=(["legacy@example.test", "modern@example.test"], None),
+            return_value=(
+                [
+                    "legacy@example.test",
+                    "modern@example.test",
+                    "removed@example.test",
+                ],
+                None,
+            ),
         ), patch.object(
             team_members,
             "_read_durable_record",
@@ -352,6 +359,13 @@ class TeamRosterReadTests(unittest.TestCase):
         self.assertEqual(
             roster,
             [
+                {
+                    "memberUserId": None,
+                    "email": "legacy@example.test",
+                    "displayName": "Team Mate",
+                    "accessLevel": "Limited",
+                    "status": "active",
+                },
                 {
                     "email": "modern@example.test",
                     "displayName": "Modern Member",

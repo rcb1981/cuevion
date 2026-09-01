@@ -24,7 +24,7 @@ type TeamMemberPresentationRecord = {
 };
 
 export type TeamMemberRecord = TeamMemberPresentationRecord & {
-  memberUserId: string;
+  memberUserId: string | null;
 };
 
 export type TeamLifecycleFailureStatus =
@@ -415,13 +415,18 @@ function isCanonicalTeamMemberUserId(value: unknown): value is string {
 
 function parseTeamMemberRecord(value: unknown): TeamMemberRecord | null {
   const presentation = parseTeamMemberPresentationRecord(value);
-  if (!presentation || !isRecord(value) || !isCanonicalTeamMemberUserId(value.memberUserId)) {
+  if (!presentation || !isRecord(value)) {
+    return null;
+  }
+
+  const memberUserId = value.memberUserId;
+  if (memberUserId !== null && !isCanonicalTeamMemberUserId(memberUserId)) {
     return null;
   }
 
   return {
     ...presentation,
-    memberUserId: value.memberUserId,
+    memberUserId,
   };
 }
 

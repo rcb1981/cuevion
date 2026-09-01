@@ -76,15 +76,17 @@ async function run() {
             status: "active",
           },
           {
-            memberUserId: firstMemberUserId,
-            email: "first@example.test",
-            displayName: "First",
+            memberUserId: null,
+            email: "legacy@example.test",
+            displayName: "Legacy Member",
             accessLevel: "Shared",
             status: "active",
+            inviteToken: "legacy-token-must-be-discarded",
           },
         ],
       })) as typeof fetch;
-    assert.deepEqual(await fetchTeamMembers(), {
+    const mixedRoster = await fetchTeamMembers();
+    assert.deepEqual(mixedRoster, {
       ok: true,
       members: [
         {
@@ -95,14 +97,20 @@ async function run() {
           status: "active",
         },
         {
-          memberUserId: firstMemberUserId,
-          email: "first@example.test",
-          displayName: "First",
+          memberUserId: null,
+          email: "legacy@example.test",
+          displayName: "Legacy Member",
           accessLevel: "Shared",
           status: "active",
         },
       ],
     });
+    assert.equal(mixedRoster.ok && mixedRoster.members[1]?.memberUserId, null);
+    assert.notEqual(
+      mixedRoster.ok && mixedRoster.members[1]?.memberUserId,
+      mixedRoster.ok && mixedRoster.members[1]?.email,
+      "legacy email must not be synthesized into a Collaboration identity",
+    );
 
     const invalidMemberUserIds: unknown[] = [
       undefined,
