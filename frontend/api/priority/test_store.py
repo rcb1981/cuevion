@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+import inspect
 import json
 import unittest
 from dataclasses import replace
+from pathlib import Path
 
 from . import store as store_module
 from .semantic_types import (
@@ -33,7 +35,9 @@ from .store import (
     SEMANTIC_HYDRATION_RESULT_BATCH_SIZE,
     SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2,
     CustomImapCompatibilityOutcome,
+    CustomImapDismissalBridgeOutcome,
     CustomImapV1CompatibilityLocator,
+    CustomImapV2DismissalAuthority,
     NewInboundIndexEntry,
     NewInboundIndexScope,
     SemanticAssessmentStore,
@@ -113,8 +117,12 @@ class MemoryRedis:
             key_count = command[2]
             keys = command[3 : 3 + key_count]
             args = command[3 + key_count :]
-            if script == store_module._READ_NEW_INBOUND_DISMISSALS_SCRIPT:
+            if script in {
+                store_module._READ_NEW_INBOUND_DISMISSALS_SCRIPT,
+                store_module._READ_CUSTOM_IMAP_V2_DISMISSALS_SCRIPT,
+            }:
                 states: list[int] = []
+                allowed_values = set(args)
                 for key in keys:
                     key_type = self._lua_type(key)
                     actual_type = (
@@ -124,7 +132,14 @@ class MemoryRedis:
                     )
                     if actual_type == "none":
                         states.append(0)
-                    elif actual_type == "string" and self.values[key] == args[0]:
+                    elif (
+                        actual_type == "string"
+                        and self.values[key] in allowed_values
+                        and (
+                            script == store_module._READ_NEW_INBOUND_DISMISSALS_SCRIPT
+                            or self.expirations.get(key, 1) > 0
+                        )
+                    ):
                         states.append(1)
                     else:
                         return {"result": [-1]}
@@ -156,7 +171,10 @@ class MemoryRedis:
                     self.values.pop(keys[0], None)
                     return {"result": 1}
                 return {"result": 0}
-            if script == store_module._COMMIT_NEW_INBOUND_RESULT_SCRIPT:
+            if script in {
+                store_module._COMMIT_NEW_INBOUND_RESULT_SCRIPT,
+                store_module._COMMIT_CUSTOM_IMAP_V2_NEW_INBOUND_RESULT_SCRIPT,
+            }:
                 if (
                     self.values.get(keys[0]) != args[0]
                     or self.values.get(keys[1]) != args[1]
@@ -178,7 +196,20 @@ class MemoryRedis:
                     if actual_type not in {"none", expected_type}:
                         return {"result": -1}
                 dismissal = self.values.get(keys[6])
-                if dismissal is not None and dismissal != args[11]:
+                allowed_dismissals = (
+                    {args[11], args[12]}
+                    if script
+                    == store_module._COMMIT_CUSTOM_IMAP_V2_NEW_INBOUND_RESULT_SCRIPT
+                    else {args[11]}
+                )
+                if dismissal is not None and dismissal not in allowed_dismissals:
+                    return {"result": -1}
+                if (
+                    dismissal is not None
+                    and script
+                    == store_module._COMMIT_CUSTOM_IMAP_V2_NEW_INBOUND_RESULT_SCRIPT
+                    and self.expirations.get(keys[6], 1) <= 0
+                ):
                     return {"result": -1}
                 member = args[4]
                 occurred_at = float(args[6])
@@ -205,7 +236,10 @@ class MemoryRedis:
                 for oldest_member in ordered[: max(0, excess)]:
                     self._remove_index_member(keys, oldest_member)
                 self.values[keys[2]] = args[2]
-                if dismissal is not None:
+                if dismissal is not None and (
+                    script == store_module._COMMIT_NEW_INBOUND_RESULT_SCRIPT
+                    or dismissal == args[11]
+                ):
                     self.expirations[keys[6]] = int(args[8])
                 self.values.pop(keys[0], None)
                 return {"result": 1}
@@ -219,14 +253,24 @@ class MemoryRedis:
                 if self.values.get(keys[0]) != args[0]:
                     return {"result": args[1]}
                 return {"result": self.values.get(keys[1])}
-            if script == store_module._DISMISS_NEW_INBOUND_SCRIPT:
+            if script in {
+                store_module._DISMISS_NEW_INBOUND_SCRIPT,
+                store_module._DISMISS_CUSTOM_IMAP_V2_NEW_INBOUND_SCRIPT,
+            }:
+                v2_script = (
+                    script == store_module._DISMISS_CUSTOM_IMAP_V2_NEW_INBOUND_SCRIPT
+                )
+                result_arg = 4 if v2_script else 3
+                ttl_arg = 5 if v2_script else 4
+                occurrence_arg = 6 if v2_script else 5
+                freshness_arg = 7 if v2_script else 6
                 if (
                     self.hashes.get(keys[0], {}).get(args[0]) != args[1]
                     or self.sorted_sets.get(keys[1], {}).get(args[0])
-                    != float(args[5])
+                    != float(args[occurrence_arg])
                     or self.sorted_sets.get(keys[2], {}).get(args[0])
-                    != float(args[6])
-                    or self.values.get(keys[3]) != args[3]
+                    != float(args[freshness_arg])
+                    or self.values.get(keys[3]) != args[result_arg]
                 ):
                     return {"result": 0}
                 dismissal_type = self._lua_type(keys[4])
@@ -238,10 +282,19 @@ class MemoryRedis:
                 if actual_dismissal_type not in {"none", "string"}:
                     return {"result": -1}
                 existing = self.values.get(keys[4])
-                if existing is not None and existing != args[2]:
+                allowed_existing = (
+                    {args[2], args[3]} if v2_script else {args[2]}
+                )
+                if existing is not None and existing not in allowed_existing:
+                    return {"result": -1}
+                if (
+                    v2_script
+                    and existing is not None
+                    and self.expirations.get(keys[4], 1) <= 0
+                ):
                     return {"result": -1}
                 self.values[keys[4]] = args[2]
-                self.expirations[keys[4]] = int(args[4])
+                self.expirations[keys[4]] = int(args[ttl_arg])
                 return {"result": 1}
             if script == store_module._RELEASE_LEASE_SCRIPT:
                 if self.values.get(keys[0]) == args[0]:
@@ -338,6 +391,21 @@ def compatibility_scope(**changes: str) -> SemanticCacheScope:
     }
     values.update(changes)
     return SemanticCacheScope(**values)
+
+
+def v2_dismissal_authority(**changes: str) -> CustomImapV2DismissalAuthority:
+    locator = compatibility_locator()
+    values = {
+        "workspace_id": locator.workspace_id,
+        "user_id": locator.user_id,
+        "mailbox_id": locator.mailbox_id,
+        "mailbox_account_identity": locator.mailbox_account_identity,
+        "provider": "custom_imap",
+        "conversation_id": "imap:v2:rfc:conversation-1",
+        "latest_turn_id": "turn-v2-1",
+    }
+    values.update(changes)
+    return CustomImapV2DismissalAuthority(**values)
 
 
 class SemanticStoreTests(unittest.TestCase):
@@ -2271,6 +2339,179 @@ class CustomImapCompatibilityUnitTests(unittest.TestCase):
             for _ in expected
         )
         self.assertEqual(actual, expected)
+
+    def test_dismissal_bridge_contract_is_typed_isolated_and_finite(self):
+        legacy = SemanticAssessmentStore(MemoryRedis(), hmac_secret=SECRET)
+        google_scope = index_scope()
+        google_key = legacy._new_inbound_dismissal_key(
+            google_scope,
+            conversation_id="conversation-1",
+            latest_turn_id="turn-1",
+        )
+        self.assertEqual(store_module._NEW_INBOUND_DISMISSAL_VALUE, "1")
+        self.assertEqual(NEW_INBOUND_DISMISSAL_TTL_SECONDS, 2_592_000)
+        self.assertEqual(
+            google_key,
+            "cuevion:priority:semantic:v1:new-inbound-dismissal:"
+            "164505ccf4bf3b685ac0c5447abc524da916c4502e26f6c2cac1b956b6f773ce",
+        )
+        self.assertEqual(
+            store_module._CUSTOM_IMAP_V2_NATIVE_DISMISSAL_VALUE,
+            "native_v2",
+        )
+        self.assertEqual(
+            store_module._CUSTOM_IMAP_V2_BRIDGED_DISMISSAL_VALUE,
+            "bridged_v1",
+        )
+        self.assertEqual(
+            {outcome.value for outcome in CustomImapDismissalBridgeOutcome},
+            {
+                "bridged",
+                "already_bridged",
+                "native_v2_present",
+                "legacy_not_dismissed",
+                "sidecar_unavailable",
+                "compatibility_incomplete",
+                "claim_stale",
+                "corrupt_state",
+            },
+        )
+        parameters = tuple(inspect.signature(
+            SemanticAssessmentStore.bridge_custom_imap_v1_dismissal_to_v2
+        ).parameters)
+        self.assertEqual(parameters, ("self", "locator", "v2_authority"))
+
+    def test_v2_dismissal_values_and_authority_validation_fail_closed(self):
+        redis = MemoryRedis()
+        v2 = SemanticAssessmentStore(
+            redis,
+            hmac_secret=SECRET,
+            mode=SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2,
+            mailbox_account_identity="primary@example.com",
+        )
+        authority = v2_dismissal_authority()
+        key = v2._new_inbound_dismissal_key(
+            authority.to_index_scope(),
+            conversation_id=authority.conversation_id,
+            latest_turn_id=authority.latest_turn_id,
+        )
+        for value in ("native_v2", "bridged_v1"):
+            with self.subTest(value=value):
+                redis.values[key] = value
+                redis.expirations[key] = 100
+                self.assertTrue(v2.is_new_inbound_dismissed_exact(
+                    authority.to_index_scope(),
+                    conversation_id=authority.conversation_id,
+                    latest_turn_id=authority.latest_turn_id,
+                ))
+        redis.values[key] = "unknown"
+        with self.assertRaises(SemanticStoreUnavailable):
+            v2.is_new_inbound_dismissed_exact(
+                authority.to_index_scope(),
+                conversation_id=authority.conversation_id,
+                latest_turn_id=authority.latest_turn_id,
+            )
+        for conversation_id in ("imap:v2:rfc:root", "imap:v2:uid:7:11"):
+            self.assertEqual(
+                v2_dismissal_authority(
+                    conversation_id=conversation_id
+                ).conversation_id,
+                conversation_id,
+            )
+        for changes in (
+            {"provider": "google"},
+            {"conversation_id": "imap:rfc:legacy"},
+        ):
+            with self.assertRaises(ValueError):
+                v2_dismissal_authority(**changes)
+
+    def test_bridge_derives_legacy_authority_only_from_validated_sidecar(self):
+        locator = compatibility_locator()
+        legacy_scope = compatibility_scope()
+        encoded = store_module._encode_custom_imap_compatibility_sidecar(
+            SECRET,
+            locator,
+            legacy_scope,
+            validated_at=1_000,
+        )
+        commands: list[list[object]] = []
+
+        def transport(command: list[object]) -> dict[str, object]:
+            commands.append(command)
+            if command[1] == store_module._PREPARE_CUSTOM_IMAP_DISMISSAL_BRIDGE_SCRIPT:
+                return {"result": [1, encoded]}
+            return {"result": 4}
+
+        bridge_store = SemanticAssessmentStore(transport, hmac_secret=SECRET)
+        self.assertEqual(
+            bridge_store.bridge_custom_imap_v1_dismissal_to_v2(
+                locator,
+                v2_dismissal_authority(),
+            ),
+            CustomImapDismissalBridgeOutcome.LEGACY_NOT_DISMISSED,
+        )
+        expected_legacy_key = bridge_store._new_inbound_dismissal_key(
+            NewInboundIndexScope(
+                workspace_id=locator.workspace_id,
+                user_id=locator.user_id,
+                mailbox_id=locator.mailbox_id,
+                provider=locator.provider,
+                mailbox_account_identity=locator.mailbox_account_identity,
+            ),
+            conversation_id=legacy_scope.conversation_id,
+            latest_turn_id=legacy_scope.latest_turn_id,
+        )
+        self.assertEqual(commands[1][5], expected_legacy_key)
+        self.assertEqual(commands[1][10], json.loads(encoded)["mappingMac"])
+        self.assertTrue({
+            "legacy_conversation_id",
+            "legacy_latest_turn_id",
+            "legacy_dismissal_key",
+            "raw_sidecar",
+        }.isdisjoint(inspect.signature(
+            SemanticAssessmentStore.bridge_custom_imap_v1_dismissal_to_v2
+        ).parameters))
+        with self.assertRaises(ValueError):
+            bridge_store.bridge_custom_imap_v1_dismissal_to_v2(
+                locator,
+                v2_dismissal_authority(mailbox_account_identity="other@example.com"),
+            )
+
+    def test_bridge_mapping_claim_ignores_provenance_but_changes_with_mapping(self):
+        locator = compatibility_locator()
+        base = compatibility_scope()
+        first = json.loads(store_module._encode_custom_imap_compatibility_sidecar(
+            SECRET,
+            locator,
+            base,
+            validated_at=1_000,
+        ))
+        renewed = json.loads(store_module._encode_custom_imap_compatibility_sidecar(
+            SECRET,
+            locator,
+            replace(base, model_version="renewed-model"),
+            validated_at=2_000,
+        ))
+        changed = json.loads(store_module._encode_custom_imap_compatibility_sidecar(
+            SECRET,
+            locator,
+            replace(base, latest_turn_id="changed-turn"),
+            validated_at=2_000,
+        ))
+        self.assertEqual(first["mappingMac"], renewed["mappingMac"])
+        self.assertNotEqual(first["recordMac"], renewed["recordMac"])
+        self.assertNotEqual(first["mappingMac"], changed["mappingMac"])
+
+    def test_dismissal_bridge_has_no_production_caller(self):
+        priority_directory = Path(__file__).resolve().parent
+        for production_file in (
+            priority_directory / "semantic_route.py",
+            priority_directory / "semantic-assessment.py",
+        ):
+            source = production_file.read_text(encoding="utf-8")
+            self.assertNotIn("bridge_custom_imap_v1_dismissal_to_v2", source)
+            self.assertNotIn("native_v2", source)
+            self.assertNotIn("bridged_v1", source)
 
 
 if __name__ == "__main__":

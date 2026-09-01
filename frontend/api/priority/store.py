@@ -111,6 +111,8 @@ _NEW_INBOUND_DISMISSAL_HMAC_INFO = (
     b"cuevion/priority/new-inbound-dismissal/v1\x00"
 )
 _NEW_INBOUND_DISMISSAL_VALUE = "1"
+_CUSTOM_IMAP_V2_NATIVE_DISMISSAL_VALUE = "native_v2"
+_CUSTOM_IMAP_V2_BRIDGED_DISMISSAL_VALUE = "bridged_v1"
 _LEASE_TOKEN_BYTES = 32
 _HEX_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _COMPATIBILITY_MAC_RE = re.compile(r"[0-9a-f]{40}")
@@ -191,6 +193,47 @@ _COMMIT_NEW_INBOUND_RESULT_SCRIPT = (
     "redis.call('EXPIRE',KEYS[5],ARGV[9]);"
     "redis.call('EXPIRE',KEYS[6],ARGV[9]);"
     "if dismissal then redis.call('EXPIRE',KEYS[7],ARGV[9]);end;"
+    "redis.call('SET',KEYS[3],ARGV[3],'EX',ARGV[4]);"
+    "redis.call('DEL',KEYS[1]);return 1"
+)
+_COMMIT_CUSTOM_IMAP_V2_NEW_INBOUND_RESULT_SCRIPT = (
+    "if redis.call('GET',KEYS[1])~=ARGV[1] or "
+    "redis.call('GET',KEYS[2])~=ARGV[2] then return 0 end;"
+    "local function keyType(key) local value=redis.call('TYPE',key);"
+    "if type(value)=='table' then return value['ok'] end;return value end;"
+    "local recordsType=keyType(KEYS[4]);"
+    "local occurrencesType=keyType(KEYS[5]);"
+    "local freshnessType=keyType(KEYS[6]);"
+    "local dismissalType=keyType(KEYS[7]);"
+    "if (recordsType~='none' and recordsType~='hash') or "
+    "(occurrencesType~='none' and occurrencesType~='zset') or "
+    "(freshnessType~='none' and freshnessType~='zset') or "
+    "(dismissalType~='none' and dismissalType~='string') then return -1 end;"
+    "local dismissal=redis.call('GET',KEYS[7]);"
+    "if dismissal and dismissal~=ARGV[12] and dismissal~=ARGV[13] then return -1 end;"
+    "if dismissal and redis.call('PTTL',KEYS[7])<=0 then return -1 end;"
+    "local prior=redis.call('ZSCORE',KEYS[5],ARGV[5]);"
+    "local existing=redis.call('HGET',KEYS[4],ARGV[5]);"
+    "if (prior and not existing) or (existing and not prior) then return -1 end;"
+    "redis.call('HSET',KEYS[4],ARGV[5],ARGV[6]);"
+    "redis.call('ZADD',KEYS[5],ARGV[7],ARGV[5]);"
+    "redis.call('ZADD',KEYS[6],ARGV[8],ARGV[5]);"
+    "local expired=redis.call('ZRANGEBYSCORE',KEYS[6],'-inf',ARGV[11]);"
+    "for _,member in ipairs(expired) do "
+    "redis.call('HDEL',KEYS[4],member);"
+    "redis.call('ZREM',KEYS[5],member);"
+    "redis.call('ZREM',KEYS[6],member);end;"
+    "local excess=redis.call('ZCARD',KEYS[6])-tonumber(ARGV[10]);"
+    "if excess>0 then "
+    "local oldest=redis.call('ZRANGE',KEYS[6],0,excess-1);"
+    "for _,member in ipairs(oldest) do "
+    "redis.call('HDEL',KEYS[4],member);"
+    "redis.call('ZREM',KEYS[5],member);"
+    "redis.call('ZREM',KEYS[6],member);end;end;"
+    "redis.call('EXPIRE',KEYS[4],ARGV[9]);"
+    "redis.call('EXPIRE',KEYS[5],ARGV[9]);"
+    "redis.call('EXPIRE',KEYS[6],ARGV[9]);"
+    "if dismissal==ARGV[12] then redis.call('EXPIRE',KEYS[7],ARGV[9]);end;"
     "redis.call('SET',KEYS[3],ARGV[3],'EX',ARGV[4]);"
     "redis.call('DEL',KEYS[1]);return 1"
 )
@@ -334,6 +377,115 @@ _CUSTOM_IMAP_COMPATIBILITY_UNAVAILABLE_SCRIPT = (
     "if marker['reason']=='sidecar_unavailable' then return write('sidecar_unavailable') end;"
     "return 1"
 )
+_PREPARE_CUSTOM_IMAP_DISMISSAL_BRIDGE_SCRIPT = (
+    "local function keyType(key) local value=redis.call('TYPE',key);"
+    "if type(value)=='table' then return value['ok'] end;return value end;"
+    "local sidecarType=keyType(KEYS[1]);"
+    "if sidecarType=='none' then local markerType=keyType(KEYS[2]);"
+    "if markerType=='none' then return {0} end;"
+    "if markerType~='string' then return {-1} end;"
+    "return {2,redis.call('GET',KEYS[2])} end;"
+    "if sidecarType~='string' then return {-1} end;"
+    "return {1,redis.call('GET',KEYS[1])}"
+)
+_CUSTOM_IMAP_DISMISSAL_BRIDGE_SCRIPT = (
+    "local function keyType(key) local value=redis.call('TYPE',key);"
+    "if type(value)=='table' then return value['ok'] end;return value end;"
+    "local function fromHex(value) local result={};"
+    "for index=1,#value,2 do result[#result+1]=string.char(tonumber("
+    "string.sub(value,index,index+1),16));end;return table.concat(result);end;"
+    "local function hmacSha1(keyHex,message) local key=fromHex(keyHex);"
+    "key=key..string.rep(string.char(0),64-#key);local inner={};local outer={};"
+    "for index=1,64 do local byte=string.byte(key,index);"
+    "inner[index]=string.char(bit.bxor(byte,54));"
+    "outer[index]=string.char(bit.bxor(byte,92));end;"
+    "local innerHex=redis.sha1hex(table.concat(inner)..message);"
+    "return redis.sha1hex(table.concat(outer)..fromHex(innerHex));end;"
+    "local separator=string.char(0);local clock=redis.call('TIME');"
+    "local currentSeconds=tonumber(clock[1]);local currentMicros=tonumber(clock[2]);"
+    "if not currentSeconds or not currentMicros then return 8 end;"
+    "local currentMillis=currentSeconds*1000+math.floor(currentMicros/1000);"
+    "local markerType=keyType(KEYS[2]);if markerType~='none' then "
+    "if markerType~='string' then return 8 end;"
+    "local rawMarker=redis.call('GET',KEYS[2]);"
+    "local markerOk,marker=pcall(cjson.decode,rawMarker);local markerCount=0;"
+    "if markerOk and type(marker)=='table' then "
+    "for _ in pairs(marker) do markerCount=markerCount+1 end end;"
+    "local markerReason=markerOk and type(marker)=='table' and "
+    "(marker['reason']=='mapping_conflict' or marker['reason']=='sidecar_corrupt' or "
+    "marker['reason']=='marker_corrupt' or marker['reason']=='sidecar_unavailable' or "
+    "marker['reason']=='record_too_large');"
+    "local markerMessage=markerOk and type(marker)=='table' and table.concat({"
+    "ARGV[1],ARGV[2],ARGV[3],tostring(marker['reason']),"
+    "tostring(marker['validatedAt']),tostring(marker['expiresAt'])},separator) or '';"
+    "local markerValid=markerOk and type(marker)=='table' and markerCount==7 and "
+    "marker['schemaVersion']==tonumber(ARGV[1]) and marker['scopeDigest']==ARGV[2] and "
+    "marker['locatorDigest']==ARGV[3] and markerReason and "
+    "type(marker['validatedAt'])=='number' and marker['validatedAt']%1==0 and "
+    "type(marker['expiresAt'])=='number' and marker['expiresAt']%1==0 and "
+    "marker['validatedAt']<=currentSeconds and marker['expiresAt']>currentSeconds and "
+    "marker['expiresAt']-marker['validatedAt']==tonumber(ARGV[7]) and "
+    "type(marker['recordMac'])=='string' and #marker['recordMac']==40 and "
+    "marker['recordMac']==hmacSha1(ARGV[11],markerMessage);"
+    "if not markerValid then return 8 end;return 6 end;"
+    "local sidecarType=keyType(KEYS[1]);if sidecarType=='none' then return 5 end;"
+    "if sidecarType~='string' then return 8 end;"
+    "local raw=redis.call('GET',KEYS[1]);if not raw or #raw>tonumber(ARGV[8]) then "
+    "return 8 end;local ok,value=pcall(cjson.decode,raw);local count=0;"
+    "if ok and type(value)=='table' then for _ in pairs(value) do count=count+1 end end;"
+    "local mappingMessage=ok and type(value)=='table' and table.concat({ARGV[2],"
+    "ARGV[3],tostring(value['legacyConversationId']),"
+    "tostring(value['legacyLatestTurnId'])},separator) or '';"
+    "local recordMessage=ok and type(value)=='table' and table.concat({ARGV[1],"
+    "ARGV[2],ARGV[3],tostring(value['legacyConversationId']),"
+    "tostring(value['legacyLatestTurnId']),tostring(value['legacySemanticVersion']),"
+    "tostring(value['legacyModelVersion']),tostring(value['validatedAt']),"
+    "tostring(value['expiresAt']),tostring(value['mappingMac'])},separator) or '';"
+    "local valid=ok and type(value)=='table' and count==11 and "
+    "value['schemaVersion']==tonumber(ARGV[1]) and value['scopeDigest']==ARGV[2] and "
+    "value['locatorDigest']==ARGV[3] and type(value['legacyConversationId'])=='string' and "
+    "#value['legacyConversationId']>0 and #value['legacyConversationId']<=tonumber(ARGV[16]) and "
+    "type(value['legacyLatestTurnId'])=='string' and #value['legacyLatestTurnId']>0 and "
+    "#value['legacyLatestTurnId']<=tonumber(ARGV[17]) and "
+    "value['legacySemanticVersion']==ARGV[15] and "
+    "type(value['legacyModelVersion'])=='string' and #value['legacyModelVersion']>0 and "
+    "#value['legacyModelVersion']<=tonumber(ARGV[19]) and "
+    "type(value['validatedAt'])=='number' and value['validatedAt']%1==0 and "
+    "type(value['expiresAt'])=='number' and value['expiresAt']%1==0 and "
+    "value['validatedAt']<=currentSeconds and value['expiresAt']>currentSeconds and "
+    "value['expiresAt']-value['validatedAt']==tonumber(ARGV[7]) and "
+    "type(value['mappingMac'])=='string' and #value['mappingMac']==40 and "
+    "type(value['recordMac'])=='string' and #value['recordMac']==40 and "
+    "value['mappingMac']==hmacSha1(ARGV[9],mappingMessage) and "
+    "value['recordMac']==hmacSha1(ARGV[10],recordMessage);"
+    "if not valid then return 8 end;"
+    "if value['mappingMac']~=ARGV[4] or value['legacyConversationId']~=ARGV[5] or "
+    "value['legacyLatestTurnId']~=ARGV[6] then return 7 end;"
+    "local legacyType=keyType(KEYS[3]);if legacyType=='none' then return 4 end;"
+    "if legacyType~='string' then return 8 end;"
+    "local legacyValue=redis.call('GET',KEYS[3]);if not legacyValue then return 4 end;"
+    "if legacyValue~=ARGV[12] then return 8 end;"
+    "local legacyPttl=redis.call('PTTL',KEYS[3]);"
+    "if legacyPttl==-2 then return 4 end;if legacyPttl<=0 then return 8 end;"
+    "local legacyExpiry=redis.call('PEXPIRETIME',KEYS[3]);"
+    "if not legacyExpiry or legacyExpiry<=currentMillis then return 4 end;"
+    "local v2Type=keyType(KEYS[4]);if v2Type=='none' then "
+    "redis.call('SET',KEYS[4],ARGV[14],'PXAT',legacyExpiry);"
+    "if redis.call('PTTL',KEYS[4])<=0 or "
+    "redis.call('PEXPIRETIME',KEYS[4])~=legacyExpiry then return 8 end;return 1 end;"
+    "if v2Type~='string' then return 8 end;local v2Value=redis.call('GET',KEYS[4]);"
+    "if not v2Value then redis.call('SET',KEYS[4],ARGV[14],'PXAT',legacyExpiry);"
+    "if redis.call('PTTL',KEYS[4])<=0 or "
+    "redis.call('PEXPIRETIME',KEYS[4])~=legacyExpiry then return 8 end;return 1 end;"
+    "local v2Pttl=redis.call('PTTL',KEYS[4]);local v2Expiry=redis.call('PEXPIRETIME',KEYS[4]);"
+    "if v2Pttl<=0 or not v2Expiry or v2Expiry<=currentMillis then return 8 end;"
+    "if v2Value==ARGV[13] then return 3 end;"
+    "if v2Value~=ARGV[14] then return 8 end;"
+    "if v2Expiry>legacyExpiry then "
+    "if redis.call('PEXPIREAT',KEYS[4],legacyExpiry)~=1 or "
+    "redis.call('PEXPIRETIME',KEYS[4])~=legacyExpiry then return 8 end;end;"
+    "return 2"
+)
 _RELEASE_LEASE_SCRIPT = (
     "if redis.call('GET',KEYS[1])==ARGV[1] then "
     "return redis.call('DEL',KEYS[1]) else return 0 end"
@@ -361,10 +513,35 @@ _DISMISS_NEW_INBOUND_SCRIPT = (
     "if existing and existing~=ARGV[3] then return -1 end;"
     "redis.call('SET',KEYS[5],ARGV[3],'EX',ARGV[5]);return 1"
 )
+_DISMISS_CUSTOM_IMAP_V2_NEW_INBOUND_SCRIPT = (
+    "if redis.call('HGET',KEYS[1],ARGV[1])~=ARGV[2] then return 0 end;"
+    "local occurrence=redis.call('ZSCORE',KEYS[2],ARGV[1]);"
+    "if not occurrence or tonumber(occurrence)~=tonumber(ARGV[7]) then return 0 end;"
+    "local freshness=redis.call('ZSCORE',KEYS[3],ARGV[1]);"
+    "if not freshness or tonumber(freshness)~=tonumber(ARGV[8]) then return 0 end;"
+    "if redis.call('GET',KEYS[4])~=ARGV[5] then return 0 end;"
+    "local dismissalType=redis.call('TYPE',KEYS[5]);"
+    "if type(dismissalType)=='table' then dismissalType=dismissalType['ok'] end;"
+    "if dismissalType~='none' and dismissalType~='string' then return -1 end;"
+    "local existing=redis.call('GET',KEYS[5]);"
+    "if existing and existing~=ARGV[3] and existing~=ARGV[4] then return -1 end;"
+    "if existing and redis.call('PTTL',KEYS[5])<=0 then return -1 end;"
+    "redis.call('SET',KEYS[5],ARGV[3],'EX',ARGV[6]);return 1"
+)
 _READ_NEW_INBOUND_DISMISSALS_SCRIPT = (
     "local values=redis.call('MGET',unpack(KEYS));local states={};"
     "for index=1,#KEYS do local value=values[index];"
     "if value then if value~=ARGV[1] then return {-1} end;states[index]=1 "
+    "else local keyType=redis.call('TYPE',KEYS[index]);"
+    "if type(keyType)=='table' then keyType=keyType['ok'] end;"
+    "if keyType~='none' then return {-1} end;states[index]=0 end;end;"
+    "return states"
+)
+_READ_CUSTOM_IMAP_V2_DISMISSALS_SCRIPT = (
+    "local values=redis.call('MGET',unpack(KEYS));local states={};"
+    "for index=1,#KEYS do local value=values[index];"
+    "if value then if value~=ARGV[1] and value~=ARGV[2] then return {-1} end;"
+    "if redis.call('PTTL',KEYS[index])<=0 then return {-1} end;states[index]=1 "
     "else local keyType=redis.call('TYPE',KEYS[index]);"
     "if type(keyType)=='table' then keyType=keyType['ok'] end;"
     "if keyType~='none' then return {-1} end;states[index]=0 end;end;"
@@ -511,6 +688,17 @@ class CustomImapCompatibilityOutcome(str, Enum):
     COMPATIBILITY_INCOMPLETE = "compatibility_incomplete"
 
 
+class CustomImapDismissalBridgeOutcome(str, Enum):
+    BRIDGED = "bridged"
+    ALREADY_BRIDGED = "already_bridged"
+    NATIVE_V2_PRESENT = "native_v2_present"
+    LEGACY_NOT_DISMISSED = "legacy_not_dismissed"
+    SIDECAR_UNAVAILABLE = "sidecar_unavailable"
+    COMPATIBILITY_INCOMPLETE = "compatibility_incomplete"
+    CLAIM_STALE = "claim_stale"
+    CORRUPT_STATE = "corrupt_state"
+
+
 @dataclass(frozen=True, slots=True)
 class CustomImapV1CompatibilityLocator:
     workspace_id: str
@@ -570,6 +758,49 @@ class CustomImapV1CompatibilityLocator:
                 self.imap_uid,
             )
         ).encode("utf-8", errors="strict")
+
+
+@dataclass(frozen=True, slots=True)
+class CustomImapV2DismissalAuthority:
+    workspace_id: str
+    user_id: str
+    mailbox_id: str
+    mailbox_account_identity: str
+    provider: str
+    conversation_id: str
+    latest_turn_id: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.provider != "custom_imap"
+            or any(
+                not _valid_index_identifier(
+                    value,
+                    NEW_INBOUND_INDEX_MAX_SCOPE_IDENTIFIER_CHARACTERS,
+                )
+                for value in (
+                    self.workspace_id,
+                    self.user_id,
+                    self.mailbox_id,
+                    self.mailbox_account_identity,
+                )
+            )
+            or not _valid_custom_imap_v2_conversation_id(self.conversation_id)
+            or not _valid_index_identifier(
+                self.latest_turn_id,
+                NEW_INBOUND_INDEX_MAX_TURN_ID_CHARACTERS,
+            )
+        ):
+            raise ValueError("invalid custom IMAP v2 dismissal authority")
+
+    def to_index_scope(self) -> NewInboundIndexScope:
+        return NewInboundIndexScope(
+            workspace_id=self.workspace_id,
+            user_id=self.user_id,
+            mailbox_id=self.mailbox_id,
+            provider=self.provider,
+            mailbox_account_identity=self.mailbox_account_identity,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1773,10 +2004,21 @@ class SemanticAssessmentStore:
         values = self._command(
             [
                 "EVAL",
-                _READ_NEW_INBOUND_DISMISSALS_SCRIPT,
+                (
+                    _READ_CUSTOM_IMAP_V2_DISMISSALS_SCRIPT
+                    if self._mode == SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2
+                    else _READ_NEW_INBOUND_DISMISSALS_SCRIPT
+                ),
                 1,
                 key,
-                _NEW_INBOUND_DISMISSAL_VALUE,
+                *(
+                    (
+                        _CUSTOM_IMAP_V2_NATIVE_DISMISSAL_VALUE,
+                        _CUSTOM_IMAP_V2_BRIDGED_DISMISSAL_VALUE,
+                    )
+                    if self._mode == SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2
+                    else (_NEW_INBOUND_DISMISSAL_VALUE,)
+                ),
             ]
         )
         if (
@@ -1817,10 +2059,21 @@ class SemanticAssessmentStore:
             values = self._command(
                 [
                     "EVAL",
-                    _READ_NEW_INBOUND_DISMISSALS_SCRIPT,
+                    (
+                        _READ_CUSTOM_IMAP_V2_DISMISSALS_SCRIPT
+                        if self._mode == SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2
+                        else _READ_NEW_INBOUND_DISMISSALS_SCRIPT
+                    ),
                     len(keys),
                     *keys,
-                    _NEW_INBOUND_DISMISSAL_VALUE,
+                    *(
+                        (
+                            _CUSTOM_IMAP_V2_NATIVE_DISMISSAL_VALUE,
+                            _CUSTOM_IMAP_V2_BRIDGED_DISMISSAL_VALUE,
+                        )
+                        if self._mode == SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2
+                        else (_NEW_INBOUND_DISMISSAL_VALUE,)
+                    ),
                 ]
             )
             if (
@@ -2029,7 +2282,11 @@ class SemanticAssessmentStore:
             result = self._command(
                 [
                     "EVAL",
-                    _COMMIT_NEW_INBOUND_RESULT_SCRIPT,
+                    (
+                        _COMMIT_CUSTOM_IMAP_V2_NEW_INBOUND_RESULT_SCRIPT
+                        if self._mode == SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2
+                        else _COMMIT_NEW_INBOUND_RESULT_SCRIPT
+                    ),
                     7,
                     keys["lease"],
                     current_key,
@@ -2049,7 +2306,14 @@ class SemanticAssessmentStore:
                     NEW_INBOUND_INDEX_TTL_SECONDS,
                     NEW_INBOUND_INDEX_MAX_RECORDS,
                     timestamp - NEW_INBOUND_INDEX_TTL_SECONDS,
-                    _NEW_INBOUND_DISMISSAL_VALUE,
+                    *(
+                        (
+                            _CUSTOM_IMAP_V2_NATIVE_DISMISSAL_VALUE,
+                            _CUSTOM_IMAP_V2_BRIDGED_DISMISSAL_VALUE,
+                        )
+                        if self._mode == SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2
+                        else (_NEW_INBOUND_DISMISSAL_VALUE,)
+                    ),
                 ]
             )
             if type(result) is not int or type(result) is bool or result not in (0, 1):
@@ -2152,6 +2416,150 @@ class SemanticAssessmentStore:
         )
         if type(result) is not int or type(result) is bool or result not in (0, 1):
             raise SemanticStoreUnavailable()
+
+    def bridge_custom_imap_v1_dismissal_to_v2(
+        self,
+        locator: CustomImapV1CompatibilityLocator,
+        v2_authority: CustomImapV2DismissalAuthority,
+    ) -> CustomImapDismissalBridgeOutcome:
+        """Dormant exact-key bridge from a live v1 dismissal to v2 metadata."""
+        if self._mode != SEMANTIC_STORE_MODE_LEGACY:
+            raise ValueError("dismissal bridge requires the legacy store")
+        if (
+            not isinstance(locator, CustomImapV1CompatibilityLocator)
+            or not isinstance(v2_authority, CustomImapV2DismissalAuthority)
+            or (
+                locator.workspace_id,
+                locator.user_id,
+                locator.mailbox_id,
+                locator.mailbox_account_identity,
+                locator.provider,
+            )
+            != (
+                v2_authority.workspace_id,
+                v2_authority.user_id,
+                v2_authority.mailbox_id,
+                v2_authority.mailbox_account_identity,
+                v2_authority.provider,
+            )
+        ):
+            raise ValueError("custom IMAP dismissal bridge scope mismatch")
+        compatibility_keys = _custom_imap_compatibility_keys(
+            self._hmac_secret,
+            locator,
+        )
+        prepared = self._command(
+            [
+                "EVAL",
+                _PREPARE_CUSTOM_IMAP_DISMISSAL_BRIDGE_SCRIPT,
+                2,
+                compatibility_keys["sidecar"],
+                compatibility_keys["incomplete"],
+            ]
+        )
+        if type(prepared) is not list or not prepared:
+            raise SemanticStoreUnavailable()
+        if prepared == [0]:
+            return CustomImapDismissalBridgeOutcome.SIDECAR_UNAVAILABLE
+        if prepared == [-1]:
+            return CustomImapDismissalBridgeOutcome.CORRUPT_STATE
+        if len(prepared) == 2 and prepared[0] == 2:
+            marker = _decode_custom_imap_compatibility_marker(
+                prepared[1],
+                secret=self._hmac_secret,
+                locator=locator,
+            )
+            return (
+                CustomImapDismissalBridgeOutcome.COMPATIBILITY_INCOMPLETE
+                if marker is not None
+                else CustomImapDismissalBridgeOutcome.CORRUPT_STATE
+            )
+        if len(prepared) != 2 or prepared[0] != 1:
+            raise SemanticStoreUnavailable()
+        sidecar = _decode_custom_imap_compatibility_sidecar(
+            prepared[1],
+            secret=self._hmac_secret,
+            locator=locator,
+        )
+        if (
+            sidecar is None
+            or sidecar["legacySemanticVersion"] != SEMANTIC_SCHEMA_VERSION
+        ):
+            return CustomImapDismissalBridgeOutcome.CORRUPT_STATE
+        legacy_scope = NewInboundIndexScope(
+            workspace_id=locator.workspace_id,
+            user_id=locator.user_id,
+            mailbox_id=locator.mailbox_id,
+            provider=locator.provider,
+            mailbox_account_identity=locator.mailbox_account_identity,
+        )
+        legacy_dismissal_key = self._new_inbound_dismissal_key(
+            legacy_scope,
+            conversation_id=sidecar["legacyConversationId"],
+            latest_turn_id=sidecar["legacyLatestTurnId"],
+        )
+        v2_scope = v2_authority.to_index_scope()
+        v2_digest = derive_new_inbound_dismissal_digest(
+            self._hmac_secret,
+            v2_scope,
+            conversation_id=v2_authority.conversation_id,
+            latest_turn_id=v2_authority.latest_turn_id,
+        )
+        v2_dismissal_key = (
+            f"{CUSTOM_IMAP_V2_KEY_PREFIX}new-inbound-dismissal:{v2_digest}"
+        )
+        result = self._command(
+            [
+                "EVAL",
+                _CUSTOM_IMAP_DISMISSAL_BRIDGE_SCRIPT,
+                4,
+                compatibility_keys["sidecar"],
+                compatibility_keys["incomplete"],
+                legacy_dismissal_key,
+                v2_dismissal_key,
+                CUSTOM_IMAP_COMPATIBILITY_SCHEMA_VERSION,
+                compatibility_keys["scope_digest"],
+                compatibility_keys["locator_digest"],
+                sidecar["mappingMac"],
+                sidecar["legacyConversationId"],
+                sidecar["legacyLatestTurnId"],
+                CUSTOM_IMAP_COMPATIBILITY_TTL_SECONDS,
+                CUSTOM_IMAP_COMPATIBILITY_MAX_SERIALIZED_BYTES,
+                _custom_imap_compatibility_mac_key(
+                    self._hmac_secret,
+                    _CUSTOM_IMAP_COMPATIBILITY_MAPPING_MAC_INFO,
+                ).hex(),
+                _custom_imap_compatibility_mac_key(
+                    self._hmac_secret,
+                    _CUSTOM_IMAP_COMPATIBILITY_RECORD_MAC_INFO,
+                ).hex(),
+                _custom_imap_compatibility_mac_key(
+                    self._hmac_secret,
+                    _CUSTOM_IMAP_COMPATIBILITY_MARKER_MAC_INFO,
+                ).hex(),
+                _NEW_INBOUND_DISMISSAL_VALUE,
+                _CUSTOM_IMAP_V2_NATIVE_DISMISSAL_VALUE,
+                _CUSTOM_IMAP_V2_BRIDGED_DISMISSAL_VALUE,
+                SEMANTIC_SCHEMA_VERSION,
+                NEW_INBOUND_INDEX_MAX_CONVERSATION_ID_CHARACTERS,
+                NEW_INBOUND_INDEX_MAX_TURN_ID_CHARACTERS,
+                NEW_INBOUND_INDEX_MAX_VERSION_CHARACTERS,
+                NEW_INBOUND_INDEX_MAX_MODEL_CHARACTERS,
+            ]
+        )
+        outcomes = {
+            1: CustomImapDismissalBridgeOutcome.BRIDGED,
+            2: CustomImapDismissalBridgeOutcome.ALREADY_BRIDGED,
+            3: CustomImapDismissalBridgeOutcome.NATIVE_V2_PRESENT,
+            4: CustomImapDismissalBridgeOutcome.LEGACY_NOT_DISMISSED,
+            5: CustomImapDismissalBridgeOutcome.SIDECAR_UNAVAILABLE,
+            6: CustomImapDismissalBridgeOutcome.COMPATIBILITY_INCOMPLETE,
+            7: CustomImapDismissalBridgeOutcome.CLAIM_STALE,
+            8: CustomImapDismissalBridgeOutcome.CORRUPT_STATE,
+        }
+        if type(result) is not int or type(result) is bool or result not in outcomes:
+            raise SemanticStoreUnavailable()
+        return outcomes[result]
 
     def read_new_inbound_index(
         self,
@@ -2342,7 +2750,11 @@ class SemanticAssessmentStore:
         result = self._command(
             [
                 "EVAL",
-                _DISMISS_NEW_INBOUND_SCRIPT,
+                (
+                    _DISMISS_CUSTOM_IMAP_V2_NEW_INBOUND_SCRIPT
+                    if self._mode == SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2
+                    else _DISMISS_NEW_INBOUND_SCRIPT
+                ),
                 5,
                 index_keys["records"],
                 index_keys["occurrences"],
@@ -2351,11 +2763,24 @@ class SemanticAssessmentStore:
                 tombstone_key,
                 conversation_digest,
                 raw_index_record,
-                _NEW_INBOUND_DISMISSAL_VALUE,
-                raw_result,
-                NEW_INBOUND_DISMISSAL_TTL_SECONDS,
-                entry.occurred_at,
-                parsed_freshness,
+                *(
+                    (
+                        _CUSTOM_IMAP_V2_NATIVE_DISMISSAL_VALUE,
+                        _CUSTOM_IMAP_V2_BRIDGED_DISMISSAL_VALUE,
+                        raw_result,
+                        NEW_INBOUND_DISMISSAL_TTL_SECONDS,
+                        entry.occurred_at,
+                        parsed_freshness,
+                    )
+                    if self._mode == SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2
+                    else (
+                        _NEW_INBOUND_DISMISSAL_VALUE,
+                        raw_result,
+                        NEW_INBOUND_DISMISSAL_TTL_SECONDS,
+                        entry.occurred_at,
+                        parsed_freshness,
+                    )
+                ),
             ]
         )
         if type(result) is not int or type(result) is bool or result not in (0, 1):

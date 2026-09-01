@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import socket
@@ -25,10 +26,13 @@ from .store import (
     NEW_INBOUND_INDEX_MAX_RECORDS,
     SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2,
     CustomImapCompatibilityOutcome,
+    CustomImapDismissalBridgeOutcome,
     CustomImapV1CompatibilityLocator,
+    CustomImapV2DismissalAuthority,
     NewInboundIndexScope,
     SemanticAssessmentStore,
     SemanticCacheScope,
+    SemanticStoreUnavailable,
 )
 
 
@@ -89,6 +93,20 @@ def _compatibility_locator(**changes: str) -> CustomImapV1CompatibilityLocator:
     }
     values.update(changes)
     return CustomImapV1CompatibilityLocator(**values)
+
+
+def _v2_authority(**changes: str) -> CustomImapV2DismissalAuthority:
+    values = {
+        "workspace_id": "wsp_real_redis",
+        "user_id": "usr_real_redis",
+        "mailbox_id": "mailbox-real-redis",
+        "mailbox_account_identity": ACCOUNT,
+        "provider": "custom_imap",
+        "conversation_id": "imap:v2:rfc:bridge",
+        "latest_turn_id": "v2-turn-1",
+    }
+    values.update(changes)
+    return CustomImapV2DismissalAuthority(**values)
 
 
 @unittest.skipUnless(
@@ -169,6 +187,78 @@ class SemanticStoreRealRedisTests(unittest.TestCase):
             check=True,
         )
         return {"result": json.loads(completed.stdout)}
+
+    def _bridge_mapping_scope(
+        self,
+        suffix: str,
+        *,
+        model_version: str = "test-model",
+    ) -> SemanticCacheScope:
+        return SemanticCacheScope(
+            workspace_id="wsp_real_redis",
+            user_id="usr_real_redis",
+            mailbox_id="mailbox-real-redis",
+            provider="custom_imap",
+            conversation_id=f"thread:mailbox-real-redis|imap:rfc:{suffix}",
+            latest_turn_id=f"legacy-turn-{suffix}",
+            semantic_version=SEMANTIC_SCHEMA_VERSION,
+            model_version=model_version,
+        )
+
+    def _bridge_keys(
+        self,
+        legacy_scope: SemanticCacheScope,
+        authority: CustomImapV2DismissalAuthority,
+    ) -> tuple[str, str]:
+        legacy_key = self.legacy._new_inbound_dismissal_key(
+            _index_scope(),
+            conversation_id=legacy_scope.conversation_id,
+            latest_turn_id=legacy_scope.latest_turn_id,
+        )
+        v2_key = self.v2._new_inbound_dismissal_key(
+            authority.to_index_scope(),
+            conversation_id=authority.conversation_id,
+            latest_turn_id=authority.latest_turn_id,
+        )
+        return legacy_key, v2_key
+
+    def _install_bridge_authority(
+        self,
+        suffix: str,
+        *,
+        legacy_ttl_ms: int = 120_000,
+        model_version: str = "test-model",
+    ) -> tuple[
+        CustomImapV1CompatibilityLocator,
+        SemanticCacheScope,
+        CustomImapV2DismissalAuthority,
+        str,
+        str,
+    ]:
+        locator = _compatibility_locator(imap_uid=str(100 + int(suffix)))
+        legacy_scope = self._bridge_mapping_scope(
+            suffix,
+            model_version=model_version,
+        )
+        authority = _v2_authority(
+            conversation_id=f"imap:v2:rfc:bridge-{suffix}",
+            latest_turn_id=f"v2-turn-{suffix}",
+        )
+        self.assertEqual(
+            self.legacy.record_custom_imap_v1_compatibility_mapping(
+                locator,
+                legacy_scope,
+            ),
+            CustomImapCompatibilityOutcome.SIDECAR_WRITTEN,
+        )
+        legacy_key, v2_key = self._bridge_keys(legacy_scope, authority)
+        self.assertEqual(
+            self._transport(
+                ["SET", legacy_key, "1", "PX", legacy_ttl_ms]
+            )["result"],
+            "OK",
+        )
+        return locator, legacy_scope, authority, legacy_key, v2_key
 
     def _commit(
         self,
@@ -503,6 +593,474 @@ class SemanticStoreRealRedisTests(unittest.TestCase):
         ))
         with self.assertRaises(ValueError):
             self.v2._keys(gmail_scope)
+
+    def test_bridge_uses_exact_legacy_expiry_and_never_extends(self):
+        locator, _scope, authority, legacy_key, v2_key = (
+            self._install_bridge_authority("1")
+        )
+        legacy_expiry = self._transport(["PEXPIRETIME", legacy_key])["result"]
+        self.assertEqual(
+            self.legacy.bridge_custom_imap_v1_dismissal_to_v2(locator, authority),
+            CustomImapDismissalBridgeOutcome.BRIDGED,
+        )
+        self.assertEqual(self._transport(["GET", v2_key])["result"], "bridged_v1")
+        self.assertEqual(
+            self._transport(["PEXPIRETIME", v2_key])["result"],
+            legacy_expiry,
+        )
+        first_expiry = self._transport(["PEXPIRETIME", v2_key])["result"]
+        self.assertEqual(
+            self.legacy.bridge_custom_imap_v1_dismissal_to_v2(locator, authority),
+            CustomImapDismissalBridgeOutcome.ALREADY_BRIDGED,
+        )
+        self.assertEqual(
+            self._transport(["PEXPIRETIME", v2_key])["result"],
+            first_expiry,
+        )
+
+        self.assertEqual(
+            self._transport(
+                ["SET", v2_key, "bridged_v1", "PXAT", legacy_expiry + 10_000]
+            )["result"],
+            "OK",
+        )
+        self.assertEqual(
+            self.legacy.bridge_custom_imap_v1_dismissal_to_v2(locator, authority),
+            CustomImapDismissalBridgeOutcome.ALREADY_BRIDGED,
+        )
+        self.assertEqual(
+            self._transport(["PEXPIRETIME", v2_key])["result"],
+            legacy_expiry,
+        )
+
+        shorter_expiry = legacy_expiry - 10_000
+        self.assertEqual(
+            self._transport(
+                ["SET", v2_key, "bridged_v1", "PXAT", shorter_expiry]
+            )["result"],
+            "OK",
+        )
+        self.assertEqual(
+            self.legacy.bridge_custom_imap_v1_dismissal_to_v2(locator, authority),
+            CustomImapDismissalBridgeOutcome.ALREADY_BRIDGED,
+        )
+        self.assertEqual(
+            self._transport(["PEXPIRETIME", v2_key])["result"],
+            shorter_expiry,
+        )
+
+    def test_bridge_requires_live_exact_legacy_dismissal(self):
+        locator, _scope, authority, legacy_key, v2_key = (
+            self._install_bridge_authority("2")
+        )
+        self.assertEqual(self._transport(["DEL", legacy_key])["result"], 1)
+        self.assertEqual(
+            self.legacy.bridge_custom_imap_v1_dismissal_to_v2(locator, authority),
+            CustomImapDismissalBridgeOutcome.LEGACY_NOT_DISMISSED,
+        )
+        self.assertIsNone(self._transport(["GET", v2_key])["result"])
+
+        locator, _scope, authority, legacy_key, v2_key = (
+            self._install_bridge_authority("3")
+        )
+        self.assertEqual(self._transport(["PEXPIREAT", legacy_key, 1])["result"], 1)
+        self.assertEqual(
+            self.legacy.bridge_custom_imap_v1_dismissal_to_v2(locator, authority),
+            CustomImapDismissalBridgeOutcome.LEGACY_NOT_DISMISSED,
+        )
+        self.assertIsNone(self._transport(["GET", v2_key])["result"])
+
+        locator, _scope, authority, legacy_key, v2_key = (
+            self._install_bridge_authority("4")
+        )
+        self.assertEqual(
+            self._transport(["SET", legacy_key, "invalid", "PX", 60_000])["result"],
+            "OK",
+        )
+        self.assertEqual(
+            self.legacy.bridge_custom_imap_v1_dismissal_to_v2(locator, authority),
+            CustomImapDismissalBridgeOutcome.CORRUPT_STATE,
+        )
+        self.assertIsNone(self._transport(["GET", v2_key])["result"])
+
+    def test_bridge_sidecar_and_marker_states_fail_closed(self):
+        missing_locator = _compatibility_locator(imap_uid="105")
+        self.assertEqual(
+            self.legacy.bridge_custom_imap_v1_dismissal_to_v2(
+                missing_locator,
+                _v2_authority(conversation_id="imap:v2:rfc:missing"),
+            ),
+            CustomImapDismissalBridgeOutcome.SIDECAR_UNAVAILABLE,
+        )
+        marker_locator = _compatibility_locator(imap_uid="121")
+        self.legacy.record_custom_imap_v1_compatibility_unavailable(marker_locator)
+        self.assertEqual(
+            self.legacy.bridge_custom_imap_v1_dismissal_to_v2(
+                marker_locator,
+                _v2_authority(conversation_id="imap:v2:rfc:marked"),
+            ),
+            CustomImapDismissalBridgeOutcome.COMPATIBILITY_INCOMPLETE,
+        )
+        malformed_marker_locator = _compatibility_locator(imap_uid="122")
+        malformed_marker_keys = store_module._custom_imap_compatibility_keys(
+            SECRET,
+            malformed_marker_locator,
+        )
+        self.assertEqual(
+            self._transport(
+                ["SET", malformed_marker_keys["incomplete"], "not-json"]
+            )["result"],
+            "OK",
+        )
+        self.assertEqual(
+            self.legacy.bridge_custom_imap_v1_dismissal_to_v2(
+                malformed_marker_locator,
+                _v2_authority(conversation_id="imap:v2:rfc:bad-marker"),
+            ),
+            CustomImapDismissalBridgeOutcome.CORRUPT_STATE,
+        )
+
+        locator, _scope, authority, _legacy_key, v2_key = (
+            self._install_bridge_authority("6")
+        )
+        keys = store_module._custom_imap_compatibility_keys(SECRET, locator)
+        self.assertEqual(
+            self._transport(["SET", keys["sidecar"], "not-json"])["result"],
+            "OK",
+        )
+        self.assertEqual(
+            self.legacy.bridge_custom_imap_v1_dismissal_to_v2(locator, authority),
+            CustomImapDismissalBridgeOutcome.CORRUPT_STATE,
+        )
+        self.assertIsNone(self._transport(["GET", v2_key])["result"])
+
+        locator, _scope, authority, _legacy_key, v2_key = (
+            self._install_bridge_authority("7")
+        )
+        keys = store_module._custom_imap_compatibility_keys(SECRET, locator)
+        tampered = json.loads(self._transport(["GET", keys["sidecar"]])["result"])
+        tampered["mappingMac"] = "0" * 40
+        self.assertEqual(
+            self._transport(
+                [
+                    "SET",
+                    keys["sidecar"],
+                    json.dumps(tampered, separators=(",", ":"), sort_keys=True),
+                ]
+            )["result"],
+            "OK",
+        )
+        self.assertEqual(
+            self.legacy.bridge_custom_imap_v1_dismissal_to_v2(locator, authority),
+            CustomImapDismissalBridgeOutcome.CORRUPT_STATE,
+        )
+        self.assertIsNone(self._transport(["GET", v2_key])["result"])
+
+        locator, _scope, authority, _legacy_key, v2_key = (
+            self._install_bridge_authority("8")
+        )
+        self.legacy.record_custom_imap_v1_compatibility_unavailable(locator)
+        self.assertEqual(
+            self.legacy.bridge_custom_imap_v1_dismissal_to_v2(locator, authority),
+            CustomImapDismissalBridgeOutcome.COMPATIBILITY_INCOMPLETE,
+        )
+        self.assertIsNone(self._transport(["GET", v2_key])["result"])
+
+        locator, scope, authority, _legacy_key, v2_key = (
+            self._install_bridge_authority("9")
+        )
+        self.assertEqual(
+            self.legacy.record_custom_imap_v1_compatibility_mapping(
+                locator,
+                replace(scope, latest_turn_id="conflicting-turn"),
+            ),
+            CustomImapCompatibilityOutcome.SIDECAR_CONFLICT,
+        )
+        self.assertEqual(
+            self.legacy.bridge_custom_imap_v1_dismissal_to_v2(locator, authority),
+            CustomImapDismissalBridgeOutcome.COMPATIBILITY_INCOMPLETE,
+        )
+        self.assertIsNone(self._transport(["GET", v2_key])["result"])
+
+    def test_bridge_revalidates_marker_and_immutable_claim_after_preparation(self):
+        def bridge_with_interruption(
+            suffix: str,
+            action,
+        ) -> tuple[CustomImapDismissalBridgeOutcome, str]:
+            locator, scope, authority, _legacy_key, v2_key = (
+                self._install_bridge_authority(suffix)
+            )
+            interrupted = False
+
+            def transport(command: list[object]) -> dict[str, object]:
+                nonlocal interrupted
+                if (
+                    not interrupted
+                    and len(command) > 1
+                    and command[1] == store_module._CUSTOM_IMAP_DISMISSAL_BRIDGE_SCRIPT
+                ):
+                    interrupted = True
+                    action(locator, scope)
+                return self._transport(command)
+
+            racing_store = SemanticAssessmentStore(transport, hmac_secret=SECRET)
+            return (
+                racing_store.bridge_custom_imap_v1_dismissal_to_v2(
+                    locator,
+                    authority,
+                ),
+                v2_key,
+            )
+
+        outcome, v2_key = bridge_with_interruption(
+            "10",
+            lambda locator, _scope: (
+                self.legacy.record_custom_imap_v1_compatibility_unavailable(locator)
+            ),
+        )
+        self.assertEqual(
+            outcome,
+            CustomImapDismissalBridgeOutcome.COMPATIBILITY_INCOMPLETE,
+        )
+        self.assertIsNone(self._transport(["GET", v2_key])["result"])
+
+        outcome, v2_key = bridge_with_interruption(
+            "11",
+            lambda locator, scope: self.legacy.record_custom_imap_v1_compatibility_mapping(
+                locator,
+                replace(scope, model_version="renewed-provenance"),
+            ),
+        )
+        self.assertEqual(outcome, CustomImapDismissalBridgeOutcome.BRIDGED)
+        self.assertEqual(self._transport(["GET", v2_key])["result"], "bridged_v1")
+
+        def replace_mapping(locator, scope):
+            keys = store_module._custom_imap_compatibility_keys(SECRET, locator)
+            now = int(self._transport(["TIME"])["result"][0])
+            alternate = store_module._encode_custom_imap_compatibility_sidecar(
+                SECRET,
+                locator,
+                replace(scope, latest_turn_id="new-mapping"),
+                validated_at=now,
+            )
+            self._transport([
+                "SET",
+                keys["sidecar"],
+                alternate,
+                "EX",
+                CUSTOM_IMAP_COMPATIBILITY_TTL_SECONDS,
+            ])
+
+        outcome, v2_key = bridge_with_interruption("12", replace_mapping)
+        self.assertEqual(outcome, CustomImapDismissalBridgeOutcome.CLAIM_STALE)
+        self.assertIsNone(self._transport(["GET", v2_key])["result"])
+
+    def test_native_v2_precedence_and_corrupt_v2_state(self):
+        locator, _scope, authority, _legacy_key, v2_key = (
+            self._install_bridge_authority("13")
+        )
+        self.assertEqual(
+            self._transport(["SET", v2_key, "native_v2", "PX", 90_000])["result"],
+            "OK",
+        )
+        native_expiry = self._transport(["PEXPIRETIME", v2_key])["result"]
+        self.assertEqual(
+            self.legacy.bridge_custom_imap_v1_dismissal_to_v2(locator, authority),
+            CustomImapDismissalBridgeOutcome.NATIVE_V2_PRESENT,
+        )
+        self.assertEqual(self._transport(["GET", v2_key])["result"], "native_v2")
+        self.assertEqual(
+            self._transport(["PEXPIRETIME", v2_key])["result"],
+            native_expiry,
+        )
+
+        locator, _scope, authority, _legacy_key, v2_key = (
+            self._install_bridge_authority("14")
+        )
+        v2_scope = _cache_scope(
+            authority.conversation_id,
+            authority.latest_turn_id,
+            CUSTOM_IMAP_V2_SEMANTIC_SCHEMA_VERSION,
+        )
+        self._commit(self.v2, v2_scope, occurred_at=10, assessed_at=20, indexed=True)
+        self.assertEqual(
+            self.legacy.bridge_custom_imap_v1_dismissal_to_v2(locator, authority),
+            CustomImapDismissalBridgeOutcome.BRIDGED,
+        )
+        self.assertTrue(self.v2.dismiss_new_inbound_exact(
+            authority.to_index_scope(),
+            conversation_id=authority.conversation_id,
+            latest_turn_id=authority.latest_turn_id,
+            semantic_version=CUSTOM_IMAP_V2_SEMANTIC_SCHEMA_VERSION,
+            current=20,
+        ))
+        self.assertEqual(self._transport(["GET", v2_key])["result"], "native_v2")
+        self.assertGreaterEqual(
+            self._transport(["TTL", v2_key])["result"],
+            2_592_000 - 2,
+        )
+        self.assertEqual(
+            self._transport(["SET", v2_key, "unknown", "PX", 60_000])["result"],
+            "OK",
+        )
+        with self.assertRaises(SemanticStoreUnavailable):
+            self.v2.dismiss_new_inbound_exact(
+                authority.to_index_scope(),
+                conversation_id=authority.conversation_id,
+                latest_turn_id=authority.latest_turn_id,
+                semantic_version=CUSTOM_IMAP_V2_SEMANTIC_SCHEMA_VERSION,
+                current=20,
+            )
+
+        for value, expiry in (("unknown", 60_000), ("bridged_v1", None)):
+            locator, _scope, authority, _legacy_key, v2_key = (
+                self._install_bridge_authority(str(15 if value == "unknown" else 16))
+            )
+            command: list[object] = ["SET", v2_key, value]
+            if expiry is not None:
+                command.extend(["PX", expiry])
+            self.assertEqual(self._transport(command)["result"], "OK")
+            self.assertEqual(
+                self.legacy.bridge_custom_imap_v1_dismissal_to_v2(locator, authority),
+                CustomImapDismissalBridgeOutcome.CORRUPT_STATE,
+            )
+        locator, _scope, authority, _legacy_key, v2_key = (
+            self._install_bridge_authority("17")
+        )
+        self.assertEqual(
+            self._transport(["HSET", v2_key, "field", "value"])["result"],
+            1,
+        )
+        self.assertEqual(
+            self.legacy.bridge_custom_imap_v1_dismissal_to_v2(locator, authority),
+            CustomImapDismissalBridgeOutcome.CORRUPT_STATE,
+        )
+
+    def test_concurrent_bridges_and_native_action_converge(self):
+        locator, _scope, authority, _legacy_key, v2_key = (
+            self._install_bridge_authority("18")
+        )
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            outcomes = list(executor.map(
+                lambda _number: self.legacy.bridge_custom_imap_v1_dismissal_to_v2(
+                    locator,
+                    authority,
+                ),
+                range(16),
+            ))
+        self.assertEqual(outcomes.count(CustomImapDismissalBridgeOutcome.BRIDGED), 1)
+        self.assertEqual(
+            outcomes.count(CustomImapDismissalBridgeOutcome.ALREADY_BRIDGED),
+            15,
+        )
+        first_expiry = self._transport(["PEXPIRETIME", v2_key])["result"]
+        for _attempt in range(3):
+            self.assertEqual(
+                self.legacy.bridge_custom_imap_v1_dismissal_to_v2(locator, authority),
+                CustomImapDismissalBridgeOutcome.ALREADY_BRIDGED,
+            )
+            next_expiry = self._transport(["PEXPIRETIME", v2_key])["result"]
+            self.assertLessEqual(next_expiry, first_expiry)
+            first_expiry = next_expiry
+
+        locator, _scope, authority, _legacy_key, v2_key = (
+            self._install_bridge_authority("19")
+        )
+        v2_scope = _cache_scope(
+            authority.conversation_id,
+            authority.latest_turn_id,
+            CUSTOM_IMAP_V2_SEMANTIC_SCHEMA_VERSION,
+        )
+        self._commit(self.v2, v2_scope, occurred_at=10, assessed_at=20, indexed=True)
+
+        def native_action() -> bool:
+            return self.v2.dismiss_new_inbound_exact(
+                authority.to_index_scope(),
+                conversation_id=authority.conversation_id,
+                latest_turn_id=authority.latest_turn_id,
+                semantic_version=CUSTOM_IMAP_V2_SEMANTIC_SCHEMA_VERSION,
+                current=20,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            bridge_future = executor.submit(
+                self.legacy.bridge_custom_imap_v1_dismissal_to_v2,
+                locator,
+                authority,
+            )
+            native_future = executor.submit(native_action)
+        self.assertIn(
+            bridge_future.result(),
+            {
+                CustomImapDismissalBridgeOutcome.BRIDGED,
+                CustomImapDismissalBridgeOutcome.NATIVE_V2_PRESENT,
+            },
+        )
+        self.assertTrue(native_future.result())
+        self.assertEqual(self._transport(["GET", v2_key])["result"], "native_v2")
+
+    def test_bridge_validation_and_legacy_script_bytes_remain_frozen(self):
+        locator = _compatibility_locator(imap_uid="120")
+        authority = _v2_authority()
+        with self.assertRaises(ValueError):
+            self.legacy.bridge_custom_imap_v1_dismissal_to_v2(
+                locator,
+                replace(authority, mailbox_account_identity="other@example.com"),
+            )
+        for changes in (
+            {"provider": "google"},
+            {"conversation_id": "imap:rfc:legacy"},
+        ):
+            with self.assertRaises(ValueError):
+                _v2_authority(**changes)
+        expected_hashes = {
+            "commit": "e13f9228df08a1a1b1b7aa1e3b8b43a1bfd8089f35586fe0784f40480f19472f",
+            "dismiss": "94f6f5a53cc38f0dcf9712c31fcedcc5e4e9ed654152b5e38d37cd5b7e2f4a30",
+            "read": "7c1038da50bc84e30b9e5ce76c0c2be8b5654c18315d3f0314785284ca87475a",
+        }
+        self.assertEqual(
+            hashlib.sha256(
+                store_module._COMMIT_NEW_INBOUND_RESULT_SCRIPT.encode()
+            ).hexdigest(),
+            expected_hashes["commit"],
+        )
+        self.assertEqual(
+            hashlib.sha256(
+                store_module._DISMISS_NEW_INBOUND_SCRIPT.encode()
+            ).hexdigest(),
+            expected_hashes["dismiss"],
+        )
+        self.assertEqual(
+            hashlib.sha256(
+                store_module._READ_NEW_INBOUND_DISMISSALS_SCRIPT.encode()
+            ).hexdigest(),
+            expected_hashes["read"],
+        )
+        gmail_scope = _index_scope(provider="google")
+        gmail_key = self.legacy._new_inbound_dismissal_key(
+            gmail_scope,
+            conversation_id="thread:gmail",
+            latest_turn_id="message-1",
+        )
+        self.assertTrue(gmail_key.startswith(
+            "cuevion:priority:semantic:v1:new-inbound-dismissal:"
+        ))
+        self.assertEqual(
+            self._transport(["SET", gmail_key, "1", "EX", 2_592_000])["result"],
+            "OK",
+        )
+        gmail_expiry = self._transport(["PEXPIRETIME", gmail_key])["result"]
+        locator, _scope, authority, legacy_key, v2_key = (
+            self._install_bridge_authority("21")
+        )
+        self.legacy.bridge_custom_imap_v1_dismissal_to_v2(locator, authority)
+        self.assertEqual(self._transport(["GET", gmail_key])["result"], "1")
+        self.assertEqual(
+            self._transport(["PEXPIRETIME", gmail_key])["result"],
+            gmail_expiry,
+        )
+        self.assertEqual(self._transport(["GET", legacy_key])["result"], "1")
+        self.assertEqual(self._transport(["GET", v2_key])["result"], "bridged_v1")
 
     def _compatibility_artifacts(
         self,
