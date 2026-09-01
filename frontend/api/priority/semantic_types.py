@@ -12,9 +12,28 @@ from .semantic_errors import SemanticInputError, SemanticProviderResponseError
 
 
 SEMANTIC_SCHEMA_VERSION = "priority-semantic-state-v1"
+CUSTOM_IMAP_V2_SEMANTIC_SCHEMA_VERSION = (
+    "priority-semantic-state-custom-imap-v2"
+)
 MAX_REQUEST_TURNS = 3
 MAX_TURN_ID_LENGTH = 512
 MAX_TIMESTAMP_LENGTH = 64
+
+
+def semantic_schema_version_for_provider(
+    provider: str,
+    *,
+    custom_imap_v2: bool = False,
+) -> str:
+    """Resolve a provider-specific semantic version without changing callers."""
+
+    if provider not in {"google", "custom_imap"}:
+        raise ValueError("invalid semantic provider")
+    if custom_imap_v2:
+        if provider != "custom_imap":
+            raise ValueError("custom IMAP v2 semantics require custom_imap")
+        return CUSTOM_IMAP_V2_SEMANTIC_SCHEMA_VERSION
+    return SEMANTIC_SCHEMA_VERSION
 
 
 class SemanticState(str, Enum):

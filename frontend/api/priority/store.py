@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING, Callable
 
 from .event_reference import derive_priority_hmac_key
 from .semantic_thresholds import evaluate_semantic_confidence
-from .semantic_types import SemanticAssessment, SemanticState
+from .semantic_types import (
+    CUSTOM_IMAP_V2_SEMANTIC_SCHEMA_VERSION,
+    SemanticAssessment,
+    SemanticState,
+)
 
 
 if TYPE_CHECKING:
@@ -55,10 +59,21 @@ WORKFLOW_MAX_SERIALIZED_RECORD_BYTES = 2 * 1_024
 WORKFLOW_MAX_SAFE_INTEGER = 9_007_199_254_740_991
 
 _KEY_PREFIX = "cuevion:priority:semantic:v1:"
+CUSTOM_IMAP_V2_KEY_PREFIX = (
+    "cuevion:priority:semantic:custom-imap-conversation-v2:v1:"
+)
+SEMANTIC_STORE_MODE_LEGACY = "legacy"
+SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2 = "custom_imap_v2"
 _WORKFLOW_KEY_PREFIX = "cuevion:priority:workflow:v1:"
 _SCOPE_HMAC_INFO = b"cuevion/priority/cache-scope/v1\x00"
+_CUSTOM_IMAP_V2_SCOPE_HMAC_INFO = (
+    b"cuevion/priority/custom-imap-v2/cache-scope/v1\x00"
+)
 _WORKFLOW_SCOPE_HMAC_INFO = b"cuevion/priority/workflow-scope/v1\x00"
 _RECORD_HMAC_INFO = b"cuevion/priority/cache-record/v1\x00"
+_CUSTOM_IMAP_V2_RECORD_HMAC_INFO = (
+    b"cuevion/priority/custom-imap-v2/cache-record/v1\x00"
+)
 _NEW_INBOUND_INDEX_SCOPE_HMAC_INFO = (
     b"cuevion/priority/new-inbound-index-scope/v1\x00"
 )
@@ -590,6 +605,22 @@ def derive_scope_digest(secret: str, scope: SemanticCacheScope) -> str:
     return hmac.new(key, scope.canonical_bytes(), hashlib.sha256).hexdigest()
 
 
+def derive_custom_imap_v2_scope_digest(
+    secret: str,
+    scope: SemanticCacheScope,
+    *,
+    mailbox_account_identity: str,
+) -> str:
+    _validate_custom_imap_v2_cache_scope(scope, mailbox_account_identity)
+    key = derive_priority_hmac_key(secret, _CUSTOM_IMAP_V2_SCOPE_HMAC_INFO)
+    identity = (
+        scope.canonical_bytes()
+        + b"\x00"
+        + mailbox_account_identity.encode("utf-8", errors="strict")
+    )
+    return hmac.new(key, identity, hashlib.sha256).hexdigest()
+
+
 def derive_new_inbound_index_scope_digest(
     secret: str,
     scope: NewInboundIndexScope,
@@ -631,6 +662,47 @@ def derive_new_inbound_dismissal_digest(
 def _derive_record_digest(secret: str, label: bytes, value: bytes) -> str:
     key = derive_priority_hmac_key(secret, _RECORD_HMAC_INFO)
     return hmac.new(key, label + b"\x00" + value, hashlib.sha256).hexdigest()
+
+
+def _derive_custom_imap_v2_record_digest(
+    secret: str,
+    label: bytes,
+    value: bytes,
+) -> str:
+    key = derive_priority_hmac_key(secret, _CUSTOM_IMAP_V2_RECORD_HMAC_INFO)
+    return hmac.new(key, label + b"\x00" + value, hashlib.sha256).hexdigest()
+
+
+def _valid_custom_imap_v2_conversation_id(value: object) -> bool:
+    return _valid_index_identifier(
+        value,
+        NEW_INBOUND_INDEX_MAX_CONVERSATION_ID_CHARACTERS,
+    ) and value.startswith(("imap:v2:rfc:", "imap:v2:uid:"))
+
+
+def _validate_custom_imap_v2_cache_scope(
+    scope: SemanticCacheScope,
+    mailbox_account_identity: str,
+) -> None:
+    if (
+        not isinstance(scope, SemanticCacheScope)
+        or scope.provider != "custom_imap"
+        or scope.semantic_version != CUSTOM_IMAP_V2_SEMANTIC_SCHEMA_VERSION
+        or not _valid_custom_imap_v2_conversation_id(scope.conversation_id)
+        or not _valid_index_identifier(
+            scope.latest_turn_id,
+            NEW_INBOUND_INDEX_MAX_TURN_ID_CHARACTERS,
+        )
+        or not _valid_index_identifier(
+            scope.model_version,
+            NEW_INBOUND_INDEX_MAX_MODEL_CHARACTERS,
+        )
+        or not _valid_index_identifier(
+            mailbox_account_identity,
+            NEW_INBOUND_INDEX_MAX_SCOPE_IDENTIFIER_CHARACTERS,
+        )
+    ):
+        raise ValueError("invalid custom IMAP v2 semantic cache scope")
 
 
 class PriorityWorkflowStore:
@@ -767,15 +839,47 @@ class PriorityWorkflowStore:
 class SemanticAssessmentStore:
     """Strict Redis-command store with no raw provider identity in its keys."""
 
-    __slots__ = ("_transport", "_hmac_secret")
+    __slots__ = (
+        "_transport",
+        "_hmac_secret",
+        "_mode",
+        "_key_prefix",
+        "_mailbox_account_identity",
+    )
 
-    def __init__(self, command_transport: CommandTransport, *, hmac_secret: str) -> None:
+    def __init__(
+        self,
+        command_transport: CommandTransport,
+        *,
+        hmac_secret: str,
+        mode: str = SEMANTIC_STORE_MODE_LEGACY,
+        mailbox_account_identity: str | None = None,
+    ) -> None:
         if not callable(command_transport):
             raise ValueError("invalid semantic command transport")
+        if mode not in {
+            SEMANTIC_STORE_MODE_LEGACY,
+            SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2,
+        }:
+            raise ValueError("invalid semantic store mode")
+        if mode == SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2 and not _valid_index_identifier(
+            mailbox_account_identity,
+            NEW_INBOUND_INDEX_MAX_SCOPE_IDENTIFIER_CHARACTERS,
+        ):
+            raise ValueError("custom IMAP v2 mailbox account identity is required")
         # Derive once so invalid secret configuration fails before any I/O.
         derive_priority_hmac_key(hmac_secret, _SCOPE_HMAC_INFO)
+        if mode == SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2:
+            derive_priority_hmac_key(hmac_secret, _CUSTOM_IMAP_V2_SCOPE_HMAC_INFO)
         self._transport = command_transport
         self._hmac_secret = hmac_secret
+        self._mode = mode
+        self._key_prefix = (
+            CUSTOM_IMAP_V2_KEY_PREFIX
+            if mode == SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2
+            else _KEY_PREFIX
+        )
+        self._mailbox_account_identity = mailbox_account_identity
 
     def _command(self, command: list[object]) -> object:
         try:
@@ -787,30 +891,66 @@ class SemanticAssessmentStore:
         return payload["result"]
 
     def _keys(self, scope: SemanticCacheScope) -> dict[str, str]:
-        digest = derive_scope_digest(self._hmac_secret, scope)
+        digest = self._scope_digest(scope)
         return {
             "digest": digest,
-            "result": f"{_KEY_PREFIX}result:{digest}",
-            "lease": f"{_KEY_PREFIX}lease:{digest}",
-            "negative": f"{_KEY_PREFIX}negative:{digest}",
-            "attempts": f"{_KEY_PREFIX}attempts:{digest}",
+            "result": f"{self._key_prefix}result:{digest}",
+            "lease": f"{self._key_prefix}lease:{digest}",
+            "negative": f"{self._key_prefix}negative:{digest}",
+            "attempts": f"{self._key_prefix}attempts:{digest}",
         }
 
+    def _scope_digest(self, scope: SemanticCacheScope) -> str:
+        if self._mode == SEMANTIC_STORE_MODE_LEGACY:
+            return derive_scope_digest(self._hmac_secret, scope)
+        assert self._mailbox_account_identity is not None
+        return derive_custom_imap_v2_scope_digest(
+            self._hmac_secret,
+            scope,
+            mailbox_account_identity=self._mailbox_account_identity,
+        )
+
+    def _validate_index_scope(self, scope: NewInboundIndexScope) -> None:
+        if self._mode == SEMANTIC_STORE_MODE_LEGACY:
+            return
+        if (
+            not isinstance(scope, NewInboundIndexScope)
+            or scope.provider != "custom_imap"
+            or scope.mailbox_account_identity != self._mailbox_account_identity
+        ):
+            raise ValueError("invalid custom IMAP v2 new-inbound index scope")
+
+    def _validate_v2_conversation(self, conversation_id: str) -> None:
+        if (
+            self._mode == SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2
+            and not _valid_custom_imap_v2_conversation_id(conversation_id)
+        ):
+            raise ValueError("invalid custom IMAP v2 conversation authority")
+
     def _record_digests(self, scope: SemanticCacheScope) -> tuple[str, str]:
-        tenant_prefix = "\x00".join(
-            (
-                scope.workspace_id,
-                scope.user_id,
-                scope.mailbox_id,
-                scope.provider,
+        if self._mode == SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2:
+            assert self._mailbox_account_identity is not None
+            _validate_custom_imap_v2_cache_scope(
+                scope,
+                self._mailbox_account_identity,
             )
-        ).encode("utf-8")
-        conversation_digest = _derive_record_digest(
+        tenant_values = (
+            scope.workspace_id,
+            scope.user_id,
+            scope.mailbox_id,
+            scope.provider,
+        )
+        digest_function = _derive_record_digest
+        if self._mode == SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2:
+            tenant_values = (*tenant_values, self._mailbox_account_identity)
+            digest_function = _derive_custom_imap_v2_record_digest
+        tenant_prefix = "\x00".join(tenant_values).encode("utf-8")
+        conversation_digest = digest_function(
             self._hmac_secret,
             b"conversation",
             tenant_prefix + b"\x00" + scope.conversation_id.encode("utf-8"),
         )
-        latest_turn_digest = _derive_record_digest(
+        latest_turn_digest = digest_function(
             self._hmac_secret,
             b"latest-turn",
             tenant_prefix
@@ -825,15 +965,16 @@ class SemanticAssessmentStore:
         self,
         scope: NewInboundIndexScope,
     ) -> dict[str, str]:
+        self._validate_index_scope(scope)
         digest = derive_new_inbound_index_scope_digest(
             self._hmac_secret,
             scope,
         )
         return {
             "digest": digest,
-            "records": f"{_KEY_PREFIX}new-inbound-index:records:{digest}",
-            "occurrences": f"{_KEY_PREFIX}new-inbound-index:occurrences:{digest}",
-            "freshness": f"{_KEY_PREFIX}new-inbound-index:freshness:{digest}",
+            "records": f"{self._key_prefix}new-inbound-index:records:{digest}",
+            "occurrences": f"{self._key_prefix}new-inbound-index:occurrences:{digest}",
+            "freshness": f"{self._key_prefix}new-inbound-index:freshness:{digest}",
         }
 
     def _new_inbound_dismissal_key(
@@ -843,13 +984,15 @@ class SemanticAssessmentStore:
         conversation_id: str,
         latest_turn_id: str,
     ) -> str:
+        self._validate_index_scope(scope)
+        self._validate_v2_conversation(conversation_id)
         digest = derive_new_inbound_dismissal_digest(
             self._hmac_secret,
             scope,
             conversation_id=conversation_id,
             latest_turn_id=latest_turn_id,
         )
-        return f"{_KEY_PREFIX}new-inbound-dismissal:{digest}"
+        return f"{self._key_prefix}new-inbound-dismissal:{digest}"
 
     def _current_key_and_value(
         self,
@@ -860,7 +1003,7 @@ class SemanticAssessmentStore:
             raise ValueError("invalid semantic occurrence time")
         conversation_digest, latest_turn_digest = self._record_digests(scope)
         return (
-            f"{_KEY_PREFIX}current:{conversation_digest}",
+            f"{self._key_prefix}current:{conversation_digest}",
             f"{occurred_at}:{latest_turn_digest}",
         )
 
@@ -1339,6 +1482,11 @@ class SemanticAssessmentStore:
             )
         ):
             raise ValueError("invalid new-inbound index read")
+        if (
+            self._mode == SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2
+            and semantic_version != CUSTOM_IMAP_V2_SEMANTIC_SCHEMA_VERSION
+        ):
+            raise ValueError("invalid custom IMAP v2 semantic version")
         keys = self._new_inbound_index_keys(scope)
         members = self._command(
             [
@@ -1381,6 +1529,13 @@ class SemanticAssessmentStore:
                 )
                 if entry is None or entry.conversation_id in seen_conversations:
                     continue
+                if (
+                    self._mode == SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2
+                    and not _valid_custom_imap_v2_conversation_id(
+                        entry.conversation_id
+                    )
+                ):
+                    raise SemanticStoreUnavailable()
                 seen_conversations.add(entry.conversation_id)
                 entries.append(entry)
         return tuple(entries)
@@ -1418,6 +1573,11 @@ class SemanticAssessmentStore:
             or current < 0
         ):
             raise ValueError("invalid new-inbound dismissal")
+        if self._mode == SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2:
+            self._validate_index_scope(index_scope)
+            self._validate_v2_conversation(conversation_id)
+            if semantic_version != CUSTOM_IMAP_V2_SEMANTIC_SCHEMA_VERSION:
+                raise ValueError("invalid custom IMAP v2 semantic version")
 
         index_keys = self._new_inbound_index_keys(index_scope)
         conversation_digest = _new_inbound_conversation_digest(

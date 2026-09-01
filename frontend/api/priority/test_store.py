@@ -7,11 +7,18 @@ from dataclasses import replace
 
 from . import store as store_module
 from .semantic_types import (
+    CUSTOM_IMAP_V2_SEMANTIC_SCHEMA_VERSION,
+    SEMANTIC_SCHEMA_VERSION,
     SemanticAssessment,
     SemanticReasonCode,
     SemanticState,
+    semantic_schema_version_for_provider,
 )
 from .store import (
+    ATTEMPT_WINDOW_SECONDS,
+    CUSTOM_IMAP_V2_KEY_PREFIX,
+    LEASE_TTL_SECONDS,
+    NEGATIVE_TTL_SECONDS,
     NEW_INBOUND_DISMISSAL_READ_BATCH_SIZE,
     NEW_INBOUND_DISMISSAL_TTL_SECONDS,
     NEW_INBOUND_INDEX_MAX_CONVERSATION_ID_CHARACTERS,
@@ -19,7 +26,9 @@ from .store import (
     NEW_INBOUND_INDEX_MAX_SERIALIZED_RECORD_BYTES,
     NEW_INBOUND_INDEX_READ_BATCH_SIZE,
     NEW_INBOUND_INDEX_TTL_SECONDS,
+    RESULT_TTL_SECONDS,
     SEMANTIC_HYDRATION_RESULT_BATCH_SIZE,
+    SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2,
     NewInboundIndexEntry,
     NewInboundIndexScope,
     SemanticAssessmentStore,
@@ -277,6 +286,21 @@ def index_scope(
         mailbox_id=mailbox_id,
         provider=provider,
         mailbox_account_identity=mailbox_account_identity,
+    )
+
+
+def custom_imap_scope(
+    *,
+    conversation_id: str = "imap:v2:rfc:conversation-1",
+    latest_turn_id: str = "turn-1",
+    semantic_version: str = CUSTOM_IMAP_V2_SEMANTIC_SCHEMA_VERSION,
+) -> SemanticCacheScope:
+    current = scope(latest_turn_id)
+    return replace(
+        current,
+        provider="custom_imap",
+        conversation_id=conversation_id,
+        semantic_version=semantic_version,
     )
 
 
@@ -1613,6 +1637,355 @@ class SemanticStoreTests(unittest.TestCase):
                 new_inbound_mailbox_account_identity="primary@example.com",
             )
         self.assertNotIn(self.store._keys(newer)["result"], self.redis.values)
+
+
+class CustomImapV2SemanticNamespaceTests(unittest.TestCase):
+    ACCOUNT = "primary@example.com"
+
+    def setUp(self) -> None:
+        self.redis = MemoryRedis()
+        self.legacy = SemanticAssessmentStore(self.redis, hmac_secret=SECRET)
+        self.v2 = SemanticAssessmentStore(
+            self.redis,
+            hmac_secret=SECRET,
+            mode=SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2,
+            mailbox_account_identity=self.ACCOUNT,
+        )
+
+    def test_legacy_google_contract_is_byte_stable(self):
+        cache_scope = scope()
+        self.assertEqual(SEMANTIC_SCHEMA_VERSION, "priority-semantic-state-v1")
+        self.assertEqual(
+            semantic_schema_version_for_provider("google"),
+            "priority-semantic-state-v1",
+        )
+        self.assertEqual(
+            self.legacy._keys(cache_scope)["result"],
+            "cuevion:priority:semantic:v1:result:"
+            "69863744edede234efa53b2f73cc7e431722ed79d466e56777441f597f005ceb",
+        )
+        self.legacy.set_current_exact(cache_scope, occurred_at=10_000)
+        lease = self.legacy.try_acquire_lease(
+            cache_scope,
+            random_bytes=lambda length: bytes([1]) * length,
+        )
+        self.assertTrue(
+            self.legacy.commit_result_if_lease_owned(
+                cache_scope,
+                lease_token=lease,
+                assessment=ASSESSMENT,
+                input_hash="a" * 64,
+                occurred_at=10_000,
+                assessed_at=20,
+            )
+        )
+        self.assertEqual(
+            self.redis.values[self.legacy._keys(cache_scope)["result"]],
+            '{"assessedAt":20,"confidence":0.98,"conversationDigest":'
+            '"79b10599e8192dc94384294df86fa961e67dafaafcb1ea40145979ccbeaad1b3",'
+            '"effectiveSemanticState":"resolved","inputHash":"'
+            + "a" * 64
+            + '","latestTurnDigest":"06d953be3416889653f117358cd6b2dc433c314f1c7c6104240c3b24e2f19c30",'
+            '"modelVersion":"test-model","reasonCode":"completed_confirmation",'
+            '"schemaVersion":1,"scopeDigest":"69863744edede234efa53b2f73cc7e431722ed79d466e56777441f597f005ceb",'
+            '"semanticVersion":"priority-semantic-state-v1","state":"resolved"}',
+        )
+
+    def test_legacy_custom_imap_keys_and_wire_record_are_byte_stable(self):
+        cache_scope = custom_imap_scope(
+            conversation_id="imap:rfc:example",
+            latest_turn_id="message-1",
+            semantic_version=SEMANTIC_SCHEMA_VERSION,
+        )
+        current_key, current_value = self.legacy._current_key_and_value(
+            cache_scope,
+            10_000,
+        )
+        self.assertEqual(
+            self.legacy._keys(cache_scope)["result"],
+            "cuevion:priority:semantic:v1:result:"
+            "b5121091b72f174165d27d20f3828c2a6745d713956c7ec200c3259bd1c0f754",
+        )
+        self.assertEqual(
+            (current_key, current_value),
+            (
+                "cuevion:priority:semantic:v1:current:"
+                "ff5b6697ded0c56e5eec77b1f6ea9c2f487e18c9918e5597e631154856b50881",
+                "10000:1599b6cd52db38a1f7fe0f294df440ca2e36c5d09b1f1b2881c175562f7a3437",
+            ),
+        )
+        current_index_scope = index_scope(provider="custom_imap")
+        self.assertEqual(
+            self.legacy._new_inbound_index_keys(current_index_scope),
+            {
+                "digest": "4b77819825cc26f26564d723a7a41401decdc0192aa5eb4afdd6a74338d01099",
+                "records": "cuevion:priority:semantic:v1:new-inbound-index:records:4b77819825cc26f26564d723a7a41401decdc0192aa5eb4afdd6a74338d01099",
+                "occurrences": "cuevion:priority:semantic:v1:new-inbound-index:occurrences:4b77819825cc26f26564d723a7a41401decdc0192aa5eb4afdd6a74338d01099",
+                "freshness": "cuevion:priority:semantic:v1:new-inbound-index:freshness:4b77819825cc26f26564d723a7a41401decdc0192aa5eb4afdd6a74338d01099",
+            },
+        )
+        self.assertEqual(
+            self.legacy._new_inbound_dismissal_key(
+                current_index_scope,
+                conversation_id=cache_scope.conversation_id,
+                latest_turn_id=cache_scope.latest_turn_id,
+            ),
+            "cuevion:priority:semantic:v1:new-inbound-dismissal:"
+            "9c2d9ead33b97f4c7e62f9a270c0835454fb85f25e16159ea2de0f5bc7bff862",
+        )
+        self.legacy.set_current_exact(cache_scope, occurred_at=10_000)
+        lease = self.legacy.try_acquire_lease(
+            cache_scope,
+            random_bytes=lambda length: bytes([1]) * length,
+        )
+        self.assertTrue(
+            self.legacy.commit_result_if_lease_owned(
+                cache_scope,
+                lease_token=lease,
+                assessment=ASSESSMENT,
+                input_hash="a" * 64,
+                occurred_at=10_000,
+                assessed_at=20,
+            )
+        )
+        self.assertEqual(
+            self.redis.values[self.legacy._keys(cache_scope)["result"]],
+            '{"assessedAt":20,"confidence":0.98,"conversationDigest":'
+            '"ff5b6697ded0c56e5eec77b1f6ea9c2f487e18c9918e5597e631154856b50881",'
+            '"effectiveSemanticState":"resolved","inputHash":"'
+            + "a" * 64
+            + '","latestTurnDigest":"1599b6cd52db38a1f7fe0f294df440ca2e36c5d09b1f1b2881c175562f7a3437",'
+            '"modelVersion":"test-model","reasonCode":"completed_confirmation",'
+            '"schemaVersion":1,"scopeDigest":"b5121091b72f174165d27d20f3828c2a6745d713956c7ec200c3259bd1c0f754",'
+            '"semanticVersion":"priority-semantic-state-v1","state":"resolved"}',
+        )
+
+    def test_custom_imap_v2_all_artifact_families_are_physically_isolated(self):
+        legacy_scope = custom_imap_scope(
+            conversation_id="imap:rfc:conversation-1",
+            semantic_version=SEMANTIC_SCHEMA_VERSION,
+        )
+        v2_scope = custom_imap_scope()
+        legacy_keys = self.legacy._keys(legacy_scope)
+        v2_keys = self.v2._keys(v2_scope)
+        for family in ("result", "negative", "lease", "attempts"):
+            with self.subTest(family=family):
+                self.assertNotEqual(legacy_keys[family], v2_keys[family])
+                self.assertTrue(v2_keys[family].startswith(CUSTOM_IMAP_V2_KEY_PREFIX))
+        self.assertNotEqual(
+            self.legacy._current_key_and_value(legacy_scope, 1)[0],
+            self.v2._current_key_and_value(v2_scope, 1)[0],
+        )
+        legacy_index = index_scope(provider="custom_imap")
+        v2_index = index_scope(provider="custom_imap")
+        legacy_index_keys = self.legacy._new_inbound_index_keys(legacy_index)
+        v2_index_keys = self.v2._new_inbound_index_keys(v2_index)
+        for family in ("records", "occurrences", "freshness"):
+            with self.subTest(family=family):
+                self.assertNotEqual(legacy_index_keys[family], v2_index_keys[family])
+                self.assertTrue(
+                    v2_index_keys[family].startswith(CUSTOM_IMAP_V2_KEY_PREFIX)
+                )
+        self.assertNotEqual(
+            self.legacy._new_inbound_dismissal_key(
+                legacy_index,
+                conversation_id=legacy_scope.conversation_id,
+                latest_turn_id=legacy_scope.latest_turn_id,
+            ),
+            self.v2._new_inbound_dismissal_key(
+                v2_index,
+                conversation_id=v2_scope.conversation_id,
+                latest_turn_id=v2_scope.latest_turn_id,
+            ),
+        )
+
+    def test_custom_imap_v2_is_account_scoped_while_legacy_remains_unchanged(self):
+        cache_scope = custom_imap_scope()
+        other_v2 = SemanticAssessmentStore(
+            self.redis,
+            hmac_secret=SECRET,
+            mode=SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2,
+            mailbox_account_identity="other@example.com",
+        )
+        self.assertNotEqual(
+            self.v2._keys(cache_scope)["result"],
+            other_v2._keys(cache_scope)["result"],
+        )
+        self.assertNotEqual(
+            self.v2._current_key_and_value(cache_scope, 1)[0],
+            other_v2._current_key_and_value(cache_scope, 1)[0],
+        )
+        legacy_with_account = SemanticAssessmentStore(
+            self.redis,
+            hmac_secret=SECRET,
+            mailbox_account_identity="ignored@example.com",
+        )
+        legacy_scope = custom_imap_scope(
+            conversation_id="imap:rfc:conversation-1",
+            semantic_version=SEMANTIC_SCHEMA_VERSION,
+        )
+        self.assertEqual(
+            self.legacy._keys(legacy_scope),
+            legacy_with_account._keys(legacy_scope),
+        )
+        self.assertEqual(
+            self.legacy._current_key_and_value(legacy_scope, 1),
+            legacy_with_account._current_key_and_value(legacy_scope, 1),
+        )
+
+    def test_custom_imap_v2_provider_version_and_authority_fail_closed(self):
+        with self.assertRaises(ValueError):
+            SemanticAssessmentStore(
+                self.redis,
+                hmac_secret=SECRET,
+                mode=SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2,
+            )
+        accepted = ("imap:v2:rfc:abc", "imap:v2:uid:1:2")
+        for conversation_id in accepted:
+            with self.subTest(accepted=conversation_id):
+                self.assertIn("result", self.v2._keys(custom_imap_scope(
+                    conversation_id=conversation_id
+                )))
+        rejected = (
+            "imap:rfc:abc",
+            "imap:uid:1:2",
+            "thread:gmail",
+            "",
+            "imap:v2:rfc:" + "x" * 1_024,
+        )
+        for conversation_id in rejected:
+            with self.subTest(rejected=conversation_id):
+                with self.assertRaises(ValueError):
+                    self.v2._keys(custom_imap_scope(
+                        conversation_id=conversation_id
+                    ))
+        with self.assertRaises(ValueError):
+            self.v2._keys(replace(custom_imap_scope(), provider="google"))
+        with self.assertRaises(ValueError):
+            self.v2._keys(replace(
+                custom_imap_scope(),
+                semantic_version=SEMANTIC_SCHEMA_VERSION,
+            ))
+        with self.assertRaises(ValueError):
+            semantic_schema_version_for_provider("google", custom_imap_v2=True)
+        with self.assertRaises(ValueError):
+            self.v2._new_inbound_index_keys(index_scope(provider="google"))
+        with self.assertRaises(ValueError):
+            self.v2._new_inbound_index_keys(index_scope(
+                provider="custom_imap",
+                mailbox_account_identity="other@example.com",
+            ))
+        with self.assertRaises(ValueError):
+            self.v2._new_inbound_dismissal_key(
+                index_scope(provider="custom_imap"),
+                conversation_id="imap:rfc:legacy",
+                latest_turn_id="turn-1",
+            )
+        self.assertEqual(
+            semantic_schema_version_for_provider(
+                "custom_imap",
+                custom_imap_v2=True,
+            ),
+            CUSTOM_IMAP_V2_SEMANTIC_SCHEMA_VERSION,
+        )
+
+    def test_custom_imap_v2_result_reads_and_corruption_are_isolated(self):
+        legacy_scope = custom_imap_scope(
+            conversation_id="imap:rfc:conversation-1",
+            semantic_version=SEMANTIC_SCHEMA_VERSION,
+        )
+        v2_scope = custom_imap_scope()
+        self.legacy.set_current_exact(legacy_scope, occurred_at=10_000)
+        legacy_lease = self.legacy.try_acquire_lease(
+            legacy_scope,
+            random_bytes=lambda length: bytes([2]) * length,
+        )
+        self.assertTrue(self.legacy.commit_result_if_lease_owned(
+            legacy_scope,
+            lease_token=legacy_lease,
+            assessment=ASSESSMENT,
+            input_hash="b" * 64,
+            occurred_at=10_000,
+            assessed_at=30,
+        ))
+        self.assertIsNone(self.v2.get_result_for_exact_scope(v2_scope))
+        self.v2.set_current_exact(v2_scope, occurred_at=10_000)
+        v2_lease = self.v2.try_acquire_lease(
+            v2_scope,
+            random_bytes=lambda length: bytes([3]) * length,
+        )
+        self.assertTrue(self.v2.commit_result_if_lease_owned(
+            v2_scope,
+            lease_token=v2_lease,
+            assessment=ASSESSMENT,
+            input_hash="b" * 64,
+            occurred_at=10_000,
+            assessed_at=30,
+        ))
+        v2_only_scope = custom_imap_scope(
+            conversation_id="imap:v2:uid:isolated:2",
+            latest_turn_id="turn-2",
+        )
+        self.v2.set_current_exact(v2_only_scope, occurred_at=11_000)
+        v2_only_lease = self.v2.try_acquire_lease(
+            v2_only_scope,
+            random_bytes=lambda length: bytes([4]) * length,
+        )
+        self.assertTrue(self.v2.commit_result_if_lease_owned(
+            v2_only_scope,
+            lease_token=v2_only_lease,
+            assessment=ASSESSMENT,
+            input_hash="c" * 64,
+            occurred_at=11_000,
+            assessed_at=31,
+        ))
+        self.assertIsNone(self.legacy.get_result_for_exact_scope(replace(
+            v2_only_scope,
+            semantic_version=SEMANTIC_SCHEMA_VERSION,
+        )))
+        legacy_result_key = self.legacy._keys(legacy_scope)["result"]
+        v2_result_key = self.v2._keys(v2_scope)["result"]
+        legacy_bytes = self.redis.values[legacy_result_key]
+        v2_bytes = self.redis.values[v2_result_key]
+        self.assertIsNotNone(self.legacy.get_result_for_exact_scope(legacy_scope))
+        self.assertIsNotNone(self.v2.get_result_for_exact_scope(v2_scope))
+        self.redis.values[legacy_result_key] = "corrupt"
+        self.assertIsNotNone(self.v2.get_result_for_exact_scope(v2_scope))
+        self.redis.values[legacy_result_key] = legacy_bytes
+        self.redis.values[v2_result_key] = "corrupt"
+        self.assertIsNotNone(self.legacy.get_result_for_exact_scope(legacy_scope))
+        self.assertNotEqual(legacy_bytes, v2_bytes)
+
+    def test_custom_imap_v2_index_corruption_and_capacity_are_isolated(self):
+        legacy_index = index_scope(provider="custom_imap")
+        v2_index = index_scope(provider="custom_imap")
+        legacy_keys = self.legacy._new_inbound_index_keys(legacy_index)
+        v2_keys = self.v2._new_inbound_index_keys(v2_index)
+        self.redis.values[legacy_keys["freshness"]] = "wrong-type"
+        self.assertEqual(
+            self.v2.read_new_inbound_index(
+                v2_index,
+                semantic_version=CUSTOM_IMAP_V2_SEMANTIC_SCHEMA_VERSION,
+                model_version="test-model",
+            ),
+            (),
+        )
+        self.redis.values.pop(legacy_keys["freshness"])
+        self.redis.values[v2_keys["freshness"]] = "wrong-type"
+        self.assertEqual(
+            self.legacy.read_new_inbound_index(
+                legacy_index,
+                semantic_version=SEMANTIC_SCHEMA_VERSION,
+                model_version="test-model",
+            ),
+            (),
+        )
+        self.assertEqual(NEW_INBOUND_INDEX_MAX_RECORDS, 64)
+        self.assertEqual(NEW_INBOUND_INDEX_TTL_SECONDS, RESULT_TTL_SECONDS)
+        self.assertEqual(NEW_INBOUND_DISMISSAL_TTL_SECONDS, RESULT_TTL_SECONDS)
+        self.assertEqual(NEGATIVE_TTL_SECONDS, 300)
+        self.assertEqual(LEASE_TTL_SECONDS, 60)
+        self.assertEqual(ATTEMPT_WINDOW_SECONDS, 86_400)
 
 
 if __name__ == "__main__":
