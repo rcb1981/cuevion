@@ -16,11 +16,15 @@ export type PublicTeamInvite = Pick<
   "inviteeName" | "accessLevel" | "status" | "expiresAt"
 >;
 
-export type TeamMemberRecord = {
+type TeamMemberPresentationRecord = {
   email: string;
   displayName: string;
   accessLevel: TeamAccessLevel;
   status: "active";
+};
+
+export type TeamMemberRecord = TeamMemberPresentationRecord & {
+  memberUserId: string;
 };
 
 export type TeamLifecycleFailureStatus =
@@ -105,7 +109,7 @@ type ChangeTeamMemberAccessRequest = {
 type ChangeTeamMemberAccessResponse =
   | {
       ok: true;
-      member: TeamMemberRecord;
+      member: TeamMemberPresentationRecord;
     }
   | TeamLifecycleFailure;
 
@@ -381,7 +385,9 @@ function parsePublicTeamInvite(value: unknown): PublicTeamInvite | null {
   };
 }
 
-function parseTeamMemberRecord(value: unknown): TeamMemberRecord | null {
+function parseTeamMemberPresentationRecord(
+  value: unknown,
+): TeamMemberPresentationRecord | null {
   if (
     !isRecord(value) ||
     typeof value.email !== "string" ||
@@ -397,6 +403,25 @@ function parseTeamMemberRecord(value: unknown): TeamMemberRecord | null {
     displayName: value.displayName,
     accessLevel: value.accessLevel,
     status: value.status,
+  };
+}
+
+function isCanonicalTeamMemberUserId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^usr_[A-Za-z0-9_-]{21}[AQgw]$/.test(value)
+  );
+}
+
+function parseTeamMemberRecord(value: unknown): TeamMemberRecord | null {
+  const presentation = parseTeamMemberPresentationRecord(value);
+  if (!presentation || !isRecord(value) || !isCanonicalTeamMemberUserId(value.memberUserId)) {
+    return null;
+  }
+
+  return {
+    ...presentation,
+    memberUserId: value.memberUserId,
   };
 }
 
@@ -713,7 +738,7 @@ export async function changeTeamMemberAccess(
     return lifecycleFailure(response.status, payload);
   }
 
-  const member = parseTeamMemberRecord(payload.member);
+  const member = parseTeamMemberPresentationRecord(payload.member);
   if (
     !member ||
     normalizeTeamIdentifier(member.email) !==

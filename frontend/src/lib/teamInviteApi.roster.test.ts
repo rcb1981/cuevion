@@ -18,6 +18,8 @@ function response(status: number, payload: unknown): Response {
 
 async function run() {
   const originalFetch = globalThis.fetch;
+  const firstMemberUserId = "usr_AAAAAAAAAAAAAAAAAAAAAA";
+  const secondMemberUserId = "usr_BBBBBBBBBBBBBBBBBBBBBQ";
 
   try {
     const calls: FetchCall[] = [];
@@ -27,6 +29,7 @@ async function run() {
         ok: true,
         members: [
           {
+            memberUserId: firstMemberUserId,
             email: "member@example.test",
             displayName: "Member",
             accessLevel: "Shared",
@@ -42,6 +45,7 @@ async function run() {
       ok: true,
       members: [
         {
+          memberUserId: firstMemberUserId,
           email: "member@example.test",
           displayName: "Member",
           accessLevel: "Shared",
@@ -58,6 +62,79 @@ async function run() {
       false,
       "the client must not send workspace authority",
     );
+    assert.equal(calls.length, 1, "the authoritative roster uses one request");
+
+    globalThis.fetch = (async () =>
+      response(200, {
+        ok: true,
+        members: [
+          {
+            memberUserId: secondMemberUserId,
+            email: "second@example.test",
+            displayName: "Second",
+            accessLevel: "Limited",
+            status: "active",
+          },
+          {
+            memberUserId: firstMemberUserId,
+            email: "first@example.test",
+            displayName: "First",
+            accessLevel: "Shared",
+            status: "active",
+          },
+        ],
+      })) as typeof fetch;
+    assert.deepEqual(await fetchTeamMembers(), {
+      ok: true,
+      members: [
+        {
+          memberUserId: secondMemberUserId,
+          email: "second@example.test",
+          displayName: "Second",
+          accessLevel: "Limited",
+          status: "active",
+        },
+        {
+          memberUserId: firstMemberUserId,
+          email: "first@example.test",
+          displayName: "First",
+          accessLevel: "Shared",
+          status: "active",
+        },
+      ],
+    });
+
+    const invalidMemberUserIds: unknown[] = [
+      undefined,
+      "",
+      " member-user ",
+      "member@example.test",
+      "usr_AAAAAAAAAAAAAAAAAAAAAB",
+      "usr_AAAAAAAAAAAAAAAAAAAAAA\n",
+    ];
+    for (const memberUserId of invalidMemberUserIds) {
+      globalThis.fetch = (async () =>
+        response(200, {
+          ok: true,
+          members: [
+            {
+              ...(memberUserId === undefined ? {} : { memberUserId }),
+              email: "member@example.test",
+              displayName: "Member",
+              accessLevel: "Shared",
+              status: "active",
+            },
+          ],
+        })) as typeof fetch;
+      assert.deepEqual(await fetchTeamMembers(), {
+        ok: false,
+        status: "unavailable",
+        error: {
+          code: "unavailable",
+          message: "Could not load team members.",
+        },
+      });
+    }
 
     globalThis.fetch = (async () => response(200, { ok: true, members: [] })) as typeof fetch;
     assert.deepEqual(await fetchTeamMembers(), { ok: true, members: [] });

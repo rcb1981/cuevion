@@ -531,14 +531,17 @@ def _build_member_user_pointer(value: object) -> dict[str, object] | None:
 
 def project_team_member(value: object) -> dict[str, object] | None:
     record = _normalize_mutable_membership_record(value)
-    if record is None:
+    if record is None or record["status"] != "active":
         return None
-    return {
+    projected = {
         "email": record["email"],
         "displayName": record["displayName"],
         "accessLevel": record["accessLevel"],
         "status": record["status"],
     }
+    if record["v"] == TEAM_AUTHORITY_SCHEMA_VERSION:
+        projected["memberUserId"] = record["memberUserId"]
+    return projected
 
 
 def _invitation_token_key(invitation_id: str, token_digest: str) -> str:

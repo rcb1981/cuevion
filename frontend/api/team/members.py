@@ -189,7 +189,13 @@ def _normalize_members_index(value: object) -> list[str]:
     return deduped_emails
 
 
-def _normalize_member_record(value: dict | None, workspace_id: str, email: str) -> dict | None:
+def _normalize_member_record(
+    value: dict | None,
+    workspace_id: str,
+    email: str,
+    *,
+    require_authoritative_member_id: bool = False,
+) -> dict | None:
     if not isinstance(value, dict):
         return None
 
@@ -203,6 +209,10 @@ def _normalize_member_record(value: dict | None, workspace_id: str, email: str) 
             or normalized_workspace_id != workspace_id
             or normalized_email != email
             or projected_member.get("status") != ACTIVE_TEAM_MEMBER_STATUS
+            or (
+                require_authoritative_member_id
+                and schema_version != 2
+            )
         ):
             return None
         return projected_member
@@ -481,7 +491,12 @@ def _list_team_members(workspace_id: str) -> tuple[list[dict] | None, dict | Non
         if record_error:
             return None, record_error
 
-        normalized_member = _normalize_member_record(record, workspace_id, email)
+        normalized_member = _normalize_member_record(
+            record,
+            workspace_id,
+            email,
+            require_authoritative_member_id=True,
+        )
         if normalized_member:
             members.append(normalized_member)
 

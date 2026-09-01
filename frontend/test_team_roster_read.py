@@ -11,6 +11,7 @@ from api.auth.runtime import (
     AuthenticatedMemberResolution,
     MemberResolutionOutcome,
 )
+from api.team import authority as team_authority
 from api.team import members as team_members
 
 
@@ -107,6 +108,7 @@ class TeamRosterReadTests(unittest.TestCase):
             "displayName": "Team Mate",
             "accessLevel": "Limited",
             "status": "active",
+            "memberUserId": "usr_AAAAAAAAAAAAAAAAAAAAAA",
         }
         request, list_members = self.invoke_get(
             "/api/team/members?op=list",
@@ -204,6 +206,14 @@ class TeamRosterReadTests(unittest.TestCase):
                 "status": "active",
             },
         )
+        self.assertIsNone(
+            team_members._normalize_member_record(
+                record,
+                "workspace-a",
+                "legacy-recipient",
+                require_authoritative_member_id=True,
+            )
+        )
 
     def test_secure_v2_membership_is_roster_visible_without_token_fields(self):
         record = {
@@ -232,7 +242,22 @@ class TeamRosterReadTests(unittest.TestCase):
                 "displayName": "Team Mate",
                 "accessLevel": "Shared",
                 "status": "active",
+                "memberUserId": "usr_recipient",
             },
+        )
+        self.assertIsNone(
+            team_members._normalize_member_record(
+                {key: value for key, value in record.items() if key != "memberUserId"},
+                "wsp_AaZz09_-",
+                "teammate@example.test",
+            )
+        )
+        self.assertIsNone(
+            team_members._normalize_member_record(
+                {**record, "memberUserId": ""},
+                "wsp_AaZz09_-",
+                "teammate@example.test",
+            )
         )
         self.assertIsNone(
             team_members._normalize_member_record(
@@ -240,6 +265,101 @@ class TeamRosterReadTests(unittest.TestCase):
                 "wsp_AaZz09_-",
                 "teammate@example.test",
             )
+        )
+
+    def test_modern_projection_exposes_only_the_stored_member_user_id(self):
+        record = {
+            "v": 2,
+            "workspaceId": "workspace-a",
+            "email": "teammate@example.test",
+            "verifiedRecipientEmail": "teammate@example.test",
+            "memberUserId": "usr_AAAAAAAAAAAAAAAAAAAAAA",
+            "displayName": "Team Mate",
+            "accessLevel": "Shared",
+            "status": "active",
+            "sourceInvitationId": "tinv_test",
+            "createdAt": 1_800_000_000_000,
+            "acceptedAt": 1_800_000_000_100,
+            "updatedAt": 1_800_000_000_100,
+        }
+        original = dict(record)
+
+        self.assertEqual(
+            team_authority.project_team_member(record),
+            {
+                "email": "teammate@example.test",
+                "displayName": "Team Mate",
+                "accessLevel": "Shared",
+                "status": "active",
+                "memberUserId": "usr_AAAAAAAAAAAAAAAAAAAAAA",
+            },
+        )
+        self.assertEqual(record, original)
+        self.assertIsNone(
+            team_authority.project_team_member(
+                {key: value for key, value in record.items() if key != "memberUserId"}
+            )
+        )
+        self.assertIsNone(
+            team_authority.project_team_member(
+                {**record, "memberUserId": "", "email": "usr_email_fallback"}
+            )
+        )
+        self.assertIsNone(
+            team_authority.project_team_member({**record, "status": "removed"})
+        )
+
+    def test_list_store_omits_legacy_rows_without_authoritative_user_ids(self):
+        legacy = self.stored_member(email="legacy@example.test")
+        modern = {
+            "v": 2,
+            "workspaceId": "workspace-a",
+            "email": "modern@example.test",
+            "verifiedRecipientEmail": "modern@example.test",
+            "memberUserId": "usr_AAAAAAAAAAAAAAAAAAAAAA",
+            "displayName": "Modern Member",
+            "accessLevel": "Limited",
+            "status": "active",
+            "sourceInvitationId": "tinv_test",
+            "createdAt": 1_800_000_000_000,
+            "acceptedAt": 1_800_000_000_100,
+            "updatedAt": 1_800_000_000_100,
+        }
+        records = {
+            "legacy@example.test": legacy,
+            "modern@example.test": modern,
+        }
+
+        with patch.object(
+            team_members,
+            "_resolve_durable_store_config",
+            return_value={"rest_url": "https://store.example", "rest_token": "token"},
+        ), patch.object(
+            team_members,
+            "_read_durable_value",
+            return_value=(["legacy@example.test", "modern@example.test"], None),
+        ), patch.object(
+            team_members,
+            "_read_durable_record",
+            side_effect=lambda _config, key: (
+                records[key.rsplit(":", 1)[-1]],
+                None,
+            ),
+        ):
+            roster, error = team_members._list_team_members("workspace-a")
+
+        self.assertIsNone(error)
+        self.assertEqual(
+            roster,
+            [
+                {
+                    "email": "modern@example.test",
+                    "displayName": "Modern Member",
+                    "accessLevel": "Limited",
+                    "status": "active",
+                    "memberUserId": "usr_AAAAAAAAAAAAAAAAAAAAAA",
+                }
+            ],
         )
 
     def test_unknown_member_schema_is_not_roster_visible(self):
