@@ -679,6 +679,27 @@ def snapshot(
     )
 
 
+def imap_v2_snapshot(*, authority_kind: str = "rfc") -> PriorityCandidateSnapshot:
+    intended = snapshot(provider="custom_imap")
+    if authority_kind == "rfc":
+        conversation = replace(
+            intended.conversation,
+            conversation_id="imap:v2:rfc:mailbox-imap:root%40example.test",
+            authority_kind="rfc",
+            rfc_root_message_id="root@example.test",
+            rfc_message_id="message@example.test",
+        )
+    else:
+        conversation = replace(
+            intended.conversation,
+            conversation_id="imap:v2:uid:mailbox-imap:INBOX:7:41",
+            authority_kind="imap_uid",
+            rfc_root_message_id=None,
+            rfc_message_id=None,
+        )
+    return replace(intended, conversation=conversation)
+
+
 class CandidateIdentityAndCodecTests(unittest.TestCase):
     def test_read_and_upsert_failures_expose_only_fixed_stages(self) -> None:
         scope = google_scope()
@@ -2075,6 +2096,244 @@ class CandidateRetentionAndInvalidationTests(unittest.TestCase):
                 first, snapshot(provider="custom_imap"), expected_version=0
             )
         self.assertFalse(any(command[0] == "SCAN" for command in redis.commands))
+
+
+class CustomImapV2CandidateStoreFoundationTests(unittest.TestCase):
+    def _stores(
+        self,
+        redis: MemoryRedis,
+    ) -> tuple[PriorityCandidateStore, PriorityCandidateStore]:
+        return (
+            PriorityCandidateStore(redis, hmac_secret=SECRET),
+            PriorityCandidateStore(
+                redis,
+                hmac_secret=SECRET,
+                storage_namespace="custom_imap_v2",
+            ),
+        )
+
+    def test_same_logical_scope_has_fully_separate_physical_keys(self) -> None:
+        redis = MemoryRedis()
+        legacy, v2 = self._stores(redis)
+        scope = imap_scope()
+        legacy_keys = legacy._scope_keys(scope)
+        v2_keys = v2._scope_keys(scope)
+
+        self.assertEqual(legacy_keys["member"], v2_keys["member"])
+        for key_name in (
+            "record",
+            "mailbox_index",
+            "user_index",
+            "namespace_index",
+            "namespace_invalid",
+            "mailbox_incomplete",
+            "user_incomplete",
+        ):
+            self.assertNotEqual(legacy_keys[key_name], v2_keys[key_name])
+        self.assertTrue(
+            v2_keys["record"].startswith(
+                "cuevion:priority:candidate:custom-imap-conversation-v2:v1:"
+            )
+        )
+        self.assertEqual(
+            scope.identity.canonical_bytes(),
+            b"custom_imap\x00INBOX\x007\x0041",
+        )
+
+    def test_legacy_and_v2_records_and_pages_are_mutually_invisible(self) -> None:
+        redis = MemoryRedis()
+        legacy, v2 = self._stores(redis)
+        scope = imap_scope()
+        legacy_record = legacy.upsert_confirmed(
+            scope,
+            snapshot(provider="custom_imap"),
+            expected_version=0,
+        )
+
+        self.assertIsNone(v2.read_candidate(scope))
+        self.assertEqual(v2.read_mailbox_page(scope.mailbox_scope()).records, ())
+        v2_record = v2.upsert_confirmed(
+            scope,
+            imap_v2_snapshot(),
+            expected_version=0,
+        )
+        self.assertEqual(legacy.read_candidate(scope), legacy_record)
+        self.assertEqual(v2.read_candidate(scope), v2_record)
+        self.assertEqual(
+            legacy.read_mailbox_page(scope.mailbox_scope()).records,
+            (legacy_record,),
+        )
+        self.assertEqual(
+            v2.read_mailbox_page(scope.mailbox_scope()).records,
+            (v2_record,),
+        )
+
+    def test_v2_mode_accepts_only_consistent_custom_imap_v2_authority(self) -> None:
+        with self.assertRaises(ValueError):
+            PriorityCandidateStore(
+                MemoryRedis(),
+                hmac_secret=SECRET,
+                storage_namespace="custom_imap_v3",
+            )
+        store = PriorityCandidateStore(
+            MemoryRedis(),
+            hmac_secret=SECRET,
+            storage_namespace="custom_imap_v2",
+        )
+        scope = imap_scope()
+        accepted_rfc = store.upsert_confirmed(
+            scope,
+            imap_v2_snapshot(),
+            expected_version=0,
+        )
+        self.assertEqual(accepted_rfc.version, 1)
+
+        uid_scope = imap_scope(uid="42")
+        accepted_uid = store.upsert_confirmed(
+            uid_scope,
+            replace(
+                imap_v2_snapshot(authority_kind="imap_uid"),
+                conversation=replace(
+                    imap_v2_snapshot(authority_kind="imap_uid").conversation,
+                    conversation_id="imap:v2:uid:mailbox-imap:INBOX:7:42",
+                ),
+            ),
+            expected_version=0,
+        )
+        self.assertEqual(accepted_uid.version, 1)
+
+        invalid_conversations = (
+            replace(
+                imap_v2_snapshot().conversation,
+                conversation_id="imap:rfc:mailbox-imap:root%40example.test",
+            ),
+            replace(
+                imap_v2_snapshot(authority_kind="imap_uid").conversation,
+                conversation_id="imap:uid:mailbox-imap:INBOX:7:43",
+            ),
+            replace(imap_v2_snapshot().conversation, conversation_id="imap:v2:rfc:"),
+            replace(
+                imap_v2_snapshot().conversation,
+                conversation_id="imap:v2:rfcx:mailbox-imap:root",
+            ),
+            replace(
+                imap_v2_snapshot().conversation,
+                conversation_id="imap:v2:rfc:mailbox-imap:root",
+                authority_kind="imap_uid",
+            ),
+            replace(
+                imap_v2_snapshot(authority_kind="imap_uid").conversation,
+                conversation_id="imap:v2:uid:mailbox-imap:INBOX:7:43",
+                rfc_message_id="message@example.test",
+            ),
+        )
+        for index, conversation in enumerate(invalid_conversations, start=100):
+            with self.subTest(conversation_id=conversation.conversation_id):
+                invalid_scope = imap_scope(uid=str(index))
+                with self.assertRaises(ValueError):
+                    store.upsert_confirmed(
+                        invalid_scope,
+                        replace(
+                            snapshot(provider="custom_imap"),
+                            conversation=conversation,
+                        ),
+                        expected_version=0,
+                    )
+
+        google = google_scope()
+        with self.assertRaises(ValueError):
+            store.read_candidate(google)
+        with self.assertRaises(ValueError):
+            store.read_mailbox_page(google.mailbox_scope())
+        with self.assertRaises(ValueError):
+            store.upsert_confirmed(google, snapshot(), expected_version=0)
+        with self.assertRaises(ValueError):
+            store.read_candidate(replace(scope, provider="other"))
+        with self.assertRaises(ValueError):
+            replace(
+                imap_v2_snapshot().conversation,
+                conversation_id="imap:v2:rfc:" + "x" * 1_024,
+            )
+
+    def test_default_store_and_google_key_and_wire_behavior_are_unchanged(self) -> None:
+        redis = MemoryRedis()
+        store = PriorityCandidateStore(redis, hmac_secret=SECRET)
+        google = google_scope()
+        google_keys = store._scope_keys(google)
+        self.assertEqual(
+            google_keys["record"],
+            "cuevion:priority:candidate:v2:record:"
+            "c43a66e4bc4f66c3e6de3b17f242346d4443b5808c2fd2f729ea5c2cbbcb0b95",
+        )
+        google_record = store.upsert_confirmed(
+            google,
+            snapshot(),
+            expected_version=0,
+        )
+        google_wire = json.loads(redis.values[google_keys["record"]])
+        self.assertEqual(google_wire["schemaVersion"], 2)
+        self.assertEqual(set(google_wire), candidate_module._ROOT_FIELDS)
+
+        for uid, conversation in (
+            (
+                "901",
+                replace(
+                    snapshot(provider="custom_imap").conversation,
+                    conversation_id="imap:rfc:mailbox-imap:root%40example.test",
+                ),
+            ),
+            (
+                "902",
+                replace(
+                    snapshot(provider="custom_imap").conversation,
+                    conversation_id="imap:uid:mailbox-imap:INBOX:7:902",
+                    authority_kind="imap_uid",
+                    rfc_root_message_id=None,
+                    rfc_message_id=None,
+                ),
+            ),
+        ):
+            legacy_scope = imap_scope(uid=uid)
+            accepted = store.upsert_confirmed(
+                legacy_scope,
+                replace(snapshot(provider="custom_imap"), conversation=conversation),
+                expected_version=0,
+            )
+            self.assertEqual(accepted.version, 1)
+        self.assertEqual(store.read_candidate(google), google_record)
+
+    def test_corruption_cannot_cross_the_namespace_boundary(self) -> None:
+        redis = MemoryRedis()
+        legacy, v2 = self._stores(redis)
+        scope = imap_scope()
+        v2_record = v2.upsert_confirmed(
+            scope,
+            imap_v2_snapshot(),
+            expected_version=0,
+        )
+        legacy_keys = legacy._scope_keys(scope)
+        redis.values[legacy_keys["record"]] = "{"
+        redis.sorted_sets[legacy_keys["mailbox_index"]] = {"not-a-digest": 1}
+        self.assertEqual(v2.read_candidate(scope), v2_record)
+        self.assertEqual(
+            v2.read_mailbox_page(scope.mailbox_scope()).records,
+            (v2_record,),
+        )
+
+        isolated_scope = imap_scope(uid="55", mailbox_id="mailbox-imap-isolated")
+        legacy_record = legacy.upsert_confirmed(
+            isolated_scope,
+            snapshot(provider="custom_imap"),
+            expected_version=0,
+        )
+        v2_keys = v2._scope_keys(isolated_scope)
+        redis.values[v2_keys["record"]] = "{"
+        redis.sorted_sets[v2_keys["mailbox_index"]] = {"not-a-digest": 1}
+        self.assertEqual(legacy.read_candidate(isolated_scope), legacy_record)
+        self.assertIn(
+            legacy_record,
+            legacy.read_mailbox_page(isolated_scope.mailbox_scope()).records,
+        )
 
 
 class CandidateDormancyTests(unittest.TestCase):

@@ -49,6 +49,12 @@ _WORKFLOW_POSITIVE_REFERENCE_KINDS = (
     "returned_reply",
 )
 _CANDIDATE_KEY_PREFIX = "cuevion:priority:candidate:v2:"
+_CUSTOM_IMAP_V2_CANDIDATE_KEY_PREFIX = (
+    "cuevion:priority:candidate:custom-imap-conversation-v2:v1:"
+)
+_LEGACY_STORE_NAMESPACE = "legacy"
+_CUSTOM_IMAP_V2_STORE_NAMESPACE = "custom_imap_v2"
+CandidateStoreNamespace = Literal["legacy", "custom_imap_v2"]
 _SCOPE_HMAC_INFO = b"cuevion/priority/candidate-scope/v1\x00"
 _MAILBOX_SCOPE_HMAC_INFO = b"cuevion/priority/candidate-mailbox-scope/v1\x00"
 _USER_SCOPE_HMAC_INFO = b"cuevion/priority/candidate-user-scope/v1\x00"
@@ -1773,11 +1779,27 @@ def _safe_redis_integer(value: object) -> int | None:
 class PriorityCandidateStore:
     """Strict candidate records plus bounded mailbox/user/namespace indexes."""
 
-    __slots__ = ("_transport", "_hmac_secret")
+    __slots__ = (
+        "_transport",
+        "_hmac_secret",
+        "_storage_namespace",
+        "_key_prefix",
+    )
 
-    def __init__(self, command_transport: CommandTransport, *, hmac_secret: str) -> None:
+    def __init__(
+        self,
+        command_transport: CommandTransport,
+        *,
+        hmac_secret: str,
+        storage_namespace: CandidateStoreNamespace = _LEGACY_STORE_NAMESPACE,
+    ) -> None:
         if not callable(command_transport):
             raise ValueError("invalid Priority candidate command transport")
+        if storage_namespace not in {
+            _LEGACY_STORE_NAMESPACE,
+            _CUSTOM_IMAP_V2_STORE_NAMESPACE,
+        }:
+            raise ValueError("invalid Priority candidate storage namespace")
         derive_priority_hmac_key(hmac_secret, _SCOPE_HMAC_INFO)
         derive_priority_hmac_key(hmac_secret, _MAILBOX_SCOPE_HMAC_INFO)
         derive_priority_hmac_key(hmac_secret, _USER_SCOPE_HMAC_INFO)
@@ -1785,6 +1807,65 @@ class PriorityCandidateStore:
         derive_priority_hmac_key(hmac_secret, _NAMESPACE_HMAC_INFO)
         self._transport = command_transport
         self._hmac_secret = hmac_secret
+        self._storage_namespace = storage_namespace
+        self._key_prefix = (
+            _CUSTOM_IMAP_V2_CANDIDATE_KEY_PREFIX
+            if storage_namespace == _CUSTOM_IMAP_V2_STORE_NAMESPACE
+            else _CANDIDATE_KEY_PREFIX
+        )
+
+    def _validate_mailbox_scope_policy(
+        self,
+        scope: PriorityCandidateMailboxScope,
+    ) -> None:
+        if (
+            self._storage_namespace == _CUSTOM_IMAP_V2_STORE_NAMESPACE
+            and (
+                not isinstance(scope, PriorityCandidateMailboxScope)
+                or scope.provider != "custom_imap"
+            )
+        ):
+            raise ValueError("invalid custom-IMAP v2 candidate scope")
+
+    def _validate_scope_policy(self, scope: PriorityCandidateScope) -> None:
+        if not isinstance(scope, PriorityCandidateScope):
+            if self._storage_namespace == _CUSTOM_IMAP_V2_STORE_NAMESPACE:
+                raise ValueError("invalid custom-IMAP v2 candidate scope")
+            return
+        self._validate_mailbox_scope_policy(scope.mailbox_scope())
+
+    def _validate_snapshot_policy(
+        self,
+        scope: PriorityCandidateScope,
+        snapshot: PriorityCandidateSnapshot,
+    ) -> None:
+        self._validate_scope_policy(scope)
+        if self._storage_namespace != _CUSTOM_IMAP_V2_STORE_NAMESPACE:
+            return
+        if not isinstance(snapshot, PriorityCandidateSnapshot):
+            raise ValueError("invalid custom-IMAP v2 candidate snapshot")
+        conversation = snapshot.conversation
+        conversation_id = conversation.conversation_id
+        rfc_prefix = "imap:v2:rfc:"
+        uid_prefix = "imap:v2:uid:"
+        if conversation_id.startswith(rfc_prefix):
+            valid = (
+                len(conversation_id) > len(rfc_prefix)
+                and conversation.authority_kind == "rfc"
+                and conversation.rfc_root_message_id is not None
+                and conversation.rfc_message_id is not None
+            )
+        elif conversation_id.startswith(uid_prefix):
+            valid = (
+                len(conversation_id) > len(uid_prefix)
+                and conversation.authority_kind == "imap_uid"
+                and conversation.rfc_root_message_id is None
+                and conversation.rfc_message_id is None
+            )
+        else:
+            valid = False
+        if not valid:
+            raise ValueError("invalid custom-IMAP v2 candidate snapshot")
 
     def _command(
         self,
@@ -1804,22 +1885,24 @@ class PriorityCandidateStore:
     def _mailbox_keys(
         self, scope: PriorityCandidateMailboxScope
     ) -> dict[str, str]:
+        self._validate_mailbox_scope_policy(scope)
         mailbox_digest = derive_candidate_mailbox_scope_digest(
             self._hmac_secret, scope
         )
         user_digest = derive_candidate_user_scope_digest(self._hmac_secret, scope)
         return {
-            "mailbox_index": f"{_CANDIDATE_KEY_PREFIX}index:mailbox:{mailbox_digest}",
-            "user_index": f"{_CANDIDATE_KEY_PREFIX}index:user:{user_digest}",
+            "mailbox_index": f"{self._key_prefix}index:mailbox:{mailbox_digest}",
+            "user_index": f"{self._key_prefix}index:user:{user_digest}",
             "mailbox_incomplete": (
-                f"{_CANDIDATE_KEY_PREFIX}incomplete:mailbox:{mailbox_digest}"
+                f"{self._key_prefix}incomplete:mailbox:{mailbox_digest}"
             ),
             "user_incomplete": (
-                f"{_CANDIDATE_KEY_PREFIX}incomplete:user:{user_digest}"
+                f"{self._key_prefix}incomplete:user:{user_digest}"
             ),
         }
 
     def _scope_keys(self, scope: PriorityCandidateScope) -> dict[str, str]:
+        self._validate_scope_policy(scope)
         scope_digest = derive_candidate_scope_digest(self._hmac_secret, scope)
         namespace_digest = derive_candidate_namespace_scope_digest(
             self._hmac_secret, scope
@@ -1828,12 +1911,12 @@ class PriorityCandidateStore:
         keys.update(
             {
                 "member": scope_digest,
-                "record": f"{_CANDIDATE_KEY_PREFIX}record:{scope_digest}",
+                "record": f"{self._key_prefix}record:{scope_digest}",
                 "namespace_index": (
-                    f"{_CANDIDATE_KEY_PREFIX}index:namespace:{namespace_digest}"
+                    f"{self._key_prefix}index:namespace:{namespace_digest}"
                 ),
                 "namespace_invalid": (
-                    f"{_CANDIDATE_KEY_PREFIX}invalid:namespace:{namespace_digest}"
+                    f"{self._key_prefix}invalid:namespace:{namespace_digest}"
                 ),
             }
         )
@@ -1856,6 +1939,10 @@ class PriorityCandidateStore:
         )
         if record is None or record.scope != scope:
             raise CandidateStoreUnavailable(failure_stage)
+        try:
+            self._validate_snapshot_policy(record.scope, record.snapshot)
+        except Exception:
+            raise CandidateStoreUnavailable(failure_stage) from None
         return record
 
     def _prepare_confirmed(
@@ -1872,6 +1959,7 @@ class PriorityCandidateStore:
         ):
             raise ValueError("invalid Priority candidate write")
         snapshot.validate_for_scope(scope)
+        self._validate_snapshot_policy(scope, snapshot)
         if (
             type(references) is not tuple
             or len(references) != len(_POSITIVE_REFERENCE_KINDS)
@@ -2116,6 +2204,7 @@ class PriorityCandidateStore:
         ):
             raise ValueError("invalid Priority candidate write")
         snapshot.validate_for_scope(scope)
+        self._validate_snapshot_policy(scope, snapshot)
         keys = self._scope_keys(scope)
         current = self._command(
             ["GET", keys["record"]],
@@ -2168,6 +2257,7 @@ class PriorityCandidateStore:
         ):
             raise ValueError("invalid Priority candidate repair")
         snapshot.validate_for_scope(scope)
+        self._validate_snapshot_policy(scope, snapshot)
         keys = self._scope_keys(scope)
         current = self._command(
             ["GET", keys["record"]],
@@ -2313,7 +2403,7 @@ class PriorityCandidateStore:
         values = self._command(
             [
                 "MGET",
-                *(f"{_CANDIDATE_KEY_PREFIX}record:{member}" for member in members),
+                *(f"{self._key_prefix}record:{member}" for member in members),
             ]
         ) if members else []
         if type(values) is not list or len(values) != len(members):
@@ -2327,6 +2417,11 @@ class PriorityCandidateStore:
                 expected_mailbox_scope=scope,
                 expected_member_digest=member,
             )
+            try:
+                if record is not None:
+                    self._validate_snapshot_policy(record.scope, record.snapshot)
+            except Exception:
+                record = None
             if (
                 score is None
                 or record is None
@@ -2782,7 +2877,7 @@ class PriorityCandidateStore:
                 keys["namespace_invalid"],
                 keys["mailbox_incomplete"],
                 keys["user_incomplete"],
-                f"{_CANDIDATE_KEY_PREFIX}record:",
+                f"{self._key_prefix}record:",
                 CANDIDATE_MAX_MAILBOX_RECORDS,
                 _INCOMPLETE_VALUE,
                 CANDIDATE_INDEX_TTL_SECONDS,

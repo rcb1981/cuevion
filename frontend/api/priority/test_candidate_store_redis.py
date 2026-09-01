@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import json
 import shutil
@@ -13,6 +14,7 @@ from unittest.mock import patch
 from . import candidate_store as candidate_module
 from .candidate_projection import populate_priority_candidates, project_priority_candidate
 from .candidate_store import (
+    CandidateCapacityExceeded,
     CandidateStoreUnavailable,
     CandidateVersionConflict,
     PriorityCandidateStore,
@@ -27,6 +29,7 @@ from .test_candidate_store import (
     SECRET,
     google_scope,
     imap_scope,
+    imap_v2_snapshot,
     ready_routing,
     snapshot,
 )
@@ -104,6 +107,33 @@ class CandidateRealRedisTests(unittest.TestCase):
             check=True,
         )
         return {"result": json.loads(completed.stdout)}
+
+    def _v2_store(self) -> PriorityCandidateStore:
+        return PriorityCandidateStore(
+            self._transport,
+            hmac_secret=SECRET,
+            storage_namespace="custom_imap_v2",
+        )
+
+    def _physical_state(
+        self,
+        store: PriorityCandidateStore,
+        scope,
+    ) -> tuple[object, ...]:
+        keys = store._scope_keys(scope)
+        return (
+            self._transport(["GET", keys["record"]])["result"],
+            *(
+                self._transport(
+                    ["ZRANGE", keys[index_name], 0, -1, "WITHSCORES"]
+                )["result"]
+                for index_name in (
+                    "mailbox_index",
+                    "user_index",
+                    "namespace_index",
+                )
+            ),
+        )
 
     def _prepare_script_result(
         self,
@@ -913,6 +943,330 @@ class CandidateRealRedisTests(unittest.TestCase):
             ),
             1,
         )
+
+    def test_custom_imap_v2_records_updates_and_indexes_are_physically_isolated(
+        self,
+    ) -> None:
+        legacy = self.store
+        v2 = self._v2_store()
+        first = imap_scope(uid="7101")
+        legacy_first = legacy.upsert_confirmed(
+            first,
+            snapshot(provider="custom_imap"),
+            expected_version=0,
+        )
+        self.assertIsNone(v2.read_candidate(first))
+        v2_first = v2.upsert_confirmed(
+            first,
+            imap_v2_snapshot(),
+            expected_version=0,
+        )
+        v2_before_legacy_update = self._physical_state(v2, first)
+        legacy_updated = legacy.upsert_confirmed(
+            first,
+            snapshot(provider="custom_imap", snippet="legacy update"),
+            expected_version=legacy_first.version,
+        )
+        self.assertEqual(self._physical_state(v2, first), v2_before_legacy_update)
+        self.assertEqual(v2.read_candidate(first), v2_first)
+        self.assertEqual(legacy_updated.version, 2)
+
+        second = imap_scope(uid="7102")
+        v2_second = v2.upsert_confirmed(
+            second,
+            replace(
+                imap_v2_snapshot(),
+                conversation=replace(
+                    imap_v2_snapshot().conversation,
+                    conversation_id="imap:v2:rfc:mailbox-imap:second%40example.test",
+                ),
+            ),
+            expected_version=0,
+        )
+        self.assertIsNone(legacy.read_candidate(second))
+        legacy_second = legacy.upsert_confirmed(
+            second,
+            snapshot(provider="custom_imap"),
+            expected_version=0,
+        )
+        legacy_before_v2_update = self._physical_state(legacy, second)
+        v2_updated = v2.upsert_confirmed(
+            second,
+            replace(
+                v2_second.snapshot,
+                render=replace(v2_second.snapshot.render, snippet="v2 update"),
+            ),
+            expected_version=v2_second.version,
+        )
+        self.assertEqual(
+            self._physical_state(legacy, second),
+            legacy_before_v2_update,
+        )
+        self.assertEqual(legacy.read_candidate(second), legacy_second)
+        self.assertEqual(v2_updated.version, 2)
+        self.assertCountEqual(
+            legacy.read_mailbox_page(first.mailbox_scope()).records,
+            (legacy_updated, legacy_second),
+        )
+        self.assertCountEqual(
+            v2.read_mailbox_page(first.mailbox_scope()).records,
+            (v2_first, v2_updated),
+        )
+
+    def test_custom_imap_v2_and_legacy_corruption_are_contained(self) -> None:
+        legacy = self.store
+        v2 = self._v2_store()
+        scope = imap_scope(uid="7201")
+        legacy_record = legacy.upsert_confirmed(
+            scope,
+            snapshot(provider="custom_imap"),
+            expected_version=0,
+        )
+        v2_record = v2.upsert_confirmed(
+            scope,
+            imap_v2_snapshot(),
+            expected_version=0,
+        )
+        legacy_keys = legacy._scope_keys(scope)
+        self._transport(["SET", legacy_keys["record"], "{"])
+        self._transport(["SET", legacy_keys["mailbox_index"], "wrong-type"])
+        self.assertEqual(v2.read_candidate(scope), v2_record)
+        self.assertEqual(
+            v2.read_mailbox_page(scope.mailbox_scope()).records,
+            (v2_record,),
+        )
+        v2_updated = v2.upsert_confirmed(
+            scope,
+            replace(
+                v2_record.snapshot,
+                render=replace(v2_record.snapshot.render, snippet="safe"),
+            ),
+            expected_version=v2_record.version,
+        )
+        self.assertEqual(v2_updated.version, 2)
+
+        isolated = imap_scope(uid="7202", mailbox_id="mailbox-imap-isolated")
+        isolated_legacy = legacy.upsert_confirmed(
+            isolated,
+            snapshot(provider="custom_imap"),
+            expected_version=0,
+        )
+        isolated_v2 = v2.upsert_confirmed(
+            isolated,
+            replace(
+                imap_v2_snapshot(),
+                conversation=replace(
+                    imap_v2_snapshot().conversation,
+                    conversation_id="imap:v2:rfc:mailbox-imap:isolated%40example.test",
+                ),
+            ),
+            expected_version=0,
+        )
+        v2_keys = v2._scope_keys(isolated)
+        self._transport(["SET", v2_keys["record"], "{"])
+        self._transport(["SET", v2_keys["mailbox_index"], "wrong-type"])
+        self.assertEqual(legacy.read_candidate(isolated), isolated_legacy)
+        self.assertIn(
+            isolated_legacy,
+            legacy.read_mailbox_page(isolated.mailbox_scope()).records,
+        )
+        self.assertEqual(legacy_record.version, 1)
+        self.assertEqual(isolated_v2.version, 1)
+
+    def test_custom_imap_v2_mailbox_and_user_capacity_are_independent(self) -> None:
+        legacy = self.store
+        v2 = self._v2_store()
+        with patch.object(candidate_module, "CANDIDATE_MAX_MAILBOX_RECORDS", 2):
+            mailbox_scopes = tuple(
+                imap_scope(uid=str(7300 + index)) for index in range(3)
+            )
+            for scope in mailbox_scopes[:2]:
+                legacy.upsert_confirmed(
+                    scope,
+                    snapshot(provider="custom_imap"),
+                    expected_version=0,
+                )
+            with self.assertRaises(CandidateCapacityExceeded) as legacy_full:
+                legacy.upsert_confirmed(
+                    mailbox_scopes[2],
+                    snapshot(provider="custom_imap"),
+                    expected_version=0,
+                )
+            self.assertEqual(legacy_full.exception.scope_kind, "mailbox")
+            v2.upsert_confirmed(
+                mailbox_scopes[2],
+                replace(
+                    imap_v2_snapshot(),
+                    conversation=replace(
+                        imap_v2_snapshot().conversation,
+                        conversation_id="imap:v2:rfc:mailbox-imap:capacity-2",
+                    ),
+                ),
+                expected_version=0,
+            )
+            v2.upsert_confirmed(
+                mailbox_scopes[0],
+                imap_v2_snapshot(),
+                expected_version=0,
+            )
+            with self.assertRaises(CandidateCapacityExceeded) as v2_full:
+                v2.upsert_confirmed(
+                    mailbox_scopes[1],
+                    replace(
+                        imap_v2_snapshot(),
+                        conversation=replace(
+                            imap_v2_snapshot().conversation,
+                            conversation_id="imap:v2:rfc:mailbox-imap:capacity-1",
+                        ),
+                    ),
+                    expected_version=0,
+                )
+            self.assertEqual(v2_full.exception.scope_kind, "mailbox")
+
+        self._transport(["FLUSHDB"])
+        with (
+            patch.object(candidate_module, "CANDIDATE_MAX_MAILBOX_RECORDS", 10),
+            patch.object(candidate_module, "CANDIDATE_MAX_USER_RECORDS", 2),
+        ):
+            user_scopes = tuple(
+                imap_scope(uid=str(7400 + index), mailbox_id=f"user-mailbox-{index}")
+                for index in range(3)
+            )
+            for scope in user_scopes[:2]:
+                legacy.upsert_confirmed(
+                    scope,
+                    snapshot(provider="custom_imap"),
+                    expected_version=0,
+                )
+            with self.assertRaises(CandidateCapacityExceeded) as legacy_user_full:
+                legacy.upsert_confirmed(
+                    user_scopes[2],
+                    snapshot(provider="custom_imap"),
+                    expected_version=0,
+                )
+            self.assertEqual(legacy_user_full.exception.scope_kind, "user")
+            for index, scope in enumerate((user_scopes[2], user_scopes[0])):
+                intended = imap_v2_snapshot()
+                v2.upsert_confirmed(
+                    scope,
+                    replace(
+                        intended,
+                        conversation=replace(
+                            intended.conversation,
+                            conversation_id=f"imap:v2:rfc:mailbox-imap:user-capacity-{index}",
+                        ),
+                    ),
+                    expected_version=0,
+                )
+            with self.assertRaises(CandidateCapacityExceeded) as v2_user_full:
+                v2.upsert_confirmed(
+                    user_scopes[1],
+                    replace(
+                        imap_v2_snapshot(),
+                        conversation=replace(
+                            imap_v2_snapshot().conversation,
+                            conversation_id="imap:v2:rfc:mailbox-imap:user-capacity-full",
+                        ),
+                    ),
+                    expected_version=0,
+                )
+            self.assertEqual(v2_user_full.exception.scope_kind, "user")
+
+    def test_custom_imap_v2_concurrent_upserts_preserve_exact_cas(self) -> None:
+        v2 = self._v2_store()
+        scope = imap_scope(uid="7501")
+        initial = v2.upsert_confirmed(
+            scope,
+            imap_v2_snapshot(),
+            expected_version=0,
+        )
+
+        def update(snippet: str):
+            return v2.upsert_confirmed(
+                scope,
+                replace(
+                    initial.snapshot,
+                    render=replace(initial.snapshot.render, snippet=snippet),
+                ),
+                expected_version=initial.version,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(update, snippet)
+                for snippet in ("first", "second")
+            ]
+            outcomes = []
+            for future in futures:
+                try:
+                    outcomes.append(future.result())
+                except CandidateVersionConflict as error:
+                    outcomes.append(error)
+        records = [
+            outcome for outcome in outcomes if not isinstance(outcome, Exception)
+        ]
+        conflicts = [
+            outcome
+            for outcome in outcomes
+            if isinstance(outcome, CandidateVersionConflict)
+        ]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(records[0].version, 2)
+        self.assertEqual(v2.read_candidate(scope), records[0])
+        keys = v2._scope_keys(scope)
+        expected_score = records[0].logical_expires_at()
+        for index_name in ("mailbox_index", "user_index", "namespace_index"):
+            self.assertEqual(
+                int(
+                    float(
+                        self._transport(
+                            ["ZSCORE", keys[index_name], keys["member"]]
+                        )["result"]
+                    )
+                ),
+                expected_score,
+            )
+
+    def test_rollback_style_legacy_reader_and_google_ignore_v2_namespace(self) -> None:
+        legacy = self.store
+        v2 = self._v2_store()
+        scope = imap_scope(uid="7601")
+        v2.upsert_confirmed(scope, imap_v2_snapshot(), expected_version=0)
+        self.assertIsNone(legacy.read_candidate(scope))
+        self.assertEqual(
+            legacy.read_mailbox_page(scope.mailbox_scope()).records,
+            (),
+        )
+        legacy_keys = legacy._scope_keys(scope)
+        for key_name in ("record", "mailbox_index", "user_index", "namespace_index"):
+            self.assertEqual(
+                self._transport(["EXISTS", legacy_keys[key_name]])["result"],
+                0,
+            )
+
+        google = google_scope(message_id="google-physical-regression")
+        google_record = legacy.upsert_confirmed(
+            google,
+            snapshot(),
+            expected_version=0,
+        )
+        google_keys = legacy._scope_keys(google)
+        self.assertTrue(
+            google_keys["record"].startswith(candidate_module._CANDIDATE_KEY_PREFIX)
+        )
+        self.assertFalse(
+            google_keys["record"].startswith(
+                candidate_module._CUSTOM_IMAP_V2_CANDIDATE_KEY_PREFIX
+            )
+        )
+        self.assertEqual(legacy.read_candidate(google), google_record)
+        for index_name in ("mailbox_index", "user_index", "namespace_index"):
+            self.assertTrue(
+                google_keys[index_name].startswith(
+                    candidate_module._CANDIDATE_KEY_PREFIX
+                )
+            )
 
 
 if __name__ == "__main__":
