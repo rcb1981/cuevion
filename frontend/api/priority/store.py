@@ -11,12 +11,14 @@ import re
 import secrets
 import time
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Callable
 
 from .event_reference import derive_priority_hmac_key
 from .semantic_thresholds import evaluate_semantic_confidence
 from .semantic_types import (
     CUSTOM_IMAP_V2_SEMANTIC_SCHEMA_VERSION,
+    SEMANTIC_SCHEMA_VERSION,
     SemanticAssessment,
     SemanticState,
 )
@@ -46,6 +48,13 @@ NEW_INBOUND_INDEX_READ_BATCH_SIZE = 6
 SEMANTIC_HYDRATION_RESULT_BATCH_SIZE = 3
 NEW_INBOUND_DISMISSAL_TTL_SECONDS = NEW_INBOUND_INDEX_TTL_SECONDS
 NEW_INBOUND_DISMISSAL_READ_BATCH_SIZE = NEW_INBOUND_INDEX_MAX_RECORDS
+CUSTOM_IMAP_COMPATIBILITY_SCHEMA_VERSION = 1
+CUSTOM_IMAP_COMPATIBILITY_TTL_SECONDS = (
+    RESULT_TTL_SECONDS + NEW_INBOUND_DISMISSAL_TTL_SECONDS
+)
+CUSTOM_IMAP_COMPATIBILITY_MAX_SERIALIZED_BYTES = 2 * 1_024
+CUSTOM_IMAP_COMPATIBILITY_MAX_FOLDER_BYTES = 16_384
+CUSTOM_IMAP_COMPATIBILITY_MAX_IMAP_NUMBER = 4_294_967_295
 WORKFLOW_STORE_SCHEMA_VERSION = 2
 # Approved private-beta policy. Re-review before external testers or multi-user
 # rollout; logical field expiry is intentionally independent of physical TTL.
@@ -64,6 +73,9 @@ CUSTOM_IMAP_V2_KEY_PREFIX = (
 )
 SEMANTIC_STORE_MODE_LEGACY = "legacy"
 SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2 = "custom_imap_v2"
+CUSTOM_IMAP_COMPATIBILITY_KEY_PREFIX = (
+    "cuevion:priority:semantic-compat:custom-imap-v1-to-v2:v1:"
+)
 _WORKFLOW_KEY_PREFIX = "cuevion:priority:workflow:v1:"
 _SCOPE_HMAC_INFO = b"cuevion/priority/cache-scope/v1\x00"
 _CUSTOM_IMAP_V2_SCOPE_HMAC_INFO = (
@@ -73,6 +85,21 @@ _WORKFLOW_SCOPE_HMAC_INFO = b"cuevion/priority/workflow-scope/v1\x00"
 _RECORD_HMAC_INFO = b"cuevion/priority/cache-record/v1\x00"
 _CUSTOM_IMAP_V2_RECORD_HMAC_INFO = (
     b"cuevion/priority/custom-imap-v2/cache-record/v1\x00"
+)
+_CUSTOM_IMAP_COMPATIBILITY_SCOPE_HMAC_INFO = (
+    b"cuevion/priority/semantic-compat/custom-imap-v1-to-v2/scope/v1\x00"
+)
+_CUSTOM_IMAP_COMPATIBILITY_LOCATOR_HMAC_INFO = (
+    b"cuevion/priority/semantic-compat/custom-imap-v1-to-v2/locator/v1\x00"
+)
+_CUSTOM_IMAP_COMPATIBILITY_MAPPING_MAC_INFO = (
+    b"cuevion/priority/semantic-compat/custom-imap-v1-to-v2/mapping/v1\x00"
+)
+_CUSTOM_IMAP_COMPATIBILITY_RECORD_MAC_INFO = (
+    b"cuevion/priority/semantic-compat/custom-imap-v1-to-v2/record/v1\x00"
+)
+_CUSTOM_IMAP_COMPATIBILITY_MARKER_MAC_INFO = (
+    b"cuevion/priority/semantic-compat/custom-imap-v1-to-v2/marker/v1\x00"
 )
 _NEW_INBOUND_INDEX_SCOPE_HMAC_INFO = (
     b"cuevion/priority/new-inbound-index-scope/v1\x00"
@@ -86,6 +113,8 @@ _NEW_INBOUND_DISMISSAL_HMAC_INFO = (
 _NEW_INBOUND_DISMISSAL_VALUE = "1"
 _LEASE_TOKEN_BYTES = 32
 _HEX_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+_COMPATIBILITY_MAC_RE = re.compile(r"[0-9a-f]{40}")
+_CUSTOM_IMAP_COMPATIBILITY_NUMBER_RE = re.compile(r"[1-9][0-9]*", re.ASCII)
 _REDIS_NONNEGATIVE_INTEGER_SCORE_RE = re.compile(
     r"(?:0|[1-9][0-9]*)(?:\.0+)?"
 )
@@ -102,6 +131,23 @@ _NEGATIVE_CODES = frozenset(
 _CURRENT_MISMATCH_SENTINEL = "__cuevion_priority_current_mismatch__"
 _WORKFLOW_CORRUPT_SENTINEL = "__cuevion_priority_workflow_corrupt__"
 _WORKFLOW_MISSING_SENTINEL = "__cuevion_priority_workflow_missing__"
+_CUSTOM_IMAP_COMPATIBILITY_MARKER_REASONS = frozenset(
+    {
+        "mapping_conflict",
+        "sidecar_corrupt",
+        "marker_corrupt",
+        "sidecar_unavailable",
+        "record_too_large",
+    }
+)
+_CUSTOM_IMAP_COMPATIBILITY_STICKY_REASONS = frozenset(
+    {
+        "mapping_conflict",
+        "sidecar_corrupt",
+        "marker_corrupt",
+        "record_too_large",
+    }
+)
 _COMMIT_RESULT_SCRIPT = (
     "if redis.call('GET',KEYS[1])==ARGV[1] and "
     "redis.call('GET',KEYS[2])==ARGV[2] then "
@@ -147,6 +193,146 @@ _COMMIT_NEW_INBOUND_RESULT_SCRIPT = (
     "if dismissal then redis.call('EXPIRE',KEYS[7],ARGV[9]);end;"
     "redis.call('SET',KEYS[3],ARGV[3],'EX',ARGV[4]);"
     "redis.call('DEL',KEYS[1]);return 1"
+)
+_CUSTOM_IMAP_COMPATIBILITY_SCRIPT = (
+    "local function keyType(key) local value=redis.call('TYPE',key);"
+    "if type(value)=='table' then return value['ok'] end;return value end;"
+    "local function fromHex(value) local result={};"
+    "for index=1,#value,2 do result[#result+1]=string.char(tonumber("
+    "string.sub(value,index,index+1),16));end;return table.concat(result);end;"
+    "local function hmacSha1(keyHex,message) local key=fromHex(keyHex);"
+    "key=key..string.rep(string.char(0),64-#key);local inner={};local outer={};"
+    "for index=1,64 do local byte=string.byte(key,index);"
+    "inner[index]=string.char(bit.bxor(byte,54));"
+    "outer[index]=string.char(bit.bxor(byte,92));end;"
+    "local innerHex=redis.sha1hex(table.concat(inner)..message);"
+    "return redis.sha1hex(table.concat(outer)..fromHex(innerHex));end;"
+    "local separator=string.char(0);"
+    "local function markerMac(reason,validatedAt,expiresAt) return hmacSha1("
+    "ARGV[12],table.concat({ARGV[1],ARGV[2],ARGV[3],reason,"
+    "tostring(validatedAt),tostring(expiresAt)},separator));end;"
+    "local function writeMarker(reason,current) local expires=current+tonumber(ARGV[8]);"
+    "local marker={schemaVersion=tonumber(ARGV[1]),scopeDigest=ARGV[2],"
+    "locatorDigest=ARGV[3],reason=reason,validatedAt=current,expiresAt=expires};"
+    "marker['recordMac']=markerMac(reason,current,expires);"
+    "local encoded=cjson.encode(marker);"
+    "redis.call('SET',KEYS[2],encoded,'EX',ARGV[8]);return 4 end;"
+    "local clock=redis.call('TIME');local current=tonumber(clock[1]);"
+    "if not current then return redis.error_reply('compatibility time unavailable') end;"
+    "local markerType=keyType(KEYS[2]);if markerType~='none' then "
+    "if markerType~='string' then return writeMarker('marker_corrupt',current) end;"
+    "local rawMarker=redis.call('GET',KEYS[2]);local ok,marker=pcall(cjson.decode,rawMarker);"
+    "local count=0;if ok and type(marker)=='table' then "
+    "for _ in pairs(marker) do count=count+1 end end;"
+    "local validReason=ok and type(marker)=='table' and "
+    "(marker['reason']=='mapping_conflict' or marker['reason']=='sidecar_corrupt' or "
+    "marker['reason']=='marker_corrupt' or marker['reason']=='sidecar_unavailable' or "
+    "marker['reason']=='record_too_large');"
+    "local markerValid=ok and type(marker)=='table' and count==7 and "
+    "marker['schemaVersion']==tonumber(ARGV[1]) and marker['scopeDigest']==ARGV[2] and "
+    "marker['locatorDigest']==ARGV[3] and validReason and "
+    "type(marker['validatedAt'])=='number' and marker['validatedAt']%1==0 and "
+    "type(marker['expiresAt'])=='number' and marker['expiresAt']%1==0 and "
+    "marker['validatedAt']<=current and marker['expiresAt']>current and "
+    "marker['expiresAt']-marker['validatedAt']==tonumber(ARGV[8]) and "
+    "type(marker['recordMac'])=='string' and #marker['recordMac']==40 and "
+    "marker['recordMac']==markerMac(marker['reason'],marker['validatedAt'],"
+    "marker['expiresAt']);"
+    "if not markerValid then return writeMarker('marker_corrupt',current) end;"
+    "if marker['reason']~='sidecar_unavailable' then return 4 end end;"
+    "local sidecarType=keyType(KEYS[1]);local existing=nil;"
+    "if sidecarType~='none' then if sidecarType~='string' then "
+    "return writeMarker('sidecar_corrupt',current) end;"
+    "local raw=redis.call('GET',KEYS[1]);local ok,value=pcall(cjson.decode,raw);"
+    "local count=0;if ok and type(value)=='table' then "
+    "for _ in pairs(value) do count=count+1 end end;"
+    "local mappingMessage=ok and type(value)=='table' and table.concat({ARGV[2],"
+    "ARGV[3],tostring(value['legacyConversationId']),"
+    "tostring(value['legacyLatestTurnId'])},separator) or '';"
+    "local recordMessage=ok and type(value)=='table' and table.concat({ARGV[1],"
+    "ARGV[2],ARGV[3],tostring(value['legacyConversationId']),"
+    "tostring(value['legacyLatestTurnId']),tostring(value['legacySemanticVersion']),"
+    "tostring(value['legacyModelVersion']),tostring(value['validatedAt']),"
+    "tostring(value['expiresAt']),tostring(value['mappingMac'])},separator) or '';"
+    "local valid=ok and type(value)=='table' and count==11 and "
+    "#raw<=tonumber(ARGV[9]) and value['schemaVersion']==tonumber(ARGV[1]) and "
+    "value['scopeDigest']==ARGV[2] and value['locatorDigest']==ARGV[3] and "
+    "type(value['legacyConversationId'])=='string' and "
+    "type(value['legacyLatestTurnId'])=='string' and "
+    "type(value['legacySemanticVersion'])=='string' and "
+    "type(value['legacyModelVersion'])=='string' and "
+    "type(value['validatedAt'])=='number' and value['validatedAt']%1==0 and "
+    "type(value['expiresAt'])=='number' and value['expiresAt']%1==0 and "
+    "value['validatedAt']<=current and value['expiresAt']>current and "
+    "value['expiresAt']-value['validatedAt']==tonumber(ARGV[8]) and "
+    "type(value['mappingMac'])=='string' and #value['mappingMac']==40 and "
+    "type(value['recordMac'])=='string' and #value['recordMac']==40 and "
+    "value['mappingMac']==hmacSha1(ARGV[10],mappingMessage) and "
+    "value['recordMac']==hmacSha1(ARGV[11],recordMessage);"
+    "if not valid then return writeMarker('sidecar_corrupt',current) end;existing=value end;"
+    "if existing and (existing['legacyConversationId']~=ARGV[4] or "
+    "existing['legacyLatestTurnId']~=ARGV[5]) then "
+    "writeMarker('mapping_conflict',current);return 3 end;"
+    "local expires=current+tonumber(ARGV[8]);"
+    "local mappingMessage=table.concat({ARGV[2],ARGV[3],ARGV[4],ARGV[5]},separator);"
+    "local mappingMac=hmacSha1(ARGV[10],mappingMessage);"
+    "local recordMessage=table.concat({ARGV[1],ARGV[2],ARGV[3],ARGV[4],ARGV[5],"
+    "ARGV[6],ARGV[7],tostring(current),tostring(expires),mappingMac},separator);"
+    "local record={schemaVersion=tonumber(ARGV[1]),scopeDigest=ARGV[2],"
+    "locatorDigest=ARGV[3],legacyConversationId=ARGV[4],legacyLatestTurnId=ARGV[5],"
+    "legacySemanticVersion=ARGV[6],legacyModelVersion=ARGV[7],validatedAt=current,"
+    "expiresAt=expires,mappingMac=mappingMac,recordMac=hmacSha1(ARGV[11],recordMessage)};"
+    "local encoded=cjson.encode(record);if #encoded>tonumber(ARGV[9]) then "
+    "return writeMarker('record_too_large',current) end;"
+    "redis.call('SET',KEYS[1],encoded,'EX',ARGV[8]);"
+    "if markerType~='none' then redis.call('DEL',KEYS[2]);end;"
+    "if existing then return 2 else return 1 end"
+)
+_CUSTOM_IMAP_COMPATIBILITY_UNAVAILABLE_SCRIPT = (
+    "local function keyType(key) local value=redis.call('TYPE',key);"
+    "if type(value)=='table' then return value['ok'] end;return value end;"
+    "local function fromHex(value) local result={};"
+    "for index=1,#value,2 do result[#result+1]=string.char(tonumber("
+    "string.sub(value,index,index+1),16));end;return table.concat(result);end;"
+    "local function hmacSha1(keyHex,message) local key=fromHex(keyHex);"
+    "key=key..string.rep(string.char(0),64-#key);local inner={};local outer={};"
+    "for index=1,64 do local byte=string.byte(key,index);"
+    "inner[index]=string.char(bit.bxor(byte,54));"
+    "outer[index]=string.char(bit.bxor(byte,92));end;"
+    "local innerHex=redis.sha1hex(table.concat(inner)..message);"
+    "return redis.sha1hex(table.concat(outer)..fromHex(innerHex));end;"
+    "local separator=string.char(0);local clock=redis.call('TIME');"
+    "local current=tonumber(clock[1]);if not current then return 0 end;"
+    "local function mac(reason,validatedAt,expiresAt) return hmacSha1(ARGV[6],"
+    "table.concat({ARGV[1],ARGV[2],ARGV[3],reason,tostring(validatedAt),"
+    "tostring(expiresAt)},separator));end;"
+    "local function write(reason) local expires=current+tonumber(ARGV[4]);"
+    "local marker={schemaVersion=tonumber(ARGV[1]),scopeDigest=ARGV[2],"
+    "locatorDigest=ARGV[3],reason=reason,validatedAt=current,expiresAt=expires};"
+    "marker['recordMac']=mac(reason,current,expires);local encoded=cjson.encode(marker);"
+    "if #encoded>tonumber(ARGV[5]) then return 0 end;"
+    "redis.call('SET',KEYS[1],encoded,'EX',ARGV[4]);return 1 end;"
+    "local markerType=keyType(KEYS[1]);if markerType=='none' then "
+    "return write('sidecar_unavailable') end;if markerType~='string' then "
+    "return write('marker_corrupt') end;local raw=redis.call('GET',KEYS[1]);"
+    "local ok,marker=pcall(cjson.decode,raw);local count=0;"
+    "if ok and type(marker)=='table' then for _ in pairs(marker) do count=count+1 end end;"
+    "local validReason=ok and type(marker)=='table' and "
+    "(marker['reason']=='mapping_conflict' or marker['reason']=='sidecar_corrupt' or "
+    "marker['reason']=='marker_corrupt' or marker['reason']=='sidecar_unavailable' or "
+    "marker['reason']=='record_too_large');"
+    "local valid=ok and type(marker)=='table' and count==7 and "
+    "marker['schemaVersion']==tonumber(ARGV[1]) and marker['scopeDigest']==ARGV[2] and "
+    "marker['locatorDigest']==ARGV[3] and validReason and "
+    "type(marker['validatedAt'])=='number' and marker['validatedAt']%1==0 and "
+    "type(marker['expiresAt'])=='number' and marker['expiresAt']%1==0 and "
+    "marker['validatedAt']<=current and marker['expiresAt']>current and "
+    "marker['expiresAt']-marker['validatedAt']==tonumber(ARGV[4]) and "
+    "type(marker['recordMac'])=='string' and #marker['recordMac']==40 and "
+    "marker['recordMac']==mac(marker['reason'],marker['validatedAt'],marker['expiresAt']);"
+    "if not valid then return write('marker_corrupt') end;"
+    "if marker['reason']=='sidecar_unavailable' then return write('sidecar_unavailable') end;"
+    "return 1"
 )
 _RELEASE_LEASE_SCRIPT = (
     "if redis.call('GET',KEYS[1])==ARGV[1] then "
@@ -316,6 +502,74 @@ class SemanticCacheScope:
         ):
             raise ValueError("invalid semantic cache scope")
         return "\x00".join(values).encode("utf-8", errors="strict")
+
+
+class CustomImapCompatibilityOutcome(str, Enum):
+    SIDECAR_WRITTEN = "sidecar_written"
+    SIDECAR_RENEWED = "sidecar_renewed"
+    SIDECAR_CONFLICT = "sidecar_conflict"
+    COMPATIBILITY_INCOMPLETE = "compatibility_incomplete"
+
+
+@dataclass(frozen=True, slots=True)
+class CustomImapV1CompatibilityLocator:
+    workspace_id: str
+    user_id: str
+    mailbox_id: str
+    mailbox_account_identity: str
+    provider: str
+    provider_folder: str
+    uid_validity: str
+    imap_uid: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.provider != "custom_imap"
+            or any(
+                not _valid_index_identifier(
+                    value,
+                    NEW_INBOUND_INDEX_MAX_SCOPE_IDENTIFIER_CHARACTERS,
+                )
+                for value in (
+                    self.workspace_id,
+                    self.user_id,
+                    self.mailbox_id,
+                    self.mailbox_account_identity,
+                )
+            )
+            or not _valid_custom_imap_compatibility_folder(self.provider_folder)
+            or not _valid_custom_imap_compatibility_number(self.uid_validity)
+            or not _valid_custom_imap_compatibility_number(self.imap_uid)
+        ):
+            raise ValueError("invalid custom IMAP compatibility locator")
+
+    def scope_canonical_bytes(self) -> bytes:
+        return "\x00".join(
+            (
+                self.workspace_id,
+                self.user_id,
+                self.mailbox_id,
+                self.mailbox_account_identity,
+                self.provider,
+            )
+        ).encode("utf-8", errors="strict")
+
+    def canonical_bytes(self) -> bytes:
+        # The duplicated mailbox identity is part of the frozen B2 digest
+        # contract and must remain byte-for-byte stable for later migration.
+        return "\x00".join(
+            (
+                self.workspace_id,
+                self.user_id,
+                self.mailbox_id,
+                self.mailbox_account_identity,
+                self.mailbox_account_identity,
+                self.provider,
+                self.provider_folder,
+                self.uid_validity,
+                self.imap_uid,
+            )
+        ).encode("utf-8", errors="strict")
 
 
 @dataclass(frozen=True, slots=True)
@@ -580,6 +834,35 @@ def _valid_index_identifier(value: object, maximum: int) -> bool:
     )
 
 
+def _valid_custom_imap_compatibility_folder(value: object) -> bool:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        return False
+    try:
+        return (
+            len(value.encode("utf-8", errors="strict"))
+            <= CUSTOM_IMAP_COMPATIBILITY_MAX_FOLDER_BYTES
+        )
+    except UnicodeEncodeError:
+        return False
+
+
+def _valid_custom_imap_compatibility_number(value: object) -> bool:
+    if (
+        type(value) is not str
+        or _CUSTOM_IMAP_COMPATIBILITY_NUMBER_RE.fullmatch(value) is None
+    ):
+        return False
+    maximum = str(CUSTOM_IMAP_COMPATIBILITY_MAX_IMAP_NUMBER)
+    return len(value) < len(maximum) or (
+        len(value) == len(maximum) and value <= maximum
+    )
+
+
 def _parse_bounded_redis_score(value: object) -> int | None:
     if type(value) is int:
         parsed = value
@@ -657,6 +940,333 @@ def derive_new_inbound_dismissal_digest(
         + latest_turn_id.encode("utf-8", errors="strict")
     )
     return hmac.new(key, identity, hashlib.sha256).hexdigest()
+
+
+def derive_custom_imap_compatibility_scope_digest(
+    secret: str,
+    locator: CustomImapV1CompatibilityLocator,
+) -> str:
+    if not isinstance(locator, CustomImapV1CompatibilityLocator):
+        raise ValueError("invalid custom IMAP compatibility locator")
+    key = derive_priority_hmac_key(
+        secret,
+        _CUSTOM_IMAP_COMPATIBILITY_SCOPE_HMAC_INFO,
+    )
+    return hmac.new(
+        key,
+        locator.scope_canonical_bytes(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def derive_custom_imap_compatibility_locator_digest(
+    secret: str,
+    locator: CustomImapV1CompatibilityLocator,
+) -> str:
+    if not isinstance(locator, CustomImapV1CompatibilityLocator):
+        raise ValueError("invalid custom IMAP compatibility locator")
+    key = derive_priority_hmac_key(
+        secret,
+        _CUSTOM_IMAP_COMPATIBILITY_LOCATOR_HMAC_INFO,
+    )
+    return hmac.new(key, locator.canonical_bytes(), hashlib.sha256).hexdigest()
+
+
+def _custom_imap_compatibility_keys(
+    secret: str,
+    locator: CustomImapV1CompatibilityLocator,
+) -> dict[str, str]:
+    locator_digest = derive_custom_imap_compatibility_locator_digest(
+        secret,
+        locator,
+    )
+    return {
+        "scope_digest": derive_custom_imap_compatibility_scope_digest(
+            secret,
+            locator,
+        ),
+        "locator_digest": locator_digest,
+        "sidecar": (
+            f"{CUSTOM_IMAP_COMPATIBILITY_KEY_PREFIX}locator:{locator_digest}"
+        ),
+        "incomplete": (
+            f"{CUSTOM_IMAP_COMPATIBILITY_KEY_PREFIX}incomplete:{locator_digest}"
+        ),
+    }
+
+
+def _custom_imap_compatibility_mac_key(secret: str, info: bytes) -> bytes:
+    return derive_priority_hmac_key(secret, info)
+
+
+def _custom_imap_compatibility_mapping_mac(
+    secret: str,
+    *,
+    scope_digest: str,
+    locator_digest: str,
+    legacy_conversation_id: str,
+    legacy_latest_turn_id: str,
+) -> str:
+    message = "\x00".join(
+        (
+            scope_digest,
+            locator_digest,
+            legacy_conversation_id,
+            legacy_latest_turn_id,
+        )
+    ).encode("utf-8", errors="strict")
+    return hmac.new(
+        _custom_imap_compatibility_mac_key(
+            secret,
+            _CUSTOM_IMAP_COMPATIBILITY_MAPPING_MAC_INFO,
+        ),
+        message,
+        hashlib.sha1,
+    ).hexdigest()
+
+
+def _custom_imap_compatibility_record_mac(
+    secret: str,
+    record: dict[str, object],
+) -> str:
+    fields = (
+        record.get("schemaVersion"),
+        record.get("scopeDigest"),
+        record.get("locatorDigest"),
+        record.get("legacyConversationId"),
+        record.get("legacyLatestTurnId"),
+        record.get("legacySemanticVersion"),
+        record.get("legacyModelVersion"),
+        record.get("validatedAt"),
+        record.get("expiresAt"),
+        record.get("mappingMac"),
+    )
+    message = "\x00".join(str(value) for value in fields).encode(
+        "utf-8",
+        errors="strict",
+    )
+    return hmac.new(
+        _custom_imap_compatibility_mac_key(
+            secret,
+            _CUSTOM_IMAP_COMPATIBILITY_RECORD_MAC_INFO,
+        ),
+        message,
+        hashlib.sha1,
+    ).hexdigest()
+
+
+def _custom_imap_compatibility_marker_mac(
+    secret: str,
+    marker: dict[str, object],
+) -> str:
+    fields = (
+        marker.get("schemaVersion"),
+        marker.get("scopeDigest"),
+        marker.get("locatorDigest"),
+        marker.get("reason"),
+        marker.get("validatedAt"),
+        marker.get("expiresAt"),
+    )
+    message = "\x00".join(str(value) for value in fields).encode(
+        "utf-8",
+        errors="strict",
+    )
+    return hmac.new(
+        _custom_imap_compatibility_mac_key(
+            secret,
+            _CUSTOM_IMAP_COMPATIBILITY_MARKER_MAC_INFO,
+        ),
+        message,
+        hashlib.sha1,
+    ).hexdigest()
+
+
+def _validate_custom_imap_v1_compatibility_mapping(
+    locator: CustomImapV1CompatibilityLocator,
+    scope: SemanticCacheScope,
+) -> None:
+    if (
+        not isinstance(locator, CustomImapV1CompatibilityLocator)
+        or not isinstance(scope, SemanticCacheScope)
+        or scope.workspace_id != locator.workspace_id
+        or scope.user_id != locator.user_id
+        or scope.mailbox_id != locator.mailbox_id
+        or scope.provider != "custom_imap"
+        or scope.provider != locator.provider
+        or scope.semantic_version != SEMANTIC_SCHEMA_VERSION
+        or not _valid_index_identifier(
+            scope.conversation_id,
+            NEW_INBOUND_INDEX_MAX_CONVERSATION_ID_CHARACTERS,
+        )
+        or not _valid_index_identifier(
+            scope.latest_turn_id,
+            NEW_INBOUND_INDEX_MAX_TURN_ID_CHARACTERS,
+        )
+        or not _valid_index_identifier(
+            scope.model_version,
+            NEW_INBOUND_INDEX_MAX_MODEL_CHARACTERS,
+        )
+    ):
+        raise ValueError("invalid custom IMAP v1 compatibility mapping")
+
+
+def _encode_custom_imap_compatibility_sidecar(
+    secret: str,
+    locator: CustomImapV1CompatibilityLocator,
+    scope: SemanticCacheScope,
+    *,
+    validated_at: int,
+) -> str:
+    _validate_custom_imap_v1_compatibility_mapping(locator, scope)
+    if type(validated_at) is not int or validated_at < 0:
+        raise ValueError("invalid custom IMAP compatibility timestamp")
+    keys = _custom_imap_compatibility_keys(secret, locator)
+    record: dict[str, object] = {
+        "schemaVersion": CUSTOM_IMAP_COMPATIBILITY_SCHEMA_VERSION,
+        "scopeDigest": keys["scope_digest"],
+        "locatorDigest": keys["locator_digest"],
+        "legacyConversationId": scope.conversation_id,
+        "legacyLatestTurnId": scope.latest_turn_id,
+        "legacySemanticVersion": scope.semantic_version,
+        "legacyModelVersion": scope.model_version,
+        "validatedAt": validated_at,
+        "expiresAt": validated_at + CUSTOM_IMAP_COMPATIBILITY_TTL_SECONDS,
+    }
+    record["mappingMac"] = _custom_imap_compatibility_mapping_mac(
+        secret,
+        scope_digest=keys["scope_digest"],
+        locator_digest=keys["locator_digest"],
+        legacy_conversation_id=scope.conversation_id,
+        legacy_latest_turn_id=scope.latest_turn_id,
+    )
+    record["recordMac"] = _custom_imap_compatibility_record_mac(secret, record)
+    encoded = json.dumps(record, separators=(",", ":"), sort_keys=True)
+    if len(encoded.encode("utf-8")) > CUSTOM_IMAP_COMPATIBILITY_MAX_SERIALIZED_BYTES:
+        raise ValueError("custom IMAP compatibility record is too large")
+    return encoded
+
+
+def _decode_custom_imap_compatibility_sidecar(
+    value: object,
+    *,
+    secret: str,
+    locator: CustomImapV1CompatibilityLocator,
+) -> dict[str, object] | None:
+    if (
+        type(value) is not str
+        or len(value.encode("utf-8"))
+        > CUSTOM_IMAP_COMPATIBILITY_MAX_SERIALIZED_BYTES
+    ):
+        return None
+    try:
+        record = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    keys = _custom_imap_compatibility_keys(secret, locator)
+    expected_fields = {
+        "schemaVersion",
+        "scopeDigest",
+        "locatorDigest",
+        "legacyConversationId",
+        "legacyLatestTurnId",
+        "legacySemanticVersion",
+        "legacyModelVersion",
+        "validatedAt",
+        "expiresAt",
+        "mappingMac",
+        "recordMac",
+    }
+    if (
+        type(record) is not dict
+        or set(record) != expected_fields
+        or record.get("schemaVersion") != CUSTOM_IMAP_COMPATIBILITY_SCHEMA_VERSION
+        or record.get("scopeDigest") != keys["scope_digest"]
+        or record.get("locatorDigest") != keys["locator_digest"]
+        or any(
+            not _valid_index_identifier(record.get(field), maximum)
+            for field, maximum in (
+                (
+                    "legacyConversationId",
+                    NEW_INBOUND_INDEX_MAX_CONVERSATION_ID_CHARACTERS,
+                ),
+                ("legacyLatestTurnId", NEW_INBOUND_INDEX_MAX_TURN_ID_CHARACTERS),
+                ("legacySemanticVersion", NEW_INBOUND_INDEX_MAX_VERSION_CHARACTERS),
+                ("legacyModelVersion", NEW_INBOUND_INDEX_MAX_MODEL_CHARACTERS),
+            )
+        )
+        or type(record.get("validatedAt")) is not int
+        or type(record.get("expiresAt")) is not int
+        or record["validatedAt"] < 0
+        or record["expiresAt"] - record["validatedAt"]
+        != CUSTOM_IMAP_COMPATIBILITY_TTL_SECONDS
+        or type(record.get("mappingMac")) is not str
+        or _COMPATIBILITY_MAC_RE.fullmatch(record["mappingMac"]) is None
+        or type(record.get("recordMac")) is not str
+        or _COMPATIBILITY_MAC_RE.fullmatch(record["recordMac"]) is None
+    ):
+        return None
+    expected_mapping_mac = _custom_imap_compatibility_mapping_mac(
+        secret,
+        scope_digest=record["scopeDigest"],
+        locator_digest=record["locatorDigest"],
+        legacy_conversation_id=record["legacyConversationId"],
+        legacy_latest_turn_id=record["legacyLatestTurnId"],
+    )
+    if not hmac.compare_digest(record["mappingMac"], expected_mapping_mac):
+        return None
+    expected_record_mac = _custom_imap_compatibility_record_mac(secret, record)
+    if not hmac.compare_digest(record["recordMac"], expected_record_mac):
+        return None
+    return record
+
+
+def _decode_custom_imap_compatibility_marker(
+    value: object,
+    *,
+    secret: str,
+    locator: CustomImapV1CompatibilityLocator,
+) -> dict[str, object] | None:
+    if (
+        type(value) is not str
+        or len(value.encode("utf-8"))
+        > CUSTOM_IMAP_COMPATIBILITY_MAX_SERIALIZED_BYTES
+    ):
+        return None
+    try:
+        marker = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    keys = _custom_imap_compatibility_keys(secret, locator)
+    if (
+        type(marker) is not dict
+        or set(marker)
+        != {
+            "schemaVersion",
+            "scopeDigest",
+            "locatorDigest",
+            "reason",
+            "validatedAt",
+            "expiresAt",
+            "recordMac",
+        }
+        or marker.get("schemaVersion")
+        != CUSTOM_IMAP_COMPATIBILITY_SCHEMA_VERSION
+        or marker.get("scopeDigest") != keys["scope_digest"]
+        or marker.get("locatorDigest") != keys["locator_digest"]
+        or marker.get("reason") not in _CUSTOM_IMAP_COMPATIBILITY_MARKER_REASONS
+        or type(marker.get("validatedAt")) is not int
+        or type(marker.get("expiresAt")) is not int
+        or marker["validatedAt"] < 0
+        or marker["expiresAt"] - marker["validatedAt"]
+        != CUSTOM_IMAP_COMPATIBILITY_TTL_SECONDS
+        or type(marker.get("recordMac")) is not str
+        or _COMPATIBILITY_MAC_RE.fullmatch(marker["recordMac"]) is None
+    ):
+        return None
+    expected_mac = _custom_imap_compatibility_marker_mac(secret, marker)
+    if not hmac.compare_digest(marker["recordMac"], expected_mac):
+        return None
+    return marker
 
 
 def _derive_record_digest(secret: str, label: bytes, value: bytes) -> str:
@@ -1462,6 +2072,86 @@ class SemanticAssessmentStore:
         if type(result) is not int or type(result) is bool or result not in (0, 1):
             raise SemanticStoreUnavailable()
         return result == 1
+
+    def record_custom_imap_v1_compatibility_mapping(
+        self,
+        locator: CustomImapV1CompatibilityLocator,
+        scope: SemanticCacheScope,
+    ) -> CustomImapCompatibilityOutcome:
+        """Record non-authoritative v1→v2 migration metadata after v1 commit."""
+        if self._mode != SEMANTIC_STORE_MODE_LEGACY:
+            raise ValueError("compatibility mapping requires the legacy store")
+        _validate_custom_imap_v1_compatibility_mapping(locator, scope)
+        keys = _custom_imap_compatibility_keys(self._hmac_secret, locator)
+        result = self._command(
+            [
+                "EVAL",
+                _CUSTOM_IMAP_COMPATIBILITY_SCRIPT,
+                2,
+                keys["sidecar"],
+                keys["incomplete"],
+                CUSTOM_IMAP_COMPATIBILITY_SCHEMA_VERSION,
+                keys["scope_digest"],
+                keys["locator_digest"],
+                scope.conversation_id,
+                scope.latest_turn_id,
+                scope.semantic_version,
+                scope.model_version,
+                CUSTOM_IMAP_COMPATIBILITY_TTL_SECONDS,
+                CUSTOM_IMAP_COMPATIBILITY_MAX_SERIALIZED_BYTES,
+                _custom_imap_compatibility_mac_key(
+                    self._hmac_secret,
+                    _CUSTOM_IMAP_COMPATIBILITY_MAPPING_MAC_INFO,
+                ).hex(),
+                _custom_imap_compatibility_mac_key(
+                    self._hmac_secret,
+                    _CUSTOM_IMAP_COMPATIBILITY_RECORD_MAC_INFO,
+                ).hex(),
+                _custom_imap_compatibility_mac_key(
+                    self._hmac_secret,
+                    _CUSTOM_IMAP_COMPATIBILITY_MARKER_MAC_INFO,
+                ).hex(),
+            ]
+        )
+        outcomes = {
+            1: CustomImapCompatibilityOutcome.SIDECAR_WRITTEN,
+            2: CustomImapCompatibilityOutcome.SIDECAR_RENEWED,
+            3: CustomImapCompatibilityOutcome.SIDECAR_CONFLICT,
+            4: CustomImapCompatibilityOutcome.COMPATIBILITY_INCOMPLETE,
+        }
+        if type(result) is not int or type(result) is bool or result not in outcomes:
+            raise SemanticStoreUnavailable()
+        return outcomes[result]
+
+    def record_custom_imap_v1_compatibility_unavailable(
+        self,
+        locator: CustomImapV1CompatibilityLocator,
+    ) -> None:
+        """Best-effort exact marker used only after an uncertain sidecar EVAL."""
+        if self._mode != SEMANTIC_STORE_MODE_LEGACY:
+            raise ValueError("compatibility marker requires the legacy store")
+        if not isinstance(locator, CustomImapV1CompatibilityLocator):
+            raise ValueError("invalid custom IMAP compatibility locator")
+        keys = _custom_imap_compatibility_keys(self._hmac_secret, locator)
+        result = self._command(
+            [
+                "EVAL",
+                _CUSTOM_IMAP_COMPATIBILITY_UNAVAILABLE_SCRIPT,
+                1,
+                keys["incomplete"],
+                CUSTOM_IMAP_COMPATIBILITY_SCHEMA_VERSION,
+                keys["scope_digest"],
+                keys["locator_digest"],
+                CUSTOM_IMAP_COMPATIBILITY_TTL_SECONDS,
+                CUSTOM_IMAP_COMPATIBILITY_MAX_SERIALIZED_BYTES,
+                _custom_imap_compatibility_mac_key(
+                    self._hmac_secret,
+                    _CUSTOM_IMAP_COMPATIBILITY_MARKER_MAC_INFO,
+                ).hex(),
+            ]
+        )
+        if type(result) is not int or type(result) is bool or result not in (0, 1):
+            raise SemanticStoreUnavailable()
 
     def read_new_inbound_index(
         self,

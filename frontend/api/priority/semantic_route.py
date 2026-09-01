@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -45,6 +46,7 @@ from .semantic_thresholds import (
     meets_future_new_inbound_promotion_threshold,
 )
 from .semantic_types import (
+    SEMANTIC_SCHEMA_VERSION,
     SemanticAssessment,
     SemanticAssessmentRequest,
     SemanticState,
@@ -60,12 +62,17 @@ from .store import (
     NEW_INBOUND_INDEX_MAX_VERSION_CHARACTERS,
     RESULT_TTL_SECONDS,
     CachedSemanticAssessment,
+    CustomImapCompatibilityOutcome,
+    CustomImapV1CompatibilityLocator,
     NewInboundIndexScope,
     SemanticAssessmentStore,
     SemanticCacheScope,
     SemanticStoreUnavailable,
     build_runtime_semantic_store,
 )
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 MAX_ROUTE_AUTHORED_TEXT_CHARACTERS = MAX_AUTHORED_TEXT_CHARACTERS
@@ -502,6 +509,70 @@ def _new_inbound_index_scope(authority: PriorityAuthority) -> NewInboundIndexSco
         provider=authority.provider,
         mailbox_account_identity=authority.mailbox_email,
     )
+
+
+def _record_custom_imap_v1_compatibility(
+    semantic_store: SemanticAssessmentStore,
+    source: AuthorizedSemanticSource,
+    scope: SemanticCacheScope,
+) -> None:
+    """Best-effort post-v1 metadata write from provider-minted authority only."""
+    outcome = "compatibility_incomplete"
+    locator: CustomImapV1CompatibilityLocator | None = None
+    try:
+        trusted = source.revalidation_locator
+        source_authority = source.authority
+        if (
+            source_authority.provider != "custom_imap"
+            or scope.provider != "custom_imap"
+            or scope.semantic_version != SEMANTIC_SCHEMA_VERSION
+        ):
+            return
+        if (
+            type(trusted) is not dict
+            or trusted.get("provider") != "custom_imap"
+            or trusted.get("authorityKind") != "new_inbound"
+            or any(
+                type(trusted.get(field)) is not str
+                for field in ("providerFolder", "uidValidity", "imapUid")
+            )
+        ):
+            raise ValueError("missing provider-minted compatibility locator")
+        locator = CustomImapV1CompatibilityLocator(
+            workspace_id=source_authority.workspace_id,
+            user_id=source_authority.user_id,
+            mailbox_id=source_authority.mailbox_id,
+            mailbox_account_identity=source_authority.mailbox_email,
+            provider=source_authority.provider,
+            provider_folder=trusted["providerFolder"],
+            uid_validity=trusted["uidValidity"],
+            imap_uid=trusted["imapUid"],
+        )
+        store_outcome = (
+            semantic_store.record_custom_imap_v1_compatibility_mapping(
+                locator,
+                scope,
+            )
+        )
+        outcome = store_outcome.value
+    except SemanticStoreUnavailable:
+        outcome = "sidecar_unavailable"
+        if locator is not None:
+            try:
+                semantic_store.record_custom_imap_v1_compatibility_unavailable(
+                    locator
+                )
+            except Exception:
+                pass
+    except Exception:
+        outcome = "compatibility_incomplete"
+    if outcome in {
+        CustomImapCompatibilityOutcome.SIDECAR_WRITTEN.value,
+        CustomImapCompatibilityOutcome.SIDECAR_RENEWED.value,
+    }:
+        _LOGGER.info("Priority semantic compatibility outcome=%s", outcome)
+    else:
+        _LOGGER.warning("Priority semantic compatibility outcome=%s", outcome)
 
 
 def _is_exact_new_inbound_dismissed(
@@ -1114,6 +1185,15 @@ def process_semantic_request(
             status="pending",
             retry_after=LEASE_TTL_SECONDS,
             semantic_trigger=trigger,
+        )
+    if (
+        authority.provider == "custom_imap"
+        and scope.semantic_version == SEMANTIC_SCHEMA_VERSION
+    ):
+        _record_custom_imap_v1_compatibility(
+            semantic_store,
+            source,
+            scope,
         )
     confidence = evaluate_semantic_confidence(assessment)
     fresh = CachedSemanticAssessment(

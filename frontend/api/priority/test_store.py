@@ -16,6 +16,8 @@ from .semantic_types import (
 )
 from .store import (
     ATTEMPT_WINDOW_SECONDS,
+    CUSTOM_IMAP_COMPATIBILITY_MAX_SERIALIZED_BYTES,
+    CUSTOM_IMAP_COMPATIBILITY_TTL_SECONDS,
     CUSTOM_IMAP_V2_KEY_PREFIX,
     LEASE_TTL_SECONDS,
     NEGATIVE_TTL_SECONDS,
@@ -24,16 +26,20 @@ from .store import (
     NEW_INBOUND_INDEX_MAX_CONVERSATION_ID_CHARACTERS,
     NEW_INBOUND_INDEX_MAX_RECORDS,
     NEW_INBOUND_INDEX_MAX_SERIALIZED_RECORD_BYTES,
+    NEW_INBOUND_INDEX_MAX_TURN_ID_CHARACTERS,
     NEW_INBOUND_INDEX_READ_BATCH_SIZE,
     NEW_INBOUND_INDEX_TTL_SECONDS,
     RESULT_TTL_SECONDS,
     SEMANTIC_HYDRATION_RESULT_BATCH_SIZE,
     SEMANTIC_STORE_MODE_CUSTOM_IMAP_V2,
+    CustomImapCompatibilityOutcome,
+    CustomImapV1CompatibilityLocator,
     NewInboundIndexEntry,
     NewInboundIndexScope,
     SemanticAssessmentStore,
     SemanticCacheScope,
     SemanticStoreUnavailable,
+    derive_custom_imap_compatibility_locator_digest,
     derive_new_inbound_dismissal_digest,
     derive_new_inbound_index_scope_digest,
 )
@@ -302,6 +308,36 @@ def custom_imap_scope(
         conversation_id=conversation_id,
         semantic_version=semantic_version,
     )
+
+
+def compatibility_locator(**changes: str) -> CustomImapV1CompatibilityLocator:
+    values = {
+        "workspace_id": _account("wsp_", 1),
+        "user_id": _account("usr_", 2),
+        "mailbox_id": "mailbox-1",
+        "mailbox_account_identity": "primary@example.com",
+        "provider": "custom_imap",
+        "provider_folder": "INBOX",
+        "uid_validity": "7",
+        "imap_uid": "11",
+    }
+    values.update(changes)
+    return CustomImapV1CompatibilityLocator(**values)
+
+
+def compatibility_scope(**changes: str) -> SemanticCacheScope:
+    values = {
+        "workspace_id": _account("wsp_", 1),
+        "user_id": _account("usr_", 2),
+        "mailbox_id": "mailbox-1",
+        "provider": "custom_imap",
+        "conversation_id": "thread:mailbox-1|imap:rfc:mailbox-1:root",
+        "latest_turn_id": "turn-1",
+        "semantic_version": SEMANTIC_SCHEMA_VERSION,
+        "model_version": "test-model",
+    }
+    values.update(changes)
+    return SemanticCacheScope(**values)
 
 
 class SemanticStoreTests(unittest.TestCase):
@@ -1986,6 +2022,255 @@ class CustomImapV2SemanticNamespaceTests(unittest.TestCase):
         self.assertEqual(NEGATIVE_TTL_SECONDS, 300)
         self.assertEqual(LEASE_TTL_SECONDS, 60)
         self.assertEqual(ATTEMPT_WINDOW_SECONDS, 86_400)
+
+
+class CustomImapCompatibilityUnitTests(unittest.TestCase):
+    def test_locator_digest_binds_every_trusted_component_and_only_custom_imap(self):
+        original = compatibility_locator()
+        digest = derive_custom_imap_compatibility_locator_digest(SECRET, original)
+        changes = {
+            "workspace_id": _account("wsp_", 9),
+            "user_id": _account("usr_", 9),
+            "mailbox_id": "mailbox-2",
+            "mailbox_account_identity": "other@example.com",
+            "provider_folder": "Archive",
+            "uid_validity": "8",
+            "imap_uid": "12",
+        }
+        for field, value in changes.items():
+            with self.subTest(field=field):
+                changed = replace(original, **{field: value})
+                self.assertNotEqual(
+                    digest,
+                    derive_custom_imap_compatibility_locator_digest(
+                        SECRET,
+                        changed,
+                    ),
+                )
+        self.assertIn(b"\x00custom_imap\x00", original.canonical_bytes())
+        with self.assertRaises(ValueError):
+            replace(original, provider="google")
+        self.assertEqual(
+            replace(original, imap_uid="4294967295").imap_uid,
+            "4294967295",
+        )
+        for invalid_number in ("0", "01", "4294967296", "not-a-number"):
+            with self.subTest(invalid_number=invalid_number):
+                with self.assertRaises(ValueError):
+                    replace(original, imap_uid=invalid_number)
+        self.assertEqual(
+            len(replace(original, provider_folder="f" * 16_384).provider_folder),
+            16_384,
+        )
+        with self.assertRaises(ValueError):
+            replace(original, provider_folder="f" * 16_385)
+
+    def test_sidecar_is_strict_content_free_bounded_and_mac_protected(self):
+        locator = compatibility_locator()
+        encoded = store_module._encode_custom_imap_compatibility_sidecar(
+            SECRET,
+            locator,
+            compatibility_scope(),
+            validated_at=1_000,
+        )
+        self.assertLessEqual(
+            len(encoded.encode("utf-8")),
+            CUSTOM_IMAP_COMPATIBILITY_MAX_SERIALIZED_BYTES,
+        )
+        record = store_module._decode_custom_imap_compatibility_sidecar(
+            encoded,
+            secret=SECRET,
+            locator=locator,
+        )
+        self.assertIsNotNone(record)
+        self.assertEqual(
+            set(record),
+            {
+                "schemaVersion",
+                "scopeDigest",
+                "locatorDigest",
+                "legacyConversationId",
+                "legacyLatestTurnId",
+                "legacySemanticVersion",
+                "legacyModelVersion",
+                "validatedAt",
+                "expiresAt",
+                "mappingMac",
+                "recordMac",
+            },
+        )
+        self.assertTrue(
+            set(record).isdisjoint(
+                {
+                    "body",
+                    "html",
+                    "subject",
+                    "snippet",
+                    "sender",
+                    "recipient",
+                    "accountEmail",
+                    "modelInput",
+                    "modelOutput",
+                    "headers",
+                }
+            )
+        )
+        extra = {**record, "subject": "must not persist"}
+        self.assertIsNone(
+            store_module._decode_custom_imap_compatibility_sidecar(
+                json.dumps(extra),
+                secret=SECRET,
+                locator=locator,
+            )
+        )
+        mapping_tamper = {**record, "mappingMac": "0" * 40}
+        self.assertIsNone(
+            store_module._decode_custom_imap_compatibility_sidecar(
+                json.dumps(mapping_tamper),
+                secret=SECRET,
+                locator=locator,
+            )
+        )
+        record_tamper = {**record, "recordMac": "0" * 40}
+        self.assertIsNone(
+            store_module._decode_custom_imap_compatibility_sidecar(
+                json.dumps(record_tamper),
+                secret=SECRET,
+                locator=locator,
+            )
+        )
+
+    def test_mapping_identity_is_immutable_while_provenance_is_refreshable(self):
+        locator = compatibility_locator()
+        base = compatibility_scope()
+        first = json.loads(store_module._encode_custom_imap_compatibility_sidecar(
+            SECRET,
+            locator,
+            base,
+            validated_at=1_000,
+        ))
+        refreshed = json.loads(store_module._encode_custom_imap_compatibility_sidecar(
+            SECRET,
+            locator,
+            replace(base, model_version="new-model"),
+            validated_at=2_000,
+        ))
+        semantic_refresh = json.loads(
+            store_module._encode_custom_imap_compatibility_sidecar(
+                SECRET,
+                locator,
+                base,
+                validated_at=3_000,
+            )
+        )
+        conversation_change = json.loads(
+            store_module._encode_custom_imap_compatibility_sidecar(
+                SECRET,
+                locator,
+                replace(base, conversation_id="thread:mailbox-1|imap:rfc:other"),
+                validated_at=1_000,
+            )
+        )
+        turn_change = json.loads(store_module._encode_custom_imap_compatibility_sidecar(
+            SECRET,
+            locator,
+            replace(base, latest_turn_id="turn-2"),
+            validated_at=1_000,
+        ))
+        self.assertEqual(first["mappingMac"], refreshed["mappingMac"])
+        self.assertEqual(first["mappingMac"], semantic_refresh["mappingMac"])
+        self.assertNotEqual(first["recordMac"], refreshed["recordMac"])
+        self.assertNotEqual(first["mappingMac"], conversation_change["mappingMac"])
+        self.assertNotEqual(first["mappingMac"], turn_change["mappingMac"])
+        self.assertEqual(
+            first["expiresAt"] - first["validatedAt"],
+            CUSTOM_IMAP_COMPATIBILITY_TTL_SECONDS,
+        )
+        oversized = replace(
+            base,
+            conversation_id="c" * NEW_INBOUND_INDEX_MAX_CONVERSATION_ID_CHARACTERS,
+            latest_turn_id="t" * NEW_INBOUND_INDEX_MAX_TURN_ID_CHARACTERS,
+            model_version="m" * store_module.NEW_INBOUND_INDEX_MAX_MODEL_CHARACTERS,
+        )
+        with self.assertRaises(ValueError):
+            store_module._encode_custom_imap_compatibility_sidecar(
+                SECRET,
+                locator,
+                oversized,
+                validated_at=1_000,
+            )
+
+    def test_marker_schema_reasons_stickiness_and_typed_outcomes_are_finite(self):
+        locator = compatibility_locator()
+        keys = store_module._custom_imap_compatibility_keys(SECRET, locator)
+        for reason in store_module._CUSTOM_IMAP_COMPATIBILITY_MARKER_REASONS:
+            marker = {
+                "schemaVersion": store_module.CUSTOM_IMAP_COMPATIBILITY_SCHEMA_VERSION,
+                "scopeDigest": keys["scope_digest"],
+                "locatorDigest": keys["locator_digest"],
+                "reason": reason,
+                "validatedAt": 1_000,
+                "expiresAt": 1_000 + CUSTOM_IMAP_COMPATIBILITY_TTL_SECONDS,
+            }
+            marker["recordMac"] = store_module._custom_imap_compatibility_marker_mac(
+                SECRET,
+                marker,
+            )
+            self.assertIsNotNone(
+                store_module._decode_custom_imap_compatibility_marker(
+                    json.dumps(marker),
+                    secret=SECRET,
+                    locator=locator,
+                )
+            )
+        invalid = {**marker, "reason": "arbitrary_detail"}
+        invalid["recordMac"] = store_module._custom_imap_compatibility_marker_mac(
+            SECRET,
+            invalid,
+        )
+        self.assertIsNone(
+            store_module._decode_custom_imap_compatibility_marker(
+                json.dumps(invalid),
+                secret=SECRET,
+                locator=locator,
+            )
+        )
+        self.assertEqual(
+            store_module._CUSTOM_IMAP_COMPATIBILITY_STICKY_REASONS,
+            {
+                "mapping_conflict",
+                "sidecar_corrupt",
+                "marker_corrupt",
+                "record_too_large",
+            },
+        )
+        self.assertNotIn(
+            "sidecar_unavailable",
+            store_module._CUSTOM_IMAP_COMPATIBILITY_STICKY_REASONS,
+        )
+        self.assertEqual(
+            {outcome.value for outcome in CustomImapCompatibilityOutcome},
+            {
+                "sidecar_written",
+                "sidecar_renewed",
+                "sidecar_conflict",
+                "compatibility_incomplete",
+            },
+        )
+        outcomes: list[int] = [1, 2, 3, 4]
+        outcome_store = SemanticAssessmentStore(
+            lambda _command: {"result": outcomes.pop(0)},
+            hmac_secret=SECRET,
+        )
+        expected = tuple(CustomImapCompatibilityOutcome)
+        actual = tuple(
+            outcome_store.record_custom_imap_v1_compatibility_mapping(
+                locator,
+                compatibility_scope(),
+            )
+            for _ in expected
+        )
+        self.assertEqual(actual, expected)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 from . import store as store_module
@@ -32,6 +33,8 @@ from .semantic_types import (
 from .store import (
     LEASE_TTL_SECONDS,
     RESULT_TTL_SECONDS,
+    CustomImapCompatibilityOutcome,
+    CustomImapV1CompatibilityLocator,
     SemanticAssessmentStore,
     SemanticCacheScope,
     SemanticStoreUnavailable,
@@ -277,6 +280,25 @@ def new_inbound_source(
                 "rfcMessageId": latest_turn_id,
             }
         ),
+    )
+
+
+def provider_minted_custom_new_inbound_source(
+    current: PriorityAuthority,
+    *,
+    latest_turn_id: str = "provider-turn@example.net",
+) -> AuthorizedSemanticSource:
+    source = new_inbound_source(current, latest_turn_id=latest_turn_id)
+    return replace(
+        source,
+        revalidation_locator={
+            "provider": "custom_imap",
+            "providerFolder": "Provider/Exact",
+            "uidValidity": "777",
+            "imapUid": "999",
+            "rfcMessageId": latest_turn_id,
+            "authorityKind": "new_inbound",
+        },
     )
 
 
@@ -3377,6 +3399,305 @@ class SemanticRouteTests(unittest.TestCase):
                 response = self.process(payload, FixedAdapter())
                 self.assertEqual(response.status_code, 400)
                 self.authority_resolver.assert_not_called()
+
+    def test_custom_imap_compatibility_uses_trusted_locator_at_exact_post_commit_point(self):
+        current = custom_authority()
+        self.authority_resolver.return_value = current
+        source = provider_minted_custom_new_inbound_source(current)
+        events: list[str] = []
+        captured: list[tuple[CustomImapV1CompatibilityLocator, SemanticCacheScope]] = []
+        original_commit = SemanticAssessmentStore.commit_result_if_lease_owned
+
+        def commit(instance, *args, **kwargs):
+            events.append("v1_commit")
+            return original_commit(instance, *args, **kwargs)
+
+        def compatibility(_instance, locator, cache_scope):
+            events.append("compatibility")
+            captured.append((locator, cache_scope))
+            return CustomImapCompatibilityOutcome.SIDECAR_WRITTEN
+
+        def dismissal_probe(_store, _index_scope, _source):
+            events.append("dismissal_recheck")
+            return False
+
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_imap_new_inbound",
+                return_value=source,
+            ) as loader,
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                side_effect=lambda *_args: events.append("provider_current"),
+            ) as proof,
+            patch.object(
+                SemanticAssessmentStore,
+                "commit_result_if_lease_owned",
+                autospec=True,
+                side_effect=commit,
+            ),
+            patch.object(
+                SemanticAssessmentStore,
+                "record_custom_imap_v1_compatibility_mapping",
+                autospec=True,
+                side_effect=compatibility,
+            ) as writer,
+            patch(
+                "api.priority.semantic_route._is_exact_new_inbound_dismissed",
+                side_effect=dismissal_probe,
+            ),
+            self.assertLogs("api.priority.semantic_route", level="INFO") as logs,
+        ):
+            response = self.process(
+                {
+                    **custom_new_inbound_request(),
+                    "incomingLocator": {
+                        "provider": "custom_imap",
+                        "providerFolder": "Request/Untrusted",
+                        "uidValidity": "1",
+                        "imapUid": "2",
+                    },
+                },
+                FixedAdapter(),
+                config=NEW_INBOUND_ACTIVE_CONFIG,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload["status"], "assessed")
+        writer.assert_called_once()
+        locator, cache_scope = captured[0]
+        self.assertEqual(locator.provider_folder, "Provider/Exact")
+        self.assertEqual(locator.uid_validity, "777")
+        self.assertEqual(locator.imap_uid, "999")
+        self.assertEqual(locator.mailbox_account_identity, current.mailbox_email)
+        self.assertEqual(cache_scope.conversation_id, source.conversation_id)
+        self.assertEqual(events.count("provider_current"), 1)
+        self.assertEqual(events.count("v1_commit"), 1)
+        self.assertEqual(events.count("compatibility"), 1)
+        self.assertLess(events.index("provider_current"), events.index("v1_commit"))
+        self.assertEqual(
+            events[events.index("v1_commit") + 1],
+            "compatibility",
+        )
+        self.assertLess(events.index("compatibility"), len(events) - 1)
+        self.assertEqual(events[-1], "dismissal_recheck")
+        loader.assert_called_once()
+        proof.assert_called_once()
+        self.assertEqual(
+            logs.output,
+            [
+                "INFO:api.priority.semantic_route:Priority semantic compatibility "
+                "outcome=sidecar_written"
+            ],
+        )
+
+    def test_failed_v1_commit_and_successful_google_commit_do_zero_compatibility_work(self):
+        current = custom_authority()
+        self.authority_resolver.return_value = current
+        source = provider_minted_custom_new_inbound_source(current)
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_imap_new_inbound",
+                return_value=source,
+            ),
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ),
+            patch.object(
+                SemanticAssessmentStore,
+                "commit_result_if_lease_owned",
+                return_value=False,
+            ),
+            patch.object(
+                SemanticAssessmentStore,
+                "record_custom_imap_v1_compatibility_mapping",
+                side_effect=AssertionError("failed v1 commit must not write compatibility"),
+            ) as failed_writer,
+        ):
+            failed = self.process(
+                custom_new_inbound_request(),
+                FixedAdapter(),
+                config=NEW_INBOUND_CONFIG,
+            )
+        self.assertEqual(failed.status_code, 202)
+        self.assertEqual(failed.payload["status"], "pending")
+        failed_writer.assert_not_called()
+
+        self.authority_resolver.return_value = self.current
+        google_source = new_inbound_source(self.current, latest_turn_id="google-zero")
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                return_value=google_source,
+            ),
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ),
+            patch.object(
+                SemanticAssessmentStore,
+                "record_custom_imap_v1_compatibility_mapping",
+                side_effect=AssertionError("Google must not write compatibility"),
+            ) as google_writer,
+        ):
+            google = self.process(
+                gmail_new_inbound_request(provider_message_id="google-zero"),
+                FixedAdapter(),
+                config=NEW_INBOUND_CONFIG,
+            )
+        self.assertEqual(google.status_code, 200)
+        google_writer.assert_not_called()
+
+    def test_compatibility_conflict_exception_and_missing_locator_never_change_v1_response(self):
+        cases = (
+            (
+                "sidecar_conflict",
+                CustomImapCompatibilityOutcome.SIDECAR_CONFLICT,
+                None,
+            ),
+            ("sidecar_unavailable", None, SemanticStoreUnavailable()),
+        )
+        for number, (expected_log, returned, raised) in enumerate(cases, start=1):
+            with self.subTest(expected_log=expected_log):
+                current = custom_authority()
+                source = provider_minted_custom_new_inbound_source(
+                    current,
+                    latest_turn_id=f"compat-{number}@example.net",
+                )
+                redis = MemoryRedis()
+                semantic_store = SemanticAssessmentStore(redis, hmac_secret=SECRET)
+                writer = patch.object(
+                    SemanticAssessmentStore,
+                    "record_custom_imap_v1_compatibility_mapping",
+                    side_effect=raised,
+                    return_value=returned,
+                )
+                with (
+                    patch(
+                        "api.priority.semantic_route.resolve_priority_authority",
+                        return_value=current,
+                    ),
+                    patch(
+                        "api.priority.semantic_route.load_authorized_imap_new_inbound",
+                        return_value=source,
+                    ),
+                    patch(
+                        "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                        return_value=None,
+                    ),
+                    writer as compatibility_writer,
+                    patch.object(
+                        SemanticAssessmentStore,
+                        "record_custom_imap_v1_compatibility_unavailable",
+                        return_value=None,
+                    ) as fallback,
+                    self.assertLogs("api.priority.semantic_route", level="WARNING") as logs,
+                ):
+                    response = process_semantic_request(
+                        [],
+                        custom_new_inbound_request(),
+                        config=NEW_INBOUND_CONFIG,
+                        hmac_secret=SECRET,
+                        store=semantic_store,
+                        adapter=FixedAdapter(),
+                        now=11,
+                    )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.payload["status"], "assessed")
+                compatibility_writer.assert_called_once()
+                self.assertEqual(fallback.call_count, int(raised is not None))
+                self.assertEqual(len(logs.output), 1)
+                self.assertTrue(logs.output[0].endswith(f"outcome={expected_log}"))
+                for forbidden in (
+                    "Provider/Exact",
+                    "777",
+                    "999",
+                    current.mailbox_email,
+                    source.conversation_id,
+                    source.latest_turn_id,
+                ):
+                    self.assertNotIn(forbidden, logs.output[0])
+
+        missing = new_inbound_source(custom_authority(), latest_turn_id="missing-locator")
+        isolated_store = SemanticAssessmentStore(MemoryRedis(), hmac_secret=SECRET)
+        with (
+            patch(
+                "api.priority.semantic_route.resolve_priority_authority",
+                return_value=missing.authority,
+            ),
+            patch(
+                "api.priority.semantic_route.load_authorized_imap_new_inbound",
+                return_value=missing,
+            ),
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ),
+            patch.object(
+                SemanticAssessmentStore,
+                "record_custom_imap_v1_compatibility_mapping",
+                side_effect=AssertionError("missing trusted locator has no exact key"),
+            ) as writer,
+            self.assertLogs("api.priority.semantic_route", level="WARNING") as logs,
+        ):
+            response = process_semantic_request(
+                [],
+                custom_new_inbound_request(),
+                config=NEW_INBOUND_CONFIG,
+                hmac_secret=SECRET,
+                store=isolated_store,
+                adapter=FixedAdapter(),
+                now=11,
+            )
+        self.assertEqual(response.status_code, 200)
+        writer.assert_not_called()
+        self.assertTrue(logs.output[0].endswith("outcome=compatibility_incomplete"))
+
+    def test_existing_v1_dismissal_renewal_path_also_invokes_compatibility(self):
+        current = custom_authority()
+        self.authority_resolver.return_value = current
+        source = provider_minted_custom_new_inbound_source(
+            current,
+            latest_turn_id="dismissal-renewal@example.net",
+        )
+        index_scope = store_module.NewInboundIndexScope(
+            workspace_id=current.workspace_id,
+            user_id=current.user_id,
+            mailbox_id=current.mailbox_id,
+            provider=current.provider,
+            mailbox_account_identity=current.mailbox_email,
+        )
+        dismissal_key = self.store._new_inbound_dismissal_key(
+            index_scope,
+            conversation_id=source.conversation_id,
+            latest_turn_id=source.latest_turn_id,
+        )
+        self.redis.values[dismissal_key] = "1"
+        self.redis.expirations[dismissal_key] = 10
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_imap_new_inbound",
+                return_value=source,
+            ),
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ),
+            patch.object(
+                SemanticAssessmentStore,
+                "record_custom_imap_v1_compatibility_mapping",
+                return_value=CustomImapCompatibilityOutcome.SIDECAR_RENEWED,
+            ) as writer,
+        ):
+            response = self.process(
+                custom_new_inbound_request(),
+                FixedAdapter(),
+                config=NEW_INBOUND_CONFIG,
+            )
+        self.assertEqual(response.status_code, 200)
+        writer.assert_called_once()
+        self.assertEqual(self.redis.expirations[dismissal_key], RESULT_TTL_SECONDS)
 
 
 if __name__ == "__main__":
