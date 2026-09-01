@@ -477,12 +477,58 @@ function getCollaborationOwnerCreateFailureMessage(
     return "Collaboration is temporarily unavailable. Try again later.";
   }
   if (failureStatus === "invalid_source_locator") {
-    return "This message cannot start a server collaboration.";
+    return "Collaboration isn’t available for this email.";
   }
   if (failureStatus === "invalid_state") {
     return "Collaboration could not be started. Try again.";
   }
   return "Collaboration is temporarily unavailable. Try again later.";
+}
+
+function isCollaborationOwnerReadFailureRetryable(failureStatus: string) {
+  return (
+    failureStatus === "rate_limited" ||
+    failureStatus === "service_unavailable" ||
+    failureStatus === "internal_error" ||
+    failureStatus === "network_failure" ||
+    failureStatus === "invalid_response"
+  );
+}
+
+function getCollaborationOwnerReadFailureMessage(
+  failureStatus: string,
+  retryAfterSeconds?: number,
+) {
+  if (failureStatus === "unauthorized") {
+    return "Collaboration isn’t available for this email. Sign in again and try once more.";
+  }
+  if (failureStatus === "forbidden") {
+    return "Collaboration isn’t available for this email.";
+  }
+  if (failureStatus === "rate_limited") {
+    return retryAfterSeconds === undefined
+      ? "Collaboration is temporarily unavailable. Try again shortly."
+      : `Collaboration is temporarily unavailable. Try again in ${retryAfterSeconds} seconds.`;
+  }
+  if (failureStatus === "conflict" || failureStatus === "not_found") {
+    return "Collaboration isn’t available for this email.";
+  }
+  return "Collaboration is temporarily unavailable. Try again.";
+}
+
+function getCollaborationOwnerStateLabel(state: unknown) {
+  switch (state) {
+    case "needs_review":
+      return "Needs input";
+    case "needs_action":
+      return "Needs action";
+    case "note_only":
+      return "Notes only";
+    case "resolved":
+      return "Ended";
+    default:
+      return "Status unavailable";
+  }
 }
 
 function getCollaborationOwnerInternalNoteFailureMessage(
@@ -1764,6 +1810,7 @@ type MailMessage = Partial<MessageNoiseAssessment> & {
 type CollaborationOwnerProjectionState =
   | { status: "idle"; identityKey: null; requestId: number }
   | { status: "loading"; identityKey: string; requestId: number }
+  | { status: "not_found"; identityKey: string; requestId: number }
   | {
       status: "success";
       identityKey: string;
@@ -1771,7 +1818,7 @@ type CollaborationOwnerProjectionState =
       collaboration: CollaborationOwnerReadDto;
     }
   | {
-      status: "failure";
+      status: "retryable_failure" | "non_retryable_failure";
       identityKey: string;
       requestId: number;
       failureStatus: string;
@@ -9195,6 +9242,13 @@ function formatCollaborationStatusTimestamp(timestamp: number) {
     hour: "numeric",
     minute: "2-digit",
   })}`;
+}
+
+function formatCollaborationSourceTimestamp(timestamp: string) {
+  const parsedTimestamp = Date.parse(timestamp);
+  return Number.isFinite(parsedTimestamp)
+    ? formatCollaborationStatusTimestamp(parsedTimestamp)
+    : null;
 }
 
 function getCollaborationMessageVisibility(
@@ -21072,6 +21126,8 @@ function MailboxView({
   const hasActiveCollaborationOwnerProjection = Boolean(
     activeCollaborationOwnerProjection,
   );
+  const hasActiveCollaborationOwnerLifecycle =
+    collaborationOwnerProjection.status !== "idle";
   const isPreStartCollaboration = Boolean(
     activeStoredCollaborationMessage &&
       !activeStoredCollaborationMessage.collaboration &&
@@ -21617,7 +21673,7 @@ function MailboxView({
           {hasUnreadCollaboration ? (
             <span aria-label="Unread collaboration update" className={unreadAttentionDotClass} />
           ) : null}
-          {isResolvedCollaboration ? "Open collaboration history" : "Open collaboration"}
+          Collaboration…
         </button>
       </div>
     );
@@ -22000,7 +22056,7 @@ function MailboxView({
             }}
             className={menuItemClass}
           >
-            {message.collaboration ? "Open collaboration…" : "Start collaboration…"}
+            Collaboration…
           </button>
           {renderManualOrganizerMenuItems(message, menuItemClass, () =>
             setDetailActionsMenuState(null),
@@ -23588,7 +23644,9 @@ function MailboxView({
         locator,
       };
       setCollaborationOwnerProjection({
-        status: "failure",
+        status: isCollaborationOwnerReadFailureRetryable(failureStatus)
+          ? "retryable_failure"
+          : "non_retryable_failure",
         identityKey,
         requestId,
         failureStatus,
@@ -23602,6 +23660,23 @@ function MailboxView({
         return;
       }
       if (lookupResult.status !== "success") {
+        if (lookupResult.status === "not_found") {
+          collaborationOwnerProjectionRequestRef.current = {
+            identityKey,
+            requestId,
+            inFlight: false,
+            operation: "read",
+            messageId,
+            sourceMailboxId,
+            locator: trustedLocator,
+          };
+          setCollaborationOwnerProjection({
+            status: "not_found",
+            identityKey,
+            requestId,
+          });
+          return;
+        }
         commitFailure(
           lookupResult.status,
           "retryAfterSeconds" in lookupResult
@@ -23649,6 +23724,39 @@ function MailboxView({
         collaboration: readResult.collaboration,
       });
     })(locator);
+  };
+
+  const retryCollaborationOwnerRead = () => {
+    const activeRequest = collaborationOwnerProjectionRequestRef.current;
+    if (
+      !activeRequest ||
+      activeRequest.inFlight ||
+      activeRequest.operation !== "read" ||
+      activeRequest.messageId !== activeCollaborationMessageId ||
+      activeRequest.sourceMailboxId !== activeCollaborationSourceMailboxId
+    ) {
+      return;
+    }
+
+    const message = getMessageById(
+      activeRequest.messageId,
+      activeRequest.sourceMailboxId,
+    );
+    const authoritativeLocation = message
+      ? resolveAuthoritativeMessageLocation({
+          message,
+          exactLocation: currentMessageLocationByMessage.get(message) ?? null,
+          explicitMailboxId: activeRequest.sourceMailboxId,
+          bareIdLocation:
+            currentMessageLocationById[activeRequest.messageId] ?? null,
+        })
+      : null;
+    beginCollaborationOwnerRead(
+      activeRequest.messageId,
+      activeRequest.sourceMailboxId,
+      message,
+      authoritativeLocation?.folder ?? null,
+    );
   };
 
   const openShareCollaboration = (
@@ -28545,9 +28653,7 @@ function MailboxView({
                   }}
                   className={contextMenuMainItemClass}
                 >
-                  {selectedMessage?.collaboration
-                    ? "Open collaboration…"
-                    : "Start collaboration…"}
+                  Collaboration…
                 </button>
                 {hasSingleSelection
                   ? renderManualOrganizerMenuItems(
@@ -29455,9 +29561,7 @@ function MailboxView({
                               .trimEnd()
                           : message.snippet;
                       const sharedContextHint = message.collaboration
-                        ? message.collaboration.state === "resolved"
-                          ? "Open collaboration history"
-                          : "Open collaboration"
+                        ? "Collaboration…"
                         : isSharedView && message.isShared
                           ? formatSharedContextHint(message.sharedContext)
                           : null;
@@ -30278,9 +30382,7 @@ function MailboxView({
                       }}
                       className={contextMenuMainItemClass}
                     >
-                      {contextMenuMessage.collaboration
-                        ? "Open collaboration…"
-                        : "Start collaboration…"}
+                      Collaboration…
                     </button>
                   ) : null}
                   {renderManualOrganizerMenuItems(
@@ -30835,81 +30937,47 @@ function MailboxView({
                           data-collaboration-owner-read-loading
                           className="rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.78rem] leading-6 text-[var(--workspace-text-faint)]"
                         >
-                          Checking the server collaboration…
+                          Loading collaboration…
                         </div>
-                      ) : null}
-                      {hasActiveCollaborationOwnerProjection &&
-                      activeCollaborationOwnerProjection ? (
+                      ) : hasActiveCollaborationOwnerProjection &&
+                        activeCollaborationOwnerProjection ? (
                         <section
                           data-collaboration-owner-read-projection
                           data-collaboration-owner-internal-note-enabled="true"
                           data-collaboration-owner-shared-message-enabled="true"
                           className="space-y-4"
                         >
-                          <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,var(--workspace-card),var(--workspace-card-subtle))] px-5 py-5">
+                          <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,var(--workspace-card),var(--workspace-card-subtle))] px-5 py-4">
                             <div className="flex flex-wrap items-center justify-between gap-3">
                               <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                                Server collaboration
+                                Current status
                               </div>
                               <span className="inline-flex rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 py-1 text-[0.62rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)]">
-                                {activeCollaborationOwnerProjection.state}
+                                {getCollaborationOwnerStateLabel(
+                                  activeCollaborationOwnerProjection.state,
+                                )}
                               </span>
                             </div>
-                            <dl className="mt-4 grid gap-3 text-[0.78rem] leading-6 text-[var(--workspace-text-faint)] sm:grid-cols-2">
-                              <div>
-                                <dt className="font-medium text-[var(--workspace-text-soft)]">
-                                  Collaboration ID
-                                </dt>
-                                <dd className="break-all">
-                                  {activeCollaborationOwnerProjection.collaborationId}
-                                </dd>
-                              </div>
-                              <div>
-                                <dt className="font-medium text-[var(--workspace-text-soft)]">
-                                  Mailbox ID
-                                </dt>
-                                <dd className="break-all">
-                                  {activeCollaborationOwnerProjection.mailboxId}
-                                </dd>
-                              </div>
-                              <div>
-                                <dt className="font-medium text-[var(--workspace-text-soft)]">
-                                  Created
-                                </dt>
-                                <dd>
-                                  {formatCollaborationStatusTimestamp(
-                                    activeCollaborationOwnerProjection.createdAt,
-                                  )}
-                                </dd>
-                              </div>
-                              <div>
-                                <dt className="font-medium text-[var(--workspace-text-soft)]">
-                                  Updated
-                                </dt>
-                                <dd>
-                                  {formatCollaborationStatusTimestamp(
-                                    activeCollaborationOwnerProjection.updatedAt,
-                                  )}
-                                </dd>
-                              </div>
-                            </dl>
                           </div>
 
                           <section className="space-y-3">
                             <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                              Source
+                              Source email
                             </div>
                             <div className="rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-4">
                               <div className="text-[0.95rem] font-medium text-[var(--workspace-text)]">
                                 {activeCollaborationOwnerProjection.source.subject}
                               </div>
                               <div className="mt-1 text-[0.78rem] leading-6 text-[var(--workspace-text-faint)]">
-                                {activeCollaborationOwnerProjection.source.senderDisplay} · {" "}
-                                {activeCollaborationOwnerProjection.source.fromDisplay} · {" "}
-                                {activeCollaborationOwnerProjection.source.timestamp}
-                              </div>
-                              <div className="mt-3 whitespace-pre-wrap text-[0.88rem] leading-6 text-[var(--workspace-text-soft)]">
-                                {activeCollaborationOwnerProjection.source.bodyText}
+                                {[
+                                  activeCollaborationOwnerProjection.source.senderDisplay,
+                                  activeCollaborationOwnerProjection.source.fromDisplay,
+                                  formatCollaborationSourceTimestamp(
+                                    activeCollaborationOwnerProjection.source.timestamp,
+                                  ),
+                                ]
+                                  .filter(Boolean)
+                                  .join(" · ")}
                               </div>
                             </div>
                           </section>
@@ -30925,17 +30993,28 @@ function MailboxView({
                                     key={entry.id}
                                     className="rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3.5 py-2.5"
                                   >
-                                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.78rem] leading-5 text-[var(--workspace-text-soft)]">
-                                      <span>{entry.authorDisplayName}</span>
-                                      <span>{entry.authorRole}</span>
-                                      <span className="uppercase tracking-[0.12em]">
-                                        {entry.visibility === "internal"
-                                          ? "Internal · Private"
-                                          : "Shared"}
-                                      </span>
+                                    <div className="flex flex-wrap items-start justify-between gap-2">
+                                      <div>
+                                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.78rem] leading-5 text-[var(--workspace-text-soft)]">
+                                          <span className="font-medium text-[var(--workspace-text)]">
+                                            {entry.authorDisplayName}
+                                          </span>
+                                          <span>{entry.authorRole}</span>
+                                        </div>
+                                        <div className="mt-1 text-[0.72rem] leading-5 text-[var(--workspace-text-faint)]">
+                                          {entry.visibility === "internal"
+                                            ? "Visible only to your Cuevion team."
+                                            : "Visible to everyone in this collaboration."}
+                                        </div>
+                                      </div>
+                                      <div className="flex flex-col items-end gap-1">
+                                        <span className="rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-2 py-0.5 text-[0.6rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-soft)]">
+                                          {entry.visibility === "internal" ? "Internal" : "Shared"}
+                                        </span>
                                       <span className="text-[var(--workspace-text-faint)]">
                                         {formatCollaborationStatusTimestamp(entry.timestamp)}
                                       </span>
+                                      </div>
                                     </div>
                                     <div className="mt-1 whitespace-pre-wrap text-[0.88rem] leading-6 text-[var(--workspace-text-soft)]">
                                       {entry.text}
@@ -30945,7 +31024,7 @@ function MailboxView({
                               </div>
                             ) : (
                               <div className="rounded-[16px] bg-[var(--workspace-card)] px-4 py-3 text-[0.84rem] text-[var(--workspace-text-faint)]">
-                                No server messages.
+                                No collaboration messages yet.
                               </div>
                             )}
                           </section>
@@ -30982,8 +31061,8 @@ function MailboxView({
                               />
                             </label>
                             <div className="text-[0.76rem] leading-5 text-[var(--workspace-text-faint)]">
-                              This message is shared in the Collaboration Activity. It does not
-                              email the source-message sender.
+                              Visible to everyone in this collaboration. This does not email the
+                              sender of the original email.
                             </div>
                             {collaborationOwnerSharedMessageState.status === "failure" ? (
                               <div
@@ -31053,6 +31132,9 @@ function MailboxView({
                                 className="min-h-[7rem] w-full resize-none rounded-[18px] border border-[color:rgba(111,148,111,0.28)] bg-[linear-gradient(180deg,rgba(255,253,249,0.98),rgba(248,244,236,0.96))] px-4 py-3.5 text-[0.92rem] leading-7 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)] disabled:cursor-not-allowed disabled:opacity-60 dark:border-[var(--workspace-accent-border)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
                               />
                             </label>
+                            <div className="text-[0.76rem] leading-5 text-[var(--workspace-text-faint)]">
+                              Visible only to your Cuevion team. External reviewers won’t see it.
+                            </div>
                             {collaborationOwnerInternalNoteState.status === "failure" ? (
                               <div
                                 data-collaboration-owner-internal-note-feedback
@@ -31089,6 +31171,58 @@ function MailboxView({
                               </button>
                             </div>
                           </section>
+                        </section>
+                      ) : collaborationOwnerProjection.status === "not_found" ? (
+                        <section
+                          data-collaboration-owner-ready-to-start
+                          className="space-y-3"
+                        >
+                          <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,var(--workspace-card),var(--workspace-card-subtle))] px-5 py-6">
+                            <div className="text-[1rem] font-medium tracking-tight text-[var(--workspace-text)]">
+                              Ready to start collaboration
+                            </div>
+                            <div className="mt-1.5 max-w-[32rem] text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
+                              Discuss this email with your Cuevion team without replying to the
+                              sender.
+                            </div>
+                          </div>
+                          {collaborationOwnerCreateState.status === "failure" ? (
+                            <div
+                              data-collaboration-owner-create-feedback
+                              className="rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.78rem] leading-6 text-[var(--workspace-text-faint)]"
+                            >
+                              {getCollaborationOwnerCreateFailureMessage(
+                                collaborationOwnerCreateState.failureStatus,
+                                collaborationOwnerCreateState.retryAfterSeconds,
+                              )}
+                            </div>
+                          ) : null}
+                        </section>
+                      ) : collaborationOwnerProjection.status === "retryable_failure" ||
+                        collaborationOwnerProjection.status === "non_retryable_failure" ? (
+                        <section
+                          data-collaboration-owner-read-failure
+                          className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,var(--workspace-card),var(--workspace-card-subtle))] px-5 py-5"
+                        >
+                          <div className="text-[1rem] font-medium tracking-tight text-[var(--workspace-text)]">
+                            Collaboration unavailable
+                          </div>
+                          <div className="mt-1.5 max-w-[32rem] text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
+                            {getCollaborationOwnerReadFailureMessage(
+                              collaborationOwnerProjection.failureStatus,
+                              collaborationOwnerProjection.retryAfterSeconds,
+                            )}
+                          </div>
+                          {collaborationOwnerProjection.status === "retryable_failure" ? (
+                            <button
+                              type="button"
+                              data-collaboration-owner-read-retry
+                              onClick={retryCollaborationOwnerRead}
+                              className={`${collaborationCompactPrimaryActionButtonClass} mt-4`}
+                            >
+                              Retry
+                            </button>
+                          ) : null}
                         </section>
                       ) : isPreStartCollaboration ? (
                         <>
@@ -31670,16 +31804,42 @@ function MailboxView({
                   </div>
 
                   <div className="mt-4 flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-[var(--workspace-border-soft)] pt-4">
-                    {hasActiveCollaborationOwnerProjection ? (
-                      <div className="ml-auto">
-                        <button
-                          type="button"
-                          onClick={closeCollaborationOverlay}
-                          className={collaborationCompactTertiaryActionButtonClass}
-                        >
-                          Close
-                        </button>
-                      </div>
+                    {hasActiveCollaborationOwnerLifecycle ? (
+                      collaborationOwnerProjection.status === "not_found" ? (
+                        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={closeCollaborationOverlay}
+                            className={collaborationCompactTertiaryActionButtonClass}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => createMessageCollaboration()}
+                            disabled={collaborationOwnerCreateState.status === "loading"}
+                            className={
+                              collaborationOwnerCreateState.status === "loading"
+                                ? collaborationCompactDisabledActionButtonClass
+                                : collaborationCompactPrimaryActionButtonClass
+                            }
+                          >
+                            {collaborationOwnerCreateState.status === "loading"
+                              ? "Starting collaboration…"
+                              : "Start collaboration"}
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="ml-auto">
+                          <button
+                            type="button"
+                            onClick={closeCollaborationOverlay}
+                            className={collaborationCompactTertiaryActionButtonClass}
+                          >
+                            Close
+                          </button>
+                        </div>
+                      )
                     ) : (
                       <>
                     <div>
@@ -31710,13 +31870,9 @@ function MailboxView({
                           <button
                             type="button"
                             onClick={() => createMessageCollaboration()}
-                            disabled={
-                              collaborationOwnerCreateState.status === "loading" ||
-                              collaborationOwnerProjection.status === "loading"
-                            }
+                            disabled={collaborationOwnerCreateState.status === "loading"}
                             className={
-                              collaborationOwnerCreateState.status === "loading" ||
-                              collaborationOwnerProjection.status === "loading"
+                              collaborationOwnerCreateState.status === "loading"
                                 ? collaborationCompactDisabledActionButtonClass
                                 : collaborationCompactPrimaryActionButtonClass
                             }

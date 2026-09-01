@@ -26,6 +26,41 @@ try {
     "const beginCollaborationOwnerRead = (",
     "const openShareCollaboration = (",
   );
+  const ownerReadRetryRegion = sourceBetween(
+    workspaceSource,
+    "const retryCollaborationOwnerRead = () =>",
+    "const openShareCollaboration = (",
+  );
+  const ownerLoadingRegion = sourceBetween(
+    workspaceSource,
+    'collaborationOwnerProjection.status === "loading" ? (',
+    ") : hasActiveCollaborationOwnerProjection &&",
+  );
+  const ownerAuthoritativeBodyRegion = sourceBetween(
+    workspaceSource,
+    'collaborationOwnerProjection.status === "loading" ? (',
+    ") : isPreStartCollaboration ? (",
+  );
+  const ownerSuccessRegion = sourceBetween(
+    workspaceSource,
+    "data-collaboration-owner-read-projection",
+    'collaborationOwnerProjection.status === "not_found"',
+  );
+  const ownerReadFailureRegion = sourceBetween(
+    workspaceSource,
+    "data-collaboration-owner-read-failure",
+    ") : isPreStartCollaboration ? (",
+  );
+  const ownerLifecycleFooterRegion = sourceBetween(
+    workspaceSource,
+    "hasActiveCollaborationOwnerLifecycle ? (",
+    ") : (\n                      <>\n                    <div>",
+  );
+  const ownerStateLabelRegion = sourceBetween(
+    workspaceSource,
+    "function getCollaborationOwnerStateLabel(",
+    "function getCollaborationOwnerInternalNoteFailureMessage(",
+  );
   const explicitOpenRegion = sourceBetween(
     workspaceSource,
     "const openShareCollaboration = (",
@@ -196,7 +231,7 @@ try {
   );
   assert.equal(
     workspaceSource.includes(
-      'collaborationOwnerCreateState.status === "loading" ||\n                              collaborationOwnerProjection.status === "loading"',
+      'disabled={collaborationOwnerCreateState.status === "loading"}',
     ),
     true,
   );
@@ -250,7 +285,8 @@ try {
       `Owner read path must not contain ${forbiddenOwnerReadSideEffect}`,
     );
   }
-  assert.equal(ownerReadRegion.includes("status: \"failure\""), true);
+  assert.equal(ownerReadRegion.includes('? "retryable_failure"'), true);
+  assert.equal(ownerReadRegion.includes(': "non_retryable_failure"'), true);
   assert.equal(workspaceSource.includes("data-collaboration-owner-read-projection"), true);
   assert.equal(
     workspaceSource.includes('data-collaboration-owner-internal-note-enabled="true"'),
@@ -279,6 +315,118 @@ try {
     precedingOwnerFunctionIndex > precedingEffectIndex,
     "Owner lookup must be owned by the explicit-open function, not an effect",
   );
+
+  assert.equal(ownerLoadingRegion.includes("Loading collaboration…"), true);
+  for (const forbiddenLoadingContent of [
+    "Checking the server collaboration…",
+    "Server collaboration",
+    "Collaboration ID",
+    "Mailbox ID",
+    "sendCollaborationReply(",
+    "issueCollaborationInvite(",
+    "markMessageCollaborationDone(",
+    "reopenMessageCollaboration(",
+  ]) {
+    assert.equal(
+      ownerLoadingRegion.includes(forbiddenLoadingContent),
+      false,
+      `Owner loading must not expose ${forbiddenLoadingContent}`,
+    );
+  }
+
+  for (const forbiddenOwnerLifecycleControl of [
+    "data-collaboration-participant-trigger",
+    ">Invite<",
+    "sendCollaborationReply(",
+    "markMessageCollaborationDone(",
+    "reopenMessageCollaboration(",
+    "Open external review",
+  ]) {
+    assert.equal(
+      ownerAuthoritativeBodyRegion.includes(forbiddenOwnerLifecycleControl),
+      false,
+      `Authoritative owner body must not expose ${forbiddenOwnerLifecycleControl}`,
+    );
+    assert.equal(
+      ownerLifecycleFooterRegion.includes(forbiddenOwnerLifecycleControl),
+      false,
+      `Authoritative owner footer must not expose ${forbiddenOwnerLifecycleControl}`,
+    );
+  }
+
+  assert.equal(ownerSuccessRegion.includes("Server collaboration"), false);
+  assert.equal(ownerSuccessRegion.includes("Collaboration ID"), false);
+  assert.equal(ownerSuccessRegion.includes("Mailbox ID"), false);
+  assert.equal(
+    ownerSuccessRegion.includes("activeCollaborationOwnerProjection.state}"),
+    false,
+  );
+  for (const [rawState, productLabel] of [
+    ["needs_review", "Needs input"],
+    ["needs_action", "Needs action"],
+    ["note_only", "Notes only"],
+    ["resolved", "Ended"],
+  ]) {
+    assert.equal(ownerStateLabelRegion.includes(`case \"${rawState}\"`), true);
+    assert.equal(ownerStateLabelRegion.includes(`return \"${productLabel}\"`), true);
+  }
+  assert.equal(ownerStateLabelRegion.includes('return "Status unavailable"'), true);
+  assert.equal(ownerSuccessRegion.includes("No collaboration messages yet."), true);
+  assert.equal(ownerSuccessRegion.includes("No server messages."), false);
+  assert.equal(
+    ownerSuccessRegion.includes(
+      "Visible to everyone in this collaboration. This does not email the",
+    ),
+    true,
+  );
+  assert.equal(
+    ownerSuccessRegion.includes(
+      "Visible only to your Cuevion team. External reviewers won’t see it.",
+    ),
+    true,
+  );
+  assert.equal(ownerSuccessRegion.includes('? "Internal" : "Shared"'), true);
+  assert.equal(
+    ownerSuccessRegion.includes('? "Visible only to your Cuevion team."'),
+    true,
+  );
+  assert.equal(
+    ownerSuccessRegion.includes(': "Visible to everyone in this collaboration."'),
+    true,
+  );
+
+  assert.equal(
+    ownerAuthoritativeBodyRegion.includes(
+      "Discuss this email with your Cuevion team without replying to the",
+    ),
+    true,
+  );
+  assert.equal(ownerReadFailureRegion.includes("Collaboration unavailable"), true);
+  assert.equal(ownerReadFailureRegion.includes("data-collaboration-owner-read-retry"), true);
+  assert.equal(ownerReadFailureRegion.includes(">\n                              Retry\n"), true);
+  assert.equal(ownerReadRetryRegion.includes("beginCollaborationOwnerRead("), true);
+  for (const forbiddenRetryAction of [
+    "createCollaborationForOwner(",
+    "prepareSharedCollaborationMessageForOwner(",
+    "prepareInternalCollaborationMessageForOwner(",
+    "sendCollaborationReply(",
+    "issueCollaborationInvite(",
+    "createCollaborationThread(",
+    "mutateCollaborationThread(",
+    "sendGmailMessage(",
+  ]) {
+    assert.equal(
+      ownerReadRetryRegion.includes(forbiddenRetryAction),
+      false,
+      `Owner read Retry must not invoke ${forbiddenRetryAction}`,
+    );
+  }
+  assert.equal(
+    (workspaceSource.match(/Collaboration…/g) ?? []).length >= 5,
+    true,
+    "Per-message Collaboration entries must use neutral wording",
+  );
+  assert.equal(workspaceSource.includes("hasActiveCollaborationOwnerLifecycle"), true);
 
   assert.equal(
     (workspaceSource.match(/prepareInternalCollaborationMessageForOwner\(/g) ?? [])
@@ -367,7 +515,10 @@ try {
   assert.equal(ownerSharedMessageComposerRegion.includes('status === "sending"'), true);
   assert.equal(ownerSharedMessageComposerRegion.includes("Retry Shared Message"), true);
   assert.equal(ownerSharedMessageComposerRegion.includes("Add Shared Message"), true);
-  assert.equal(ownerSharedMessageComposerRegion.includes("email the source-message sender"), true);
+  assert.equal(
+    ownerSharedMessageComposerRegion.includes("does not email the"),
+    true,
+  );
   assert.equal(
     ownerSharedMessageComposerRegion.includes(
       "collaborationOwnerSharedMessageRequestRef.current = null",
@@ -590,7 +741,7 @@ try {
   assert.equal(workspaceSource.includes("entry.authorRole"), true);
   assert.equal(workspaceSource.includes("entry.text"), true);
   assert.equal(workspaceSource.includes("entry.timestamp"), true);
-  assert.equal(workspaceSource.includes('"Internal · Private"'), true);
+  assert.equal(workspaceSource.includes('? "Internal" : "Shared"'), true);
   assert.equal(workspaceSource.includes("Server collaboration · Read only"), false);
   assert.equal(workspaceSource.includes("Server projection is read only."), false);
 

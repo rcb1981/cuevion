@@ -251,15 +251,17 @@ async function run() {
       );
     });
 
-    await test("classifies lookup 401, 404, bounded 429, and 503", async () => {
+    await test("classifies lookup access, absence, conflict, retry, and service failures", async () => {
       const cases = [
         { response: response(401, {}), expected: { status: "unauthorized" } },
         { response: response(404, {}), expected: { status: "not_found" } },
+        { response: response(409, {}), expected: { status: "conflict" } },
         {
           response: response(429, {}, { "Retry-After": "60" }),
           expected: { status: "rate_limited", retryAfterSeconds: 60 },
         },
-        { response: response(503, {}), expected: { status: "unavailable" } },
+        { response: response(503, {}), expected: { status: "service_unavailable" } },
+        { response: response(500, {}), expected: { status: "internal_error" } },
       ];
       for (const testCase of cases) {
         __resetCollaborationOwnerReadApiForTests();
@@ -415,9 +417,10 @@ async function run() {
       assertExactRequest(calls[3], { operation: "read", collaborationId: COLLABORATION_ID }, "replacement-token");
     });
 
-    await test("classifies 404, bounded 429 Retry-After, invalid Retry-After, and 503", async () => {
+    await test("classifies bounded read failures without collapsing their semantics", async () => {
       const cases = [
         { response: response(404, {}), expected: { status: "not_found" } },
+        { response: response(409, {}), expected: { status: "conflict" } },
         {
           response: response(429, {}, { "Retry-After": "60" }),
           expected: { status: "rate_limited", retryAfterSeconds: 60 },
@@ -430,7 +433,8 @@ async function run() {
           response: response(429, {}, { "Retry-After": " 5" }),
           expected: { status: "rate_limited" },
         },
-        { response: response(503, {}), expected: { status: "unavailable" } },
+        { response: response(503, {}), expected: { status: "service_unavailable" } },
+        { response: response(500, {}), expected: { status: "internal_error" } },
       ];
 
       for (const testCase of cases) {
@@ -438,6 +442,54 @@ async function run() {
         const calls: FetchCall[] = [];
         installFetch([csrfResponse("token"), testCase.response], calls);
         assert.deepEqual(await readCollaborationForOwner(COLLABORATION_ID), testCase.expected);
+      }
+    });
+
+    await test("keeps network and invalid-response failures bounded", async () => {
+      const networkCalls: FetchCall[] = [];
+      installFetch([Promise.reject(new Error("private network detail"))], networkCalls);
+      assert.deepEqual(await readCollaborationForOwner(COLLABORATION_ID), {
+        status: "network_failure",
+      });
+
+      __resetCollaborationOwnerReadApiForTests();
+      const invalidCalls: FetchCall[] = [];
+      installFetch(
+        [
+          csrfResponse("token"),
+          response(200, {
+            ok: false,
+            error: { message: "private response detail" },
+          }),
+        ],
+        invalidCalls,
+      );
+      const result = await readCollaborationForOwner(COLLABORATION_ID);
+      assert.deepEqual(result, { status: "invalid_response" });
+      assert.equal(JSON.stringify(result).includes("private response detail"), false);
+    });
+
+    await test("introduces no owner write operation", async () => {
+      const calls: FetchCall[] = [];
+      installFetch(
+        [csrfResponse("token"), lookupResponse(), readResponse()],
+        calls,
+      );
+      await lookupCollaborationForOwner(googleLocator);
+      await readCollaborationForOwner(COLLABORATION_ID);
+      const operations = calls.map(
+        (call) =>
+          (JSON.parse(String(call.init?.body)) as { operation: string }).operation,
+      );
+      assert.deepEqual(operations, ["csrf", "lookup", "read"]);
+      for (const forbiddenOperation of [
+        "create",
+        "append_shared",
+        "append_internal",
+        "resolve",
+        "reopen",
+      ]) {
+        assert.equal(operations.includes(forbiddenOperation), false);
       }
     });
 

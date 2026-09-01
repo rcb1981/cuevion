@@ -44,13 +44,16 @@ export type CollaborationOwnerReadDto = {
   messages: CollaborationOwnerReadMessage[];
 };
 
-type CollaborationOwnerReadFailureStatus =
+export type CollaborationOwnerReadFailureStatus =
   | "invalid_collaboration_id"
   | "not_found"
   | "unauthorized"
   | "forbidden"
+  | "conflict"
   | "rate_limited"
-  | "unavailable"
+  | "service_unavailable"
+  | "internal_error"
+  | "network_failure"
   | "invalid_response";
 
 export type CollaborationOwnerReadResult =
@@ -65,8 +68,11 @@ export type CollaborationOwnerLookupResult =
         | "not_found"
         | "unauthorized"
         | "forbidden"
+        | "conflict"
         | "rate_limited"
-        | "unavailable"
+        | "service_unavailable"
+        | "internal_error"
+        | "network_failure"
         | "invalid_response";
       retryAfterSeconds?: number;
     };
@@ -76,8 +82,11 @@ type OwnerOperationFailure = {
     | "not_found"
     | "unauthorized"
     | "forbidden"
+    | "conflict"
     | "rate_limited"
-    | "unavailable"
+    | "service_unavailable"
+    | "internal_error"
+    | "network_failure"
     | "invalid_response";
   retryAfterSeconds?: number;
 };
@@ -224,7 +233,7 @@ function mapTransportFailure(
   if (failure.status === "invalid_response") {
     return { status: "invalid_response" };
   }
-  return { status: "unavailable" };
+  return { status: failure.status };
 }
 
 async function performAuthenticatedOwnerOperation(
