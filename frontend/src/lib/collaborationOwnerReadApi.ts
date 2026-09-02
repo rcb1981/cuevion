@@ -147,7 +147,9 @@ function isSafeTimestamp(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-function isCanonicalExternalGuestEmail(value: unknown): value is string {
+export function isCanonicalCollaborationExternalGuestEmail(
+  value: unknown,
+): value is string {
   if (
     typeof value !== "string" ||
     value !== value.toLowerCase() ||
@@ -160,7 +162,9 @@ function isCanonicalExternalGuestEmail(value: unknown): value is string {
   return localPart.length <= 64 && domain.length <= 253;
 }
 
-function parseExternalGuest(value: unknown): CollaborationExternalGuest | null {
+export function parseCollaborationExternalGuest(
+  value: unknown,
+): CollaborationExternalGuest | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return null;
   }
@@ -189,7 +193,7 @@ function parseExternalGuest(value: unknown): CollaborationExternalGuest | null {
     record.expiresAt < MIN_EXTERNAL_GUEST_TIMESTAMP_SECONDS ||
     record.expiresAt > MAX_EXTERNAL_GUEST_TIMESTAMP_SECONDS ||
     (Object.prototype.hasOwnProperty.call(record, "invitedEmail") &&
-      !isCanonicalExternalGuestEmail(record.invitedEmail)) ||
+      !isCanonicalCollaborationExternalGuestEmail(record.invitedEmail)) ||
     (Object.prototype.hasOwnProperty.call(record, "displayName") &&
       (typeof record.displayName !== "string" ||
         record.displayName.length === 0 ||
@@ -362,7 +366,7 @@ export function parseCollaborationOwnerReadDto(
 
   const externalGuests =
     viewerAccess === "owner"
-      ? (record.externalGuests as unknown[]).map(parseExternalGuest)
+      ? (record.externalGuests as unknown[]).map(parseCollaborationExternalGuest)
       : [];
   if (
     externalGuests.length > MAX_EXTERNAL_GUESTS ||
