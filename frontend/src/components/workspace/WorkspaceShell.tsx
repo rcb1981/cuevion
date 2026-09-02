@@ -38,6 +38,7 @@ import {
   DesktopComposeBodyEditor,
   type DesktopComposeBodyEditorHandle,
 } from "./DesktopComposeBodyEditor";
+import { CollaborationAccessPanel } from "../collaboration/CollaborationAccessPanel";
 import type { BundleOrganizerWorkspaceMessage } from "./BundleOrganizerSurface";
 import {
   resolveOrganizerCategory,
@@ -243,7 +244,6 @@ import {
   type CollaborationOwnerReadDto,
 } from "../../lib/collaborationOwnerReadApi";
 import {
-  createCollaborationForOwner,
   prepareInternalCollaborationMessageForOwner,
   prepareSharedCollaborationMessageForOwner,
   type CollaborationOwnerAppendOperation,
@@ -1001,6 +1001,7 @@ type TeamMemberStatus =
   | "Access removed"
   | "Invite cancelled";
 type TeamMemberEntry = {
+  memberUserId?: string | null;
   name: string;
   email: string;
   accessLevel: TeamAccessLevel;
@@ -1080,6 +1081,7 @@ function mapBackendTeamMemberToEntry(member: TeamMemberRecord): TeamMemberEntry 
   const name = (member.displayName || email).trim();
 
   return {
+    memberUserId: member.memberUserId,
     name,
     email,
     accessLevel: normalizeTeamRole(member.accessLevel),
@@ -1100,6 +1102,7 @@ function areTeamMemberEntriesEqual(left: TeamMemberEntry[], right: TeamMemberEnt
     return (
       rightMember &&
       leftMember.name === rightMember.name &&
+      leftMember.memberUserId === rightMember.memberUserId &&
       leftMember.email === rightMember.email &&
       leftMember.accessLevel === rightMember.accessLevel &&
       leftMember.status === rightMember.status &&
@@ -17634,6 +17637,7 @@ function MailboxView({
   messageOwnershipInteractions,
   hasRealInternalCollaborationTeammates,
   currentUserId,
+  currentMemberUserId,
   currentUserName,
   currentUserEmail,
   currentViewerPersistenceKey,
@@ -17740,6 +17744,7 @@ function MailboxView({
   messageOwnershipInteractions: MessageOwnershipInteractionStore;
   hasRealInternalCollaborationTeammates: boolean;
   currentUserId: string;
+  currentMemberUserId: string | null;
   currentUserName: string;
   currentUserEmail: string;
   currentViewerPersistenceKey: string;
@@ -18182,6 +18187,7 @@ function MailboxView({
   >(null);
   const [activeCollaborationSourceMailboxId, setActiveCollaborationSourceMailboxId] =
     useState<InboxId | null>(null);
+  const collaborationOverlayOpenerRef = useRef<HTMLElement | null>(null);
   const [collaborationOwnerProjection, setCollaborationOwnerProjection] =
     useState<CollaborationOwnerProjectionState>({
       status: "idle",
@@ -18255,6 +18261,10 @@ function MailboxView({
   const [isCollaborationInviteComposerOpen, setIsCollaborationInviteComposerOpen] =
     useState(false);
   const [isCollaborationActionsMenuOpen, setIsCollaborationActionsMenuOpen] =
+    useState(false);
+  const [isCollaborationSecureLinkVisible, setIsCollaborationSecureLinkVisible] =
+    useState(false);
+  const [isCollaborationSecureLinkClosePending, setIsCollaborationSecureLinkClosePending] =
     useState(false);
   const [collaborationReplyVisibility, setCollaborationReplyVisibility] =
     useState<MailMessageCollaborationVisibility>("internal");
@@ -21128,6 +21138,19 @@ function MailboxView({
   );
   const hasActiveCollaborationOwnerLifecycle =
     collaborationOwnerProjection.status !== "idle";
+  const activeCollaborationOwnerContextKey =
+    collaborationOwnerProjection.identityKey ?? "";
+  const activeCollaborationOwnerLocator =
+    collaborationOwnerProjectionRequestRef.current?.identityKey ===
+    activeCollaborationOwnerContextKey
+      ? collaborationOwnerProjectionRequestRef.current.locator
+      : null;
+  const collaborationAccessPanelMode =
+    collaborationOwnerProjection.status === "not_found"
+      ? ("start" as const)
+      : collaborationOwnerProjection.status === "success"
+        ? ("access" as const)
+        : ("hidden" as const);
   const isPreStartCollaboration = Boolean(
     activeStoredCollaborationMessage &&
       !activeStoredCollaborationMessage.collaboration &&
@@ -22626,6 +22649,10 @@ function MailboxView({
 
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        if (activeCollaborationMessageId) {
+          requestCloseCollaborationOverlay();
+          return;
+        }
         closeMenus();
       }
     };
@@ -22641,6 +22668,7 @@ function MailboxView({
     contextMenuState,
     detailActionsMenuState,
     activeCollaborationMessageId,
+    isCollaborationSecureLinkVisible,
     isMoreMenuOpen,
     isReadingLearningMenuOpen,
     isSortMenuOpen,
@@ -23829,6 +23857,13 @@ function MailboxView({
       loadOwnerProjection?: boolean;
     },
   ) => {
+    if (
+      !activeCollaborationMessageId &&
+      typeof document !== "undefined" &&
+      document.activeElement instanceof HTMLElement
+    ) {
+      collaborationOverlayOpenerRef.current = document.activeElement;
+    }
     const sourceMailboxId = resolveCollaborationStorageMailboxId(
       messageId,
       options?.sourceMailboxId,
@@ -24004,6 +24039,54 @@ function MailboxView({
     setFocusCollaborationComposer(false);
     setIsCollaborationInviteComposerOpen(false);
     setIsCollaborationActionsMenuOpen(false);
+    setIsCollaborationSecureLinkVisible(false);
+    setIsCollaborationSecureLinkClosePending(false);
+    const collaborationOpener = collaborationOverlayOpenerRef.current;
+    collaborationOverlayOpenerRef.current = null;
+    collaborationOpener?.focus();
+  };
+
+  const requestCloseCollaborationOverlay = () => {
+    if (isCollaborationSecureLinkVisible) {
+      setIsCollaborationSecureLinkClosePending(true);
+      return;
+    }
+    closeCollaborationOverlay();
+  };
+
+  const applyCanonicalCollaborationAccessResult = (
+    collaboration: CollaborationOwnerReadDto,
+    expectedContextKey: string,
+  ) => {
+    const activeRequest = collaborationOwnerProjectionRequestRef.current;
+    if (
+      !activeRequest ||
+      activeRequest.identityKey !== expectedContextKey ||
+      activeRequest.messageId !== activeCollaborationMessageId ||
+      activeRequest.sourceMailboxId !== activeCollaborationSourceMailboxId ||
+      collaboration.mailboxId !== activeRequest.locator.mailboxId ||
+      (activeCollaborationOwnerProjection !== null &&
+        activeCollaborationOwnerProjection.collaborationId !==
+          collaboration.collaborationId)
+    ) {
+      return;
+    }
+
+    const requestId = collaborationOwnerProjectionGenerationRef.current + 1;
+    collaborationOwnerProjectionGenerationRef.current = requestId;
+    collaborationOwnerProjectionRequestRef.current = {
+      ...activeRequest,
+      requestId,
+      inFlight: false,
+      operation: "read",
+    };
+    setCollaborationOwnerCreateState({ status: "idle" });
+    setCollaborationOwnerProjection({
+      status: "success",
+      identityKey: expectedContextKey,
+      requestId,
+      collaboration,
+    });
   };
 
   const syncCollaborationMentionState = (
@@ -24203,106 +24286,8 @@ function MailboxView({
     });
 
     if (currentLocator) {
-      const identityKey = JSON.stringify([
-        messageId,
-        currentLocator.mailboxId,
-        currentLocator.sourceRef,
-      ]);
-      const activeRequest = collaborationOwnerProjectionRequestRef.current;
-
-      if (activeRequest?.inFlight) {
-        return;
-      }
-
-      const trustedLocator =
-        activeRequest?.identityKey === identityKey &&
-        activeRequest.messageId === messageId &&
-        activeRequest.sourceMailboxId === sourceMailboxId
-          ? activeRequest.locator
-          : null;
-      if (!trustedLocator) {
-        const requestId = collaborationOwnerProjectionGenerationRef.current + 1;
-        collaborationOwnerProjectionGenerationRef.current = requestId;
-        setCollaborationOwnerCreateState({
-          status: "failure",
-          identityKey,
-          requestId,
-          failureStatus: "invalid_source_locator",
-        });
-        return;
-      }
-
-      const requestId = collaborationOwnerProjectionGenerationRef.current + 1;
-      collaborationOwnerProjectionGenerationRef.current = requestId;
-      collaborationOwnerProjectionRequestRef.current = {
-        identityKey,
-        requestId,
-        inFlight: true,
-        operation: "create",
-        messageId,
-        sourceMailboxId,
-        locator: trustedLocator,
-      };
-      setCollaborationOwnerCreateState({
-        status: "loading",
-        identityKey,
-        requestId,
-      });
-
-      const isCurrentRequest = () => {
-        const currentRequest = collaborationOwnerProjectionRequestRef.current;
-        return (
-          currentRequest?.identityKey === identityKey &&
-          currentRequest.requestId === requestId &&
-          currentRequest.operation === "create" &&
-          currentRequest.messageId === messageId &&
-          currentRequest.sourceMailboxId === sourceMailboxId
-        );
-      };
-
-      void (async () => {
-        const result = await createCollaborationForOwner(
-          trustedLocator,
-          "needs_review",
-        );
-        if (!isCurrentRequest()) {
-          return;
-        }
-
-        collaborationOwnerProjectionRequestRef.current = {
-          identityKey,
-          requestId,
-          inFlight: false,
-          operation: "create",
-          messageId,
-          sourceMailboxId,
-          locator: trustedLocator,
-        };
-        if (result.status !== "success") {
-          setCollaborationOwnerCreateState({
-            status: "failure",
-            identityKey,
-            requestId,
-            failureStatus: result.status,
-            ...("retryAfterSeconds" in result
-              ? { retryAfterSeconds: result.retryAfterSeconds }
-              : {}),
-          });
-          return;
-        }
-
-        setPendingEndCollaborationMessageId(null);
-        setIsCollaborationParticipantPickerOpen(false);
-        setIsCollaborationInviteComposerOpen(false);
-        setIsCollaborationActionsMenuOpen(false);
-        setCollaborationOwnerCreateState({ status: "idle" });
-        setCollaborationOwnerProjection({
-          status: "success",
-          identityKey,
-          requestId,
-          collaboration: result.collaboration,
-        });
-      })();
+      // The trusted owner-v2 lifecycle is exclusively handled by
+      // CollaborationAccessPanel. Never fall through to the legacy local draft.
       return;
     }
 
@@ -30299,6 +30284,18 @@ function MailboxView({
           : null}
 
         <SettingsConfirmationModal
+          open={isCollaborationSecureLinkClosePending}
+          themeMode={themeMode}
+          title="Close the one-time secure link?"
+          description="Cuevion doesn’t store this link. Make sure you’ve copied it before closing."
+          confirmLabel="Close anyway"
+          cancelLabel="Back"
+          confirmVariant="destructive"
+          onCancel={() => setIsCollaborationSecureLinkClosePending(false)}
+          onConfirm={closeCollaborationOverlay}
+        />
+
+        <SettingsConfirmationModal
           open={isEmptyTrashConfirmationOpen}
           themeMode={themeMode}
           title="Empty trash?"
@@ -30908,12 +30905,15 @@ function MailboxView({
                 <div
                   data-theme={themeMode}
                   data-collaboration-thread-modal
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="collaboration-dialog-title"
                   className="flex max-h-[calc(100dvh-2rem)] w-full max-w-[700px] min-h-0 flex-col overflow-hidden rounded-[28px] border border-[var(--workspace-border)] bg-[var(--workspace-modal-bg)] p-4 shadow-[0_28px_80px_rgba(61,44,32,0.18),0_10px_26px_rgba(61,44,32,0.1)] sm:max-h-[calc(100dvh-3rem)] sm:p-5 md:max-h-[calc(100dvh-4rem)] md:p-6"
                   onMouseDown={(event) => event.stopPropagation()}
                 >
                   <div className="flex shrink-0 items-start justify-between gap-4">
                     <div className="space-y-2">
-                      <h2 className="text-[1.45rem] font-medium tracking-tight text-[var(--workspace-text)]">
+                      <h2 id="collaboration-dialog-title" className="text-[1.45rem] font-medium tracking-tight text-[var(--workspace-text)]">
                         Collaboration
                       </h2>
                       <p className="max-w-[36rem] text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
@@ -30923,7 +30923,7 @@ function MailboxView({
                     </div>
                     <button
                       type="button"
-                      onClick={closeCollaborationOverlay}
+                      onClick={requestCloseCollaborationOverlay}
                       className={mailboxNavigationBackButtonClass}
                     >
                       Close
@@ -30932,6 +30932,27 @@ function MailboxView({
 
                   <div className="mt-4 min-h-0 flex-1 overflow-y-auto pr-1">
                     <div className="space-y-4">
+                      <CollaborationAccessPanel
+                        key={`${activeCollaborationMessage.id}:${activeCollaborationSourceMailboxId ?? "unknown"}`}
+                        mode={collaborationAccessPanelMode}
+                        contextKey={activeCollaborationOwnerContextKey}
+                        viewerIdentityKey={currentViewerPersistenceKey}
+                        locator={activeCollaborationOwnerLocator}
+                        collaboration={activeCollaborationOwnerProjection}
+                        teamMembers={teamMemberEntries
+                          .filter((member) => member.status === "Active")
+                          .map((member) => ({
+                            memberUserId: member.memberUserId ?? null,
+                            displayName: member.name,
+                            email: member.email,
+                            status: "active" as const,
+                          }))}
+                        currentMemberUserId={currentMemberUserId}
+                        currentUserEmail={currentUserEmail}
+                        onCanonicalCollaboration={applyCanonicalCollaborationAccessResult}
+                        onRequestOverlayClose={requestCloseCollaborationOverlay}
+                        onSecureLinkVisibilityChange={setIsCollaborationSecureLinkVisible}
+                      />
                       {collaborationOwnerProjection.status === "loading" ? (
                         <div
                           data-collaboration-owner-read-loading
@@ -31172,33 +31193,8 @@ function MailboxView({
                             </div>
                           </section>
                         </section>
-                      ) : collaborationOwnerProjection.status === "not_found" ? (
-                        <section
-                          data-collaboration-owner-ready-to-start
-                          className="space-y-3"
-                        >
-                          <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,var(--workspace-card),var(--workspace-card-subtle))] px-5 py-6">
-                            <div className="text-[1rem] font-medium tracking-tight text-[var(--workspace-text)]">
-                              Ready to start collaboration
-                            </div>
-                            <div className="mt-1.5 max-w-[32rem] text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
-                              Discuss this email with your Cuevion team without replying to the
-                              sender.
-                            </div>
-                          </div>
-                          {collaborationOwnerCreateState.status === "failure" ? (
-                            <div
-                              data-collaboration-owner-create-feedback
-                              className="rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.78rem] leading-6 text-[var(--workspace-text-faint)]"
-                            >
-                              {getCollaborationOwnerCreateFailureMessage(
-                                collaborationOwnerCreateState.failureStatus,
-                                collaborationOwnerCreateState.retryAfterSeconds,
-                              )}
-                            </div>
-                          ) : null}
-                        </section>
-                      ) : collaborationOwnerProjection.status === "retryable_failure" ||
+                      ) : collaborationOwnerProjection.status === "not_found" ? null
+                      : collaborationOwnerProjection.status === "retryable_failure" ||
                         collaborationOwnerProjection.status === "non_retryable_failure" ? (
                         <section
                           data-collaboration-owner-read-failure
@@ -31805,41 +31801,15 @@ function MailboxView({
 
                   <div className="mt-4 flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-[var(--workspace-border-soft)] pt-4">
                     {hasActiveCollaborationOwnerLifecycle ? (
-                      collaborationOwnerProjection.status === "not_found" ? (
-                        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-                          <button
-                            type="button"
-                            onClick={closeCollaborationOverlay}
-                            className={collaborationCompactTertiaryActionButtonClass}
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => createMessageCollaboration()}
-                            disabled={collaborationOwnerCreateState.status === "loading"}
-                            className={
-                              collaborationOwnerCreateState.status === "loading"
-                                ? collaborationCompactDisabledActionButtonClass
-                                : collaborationCompactPrimaryActionButtonClass
-                            }
-                          >
-                            {collaborationOwnerCreateState.status === "loading"
-                              ? "Starting collaboration…"
-                              : "Start collaboration"}
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="ml-auto">
-                          <button
-                            type="button"
-                            onClick={closeCollaborationOverlay}
-                            className={collaborationCompactTertiaryActionButtonClass}
-                          >
-                            Close
-                          </button>
-                        </div>
-                      )
+                      <div className="ml-auto">
+                        <button
+                          type="button"
+                          onClick={requestCloseCollaborationOverlay}
+                          className={collaborationCompactTertiaryActionButtonClass}
+                        >
+                          Close
+                        </button>
+                      </div>
                     ) : (
                       <>
                     <div>
@@ -57007,6 +56977,7 @@ export function WorkspaceShell({
                     hasRealInternalCollaborationTeammates
                   }
                   currentUserId={currentWorkspaceUserId}
+                  currentMemberUserId={authenticatedUser?.userId ?? null}
                   currentUserName={activeWorkspaceUserName}
                   currentUserEmail={activeCollaborationViewerEmail}
                   currentViewerPersistenceKey={viewerPersistenceScope}

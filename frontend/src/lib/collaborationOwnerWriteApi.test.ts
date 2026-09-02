@@ -1479,6 +1479,13 @@ async function run() {
         ),
         "utf8",
       );
+      const accessPanelSource = fs.readFileSync(
+        path.resolve(
+          __dirname,
+          "../components/collaboration/CollaborationAccessPanel.tsx",
+        ),
+        "utf8",
+      );
       const startIndex = workspaceSource.indexOf(
         "const createMessageCollaboration = () =>",
       );
@@ -1492,14 +1499,17 @@ async function run() {
 
       assert.equal(workspaceSource.includes("collaborationOwnerWriteApi"), true);
       assert.equal(
-        (workspaceSource.match(/createCollaborationForOwner\(/g) ?? []).length,
+        (accessPanelSource.match(/createCollaborationForOwner\(/g) ?? []).length,
         1,
       );
-      assert.equal(visibleStartRegion.includes("createCollaborationForOwner("), true);
+      assert.equal(visibleStartRegion.includes("createCollaborationForOwner("), false);
+      assert.equal(accessPanelSource.includes("createCollaborationForOwner("), true);
       assert.equal(visibleStartRegion.includes("createCollaborationThread("), false);
-      assert.equal(visibleStartRegion.includes("result.created"), false);
+      assert.equal(accessPanelSource.includes("result.created"), false);
       assert.equal(
-        visibleStartRegion.includes("collaboration: result.collaboration"),
+        accessPanelSource.includes(
+          "onCanonicalCollaboration(result.collaboration, contextKey)",
+        ),
         true,
       );
       assert.equal(

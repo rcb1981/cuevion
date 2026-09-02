@@ -21,6 +21,10 @@ try {
     path.resolve(__dirname, "../../lib/collaborationOwnerWriteApi.ts"),
     "utf8",
   );
+  const accessPanelSource = fs.readFileSync(
+    path.resolve(__dirname, "../collaboration/CollaborationAccessPanel.tsx"),
+    "utf8",
+  );
   const ownerReadRegion = sourceBetween(
     workspaceSource,
     "const beginCollaborationOwnerRead = (",
@@ -80,6 +84,11 @@ try {
     workspaceSource,
     "const createMessageCollaboration = () =>",
     "const sendCollaborationReply = (",
+  );
+  const ownerAccessApplyRegion = sourceBetween(
+    workspaceSource,
+    "const applyCanonicalCollaborationAccessResult = (",
+    "const syncCollaborationMentionState = (",
   );
   const ownerCreateFailureCopyRegion = sourceBetween(
     workspaceSource,
@@ -161,23 +170,22 @@ try {
   assert.equal(explicitOpenRegion.includes("beginCollaborationOwnerRead("), true);
   assert.equal(closeRegion.includes("fenceCollaborationOwnerProjection();"), true);
 
+  assert.equal((workspaceSource.match(/<CollaborationAccessPanel/g) ?? []).length, 1);
+  assert.equal((workspaceSource.match(/createCollaborationForOwner\(/g) ?? []).length, 0);
   assert.equal(
-    (workspaceSource.match(/createCollaborationForOwner\(/g) ?? []).length,
+    (accessPanelSource.match(/createCollaborationForOwner\(/g) ?? []).length,
     1,
-    "The visible owner-v2 start path must have one create invocation",
+    "The focused owner-v2 Team start path must have one create invocation",
   );
   assert.equal(
-    ownerCreateRegion.includes(
-      "createCollaborationForOwner(\n          trustedLocator,\n          \"needs_review\",",
+    accessPanelSource.includes(
+      "locator,\n          initialState,\n          selectedTeamMemberId,",
     ),
     true,
   );
-  assert.equal(
-    ownerCreateRegion.includes("collaboration: result.collaboration"),
-    true,
-    "The complete validated create DTO must become the server projection directly",
-  );
-  assert.equal(ownerCreateRegion.includes("result.created"), false);
+  assert.equal(ownerAccessApplyRegion.includes("collaboration.mailboxId !== activeRequest.locator.mailboxId"), true);
+  assert.equal(ownerAccessApplyRegion.includes("collaboration.collaborationId"), true);
+  assert.equal(ownerAccessApplyRegion.includes("collaboration,"), true);
   assert.equal(ownerCreateRegion.includes("lookupCollaborationForOwner("), false);
   assert.equal(ownerCreateRegion.includes("readCollaborationForOwner("), false);
   assert.equal(ownerCreateRegion.includes("createCollaborationThread("), false);
@@ -215,31 +223,18 @@ try {
     ownerCreateRegion.includes("deriveCollaborationOwnerSourceLocator({"),
     true,
   );
-  assert.equal(ownerCreateRegion.includes("locator: trustedLocator"), true);
-  assert.equal(ownerCreateRegion.includes("activeRequest?.inFlight"), true);
-  assert.equal(ownerCreateRegion.includes('operation: "create"'), true);
-  assert.equal(ownerCreateRegion.includes("currentRequest.requestId === requestId"), true);
-  assert.equal(ownerCreateRegion.includes("currentRequest.messageId === messageId"), true);
+  assert.equal(ownerCreateRegion.includes("CollaborationAccessPanel"), true);
+  assert.equal(ownerCreateRegion.includes("createCollaborationForOwner("), false);
+  assert.equal(ownerCreateRegion.includes("createCollaborationWithGuestForOwner("), false);
   assert.equal(
-    ownerCreateRegion.includes("currentRequest.sourceMailboxId === sourceMailboxId"),
-    true,
-  );
-  assert.equal(ownerCreateRegion.includes("if (!isCurrentRequest())"), true);
-  assert.equal(
-    ownerCreateRegion.includes('failureStatus: "invalid_source_locator"'),
+    accessPanelSource.includes('startMutation.status === "loading"'),
     true,
   );
   assert.equal(
-    workspaceSource.includes(
-      'disabled={collaborationOwnerCreateState.status === "loading"}',
-    ),
+    accessPanelSource.includes("data-collaboration-owner-create-feedback"),
     true,
   );
-  assert.equal(
-    workspaceSource.includes("data-collaboration-owner-create-feedback"),
-    true,
-  );
-  assert.equal(workspaceSource.includes("Starting collaboration…"), true);
+  assert.equal(accessPanelSource.includes("Starting collaboration…"), true);
 
   for (const failureStatus of [
     "unauthorized",
@@ -396,8 +391,8 @@ try {
   );
 
   assert.equal(
-    ownerAuthoritativeBodyRegion.includes(
-      "Discuss this email with your Cuevion team without replying to the",
+    accessPanelSource.includes(
+      "Choose who should have access to this email’s Collaboration.",
     ),
     true,
   );

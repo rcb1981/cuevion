@@ -19,6 +19,7 @@ const phantomLocalMember = {
   status: "Active" as const,
 };
 const serverMember = {
+  memberUserId: `usr_${"S".repeat(21)}A`,
   email: "server@example.test",
   displayName: "Server Member",
   accessLevel: "Shared" as const,
@@ -34,6 +35,7 @@ assert.deepEqual(
   replaceWithAuthoritativeTeamMembers([phantomLocalMember], [serverMember]),
   [
     {
+      memberUserId: `usr_${"S".repeat(21)}A`,
       name: "Server Member",
       email: "server@example.test",
       accessLevel: "Shared",
@@ -106,6 +108,11 @@ assert.deepEqual(
 const workspaceShellSource = readFileSync(
   resolve(process.cwd(), "src/components/workspace/WorkspaceShell.tsx"),
   "utf8",
+);
+assert.match(
+  workspaceShellSource,
+  /leftMember\.memberUserId === rightMember\.memberUserId/,
+  "the canonical Collaboration participant authority must survive roster publication",
 );
 assert.match(
   workspaceShellSource,
