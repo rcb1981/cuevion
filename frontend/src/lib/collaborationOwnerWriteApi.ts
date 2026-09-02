@@ -5,6 +5,7 @@ import {
 } from "./collaborationOwnerApiTransport";
 import {
   isValidCollaborationOwnerReadId,
+  isValidCollaborationParticipantUserId,
   parseCollaborationOwnerReadDto,
   type CollaborationOwnerReadMessage,
   type CollaborationOwnerReadDto,
@@ -29,6 +30,13 @@ export type CollaborationOwnerCreateResult =
     }
   | { status: "invalid_source_locator" }
   | { status: "invalid_state" }
+  | { status: "invalid_participant_user_id" }
+  | CollaborationOwnerTransportFailure;
+
+export type CollaborationOwnerAddParticipantResult =
+  | { status: "success"; collaboration: CollaborationOwnerReadDto }
+  | { status: "invalid_collaboration_id" }
+  | { status: "invalid_participant_user_id" }
   | CollaborationOwnerTransportFailure;
 
 export type CollaborationOwnerAppendResult =
@@ -249,6 +257,7 @@ export function prepareSharedCollaborationMessageForOwner(
 export async function createCollaborationForOwner(
   locator: CollaborationOwnerSourceLocator,
   state: CollaborationOwnerCreateState,
+  participantUserId?: string,
 ): Promise<CollaborationOwnerCreateResult> {
   if (!isTrustedCollaborationOwnerSourceLocator(locator)) {
     return { status: "invalid_source_locator" };
@@ -256,12 +265,16 @@ export async function createCollaborationForOwner(
   if (!isCreateState(state)) {
     return { status: "invalid_state" };
   }
+  if (!isValidCollaborationParticipantUserId(participantUserId)) {
+    return { status: "invalid_participant_user_id" };
+  }
 
   const result = await performAuthenticatedCollaborationOwnerRequest({
     operation: "create",
     mailboxId: locator.mailboxId,
     sourceRef: locator.sourceRef,
     state,
+    participantUserId,
   });
   if (result.status !== "response") {
     return result;
@@ -292,4 +305,36 @@ export async function createCollaborationForOwner(
     created,
     collaboration,
   };
+}
+
+export async function addParticipantToCollaborationForOwner(
+  collaborationId: string,
+  participantUserId: string,
+): Promise<CollaborationOwnerAddParticipantResult> {
+  if (!isValidCollaborationOwnerReadId(collaborationId)) {
+    return { status: "invalid_collaboration_id" };
+  }
+  if (!isValidCollaborationParticipantUserId(participantUserId)) {
+    return { status: "invalid_participant_user_id" };
+  }
+
+  const result = await performAuthenticatedCollaborationOwnerRequest({
+    operation: "add_participant",
+    collaborationId,
+    participantUserId,
+  });
+  if (result.status !== "response") {
+    return result;
+  }
+
+  const collaboration =
+    result.httpStatus === 200 &&
+    isExactRecord(result.payload, ["ok", "data"]) &&
+    result.payload.ok === true &&
+    isExactRecord(result.payload.data, ["collaboration"])
+      ? parseCollaborationOwnerReadDto(result.payload.data.collaboration)
+      : null;
+  return collaboration
+    ? { status: "success", collaboration }
+    : { status: "invalid_response" };
 }

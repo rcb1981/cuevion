@@ -17,10 +17,13 @@ from .models import (
     build_v2_owner_internal_message,
     build_v2_owner_shared_message,
     _build_v2_context_message,
+    MAX_V2_EXPLICIT_PARTICIPANTS,
     MAX_V2_SAFE_INTEGER,
     normalize_v2_thread_record,
     normalize_v2_message_record,
     normalize_v2_owner_idempotency_key,
+    normalize_v2_participant_authority,
+    normalize_v2_user_id,
 )
 from .authorization import _is_internal_capability
 from .guest_session import _is_guest_mutation_capability
@@ -30,8 +33,12 @@ from .redis_store import (
     _append_v2_owner_message_idempotently,
     _append_v2_guest_reply_if_expected,
     _load_v2_thread,
+    _save_v2_participants_if_expected,
     _save_v2_thread_if_expected,
 )
+
+
+_PARTICIPANT_CAS_ATTEMPTS = 4
 
 
 def _failure(code: str) -> dict:
@@ -228,7 +235,18 @@ def _owner_mutation_fingerprint(
             capability,
             actions={"reply", "internal_note"},
         )
-        or capability.actor_kind != "owner"
+        or capability.actor_kind not in {"owner", "internal"}
+        or (
+            capability.actor_kind == "internal"
+            and normalize_v2_user_id(capability.actor_user_id)
+            != capability.actor_user_id
+        )
+        or (
+            capability.actor_kind == "owner"
+            and capability.actor_user_id is not None
+            and normalize_v2_user_id(capability.actor_user_id)
+            != capability.actor_user_id
+        )
         or (capability.action, visibility)
         not in {("reply", "shared"), ("internal_note", "internal")}
     ):
@@ -246,6 +264,8 @@ def _owner_mutation_fingerprint(
         "visibility": visibility,
         "workspaceId": capability.workspace_id,
     }
+    if capability.actor_user_id is not None:
+        canonical["actorUserId"] = capability.actor_user_id
     try:
         encoded = json.dumps(
             canonical,
@@ -276,7 +296,18 @@ def append_owner_v2_message_idempotently(
             context,
             actions={"reply", "internal_note"},
         )
-        or context.actor_kind != "owner"
+        or context.actor_kind not in {"owner", "internal"}
+        or (
+            context.actor_kind == "internal"
+            and normalize_v2_user_id(context.actor_user_id)
+            != context.actor_user_id
+        )
+        or (
+            context.actor_kind == "owner"
+            and context.actor_user_id is not None
+            and normalize_v2_user_id(context.actor_user_id)
+            != context.actor_user_id
+        )
         or (context.action, visibility)
         not in {("reply", "shared"), ("internal_note", "internal")}
     ):
@@ -299,7 +330,7 @@ def append_owner_v2_message_idempotently(
     message = _build_v2_context_message(
         context,
         text,
-        author_kind="owner",
+        author_kind=context.actor_kind,
         visibility=visibility,
         created_at=now,
     )
@@ -318,6 +349,7 @@ def append_owner_v2_message_idempotently(
         idempotency_key=canonical_key,
         fingerprint=fingerprint,
         action=context.action,
+        author_kind=context.actor_kind,
         command_transport=command_transport,
     )
     if type(saved) is not _V2OwnerAppendResult:
@@ -329,7 +361,7 @@ def append_owner_v2_message_idempotently(
     if (
         committed_message is None
         or committed_message != saved.message
-        or committed_message["authorKind"] != "owner"
+        or committed_message["authorKind"] != context.actor_kind
         or committed_message["authorDisplayName"] != context.actor_display_name
         or committed_message["text"] != message["text"]
         or committed_message["visibility"] != visibility
@@ -349,6 +381,101 @@ def append_owner_v2_message_idempotently(
         "updatedAt": saved.updated_at,
         "error": None,
     }
+
+
+def add_v2_participant(
+    context: object,
+    participant_record: object,
+    *,
+    thread_loader=_load_v2_thread,
+    thread_saver=_save_v2_participants_if_expected,
+    command_transport=None,
+) -> dict:
+    participant = normalize_v2_participant_authority(participant_record)
+    if (
+        not _is_internal_capability(context, actions={"manage_participants"})
+        or context.actor_kind != "owner"
+        or context.viewer_access != "owner"
+        or normalize_v2_user_id(context.actor_user_id) != context.actor_user_id
+        or participant is None
+        or participant["userId"] == context.actor_user_id
+    ):
+        return _failure("forbidden")
+
+    for _attempt in range(_PARTICIPANT_CAS_ATTEMPTS):
+        thread, error = _load_scoped_thread(
+            context,
+            thread_loader=thread_loader,
+            command_transport=command_transport,
+        )
+        if error:
+            return error
+        current_participants = list(thread.get("participants", []))
+        existing = next(
+            (
+                entry
+                for entry in current_participants
+                if entry["userId"] == participant["userId"]
+            ),
+            None,
+        )
+        if existing == participant:
+            return {
+                "status": "ok",
+                "record": thread,
+                "changed": False,
+                "error": None,
+            }
+        if existing is None and len(current_participants) >= MAX_V2_EXPLICIT_PARTICIPANTS:
+            return _failure("invalid_request")
+        next_participants = [
+            entry
+            for entry in current_participants
+            if entry["userId"] != participant["userId"]
+        ]
+        next_participants.append(participant)
+        expected = thread["updatedAt"]
+        updated_at = max(time.time_ns() // 1_000_000, expected + 1)
+        if updated_at > MAX_V2_SAFE_INTEGER:
+            return _failure("invalid_request")
+        replacement = normalize_v2_thread_record(
+            {
+                **thread,
+                "ownerUserId": context.actor_user_id,
+                "ownerDisplayName": context.owner_display_name,
+                "participants": next_participants,
+                "updatedAt": updated_at,
+            }
+        )
+        if replacement is None:
+            return _failure("storage_protocol_error")
+        try:
+            saved = thread_saver(
+                replacement,
+                expected,
+                participant_user_id=participant["userId"],
+                command_transport=command_transport,
+            )
+        except Exception:
+            return _failure("storage_unavailable")
+        if type(saved) is _V2RecordResult and saved.status == "ok":
+            saved_thread = normalize_v2_thread_record(saved.record)
+            if saved_thread != replacement:
+                return _failure("storage_protocol_error")
+            return {
+                "status": "ok",
+                "record": saved_thread,
+                "changed": True,
+                "error": None,
+            }
+        if (
+            type(saved) is dict
+            and saved.get("status") == "conflict"
+            and saved.get("error") == {"code": "stale_thread"}
+        ):
+            continue
+        return _failure(_canonical_storage_error(saved))
+    return _failure("stale_thread")
 
 
 def append_guest_v2_reply(

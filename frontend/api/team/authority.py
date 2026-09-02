@@ -55,6 +55,7 @@ _TEAM_V1_PREFIX = "cuevion:team:v1"
 _INVITATION_ID_RE = re.compile(r"tinv_[A-Za-z0-9_-]{1,64}")
 _TOKEN_SECRET_RE = re.compile(r"[A-Za-z0-9_-]{43}")
 _TOKEN_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+_MEMBER_USER_ID_RE = re.compile(r"usr_[A-Za-z0-9_-]{21}[AQgw]")
 
 TeamError = dict[str, str]
 CommandTransport = Callable[[list[object]], dict[str, object]]
@@ -94,6 +95,13 @@ def _valid_invitation_id(value: object) -> bool:
 
 def _valid_token_digest(value: object) -> bool:
     return type(value) is str and _TOKEN_DIGEST_RE.fullmatch(value) is not None
+
+
+def _valid_member_user_id(value: object) -> bool:
+    return (
+        type(value) is str
+        and _MEMBER_USER_ID_RE.fullmatch(value) is not None
+    )
 
 
 def _parse_invitation_token(token: object) -> tuple[str, str] | None:
@@ -525,6 +533,44 @@ def _build_member_user_pointer(value: object) -> dict[str, object] | None:
         "memberUserId": record["memberUserId"],
         "email": record["email"],
         "sourceInvitationId": record["sourceInvitationId"],
+        "status": "active",
+    }
+
+
+def _normalize_member_user_pointer(value: object) -> dict[str, object] | None:
+    required = {
+        "v",
+        "workspaceId",
+        "memberUserId",
+        "email",
+        "sourceInvitationId",
+        "status",
+    }
+    if type(value) is not dict or set(value) != required:
+        return None
+    workspace_id = value.get("workspaceId")
+    member_user_id = value.get("memberUserId")
+    email = _normalize_email(value.get("email"))
+    source_invitation_id = value.get("sourceInvitationId")
+    if (
+        type(value.get("v")) is not int
+        or value.get("v") != TEAM_AUTHORITY_SCHEMA_VERSION
+        or type(workspace_id) is not str
+        or not workspace_id
+        or workspace_id != workspace_id.strip()
+        or not _valid_member_user_id(member_user_id)
+        or not email
+        or value.get("email") != email
+        or not _valid_invitation_id(source_invitation_id)
+        or value.get("status") != "active"
+    ):
+        return None
+    return {
+        "v": TEAM_AUTHORITY_SCHEMA_VERSION,
+        "workspaceId": workspace_id,
+        "memberUserId": member_user_id,
+        "email": email,
+        "sourceInvitationId": source_invitation_id,
         "status": "active",
     }
 
@@ -1040,6 +1086,68 @@ class RuntimeTeamAuthority:
         if error:
             return False
         return raw == _canonical_json(pointer) if present else raw is None
+
+    def resolve_active_member_by_user_id(
+        self,
+        *,
+        workspace_id: str,
+        member_user_id: str,
+    ) -> tuple[dict[str, object] | None, TeamError | None]:
+        """Resolve one exact active v2 member through bounded pointer reads."""
+
+        if (
+            type(workspace_id) is not str
+            or not workspace_id
+            or workspace_id != workspace_id.strip()
+            or not _valid_member_user_id(member_user_id)
+        ):
+            return None, _error("invalid_request", "Team member identity is invalid.")
+
+        pointer_raw, pointer_error = self._get_raw(
+            _member_user_pointer_key(workspace_id, member_user_id)
+        )
+        if pointer_error:
+            return None, pointer_error
+        if pointer_raw is None:
+            return None, _error(
+                "team_member_not_active",
+                "Team member is not active.",
+            )
+        pointer = _decode_record(pointer_raw, _normalize_member_user_pointer)
+        if (
+            pointer is None
+            or pointer["workspaceId"] != workspace_id
+            or pointer["memberUserId"] != member_user_id
+        ):
+            return None, _unavailable_error()
+
+        member_raw, member_error = self._get_raw(
+            _member_key(workspace_id, str(pointer["email"]))
+        )
+        if member_error:
+            return None, member_error
+        membership = _decode_record(member_raw, _normalize_membership_record)
+        if membership is None:
+            return None, _unavailable_error()
+        if membership["status"] != "active":
+            return None, _error(
+                "team_member_not_active",
+                "Team member is not active.",
+            )
+        canonical_pointer = _build_member_user_pointer(membership)
+        if (
+            canonical_pointer is None
+            or canonical_pointer != pointer
+            or membership["workspaceId"] != workspace_id
+            or membership["memberUserId"] != member_user_id
+        ):
+            return None, _unavailable_error()
+        return {
+            "memberUserId": membership["memberUserId"],
+            "displayName": membership["displayName"],
+            "accessLevel": membership["accessLevel"],
+            "sourceInvitationId": membership["sourceInvitationId"],
+        }, None
 
     def issue_invitation(self, *, actor: AuthenticatedMemberContext, invitee_email: str, invitee_name: str, access_level: str):
         try:

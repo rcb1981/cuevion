@@ -11,7 +11,11 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-from .models import normalize_v2_email, normalize_v2_thread_record
+from .models import (
+    normalize_v2_email,
+    normalize_v2_thread_record,
+    normalize_v2_user_id,
+)
 from .redis_store import _load_v2_thread
 
 
@@ -29,6 +33,10 @@ class _InternalCollaborationCapability:
     action: str
     actor_kind: str
     actor_display_name: str
+    actor_user_id: str | None = None
+    viewer_access: str = "owner"
+    owner_user_id: str | None = None
+    owner_display_name: str = ""
 
 
 def _is_internal_capability(value: object, *, actions: set[str] | None = None) -> bool:
@@ -73,16 +81,50 @@ def _resolve_verified_owned_managed_inbox_record(headers, mailbox_id):
         include_member_authority=True,
     )
 
+
+def _resolve_current_authenticated_member(headers):
+    try:
+        runtime = importlib.import_module("api.auth.runtime")
+        resolution = runtime.resolve_authenticated_member(headers)
+    except Exception:
+        return None, "unavailable"
+    if resolution.outcome is runtime.MemberResolutionOutcome.UNAUTHENTICATED:
+        return None, "unauthorized"
+    if (
+        resolution.outcome is not runtime.MemberResolutionOutcome.AUTHENTICATED
+        or type(resolution.member) is not runtime.AuthenticatedMemberContext
+    ):
+        return None, "unavailable"
+    return resolution.member, None
+
+
+def _resolve_active_team_member(workspace_id: str, member_user_id: str):
+    try:
+        authority = importlib.import_module("api.team.authority")
+        membership, error = authority.build_runtime_team_authority().resolve_active_member_by_user_id(
+            workspace_id=workspace_id,
+            member_user_id=member_user_id,
+        )
+    except Exception:
+        return None, "unavailable"
+    if error is None and type(membership) is dict:
+        return membership, None
+    code = error.get("code") if type(error) is dict else None
+    if code in {"invalid_request", "team_member_not_active"}:
+        return None, "not_active"
+    return None, "unavailable"
+
 OWNER_ONLY_ACTIONS = {
     "create",
     "issue_invite",
     "revoke_invite",
     "manage_participants",
-    "internal_note",
     "resolve",
     "reopen",
 }
 OWNER_ACTIONS = OWNER_ONLY_ACTIONS | {"read", "reply"}
+OWNER_ACTIONS.add("internal_note")
+PARTICIPANT_ACTIONS = frozenset({"read", "reply", "internal_note"})
 
 
 def _failure(status: str, code: str) -> dict:
@@ -228,6 +270,10 @@ def resolve_internal_collaboration_context(
         required_action,
         "owner",
         display_name,
+        None,
+        "owner",
+        None,
+        display_name,
     )
     return {
         "status": "ok",
@@ -246,6 +292,8 @@ def resolve_verified_owner_collaboration_context(
     owner_security_configuration: object,
     mailbox_resolver=_resolve_verified_owned_managed_inbox_record,
     thread_loader=_load_v2_thread,
+    member_resolver=_resolve_current_authenticated_member,
+    team_member_resolver=_resolve_active_team_member,
 ) -> dict:
     """Mint an internal capability from exact Auth0 owner and mailbox authority."""
 
@@ -287,6 +335,7 @@ def resolve_verified_owner_collaboration_context(
         return _failure("malformed", "invalid_request")
 
     thread = None
+    viewer_is_owner = True
     resolved_mailbox_id = mailbox_id
     if collaboration_id is not None:
         try:
@@ -303,17 +352,96 @@ def resolve_verified_owner_collaboration_context(
         if (
             loaded.get("status") != "ok"
             or type(thread) is not dict
-            or thread.get("ownerEmail") != owner_context.owner_email
             or thread.get("workspaceId") != owner_context.workspace_id
             or type(thread.get("mailboxId")) is not str
         ):
             return _failure("forbidden", "forbidden")
+        viewer_is_owner = thread.get("ownerEmail") == owner_context.owner_email
         if (
             resolved_mailbox_id is not None
             and thread["mailboxId"] != resolved_mailbox_id
         ):
             return _failure("forbidden", "forbidden")
         resolved_mailbox_id = thread["mailboxId"]
+
+    if thread is not None and not viewer_is_owner:
+        if (
+            required_action not in PARTICIPANT_ACTIONS
+            or mailbox_id is not None
+            or normalize_v2_user_id(thread.get("ownerUserId")) is None
+            or type(thread.get("ownerDisplayName")) is not str
+            or not isinstance(thread.get("participants"), list)
+        ):
+            return _failure("forbidden", "forbidden")
+        try:
+            member, member_error = member_resolver(headers)
+        except Exception:
+            return _failure("unavailable", "storage_unavailable")
+        if member_error == "unauthorized":
+            return _failure("unauthorized", "auth_required")
+        if member_error is not None:
+            return _failure("unavailable", "storage_unavailable")
+        try:
+            auth_runtime = importlib.import_module("api.auth.runtime")
+            member_matches = (
+                type(member) is auth_runtime.AuthenticatedMemberContext
+                and member.auth_source == "auth0"
+                and member.user_type == "member"
+                and normalize_v2_user_id(member.user_id) == member.user_id
+                and member.email == owner_context.owner_email
+                and member.workspace_id == owner_context.workspace_id
+                and member.name == owner_context.display_name
+            )
+        except Exception:
+            return _failure("unavailable", "storage_unavailable")
+        if not member_matches:
+            return _failure("forbidden", "forbidden")
+        participant = next(
+            (
+                entry
+                for entry in thread["participants"]
+                if entry.get("userId") == member.user_id
+            ),
+            None,
+        )
+        if type(participant) is not dict:
+            return _failure("forbidden", "forbidden")
+        try:
+            membership, team_error = team_member_resolver(
+                owner_context.workspace_id,
+                member.user_id,
+            )
+        except Exception:
+            return _failure("unavailable", "storage_unavailable")
+        if team_error == "unavailable":
+            return _failure("unavailable", "storage_unavailable")
+        if (
+            team_error is not None
+            or type(membership) is not dict
+            or membership.get("memberUserId") != member.user_id
+            or membership.get("sourceInvitationId")
+            != participant.get("membershipRef")
+        ):
+            return _failure("forbidden", "forbidden")
+        provider = thread.get("sourceRef", {}).get("provider")
+        if provider not in {"google", "custom_imap"}:
+            return _failure("unavailable", "storage_unavailable")
+        capability = _InternalCollaborationCapability(
+            _INTERNAL_CAPABILITY_SENTINEL,
+            thread["ownerEmail"],
+            thread["workspaceId"],
+            thread["mailboxId"],
+            provider,
+            collaboration_id,
+            required_action,
+            "internal",
+            member.name,
+            member.user_id,
+            "participant",
+            thread["ownerUserId"],
+            thread["ownerDisplayName"],
+        )
+        return {"status": "ok", "context": capability, "error": None}
 
     if type(resolved_mailbox_id) is not str:
         return _failure("malformed", "invalid_request")
@@ -346,6 +474,7 @@ def resolve_verified_owner_collaboration_context(
             type(member) is auth_runtime.AuthenticatedMemberContext
             and member.auth_source == "auth0"
             and member.user_type == "member"
+            and normalize_v2_user_id(member.user_id) == member.user_id
             and member.email == owner_context.owner_email
             and member.workspace_id == owner_context.workspace_id
             and member.name == owner_context.display_name
@@ -360,6 +489,11 @@ def resolve_verified_owner_collaboration_context(
         != owner_context.owner_email
         or type(inbox) is not dict
         or inbox.get("id") != resolved_mailbox_id
+        or (
+            thread is not None
+            and "ownerUserId" in thread
+            and thread["ownerUserId"] != member.user_id
+        )
     ):
         return _failure("forbidden", "forbidden")
 
@@ -385,5 +519,17 @@ def resolve_verified_owner_collaboration_context(
         required_action,
         "owner",
         owner_context.display_name,
+        member.user_id,
+        "owner",
+        (
+            thread["ownerUserId"]
+            if thread is not None and "ownerUserId" in thread
+            else member.user_id
+        ),
+        (
+            thread["ownerDisplayName"]
+            if thread is not None and "ownerDisplayName" in thread
+            else owner_context.display_name
+        ),
     )
     return {"status": "ok", "context": capability, "error": None}

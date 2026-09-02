@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import os
 
-from . import guest_session, mutations, redis_store
+from . import authorization, guest_session, mutations, redis_store
 from .authorization import resolve_internal_collaboration_context
 from .models import hash_v2_secret
 from .mutations import append_guest_v2_reply, append_internal_v2_message
@@ -504,6 +504,197 @@ class CollaborationV2MutationTests(unittest.TestCase):
         self.assertEqual(first["updatedAt"], MS + 101)
         self.assertEqual(second["updatedAt"], MS + 102)
         self.assertEqual([message["createdAt"] for message in current["messages"]], [MS + 101, MS + 102])
+
+
+class CollaborationV2ParticipantMutationTests(unittest.TestCase):
+    workspace_id = "wsp_" + "W" * 22
+    owner_user_id = "usr_" + "A" * 22
+    participant_user_id = "usr_" + "B" * 21 + "A"
+
+    def capability(self, action: str, *, participant: bool = False):
+        return authorization._InternalCollaborationCapability(
+            authorization._INTERNAL_CAPABILITY_SENTINEL,
+            "owner@example.com",
+            self.workspace_id,
+            "mailbox-1",
+            "google",
+            "A" * 22,
+            action,
+            "internal" if participant else "owner",
+            "Participant" if participant else "Owner",
+            self.participant_user_id if participant else self.owner_user_id,
+            "participant" if participant else "owner",
+            self.owner_user_id,
+            "Owner",
+        )
+
+    def thread(self, participants=None):
+        return {
+            **thread_record(),
+            "workspaceId": self.workspace_id,
+            "ownerUserId": self.owner_user_id,
+            "ownerDisplayName": "Owner",
+            "participants": participants
+            if participants is not None
+            else [
+                {
+                    "userId": self.participant_user_id,
+                    "membershipRef": "tinv_original",
+                    "displayName": "Participant",
+                }
+            ],
+        }
+
+    @staticmethod
+    def participant(user_id: str, provenance: str = "tinv_current"):
+        return {
+            "userId": user_id,
+            "membershipRef": provenance,
+            "displayName": "New Participant",
+        }
+
+    def test_duplicate_add_is_noop_and_new_provenance_reactivates_explicitly(self):
+        context = self.capability("manage_participants")
+        current = self.thread()
+        duplicate = mutations.add_v2_participant(
+            context,
+            current["participants"][0],
+            thread_loader=lambda *_args, **_kwargs: redis_store._V2RecordResult(current),
+            thread_saver=lambda *_args, **_kwargs: self.fail("duplicate must not write"),
+        )
+        self.assertFalse(duplicate["changed"])
+        self.assertEqual(duplicate["record"]["updatedAt"], current["updatedAt"])
+
+        saved = []
+        replacement_authority = {
+            **current["participants"][0],
+            "membershipRef": "tinv_reinvited",
+            "displayName": "Participant Again",
+        }
+        with patch.object(mutations.time, "time_ns", return_value=(MS + 101) * 1_000_000):
+            reactivated = mutations.add_v2_participant(
+                context,
+                replacement_authority,
+                thread_loader=lambda *_args, **_kwargs: redis_store._V2RecordResult(current),
+                thread_saver=lambda record, _expected, **_kwargs: saved.append(record) or redis_store._V2RecordResult(record),
+            )
+        self.assertTrue(reactivated["changed"])
+        self.assertEqual(saved[0]["participants"][0]["membershipRef"], "tinv_reinvited")
+        self.assertGreater(saved[0]["updatedAt"], current["updatedAt"])
+
+    def test_stale_duplicate_converges_and_stale_distinct_add_preserves_both(self):
+        context = self.capability("manage_participants")
+        target = self.participant("usr_" + "C" * 21 + "A")
+
+        current = self.thread()
+        saves = 0
+
+        def converge_save(record, _expected, **_kwargs):
+            nonlocal current, saves
+            saves += 1
+            current = record
+            return {"status": "conflict", "error": {"code": "stale_thread"}}
+
+        result = mutations.add_v2_participant(
+            context,
+            target,
+            thread_loader=lambda *_args, **_kwargs: redis_store._V2RecordResult(current),
+            thread_saver=converge_save,
+        )
+        self.assertEqual(result["status"], "ok")
+        self.assertFalse(result["changed"])
+        self.assertEqual(saves, 1)
+
+        other = self.participant("usr_" + "D" * 21 + "A", "tinv_other")
+        current = self.thread()
+        saves = 0
+
+        def preserve_save(record, _expected, **_kwargs):
+            nonlocal current, saves
+            saves += 1
+            if saves == 1:
+                current = {
+                    **current,
+                    "participants": [*current["participants"], other],
+                    "updatedAt": current["updatedAt"] + 1,
+                }
+                return {"status": "conflict", "error": {"code": "stale_thread"}}
+            current = record
+            return redis_store._V2RecordResult(record)
+
+        result = mutations.add_v2_participant(
+            context,
+            target,
+            thread_loader=lambda *_args, **_kwargs: redis_store._V2RecordResult(current),
+            thread_saver=preserve_save,
+        )
+        self.assertTrue(result["changed"])
+        self.assertEqual(saves, 2)
+        self.assertEqual(
+            {participant["userId"] for participant in result["record"]["participants"]},
+            {
+                self.participant_user_id,
+                target["userId"],
+                other["userId"],
+            },
+        )
+
+    def test_cap_and_corrupt_state_fail_before_overwrite(self):
+        context = self.capability("manage_participants")
+        full = self.thread(
+            [
+                self.participant(
+                    "usr_" + chr(66 + index) * 21 + "A",
+                    f"tinv_{index}",
+                )
+                for index in range(15)
+            ]
+        )
+        capped = mutations.add_v2_participant(
+            context,
+            self.participant("usr_" + "z" * 21 + "A"),
+            thread_loader=lambda *_args, **_kwargs: redis_store._V2RecordResult(full),
+            thread_saver=lambda *_args, **_kwargs: self.fail("cap must fail before write"),
+        )
+        self.assertEqual(capped["error"], {"code": "invalid_request"})
+
+        corrupt = self.thread()
+        corrupt["participants"].append(dict(corrupt["participants"][0]))
+        failed = mutations.add_v2_participant(
+            context,
+            self.participant("usr_" + "C" * 21 + "A"),
+            thread_loader=lambda *_args, **_kwargs: redis_store._V2RecordResult(corrupt),
+            thread_saver=lambda *_args, **_kwargs: self.fail("corrupt state must not write"),
+        )
+        self.assertEqual(failed["error"], {"code": "storage_protocol_error"})
+
+    def test_participant_messages_use_only_server_capability_identity(self):
+        context = self.capability("reply", participant=True)
+        saved = []
+
+        def saver(record, _expected, **kwargs):
+            saved.append((record, kwargs))
+            message = record["messages"][-1]
+            return redis_store._V2OwnerAppendResult(
+                message,
+                message["createdAt"],
+                False,
+            )
+
+        with patch.object(mutations.time, "time_ns", return_value=(MS + 101) * 1_000_000):
+            result = mutations.append_owner_v2_message_idempotently(
+                context,
+                "Participant reply",
+                visibility="shared",
+                idempotency_key="i" * 42 + "A",
+                thread_loader=lambda *_args, **_kwargs: redis_store._V2RecordResult(self.thread()),
+                thread_saver=saver,
+            )
+        self.assertEqual(result["status"], "ok")
+        message = saved[0][0]["messages"][-1]
+        self.assertEqual(message["authorKind"], "internal")
+        self.assertEqual(message["authorDisplayName"], "Participant")
+        self.assertEqual(saved[0][1]["author_kind"], "internal")
 
 
 if __name__ == "__main__":

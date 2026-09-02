@@ -15,6 +15,8 @@ type FetchCall = { input: RequestInfo | URL; init?: RequestInit };
 type FetchOutcome = Response | (() => Promise<Response>);
 
 const COLLABORATION_ID = "A".repeat(22);
+const OWNER_USER_ID = `usr_${"A".repeat(22)}`;
+const PARTICIPANT_USER_ID = `usr_${"B".repeat(21)}A`;
 const NOW_MS = 1_800_000_000_000;
 
 function response(
@@ -46,6 +48,7 @@ function collaboration(
   mailboxId: string,
   state: "needs_review" | "needs_action" | "note_only" | "resolved" =
     "needs_review",
+  viewerAccess: "owner" | "participant" = "owner",
 ) {
   return {
     collaborationId: COLLABORATION_ID,
@@ -68,6 +71,19 @@ function collaboration(
         text: "Please review",
         visibility: "internal",
         timestamp: NOW_MS - 1_500,
+      },
+    ],
+    viewerAccess,
+    participants: [
+      {
+        userId: OWNER_USER_ID,
+        displayName: "Owner",
+        access: "owner",
+      },
+      {
+        userId: PARTICIPANT_USER_ID,
+        displayName: "Participant",
+        access: "participant",
       },
     ],
   } as const;
@@ -272,6 +288,7 @@ async function run() {
         await writeApi.createCollaborationForOwner(
           googleLocator(),
           "needs_review",
+          PARTICIPANT_USER_ID,
         ),
         {
           status: "success",
@@ -288,6 +305,7 @@ async function run() {
           mailboxId: "mailbox-google",
           sourceRef: { providerMessageId: "gmail-provider-message-id" },
           state: "needs_review",
+          participantUserId: PARTICIPANT_USER_ID,
         },
         "csrf-token",
       );
@@ -304,6 +322,7 @@ async function run() {
           await writeApi.createCollaborationForOwner(
             imapLocator(),
             "needs_action",
+            PARTICIPANT_USER_ID,
           )
         ).status,
         "success",
@@ -319,6 +338,7 @@ async function run() {
             imapUid: "42",
           },
           state: "needs_action",
+          participantUserId: PARTICIPANT_USER_ID,
         },
         "csrf-token",
       );
@@ -338,6 +358,7 @@ async function run() {
           await writeApi.createCollaborationForOwner(
             googleLocator(),
             "note_only",
+            PARTICIPANT_USER_ID,
           )
         ).status,
         "success",
@@ -420,6 +441,31 @@ async function run() {
       assert.equal(calls.length, 0);
     });
 
+    await test("requires one canonical participant user ID before create fetch", reset, async () => {
+      const calls: FetchCall[] = [];
+      installFetch([], calls);
+      const invalidValues: unknown[] = [
+        undefined,
+        "",
+        "participant@example.test",
+        "usr_short",
+        `usr_${"A".repeat(21)}B`,
+        { userId: PARTICIPANT_USER_ID },
+        { email: "participant@example.test", displayName: "Participant" },
+      ];
+      for (const participantUserId of invalidValues) {
+        assert.deepEqual(
+          await writeApi.createCollaborationForOwner(
+            googleLocator(),
+            "needs_review",
+            participantUserId as string,
+          ),
+          { status: "invalid_participant_user_id" },
+        );
+      }
+      assert.equal(calls.length, 0);
+    });
+
     await test("reuses one cached CSRF token for new and duplicate create", reset, async () => {
       const calls: FetchCall[] = [];
       installFetch(
@@ -431,8 +477,16 @@ async function run() {
         calls,
       );
       const locator = googleLocator();
-      const first = await writeApi.createCollaborationForOwner(locator, "needs_review");
-      const duplicate = await writeApi.createCollaborationForOwner(locator, "needs_review");
+      const first = await writeApi.createCollaborationForOwner(
+        locator,
+        "needs_review",
+        PARTICIPANT_USER_ID,
+      );
+      const duplicate = await writeApi.createCollaborationForOwner(
+        locator,
+        "needs_review",
+        PARTICIPANT_USER_ID,
+      );
       assert.equal(first.status, "success");
       assert.deepEqual(duplicate, {
         status: "success",
@@ -458,7 +512,11 @@ async function run() {
         ],
         calls,
       );
-      await writeApi.createCollaborationForOwner(googleLocator(), "needs_review");
+      await writeApi.createCollaborationForOwner(
+        googleLocator(),
+        "needs_review",
+        PARTICIPANT_USER_ID,
+      );
       assert.equal(
         (await readApi.readCollaborationForOwner(COLLABORATION_ID)).status,
         "success",
@@ -485,7 +543,13 @@ async function run() {
         successCalls,
       );
       assert.equal(
-        (await writeApi.createCollaborationForOwner(locator, "needs_review")).status,
+        (
+          await writeApi.createCollaborationForOwner(
+            locator,
+            "needs_review",
+            PARTICIPANT_USER_ID,
+          )
+        ).status,
         "success",
       );
       assert.equal(successCalls.length, 4);
@@ -496,6 +560,7 @@ async function run() {
           mailboxId: "mailbox-google",
           sourceRef: { providerMessageId: "gmail-provider-message-id" },
           state: "needs_review",
+          participantUserId: PARTICIPANT_USER_ID,
         },
         "fresh-token",
       );
@@ -512,7 +577,11 @@ async function run() {
         deniedCalls,
       );
       assert.deepEqual(
-        await writeApi.createCollaborationForOwner(locator, "needs_review"),
+        await writeApi.createCollaborationForOwner(
+          locator,
+          "needs_review",
+          PARTICIPANT_USER_ID,
+        ),
         { status: "forbidden" },
       );
       assert.equal(
@@ -536,11 +605,21 @@ async function run() {
       );
       const locator = googleLocator();
       assert.deepEqual(
-        await writeApi.createCollaborationForOwner(locator, "needs_review"),
+        await writeApi.createCollaborationForOwner(
+          locator,
+          "needs_review",
+          PARTICIPANT_USER_ID,
+        ),
         { status: "unauthorized" },
       );
       assert.equal(
-        (await writeApi.createCollaborationForOwner(locator, "needs_review")).status,
+        (
+          await writeApi.createCollaborationForOwner(
+            locator,
+            "needs_review",
+            PARTICIPANT_USER_ID,
+          )
+        ).status,
         "success",
       );
       assert.equal(calls.length, 4);
@@ -551,6 +630,7 @@ async function run() {
           mailboxId: "mailbox-google",
           sourceRef: { providerMessageId: "gmail-provider-message-id" },
           state: "needs_review",
+          participantUserId: PARTICIPANT_USER_ID,
         },
         "replacement-token",
       );
@@ -582,6 +662,7 @@ async function run() {
           await writeApi.createCollaborationForOwner(
             googleLocator(),
             "needs_review",
+            PARTICIPANT_USER_ID,
           ),
           testCase.expected,
         );
@@ -590,7 +671,33 @@ async function run() {
     });
 
     await test("rejects malformed envelopes, DTOs, and status/created mismatches", reset, async () => {
+      const authoritative = collaboration("mailbox-google");
+      const {
+        viewerAccess: _viewerAccess,
+        participants: _participants,
+        ...oldDto
+      } = authoritative;
       const malformed = [
+        response(201, {
+          ok: true,
+          data: { created: true, collaboration: oldDto },
+        }),
+        response(201, {
+          ok: true,
+          data: {
+            created: true,
+            collaboration: {
+              ...authoritative,
+              participants: [
+                authoritative.participants[0],
+                {
+                  ...authoritative.participants[1],
+                  membershipRef: "tinv_private",
+                },
+              ],
+            },
+          },
+        }),
         response(201, { ok: true, data: { created: true } }),
         response(201, {
           ok: true,
@@ -702,6 +809,7 @@ async function run() {
           await writeApi.createCollaborationForOwner(
             googleLocator(),
             "needs_review",
+            PARTICIPANT_USER_ID,
           ),
           { status: "invalid_response" },
         );
@@ -722,7 +830,11 @@ async function run() {
       );
       const locator = googleLocator();
       assert.deepEqual(
-        await writeApi.createCollaborationForOwner(locator, "needs_review"),
+        await writeApi.createCollaborationForOwner(
+          locator,
+          "needs_review",
+          PARTICIPANT_USER_ID,
+        ),
         { status: "network_failure" },
       );
       assert.equal(calls.length, 2);
@@ -730,6 +842,7 @@ async function run() {
       const callerRetry = await writeApi.createCollaborationForOwner(
         locator,
         "needs_review",
+        PARTICIPANT_USER_ID,
       );
       assert.deepEqual(callerRetry, {
         status: "success",
@@ -743,6 +856,190 @@ async function run() {
         ).length,
         2,
       );
+    });
+
+    await test("sends the exact add-participant contract without idempotency or identity extras", reset, async () => {
+      const calls: FetchCall[] = [];
+      installFetch(
+        [
+          csrfResponse("csrf-token"),
+          response(200, {
+            ok: true,
+            data: { collaboration: collaboration("mailbox-google") },
+          }),
+        ],
+        calls,
+      );
+      assert.deepEqual(
+        await writeApi.addParticipantToCollaborationForOwner(
+          COLLABORATION_ID,
+          PARTICIPANT_USER_ID,
+        ),
+        {
+          status: "success",
+          collaboration: collaboration("mailbox-google"),
+        },
+      );
+      assert.equal(calls.length, 2);
+      assertExactRequest(calls[0], { operation: "csrf" });
+      assertExactRequest(
+        calls[1],
+        {
+          operation: "add_participant",
+          collaborationId: COLLABORATION_ID,
+          participantUserId: PARTICIPANT_USER_ID,
+        },
+        "csrf-token",
+      );
+      assert.equal(calls[1].input, "/api/collaboration/owner");
+      const serialized = String(calls[1].init?.body);
+      for (const forbidden of [
+        "email",
+        "displayName",
+        "author",
+        "invite",
+        "membershipRef",
+      ]) {
+        assert.equal(serialized.includes(forbidden), false);
+      }
+    });
+
+    await test("rejects malformed add-participant authority before any request", reset, async () => {
+      const calls: FetchCall[] = [];
+      installFetch([], calls);
+      for (const collaborationId of ["", "A".repeat(21), `${COLLABORATION_ID} `]) {
+        assert.deepEqual(
+          await writeApi.addParticipantToCollaborationForOwner(
+            collaborationId,
+            PARTICIPANT_USER_ID,
+          ),
+          { status: "invalid_collaboration_id" },
+        );
+      }
+      for (const participantUserId of [
+        "",
+        "participant@example.test",
+        "usr_not-canonical",
+        `usr_${"B".repeat(21)}B`,
+      ]) {
+        assert.deepEqual(
+          await writeApi.addParticipantToCollaborationForOwner(
+            COLLABORATION_ID,
+            participantUserId,
+          ),
+          { status: "invalid_participant_user_id" },
+        );
+      }
+      assert.equal(calls.length, 0);
+    });
+
+    await test("keeps add-participant failures bounded and private", reset, async () => {
+      const cases: Array<{
+        outcomes: FetchOutcome[];
+        expected: unknown;
+      }> = [
+        {
+          outcomes: [csrfResponse("token"), response(401, { private: "auth" })],
+          expected: { status: "unauthorized" },
+        },
+        {
+          outcomes: [
+            csrfResponse("stale"),
+            response(403, { private: "first" }),
+            csrfResponse("fresh"),
+            response(403, { private: "second" }),
+          ],
+          expected: { status: "forbidden" },
+        },
+        {
+          outcomes: [csrfResponse("token"), response(409, { private: "conflict" })],
+          expected: { status: "conflict" },
+        },
+        {
+          outcomes: [
+            csrfResponse("token"),
+            response(429, { private: "limited" }, { "Retry-After": "7" }),
+          ],
+          expected: { status: "rate_limited", retryAfterSeconds: 7 },
+        },
+        {
+          outcomes: [csrfResponse("token"), response(503, { private: "store" })],
+          expected: { status: "service_unavailable" },
+        },
+        {
+          outcomes: [csrfResponse("token"), response(500, { private: "server" })],
+          expected: { status: "internal_error" },
+        },
+      ];
+      for (const testCase of cases) {
+        reset();
+        const calls: FetchCall[] = [];
+        installFetch([...testCase.outcomes], calls);
+        const result = await writeApi.addParticipantToCollaborationForOwner(
+          COLLABORATION_ID,
+          PARTICIPANT_USER_ID,
+        );
+        assert.deepEqual(result, testCase.expected);
+        assert.equal(JSON.stringify(result).includes("private"), false);
+      }
+
+      reset();
+      const networkCalls: FetchCall[] = [];
+      installFetch(
+        [csrfResponse("token"), async () => {
+          throw new Error("private network detail");
+        }],
+        networkCalls,
+      );
+      assert.deepEqual(
+        await writeApi.addParticipantToCollaborationForOwner(
+          COLLABORATION_ID,
+          PARTICIPANT_USER_ID,
+        ),
+        { status: "network_failure" },
+      );
+    });
+
+    await test("rejects malformed add-participant success DTOs through the shared strict parser", reset, async () => {
+      const valid = collaboration("mailbox-google");
+      const malformed = [
+        { ok: true, data: {} },
+        { ok: true, data: { collaboration: { ...valid, viewerAccess: "guest" } } },
+        {
+          ok: true,
+          data: {
+            collaboration: {
+              ...valid,
+              participants: [{ ...valid.participants[1] }],
+            },
+          },
+        },
+        {
+          ok: true,
+          data: {
+            collaboration: {
+              ...valid,
+              participants: [
+                valid.participants[0],
+                { ...valid.participants[1], sourceInvitationId: "private" },
+              ],
+            },
+          },
+        },
+        { ok: true, data: { collaboration: valid, extra: true } },
+      ];
+      for (const payload of malformed) {
+        reset();
+        const calls: FetchCall[] = [];
+        installFetch([csrfResponse("token"), response(200, payload)], calls);
+        assert.deepEqual(
+          await writeApi.addParticipantToCollaborationForOwner(
+            COLLABORATION_ID,
+            PARTICIPANT_USER_ID,
+          ),
+          { status: "invalid_response" },
+        );
+      }
     });
 
     await test("sends the exact append_internal contract with a hidden canonical key", reset, async () => {

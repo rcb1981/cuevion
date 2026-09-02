@@ -8,6 +8,7 @@ import {
   COLLABORATION_OWNER_READ_ENDPOINT,
   isValidCollaborationOwnerReadId,
   lookupCollaborationForOwner,
+  parseCollaborationOwnerReadDto,
   readCollaborationForOwner,
 } from "./collaborationOwnerReadApi";
 
@@ -15,6 +16,9 @@ type FetchCall = { input: RequestInfo | URL; init?: RequestInit };
 
 const COLLABORATION_ID = "A".repeat(22);
 const MESSAGE_ID = "B".repeat(22);
+const OWNER_USER_ID = `usr_${"A".repeat(22)}`;
+const PARTICIPANT_USER_ID = `usr_${"B".repeat(21)}A`;
+const SECOND_PARTICIPANT_USER_ID = `usr_${"C".repeat(21)}A`;
 const NOW_MS = 1_800_000_000_000;
 const googleLocator = {
   mailboxId: "mailbox-1",
@@ -42,6 +46,19 @@ const collaboration = {
       text: "Please review",
       visibility: "shared",
       timestamp: NOW_MS - 1_000,
+    },
+  ],
+  viewerAccess: "owner",
+  participants: [
+    {
+      userId: OWNER_USER_ID,
+      displayName: "Workspace Owner",
+      access: "owner",
+    },
+    {
+      userId: PARTICIPANT_USER_ID,
+      displayName: "Team Reviewer",
+      access: "participant",
     },
   ],
 } as const;
@@ -291,7 +308,7 @@ async function run() {
       assert.equal(calls.length, 0);
     });
 
-    await test("parses only the exact v2 owner DTO", async () => {
+    await test("parses only the exact authoritative owner DTO", async () => {
       const calls: FetchCall[] = [];
       installFetch([csrfResponse("token"), readResponse()], calls);
       const result = await readCollaborationForOwner(COLLABORATION_ID);
@@ -302,13 +319,101 @@ async function run() {
           "createdAt",
           "mailboxId",
           "messages",
+          "participants",
           "source",
           "state",
           "updatedAt",
+          "viewerAccess",
         ]);
         const serialized = JSON.stringify(result.collaboration);
-        for (const legacyField of ["participants", "requester", "mentions", "preview"])
+        for (const legacyField of ["membershipRef", "sourceInvitationId", "requester", "mentions", "preview"])
           assert.equal(serialized.includes(`\"${legacyField}\"`), false);
+      }
+    });
+
+    await test("accepts a valid participant-viewer DTO", async () => {
+      const dto = {
+        ...collaboration,
+        viewerAccess: "participant",
+      };
+      assert.deepEqual(parseCollaborationOwnerReadDto(dto), dto);
+    });
+
+    await test("strictly validates participant authority projection", async () => {
+      const participant = collaboration.participants[1];
+      const cases: unknown[] = [
+        { ...collaboration, participants: [] },
+        {
+          ...collaboration,
+          participants: Array.from({ length: 17 }, (_, index) => ({
+            userId: index === 0 ? OWNER_USER_ID : `usr_${String.fromCharCode(66 + index).repeat(21)}A`,
+            displayName: `Person ${index}`,
+            access: index === 0 ? "owner" : "participant",
+          })),
+        },
+        { ...collaboration, viewerAccess: "guest" },
+        { ...collaboration, participants: [participant] },
+        {
+          ...collaboration,
+          participants: [participant, collaboration.participants[0]],
+        },
+        {
+          ...collaboration,
+          participants: [collaboration.participants[0], collaboration.participants[0]],
+        },
+        {
+          ...collaboration,
+          participants: [
+            collaboration.participants[0],
+            { ...participant, userId: "usr_not-canonical" },
+          ],
+        },
+        {
+          ...collaboration,
+          participants: [
+            collaboration.participants[0],
+            { ...participant, access: "viewer" },
+          ],
+        },
+        {
+          ...collaboration,
+          participants: [
+            collaboration.participants[0],
+            { userId: participant.userId, displayName: participant.displayName },
+          ],
+        },
+        {
+          ...collaboration,
+          participants: [
+            collaboration.participants[0],
+            { ...participant, membershipRef: "tinv_private" },
+          ],
+        },
+        {
+          ...collaboration,
+          participants: [
+            collaboration.participants[0],
+            { ...participant, displayName: "" },
+          ],
+        },
+        {
+          ...collaboration,
+          participants: [
+            collaboration.participants[0],
+            { ...participant, displayName: "x".repeat(257) },
+          ],
+        },
+        {
+          ...collaboration,
+          participants: [
+            collaboration.participants[0],
+            { ...participant, userId: SECOND_PARTICIPANT_USER_ID },
+            participant,
+          ],
+        },
+      ];
+      for (const malformed of cases) {
+        assert.equal(parseCollaborationOwnerReadDto(malformed), null);
       }
     });
 
@@ -316,7 +421,7 @@ async function run() {
       const malformedValues = [
         { ...collaboration, mailboxId: undefined },
         { ...collaboration, state: "open" },
-        { ...collaboration, participants: [] },
+        { ...collaboration, participants: undefined },
         { ...collaboration, source: { ...collaboration.source, bodyText: 42 } },
         { ...collaboration, messages: [{ ...collaboration.messages[0], visibility: "public" }] },
       ];

@@ -44,6 +44,7 @@ _OWNER_BODY_FIELDS = frozenset(
         "sourceRef",
         "state",
         "text",
+        "participantUserId",
     }
 )
 _SECURITY_CONFIGURATION_NAMES = (
@@ -300,7 +301,13 @@ def owner_response(
             _require_exact_fields(
                 payload,
                 frozenset(
-                    {"operation", "mailboxId", "sourceRef", "state"}
+                    {
+                        "operation",
+                        "mailboxId",
+                        "sourceRef",
+                        "state",
+                        "participantUserId",
+                    }
                 ),
             )
             limited = _rate_limit_response(
@@ -317,6 +324,7 @@ def owner_response(
                     "mailboxId": payload.get("mailboxId"),
                     "sourceRef": payload.get("sourceRef"),
                     "state": payload.get("state"),
+                    "participantUserId": payload.get("participantUserId"),
                 },
                 owner_security_configuration=configuration,
             )
@@ -327,6 +335,36 @@ def owner_response(
                 and type(result.get("collaboration")) is dict
             ):
                 return json_success(result, status=201 if result["created"] else 200)
+            return _application_failure(result)
+
+        if operation == "add_participant":
+            _require_exact_fields(
+                payload,
+                frozenset(
+                    {"operation", "collaborationId", "participantUserId"}
+                ),
+            )
+            limited = _rate_limit_response(
+                context,
+                owner_rate_limit.RATE_LIMIT_WRITE,
+                rate_limit_configuration,
+            )
+            if limited is not None:
+                return limited
+            result = application.add_v2_participant_for_verified_owner(
+                context,
+                raw_headers,
+                payload.get("collaborationId"),
+                {"participantUserId": payload.get("participantUserId")},
+                owner_security_configuration=configuration,
+            )
+            if (
+                type(result) is dict
+                and result.get("status") == "ok"
+                and type(result.get("collaboration")) is dict
+                and result.get("error") is None
+            ):
+                return json_success({"collaboration": result["collaboration"]})
             return _application_failure(result)
 
         if operation in {"append_shared", "append_internal"}:

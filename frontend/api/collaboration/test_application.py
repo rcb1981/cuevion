@@ -3817,5 +3817,246 @@ class ApplicationErrorSafetyTests(unittest.TestCase):
         self.assertNotIn(PRIVATE_EXCEPTION_MARKER, text)
 
 
+class ParticipantAuthorityApplicationTests(unittest.TestCase):
+    workspace_id = "wsp_" + "W" * 22
+    owner_user_id = "usr_" + "A" * 22
+    participant_user_id = "usr_" + "B" * 21 + "A"
+
+    def capability(self, action: str, *, viewer_access: str = "owner"):
+        return authorization._InternalCollaborationCapability(
+            authorization._INTERNAL_CAPABILITY_SENTINEL,
+            OWNER_EMAIL,
+            self.workspace_id,
+            MAILBOX_ID,
+            "google",
+            None if action == "create" else COLLABORATION_ID,
+            action,
+            "owner" if viewer_access == "owner" else "internal",
+            "Owner Person" if viewer_access == "owner" else "Participant",
+            self.owner_user_id if viewer_access == "owner" else self.participant_user_id,
+            viewer_access,
+            self.owner_user_id,
+            "Owner Person",
+        )
+
+    def participant_membership(self, provenance: str = "tinv_original"):
+        return {
+            "memberUserId": self.participant_user_id,
+            "displayName": "Participant",
+            "accessLevel": "Shared",
+            "sourceInvitationId": provenance,
+        }
+
+    def modern_thread(self) -> dict:
+        return {
+            **_thread_record(),
+            "workspaceId": self.workspace_id,
+            "ownerUserId": self.owner_user_id,
+            "ownerDisplayName": "Owner Person",
+            "participants": [
+                {
+                    "userId": self.participant_user_id,
+                    "membershipRef": "tinv_original",
+                    "displayName": "Participant",
+                }
+            ],
+        }
+
+    def test_create_resolves_and_persists_initial_participant_atomically(self):
+        capability = self.capability("create")
+        stored: list[dict] = []
+
+        def create(record):
+            stored.append(record)
+            return redis_store._V2RecordResult(record, created=True)
+
+        source = {
+            "status": "ok",
+            "source": {
+                "sourceRef": {
+                    "provider": "google",
+                    "providerMessageId": "provider-1",
+                },
+                "sourceMessage": self.modern_thread()["sourceMessage"],
+            },
+            "error": None,
+        }
+        with patch.object(
+            application,
+            "resolve_verified_owner_collaboration_context",
+            return_value={"status": "ok", "context": capability, "error": None},
+        ), patch.object(
+            application,
+            "_resolve_active_team_member",
+            return_value=(self.participant_membership(), None),
+        ) as team_resolver, patch.object(
+            application,
+            "resolve_source_message",
+            return_value=source,
+        ), patch.object(
+            application,
+            "_create_v2_thread",
+            side_effect=create,
+        ), patch.object(application.time, "time_ns", return_value=NOW_MILLISECONDS * 1_000_000):
+            result = application.create_v2_collaboration_for_verified_owner(
+                object(),
+                object(),
+                {
+                    "mailboxId": MAILBOX_ID,
+                    "sourceRef": {"providerMessageId": "provider-1"},
+                    "state": "needs_review",
+                    "participantUserId": self.participant_user_id,
+                },
+                owner_security_configuration=object(),
+            )
+        self.assertTrue(result["created"])
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0]["ownerUserId"], self.owner_user_id)
+        self.assertEqual(
+            stored[0]["participants"],
+            [
+                {
+                    "userId": self.participant_user_id,
+                    "membershipRef": "tinv_original",
+                    "displayName": "Participant",
+                }
+            ],
+        )
+        self.assertEqual(result["collaboration"]["viewerAccess"], "owner")
+        self.assertEqual(
+            [person["access"] for person in result["collaboration"]["participants"]],
+            ["owner", "participant"],
+        )
+        self.assertNotIn("membershipRef", repr(result["collaboration"]))
+        self.assertGreaterEqual(team_resolver.call_count, 2)
+
+    def test_team_failure_and_missing_or_self_participant_never_create_partial_state(self):
+        capability = self.capability("create")
+        create_calls: list[dict] = []
+        source_calls: list[object] = []
+        authorized = {"status": "ok", "context": capability, "error": None}
+        with patch.object(
+            application,
+            "resolve_verified_owner_collaboration_context",
+            return_value=authorized,
+        ), patch.object(
+            application,
+            "_resolve_active_team_member",
+            return_value=(None, "not_active"),
+        ), patch.object(
+            application,
+            "resolve_source_message",
+            side_effect=lambda *_args, **_kwargs: source_calls.append(object()),
+        ), patch.object(
+            application,
+            "_create_v2_thread",
+            side_effect=lambda record: create_calls.append(record),
+        ):
+            base = {
+                "mailboxId": MAILBOX_ID,
+                "sourceRef": {"providerMessageId": "provider-1"},
+                "state": "needs_review",
+            }
+            missing = application.create_v2_collaboration_for_verified_owner(
+                object(), object(), base,
+                owner_security_configuration=object(),
+            )
+            removed = application.create_v2_collaboration_for_verified_owner(
+                object(), object(), {**base, "participantUserId": self.participant_user_id},
+                owner_security_configuration=object(),
+            )
+            self_target = application.create_v2_collaboration_for_verified_owner(
+                object(), object(), {**base, "participantUserId": self.owner_user_id},
+                owner_security_configuration=object(),
+            )
+        self.assertEqual(missing["error"], {"code": "invalid_request"})
+        self.assertEqual(removed["error"], {"code": "forbidden"})
+        self.assertEqual(self_target["error"], {"code": "invalid_request"})
+        self.assertEqual(source_calls, [])
+        self.assertEqual(create_calls, [])
+
+    def test_old_owner_record_projects_new_dto_and_inactive_history_is_omitted(self):
+        old = {**_thread_record(), "workspaceId": self.workspace_id}
+        capability = self.capability("read")
+        authorized = {"status": "ok", "context": capability, "error": None}
+        with patch.object(
+            application,
+            "resolve_verified_owner_collaboration_context",
+            return_value=authorized,
+        ), patch.object(
+            application,
+            "_load_exact_thread",
+            return_value=(old, None),
+        ):
+            result = application.read_v2_collaboration_for_verified_owner(
+                object(), object(), COLLABORATION_ID,
+                owner_security_configuration=object(),
+            )
+        self.assertEqual(result["collaboration"]["viewerAccess"], "owner")
+        self.assertEqual(
+            result["collaboration"]["participants"],
+            [{"userId": self.owner_user_id, "displayName": "Owner Person", "access": "owner"}],
+        )
+
+        with patch.object(
+            application,
+            "resolve_verified_owner_collaboration_context",
+            return_value=authorized,
+        ), patch.object(
+            application,
+            "_load_exact_thread",
+            return_value=(self.modern_thread(), None),
+        ), patch.object(
+            application,
+            "_resolve_active_team_member",
+            return_value=(None, "not_active"),
+        ):
+            inactive = application.read_v2_collaboration_for_verified_owner(
+                object(), object(), COLLABORATION_ID,
+                owner_security_configuration=object(),
+            )
+        self.assertEqual(inactive["status"], "ok")
+        self.assertEqual(len(inactive["collaboration"]["participants"]), 1)
+
+    def test_owner_add_uses_current_team_provenance_and_participant_add_is_denied(self):
+        owner_capability = self.capability("manage_participants")
+        modern = self.modern_thread()
+        modern["participants"][0]["membershipRef"] = "tinv_new"
+        authorized = {"status": "ok", "context": owner_capability, "error": None}
+        with patch.object(
+            application,
+            "resolve_verified_owner_collaboration_context",
+            return_value=authorized,
+        ), patch.object(
+            application,
+            "_resolve_active_team_member",
+            return_value=(self.participant_membership("tinv_new"), None),
+        ), patch.object(
+            mutations,
+            "add_v2_participant",
+            return_value={"status": "ok", "record": modern, "changed": True, "error": None},
+        ) as add:
+            result = application.add_v2_participant_for_verified_owner(
+                object(), object(), COLLABORATION_ID,
+                {"participantUserId": self.participant_user_id},
+                owner_security_configuration=object(),
+            )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(add.call_args.args[1]["membershipRef"], "tinv_new")
+
+        participant = self.capability("manage_participants", viewer_access="participant")
+        with patch.object(
+            application,
+            "resolve_verified_owner_collaboration_context",
+            return_value={"status": "ok", "context": participant, "error": None},
+        ):
+            denied = application.add_v2_participant_for_verified_owner(
+                object(), object(), COLLABORATION_ID,
+                {"participantUserId": "usr_" + "C" * 21 + "A"},
+                owner_security_configuration=object(),
+            )
+        self.assertEqual(denied["error"], {"code": "forbidden"})
+
+
 if __name__ == "__main__":
     unittest.main()

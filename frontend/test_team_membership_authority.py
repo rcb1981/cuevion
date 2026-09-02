@@ -968,6 +968,144 @@ class TeamAuthorityStorageContractTests(unittest.TestCase):
         self.assertNotIn(encoded_secret, serialized)
         self.assertEqual(record["tokenDigest"], token_digest)
 
+    def test_exact_active_modern_member_resolver_is_bounded_and_provenance_bound(self):
+        authority = self.load_authority_module()
+        user_id = "usr_" + "A" * 22
+        membership = {
+            "v": 2,
+            "workspaceId": "workspace-a",
+            "email": "recipient@example.test",
+            "verifiedRecipientEmail": "recipient@example.test",
+            "memberUserId": user_id,
+            "displayName": "Recipient",
+            "accessLevel": "Limited",
+            "status": "active",
+            "sourceInvitationId": "tinv_provenance",
+            "createdAt": NOW_MS,
+            "updatedAt": NOW_MS + 1,
+            "acceptedAt": NOW_MS + 1,
+        }
+        pointer = {
+            "v": 2,
+            "workspaceId": "workspace-a",
+            "memberUserId": user_id,
+            "email": "recipient@example.test",
+            "sourceInvitationId": "tinv_provenance",
+            "status": "active",
+        }
+        values = {
+            authority._member_user_pointer_key("workspace-a", user_id): authority._canonical_json(pointer),
+            authority._member_key("workspace-a", "recipient@example.test"): authority._canonical_json(membership),
+        }
+        commands: list[list[object]] = []
+
+        def transport(command: list[object]) -> dict[str, object]:
+            commands.append(command)
+            self.assertEqual(command[0], "GET")
+            return {"result": values.get(str(command[1]))}
+
+        runtime = authority.RuntimeTeamAuthority(transport, environment={})
+        resolved, error = runtime.resolve_active_member_by_user_id(
+            workspace_id="workspace-a",
+            member_user_id=user_id,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(
+            resolved,
+            {
+                "memberUserId": user_id,
+                "displayName": "Recipient",
+                "accessLevel": "Limited",
+                "sourceInvitationId": "tinv_provenance",
+            },
+        )
+        self.assertEqual(len(commands), 2)
+        self.assertTrue(all(command[0] == "GET" for command in commands))
+        self.assertFalse(any("SCAN" in json.dumps(command).upper() for command in commands))
+
+    def test_member_resolver_rejects_legacy_removed_wrong_workspace_and_malformed(self):
+        authority = self.load_authority_module()
+        user_id = "usr_" + "A" * 22
+        pointer_key = authority._member_user_pointer_key("workspace-a", user_id)
+        member_key = authority._member_key("workspace-a", "recipient@example.test")
+        pointer = {
+            "v": 2,
+            "workspaceId": "workspace-a",
+            "memberUserId": user_id,
+            "email": "recipient@example.test",
+            "sourceInvitationId": "tinv_original",
+            "status": "active",
+        }
+        removed = {
+            "v": 2,
+            "workspaceId": "workspace-a",
+            "email": "recipient@example.test",
+            "verifiedRecipientEmail": "recipient@example.test",
+            "memberUserId": user_id,
+            "displayName": "Recipient",
+            "accessLevel": "Limited",
+            "status": "removed",
+            "sourceInvitationId": "tinv_original",
+            "createdAt": NOW_MS,
+            "updatedAt": NOW_MS + 2,
+            "acceptedAt": NOW_MS + 1,
+            "removedAt": NOW_MS + 2,
+            "revokedAt": NOW_MS + 2,
+        }
+
+        def runtime_for(values: dict[str, str]):
+            return authority.RuntimeTeamAuthority(
+                lambda command: {"result": values.get(str(command[1]))},
+                environment={},
+            )
+
+        cases = [
+            runtime_for({}),
+            runtime_for(
+                {
+                    pointer_key: authority._canonical_json(pointer),
+                    member_key: authority._canonical_json(removed),
+                }
+            ),
+            runtime_for({pointer_key: "{}"}),
+        ]
+        expected_codes = [
+            "team_member_not_active",
+            "team_member_not_active",
+            "team_authority_unavailable",
+        ]
+        for runtime, expected_code in zip(cases, expected_codes, strict=True):
+            resolved, error = runtime.resolve_active_member_by_user_id(
+                workspace_id="workspace-a",
+                member_user_id=user_id,
+            )
+            self.assertIsNone(resolved)
+            self.assertEqual(error["code"], expected_code)
+
+        resolved, error = cases[0].resolve_active_member_by_user_id(
+            workspace_id="workspace-b",
+            member_user_id=user_id,
+        )
+        self.assertIsNone(resolved)
+        self.assertEqual(error["code"], "team_member_not_active")
+        resolved, error = cases[0].resolve_active_member_by_user_id(
+            workspace_id="workspace-a",
+            member_user_id="legacy-user-id",
+        )
+        self.assertIsNone(resolved)
+        self.assertEqual(error["code"], "invalid_request")
+
+        unavailable = authority.RuntimeTeamAuthority(
+            lambda _command: (_ for _ in ()).throw(RuntimeError("private")),
+            environment={},
+        )
+        resolved, error = unavailable.resolve_active_member_by_user_id(
+            workspace_id="workspace-a",
+            member_user_id=user_id,
+        )
+        self.assertIsNone(resolved)
+        self.assertEqual(error["code"], "team_authority_unavailable")
+
     def test_invitation_lifetime_is_exactly_seven_days(self):
         authority = self.load_authority_module()
         self.assertEqual(authority.TEAM_INVITE_TTL_MS, SEVEN_DAYS_MS)

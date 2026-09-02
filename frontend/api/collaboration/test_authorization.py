@@ -3,8 +3,13 @@ from __future__ import annotations
 import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from .authorization import resolve_internal_collaboration_context
+from . import authorization
+from .authorization import (
+    resolve_internal_collaboration_context,
+    resolve_verified_owner_collaboration_context,
+)
 
 MS = 1_800_000_000_000
 
@@ -155,6 +160,146 @@ class CollaborationV2AuthorizationTests(unittest.TestCase):
         )
         self.assertEqual(result["error"]["code"], "mailbox_not_found")
         self.assertEqual(calls, [])
+
+
+class CollaborationV2ParticipantAuthorizationTests(unittest.TestCase):
+    workspace_id = "wsp_" + "W" * 22
+    owner_user_id = "usr_" + "A" * 22
+    participant_user_id = "usr_" + "B" * 21 + "A"
+
+    class Member:
+        def __init__(self, *, user_id: str, workspace_id: str | None = None):
+            self.user_id = user_id
+            self.email = "participant@example.com"
+            self.name = "Participant"
+            self.workspace_id = workspace_id or CollaborationV2ParticipantAuthorizationTests.workspace_id
+            self.auth_source = "auth0"
+            self.user_type = "member"
+
+    def setUp(self):
+        self.context = SimpleNamespace(
+            owner_email="participant@example.com",
+            workspace_id=self.workspace_id,
+            display_name="Participant",
+        )
+        self.thread = {
+            "v": 2,
+            "collaborationId": "P" * 22,
+            "ownerEmail": "owner@example.com",
+            "workspaceId": self.workspace_id,
+            "mailboxId": "owner.mailbox",
+            "sourceRef": {"provider": "google", "providerMessageId": "message-1"},
+            "sourceMessage": {
+                "subject": "Review",
+                "senderDisplay": "Sender",
+                "fromDisplay": "sender@example.com",
+                "timestamp": "today",
+                "bodyText": "Body",
+            },
+            "state": "needs_review",
+            "messages": [],
+            "createdAt": MS,
+            "updatedAt": MS,
+            "ownerUserId": self.owner_user_id,
+            "ownerDisplayName": "Owner",
+            "participants": [
+                {
+                    "userId": self.participant_user_id,
+                    "membershipRef": "tinv_original",
+                    "displayName": "Participant",
+                }
+            ],
+        }
+        self.member = self.Member(user_id=self.participant_user_id)
+        self.security = SimpleNamespace(
+            _is_owner_context=lambda value: value is self.context,
+            owner_is_allowlisted=lambda _context, _configuration: True,
+            mailbox_is_allowlisted=lambda *_args: False,
+            OwnerSecurityError=RuntimeError,
+        )
+        self.runtime = SimpleNamespace(AuthenticatedMemberContext=self.Member)
+
+    def resolve(self, *, action="read", member=None, team_result=None, context=None):
+        selected_context = self.context if context is None else context
+        selected_member = self.member if member is None else member
+        selected_team_result = team_result or (
+            {
+                "memberUserId": self.participant_user_id,
+                "displayName": "Participant",
+                "accessLevel": "Shared",
+                "sourceInvitationId": "tinv_original",
+            },
+            None,
+        )
+        with patch.object(
+            authorization.importlib,
+            "import_module",
+            side_effect=lambda name: (
+                self.security
+                if name == "api.collaboration.owner_request_security"
+                else self.runtime
+            ),
+        ):
+            return resolve_verified_owner_collaboration_context(
+                selected_context,
+                (("cookie", "opaque"),),
+                collaboration_id="P" * 22,
+                required_action=action,
+                owner_security_configuration=object(),
+                mailbox_resolver=lambda *_args: (_ for _ in ()).throw(
+                    AssertionError("participant must not resolve source mailbox")
+                ),
+                thread_loader=lambda _id: {"status": "ok", "record": self.thread},
+                member_resolver=lambda _headers: (selected_member, None),
+                team_member_resolver=lambda _workspace, _user: selected_team_result,
+            )
+
+    def test_explicit_current_participant_gets_direct_read_and_write_capabilities(self):
+        for action in ("read", "reply", "internal_note"):
+            result = self.resolve(action=action)
+            self.assertEqual(result["status"], "ok")
+            capability = result["context"]
+            self.assertEqual(capability.viewer_access, "participant")
+            self.assertEqual(capability.actor_kind, "internal")
+            self.assertEqual(capability.actor_user_id, self.participant_user_id)
+            self.assertEqual(capability.mailbox_id, "owner.mailbox")
+
+    def test_nonparticipant_removed_reinvite_and_cross_workspace_fail_closed(self):
+        nonparticipant = self.Member(user_id="usr_" + "C" * 21 + "A")
+        self.assertEqual(self.resolve(member=nonparticipant)["error"], {"code": "forbidden"})
+        self.assertEqual(
+            self.resolve(team_result=(None, "not_active"))["error"],
+            {"code": "forbidden"},
+        )
+        reinvited = (
+            {
+                "memberUserId": self.participant_user_id,
+                "displayName": "Participant",
+                "accessLevel": "Shared",
+                "sourceInvitationId": "tinv_new",
+            },
+            None,
+        )
+        self.assertEqual(
+            self.resolve(team_result=reinvited)["error"],
+            {"code": "forbidden"},
+        )
+        other_context = SimpleNamespace(
+            owner_email="participant@example.com",
+            workspace_id="wsp_" + "X" * 22,
+            display_name="Participant",
+        )
+        self.security._is_owner_context = lambda value: value is other_context
+        self.assertEqual(
+            self.resolve(context=other_context)["error"],
+            {"code": "forbidden"},
+        )
+
+    def test_participant_cannot_manage_people(self):
+        self.assertEqual(
+            self.resolve(action="manage_participants")["error"],
+            {"code": "forbidden"},
+        )
 
     def test_unknown_action_is_rejected_before_resolvers_are_invoked(self):
         calls = []

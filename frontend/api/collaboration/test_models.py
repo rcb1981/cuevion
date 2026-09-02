@@ -83,7 +83,85 @@ def sample_invite() -> dict:
     }
 
 
+def sample_participant_thread() -> dict:
+    return {
+        **sample_thread(),
+        "workspaceId": "wsp_" + "W" * 22,
+        "ownerUserId": "usr_" + "A" * 22,
+        "ownerDisplayName": "Owner",
+        "participants": [
+            {
+                "userId": "usr_" + "C" * 21 + "A",
+                "membershipRef": "tinv_second",
+                "displayName": "Second",
+            },
+            {
+                "userId": "usr_" + "B" * 21 + "A",
+                "membershipRef": "tinv_first",
+                "displayName": "First",
+            },
+        ],
+    }
+
+
 class CollaborationV2ModelTests(unittest.TestCase):
+    def test_participant_authority_is_backward_compatible_and_deterministic(self):
+        old = normalize_v2_thread_record(sample_thread())
+        self.assertIsNotNone(old)
+        self.assertNotIn("participants", old)
+
+        normalized = normalize_v2_thread_record(sample_participant_thread())
+        self.assertIsNotNone(normalized)
+        self.assertEqual(
+            [participant["displayName"] for participant in normalized["participants"]],
+            ["First", "Second"],
+        )
+        self.assertEqual(
+            normalize_v2_thread_record(copy.deepcopy(normalized)),
+            normalized,
+        )
+
+    def test_participant_authority_rejects_duplicates_owner_and_malformed_values(self):
+        duplicate = sample_participant_thread()
+        duplicate["participants"][1]["userId"] = duplicate["participants"][0]["userId"]
+        self.assertIsNone(normalize_v2_thread_record(duplicate))
+
+        owner_duplicate = sample_participant_thread()
+        owner_duplicate["participants"][0]["userId"] = owner_duplicate["ownerUserId"]
+        self.assertIsNone(normalize_v2_thread_record(owner_duplicate))
+
+        malformed_id = sample_participant_thread()
+        malformed_id["participants"][0]["userId"] = "user-email@example.test"
+        self.assertIsNone(normalize_v2_thread_record(malformed_id))
+
+        malformed_provenance = sample_participant_thread()
+        malformed_provenance["participants"][0]["membershipRef"] = "invitation@example.test"
+        self.assertIsNone(normalize_v2_thread_record(malformed_provenance))
+
+        partial = sample_participant_thread()
+        del partial["ownerDisplayName"]
+        self.assertIsNone(normalize_v2_thread_record(partial))
+
+    def test_participant_authority_enforces_fifteen_explicit_people(self):
+        maximum = sample_participant_thread()
+        maximum["participants"] = [
+            {
+                "userId": "usr_" + chr(66 + index) * 21 + "A",
+                "membershipRef": f"tinv_{index}",
+                "displayName": f"Person {index}",
+            }
+            for index in range(15)
+        ]
+        self.assertIsNotNone(normalize_v2_thread_record(maximum))
+        maximum["participants"].append(
+            {
+                "userId": "usr_" + "z" * 21 + "A",
+                "membershipRef": "tinv_overflow",
+                "displayName": "Overflow",
+            }
+        )
+        self.assertIsNone(normalize_v2_thread_record(maximum))
+
     def test_thread_requires_canonical_owner_identity_and_matching_workspace(self):
         normalized = normalize_v2_thread_record(sample_thread())
         self.assertIsNotNone(normalized)

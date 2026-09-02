@@ -46,6 +46,7 @@ else:
     MAX_V2_THREAD_BYTES = 262_144
     MAX_V2_INVITE_BYTES = 16_384
     MAX_V2_MESSAGES = 500
+    MAX_V2_EXPLICIT_PARTICIPANTS = 15
     MAX_V2_MESSAGE_TEXT = 16_384
     MAX_V2_SOURCE_BODY = 131_072
     MAX_V2_INVITE_LIFETIME_SECONDS = 24 * 60 * 60
@@ -57,6 +58,8 @@ else:
     MAX_V2_TIMESTAMP_MILLISECONDS = (MAX_V2_TIMESTAMP_SECONDS * 1000) + 999
     _V2_OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{22,128}$")
     _V2_WORKSPACE_ID_RE = re.compile(r"^wsp_[A-Za-z0-9_-]{22}$")
+    _V2_USER_ID_RE = re.compile(r"^usr_[A-Za-z0-9_-]{21}[AQgw]$")
+    _V2_TEAM_MEMBERSHIP_REF_RE = re.compile(r"^tinv_[A-Za-z0-9_-]{1,64}$")
     _V2_EMAIL_RE = re.compile(
         r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*@"
         r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
@@ -699,6 +702,46 @@ else:
         )
 
 
+    def normalize_v2_user_id(value: Any) -> str | None:
+        """Accept one canonical unpadded base64url Cuevion user identifier."""
+
+        return (
+            value
+            if type(value) is str
+            and value.isascii()
+            and _V2_USER_ID_RE.fullmatch(value) is not None
+            else None
+        )
+
+
+    def normalize_v2_team_membership_ref(value: Any) -> str | None:
+        return (
+            value
+            if type(value) is str
+            and value.isascii()
+            and _V2_TEAM_MEMBERSHIP_REF_RE.fullmatch(value) is not None
+            else None
+        )
+
+
+    def normalize_v2_participant_authority(value: Any) -> dict | None:
+        required = {"userId", "membershipRef", "displayName"}
+        if not isinstance(value, dict) or not _v2_exact_keys(value, required):
+            return None
+        user_id = normalize_v2_user_id(value.get("userId"))
+        membership_ref = normalize_v2_team_membership_ref(
+            value.get("membershipRef")
+        )
+        display_name = _v2_bounded_string(value.get("displayName"), max_length=256)
+        if user_id is None or membership_ref is None or display_name is None:
+            return None
+        return {
+            "userId": user_id,
+            "membershipRef": membership_ref,
+            "displayName": display_name,
+        }
+
+
     def is_v2_opaque_id(value: Any) -> bool:
         return isinstance(value, str) and bool(_V2_OPAQUE_ID_RE.fullmatch(value))
 
@@ -831,7 +874,13 @@ else:
             "createdAt",
             "updatedAt",
         }
-        if not isinstance(value, dict) or not _v2_exact_keys(value, required):
+        participant_fields = {"ownerUserId", "ownerDisplayName", "participants"}
+        if (
+            not isinstance(value, dict)
+            or not _v2_exact_keys(value, required, participant_fields)
+            or bool(set(value) & participant_fields)
+            != participant_fields.issubset(value)
+        ):
             return None
         if type(value.get("v")) is not int or value.get("v") != COLLABORATION_V2_THREAD_SCHEMA_VERSION:
             return None
@@ -851,6 +900,7 @@ else:
         created_at = _v2_timestamp_milliseconds(value.get("createdAt"))
         updated_at = _v2_timestamp_milliseconds(value.get("updatedAt"))
         messages = value.get("messages")
+        has_participant_authority = participant_fields.issubset(value)
         if (
             not is_v2_opaque_id(collaboration_id)
             or not owner_email
@@ -874,6 +924,40 @@ else:
         normalized_messages = [normalize_v2_message_record(message) for message in messages]
         if any(message is None for message in normalized_messages):
             return None
+        normalized_participants: list[dict] | None = None
+        owner_user_id: str | None = None
+        owner_display_name: str | None = None
+        if has_participant_authority:
+            owner_user_id = normalize_v2_user_id(value.get("ownerUserId"))
+            owner_display_name = _v2_bounded_string(
+                value.get("ownerDisplayName"), max_length=256
+            )
+            participants = value.get("participants")
+            if (
+                canonical_workspace_id is None
+                or owner_user_id is None
+                or owner_display_name is None
+                or not isinstance(participants, list)
+                or not 1 <= len(participants) <= MAX_V2_EXPLICIT_PARTICIPANTS
+            ):
+                return None
+            normalized_participants = [
+                normalize_v2_participant_authority(participant)
+                for participant in participants
+            ]
+            if any(participant is None for participant in normalized_participants):
+                return None
+            normalized_participants = sorted(
+                normalized_participants, key=lambda participant: participant["userId"]
+            )
+            participant_user_ids = [
+                participant["userId"] for participant in normalized_participants
+            ]
+            if (
+                owner_user_id in participant_user_ids
+                or len(set(participant_user_ids)) != len(participant_user_ids)
+            ):
+                return None
         normalized = {
             "v": COLLABORATION_V2_THREAD_SCHEMA_VERSION,
             "collaborationId": collaboration_id,
@@ -887,6 +971,14 @@ else:
             "createdAt": created_at,
             "updatedAt": updated_at,
         }
+        if normalized_participants is not None:
+            normalized.update(
+                {
+                    "ownerUserId": owner_user_id,
+                    "ownerDisplayName": owner_display_name,
+                    "participants": normalized_participants,
+                }
+            )
         return (
             normalized
             if _v2_json_is_bounded(

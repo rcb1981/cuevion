@@ -36,6 +36,8 @@ MAILBOX_ID = "primary.mailbox"
 COLLABORATION_ID = "A" * 22
 ISSUER = "https://cuevion.eu.auth0.com/"
 SUBJECT = "auth0|0123456789abcdef"
+OWNER_USER_ID = "usr_" + "A" * 22
+PARTICIPANT_USER_ID = "usr_" + "B" * 21 + "A"
 SESSION_ID = base64.urlsafe_b64encode(b"s" * 32).rstrip(b"=").decode("ascii")
 CREDENTIAL_DIGEST = base64.urlsafe_b64encode(
     hashlib.sha256(b"credential-binding").digest()
@@ -235,6 +237,7 @@ class OwnerAuthenticationAdapterTests(unittest.TestCase):
         member.email = OWNER_EMAIL
         member.workspace_id = WORKSPACE_ID
         member.name = "Owner Person"
+        member.user_id = OWNER_USER_ID
         member.auth_source = "auth0"
         member.user_type = "member"
         session = self.Session()
@@ -313,6 +316,7 @@ class VerifiedOwnerAuthorizationTests(unittest.TestCase):
         member.email = OWNER_EMAIL
         member.workspace_id = WORKSPACE_ID
         member.name = "Owner Person"
+        member.user_id = OWNER_USER_ID
         member.auth_source = "auth0"
         member.user_type = "member"
         with mock.patch.object(
@@ -625,6 +629,7 @@ class OwnerHttpBoundaryTests(unittest.TestCase):
                         "mailboxId": MAILBOX_ID,
                         "sourceRef": {"providerMessageId": "gmail-message-1"},
                         "state": "needs_review",
+                        "participantUserId": PARTICIPANT_USER_ID,
                     },
                     csrf=csrf,
                 )
@@ -834,6 +839,7 @@ class OwnerHttpBoundaryTests(unittest.TestCase):
                                 "providerMessageId": "gmail-message-1"
                             },
                             "state": "needs_review",
+                            "participantUserId": PARTICIPANT_USER_ID,
                         },
                         csrf=csrf,
                     )
@@ -980,6 +986,12 @@ class OwnerHttpBoundaryTests(unittest.TestCase):
                 "mailboxId": MAILBOX_ID,
                 "sourceRef": {"providerMessageId": "gmail-message-1"},
                 "state": "needs_review",
+                "participantUserId": PARTICIPANT_USER_ID,
+            },
+            {
+                "operation": "add_participant",
+                "collaborationId": COLLABORATION_ID,
+                "participantUserId": PARTICIPANT_USER_ID,
             },
             {
                 "operation": "append_shared",
@@ -1038,6 +1050,7 @@ class OwnerHttpBoundaryTests(unittest.TestCase):
                                 "providerMessageId": "gmail-message-1"
                             },
                             "state": "needs_review",
+                            "participantUserId": PARTICIPANT_USER_ID,
                         },
                         csrf=self._csrf(),
                     ),
@@ -1134,6 +1147,158 @@ class OwnerHttpBoundaryTests(unittest.TestCase):
 
         self.assertEqual(response.status, 404)
         self.rate_limiter.assert_not_called()
+
+
+    def test_authoritative_owner_and_participant_read_dtos_pass_without_provenance(self):
+        base = {
+            "collaborationId": COLLABORATION_ID,
+            "mailboxId": MAILBOX_ID,
+            "state": "needs_review",
+            "createdAt": NOW * 1000,
+            "updatedAt": NOW * 1000,
+            "source": {
+                "subject": "Review",
+                "senderDisplay": "Sender",
+                "fromDisplay": "sender@example.com",
+                "timestamp": "today",
+                "bodyText": "Body",
+            },
+            "messages": [],
+            "participants": [
+                {
+                    "userId": OWNER_USER_ID,
+                    "displayName": "Owner Person",
+                    "access": "owner",
+                },
+                {
+                    "userId": PARTICIPANT_USER_ID,
+                    "displayName": "Participant",
+                    "access": "participant",
+                },
+            ],
+        }
+        for viewer in ("owner", "participant"):
+            dto = {**base, "viewerAccess": viewer}
+            with self.subTest(viewer=viewer), mock.patch.object(
+                owner_http.application,
+                "read_v2_collaboration_for_verified_owner",
+                return_value={"status": "ok", "collaboration": dto, "error": None},
+            ):
+                response = _invoke(
+                    _request(
+                        {"operation": "read", "collaborationId": COLLABORATION_ID},
+                        csrf=self._csrf(),
+                    )
+                )
+                self.assertEqual(response.status, 200)
+                returned = _json(response)["data"]["collaboration"]
+                self.assertEqual(returned["viewerAccess"], viewer)
+                self.assertEqual(returned["participants"], base["participants"])
+                self.assertNotIn("membershipRef", json.dumps(returned))
+
+    def test_create_requires_participant_and_add_participant_is_write_only(self):
+        create_service = mock.Mock(side_effect=AssertionError("invalid create must not run"))
+        missing = {
+            "operation": "create",
+            "mailboxId": MAILBOX_ID,
+            "sourceRef": {"providerMessageId": "gmail-message-1"},
+            "state": "needs_review",
+        }
+        with mock.patch.object(
+            owner_http.application,
+            "create_v2_collaboration_for_verified_owner",
+            create_service,
+        ):
+            self.assertEqual(
+                _invoke(_request(missing, csrf=self._csrf())).status,
+                400,
+            )
+        create_service.assert_not_called()
+
+        payload = {
+            "operation": "add_participant",
+            "collaborationId": COLLABORATION_ID,
+            "participantUserId": PARTICIPANT_USER_ID,
+        }
+        add_result = {
+            "status": "ok",
+            "collaboration": {
+                "collaborationId": COLLABORATION_ID,
+                "viewerAccess": "owner",
+                "participants": [],
+            },
+            "error": None,
+        }
+        with mock.patch.object(
+            owner_http.application,
+            "add_v2_participant_for_verified_owner",
+            return_value=add_result,
+        ) as service:
+            self.assertEqual(
+                _invoke(_request(payload, csrf=self._csrf()), mode="owner_read").status,
+                404,
+            )
+            accepted = _invoke(_request(payload, csrf=self._csrf()), mode="owner_write")
+        self.assertEqual(accepted.status, 200)
+        service.assert_called_once()
+        self.assertEqual(
+            service.call_args.args[3],
+            {"participantUserId": PARTICIPANT_USER_ID},
+        )
+
+    def test_participant_denials_and_team_errors_remain_bounded(self):
+        add_payload = {
+            "operation": "add_participant",
+            "collaborationId": COLLABORATION_ID,
+            "participantUserId": PARTICIPANT_USER_ID,
+        }
+        with mock.patch.object(
+            owner_http.application,
+            "add_v2_participant_for_verified_owner",
+            return_value={
+                "status": "forbidden",
+                "collaboration": None,
+                "error": {"code": "forbidden"},
+            },
+        ):
+            denied = _invoke(_request(add_payload, csrf=self._csrf()))
+        self.assertEqual(denied.status, 404)
+
+        lookup_payload = {
+            "operation": "lookup",
+            "mailboxId": MAILBOX_ID,
+            "sourceRef": {"providerMessageId": "gmail-message-1"},
+        }
+        with mock.patch.object(
+            owner_http.application,
+            "lookup_v2_collaboration_for_verified_owner",
+            return_value={
+                "status": "forbidden",
+                "collaboration": None,
+                "error": {"code": "forbidden"},
+            },
+        ):
+            lookup_denied = _invoke(_request(lookup_payload, csrf=self._csrf()))
+        self.assertEqual(lookup_denied.status, 404)
+
+        private_error = "private-team-member-existence-detail"
+        with mock.patch.object(
+            owner_http.application,
+            "add_v2_participant_for_verified_owner",
+            return_value={
+                "status": "unavailable",
+                "collaboration": None,
+                "error": {"code": "storage_unavailable"},
+                "private": private_error,
+            },
+        ):
+            unavailable = _invoke(_request(add_payload, csrf=self._csrf()))
+        self.assertEqual(unavailable.status, 503)
+        self.assertEqual(
+            _json(unavailable),
+            {"ok": False, "error": {"code": "service_unavailable"}},
+        )
+        self.assertNotIn(private_error, unavailable.body.decode("utf-8"))
 
 
 class OwnerRouteActivationTests(unittest.TestCase):

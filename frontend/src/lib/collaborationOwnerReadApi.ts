@@ -12,6 +12,9 @@ import {
 export const COLLABORATION_OWNER_READ_ENDPOINT = COLLABORATION_OWNER_ENDPOINT;
 
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9_-]{22,128}$/;
+const CANONICAL_USER_ID_PATTERN = /^usr_[A-Za-z0-9_-]{21}[AQgw]$/;
+const UNSAFE_DISPLAY_NAME_PATTERN = /[\p{Cc}\p{Cf}\p{Cs}]/u;
+const MAX_PARTICIPANT_DISPLAY_NAME_BYTES = 256;
 
 export type CollaborationOwnerReadState =
   | "needs_review"
@@ -28,6 +31,12 @@ export type CollaborationOwnerReadMessage = {
   timestamp: number;
 };
 
+export type CollaborationOwnerReadParticipant = {
+  userId: string;
+  displayName: string;
+  access: "owner" | "participant";
+};
+
 export type CollaborationOwnerReadDto = {
   collaborationId: string;
   mailboxId: string;
@@ -42,6 +51,8 @@ export type CollaborationOwnerReadDto = {
     bodyText: string;
   };
   messages: CollaborationOwnerReadMessage[];
+  viewerAccess: "owner" | "participant";
+  participants: CollaborationOwnerReadParticipant[];
 };
 
 export type CollaborationOwnerReadFailureStatus =
@@ -108,6 +119,12 @@ export function isValidCollaborationOwnerReadId(value: unknown): value is string
   return typeof value === "string" && OPAQUE_ID_PATTERN.test(value);
 }
 
+export function isValidCollaborationParticipantUserId(
+  value: unknown,
+): value is string {
+  return typeof value === "string" && CANONICAL_USER_ID_PATTERN.test(value);
+}
+
 function parseMessage(value: unknown): CollaborationOwnerReadMessage | null {
   if (
     !isExactRecord(value, [
@@ -141,6 +158,28 @@ function parseMessage(value: unknown): CollaborationOwnerReadMessage | null {
   };
 }
 
+function parseParticipant(value: unknown): CollaborationOwnerReadParticipant | null {
+  if (
+    !isExactRecord(value, ["userId", "displayName", "access"]) ||
+    !isValidCollaborationParticipantUserId(value.userId) ||
+    typeof value.displayName !== "string" ||
+    value.displayName.length === 0 ||
+    value.displayName !== value.displayName.trim() ||
+    value.displayName !== value.displayName.normalize("NFC") ||
+    UNSAFE_DISPLAY_NAME_PATTERN.test(value.displayName) ||
+    new TextEncoder().encode(value.displayName).length > MAX_PARTICIPANT_DISPLAY_NAME_BYTES ||
+    (value.access !== "owner" && value.access !== "participant")
+  ) {
+    return null;
+  }
+
+  return {
+    userId: value.userId,
+    displayName: value.displayName,
+    access: value.access,
+  };
+}
+
 export function parseCollaborationOwnerReadDto(
   value: unknown,
 ): CollaborationOwnerReadDto | null {
@@ -153,6 +192,8 @@ export function parseCollaborationOwnerReadDto(
       "updatedAt",
       "source",
       "messages",
+      "viewerAccess",
+      "participants",
     ]) ||
     !isValidCollaborationOwnerReadId(value.collaborationId) ||
     typeof value.mailboxId !== "string" ||
@@ -177,13 +218,38 @@ export function parseCollaborationOwnerReadDto(
     typeof value.source.fromDisplay !== "string" ||
     typeof value.source.timestamp !== "string" ||
     typeof value.source.bodyText !== "string" ||
-    !Array.isArray(value.messages)
+    !Array.isArray(value.messages) ||
+    (value.viewerAccess !== "owner" && value.viewerAccess !== "participant") ||
+    !Array.isArray(value.participants) ||
+    value.participants.length < 1 ||
+    value.participants.length > 16
   ) {
     return null;
   }
 
   const messages = value.messages.map(parseMessage);
   if (messages.some((message) => message === null)) {
+    return null;
+  }
+  const participants = value.participants.map(parseParticipant);
+  if (
+    participants.some((participant) => participant === null) ||
+    participants[0]?.access !== "owner" ||
+    participants.filter((participant) => participant?.access === "owner").length !== 1
+  ) {
+    return null;
+  }
+  const parsedParticipants = participants as CollaborationOwnerReadParticipant[];
+  const userIds = parsedParticipants.map((participant) => participant.userId);
+  const explicitParticipants = parsedParticipants.slice(1);
+  if (
+    new Set(userIds).size !== userIds.length ||
+    explicitParticipants.some((participant) => participant.access !== "participant") ||
+    explicitParticipants.some(
+      (participant, index) =>
+        index > 0 && explicitParticipants[index - 1].userId >= participant.userId,
+    )
+  ) {
     return null;
   }
 
@@ -201,6 +267,8 @@ export function parseCollaborationOwnerReadDto(
       bodyText: value.source.bodyText,
     },
     messages: messages as CollaborationOwnerReadMessage[],
+    viewerAccess: value.viewerAccess,
+    participants: parsedParticipants,
   };
 }
 

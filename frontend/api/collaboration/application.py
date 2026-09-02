@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from .authorization import (
+    _resolve_active_team_member,
     _is_internal_capability,
     resolve_internal_collaboration_context,
     resolve_verified_owner_collaboration_context,
@@ -22,6 +23,7 @@ from .models import (
     COLLABORATION_V2_THREAD_SCHEMA_VERSION,
     COLLABORATION_V2_SAFE_ERROR_CODES,
     MAX_V2_MESSAGE_TEXT,
+    MAX_V2_EXPLICIT_PARTICIPANTS,
     MAX_V2_TIMESTAMP_MILLISECONDS,
     MAX_V2_TIMESTAMP_SECONDS,
     MIN_V2_TIMESTAMP_MILLISECONDS,
@@ -31,7 +33,10 @@ from .models import (
     generate_v2_opaque_id,
     is_v2_opaque_id,
     normalize_v2_source_ref,
+    normalize_v2_participant_authority,
+    normalize_v2_team_membership_ref,
     normalize_v2_thread_record,
+    normalize_v2_user_id,
 )
 from .redis_store import (
     _V2RecordResult,
@@ -250,6 +255,113 @@ def _build_owner_thread_dto(thread: dict[str, Any]) -> dict[str, Any]:
             for message in thread["messages"]
         ],
     }
+
+
+def _build_verified_thread_dto(
+    thread: dict[str, Any],
+    capability: object,
+    *,
+    team_member_resolver=None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if team_member_resolver is None:
+        team_member_resolver = _resolve_active_team_member
+    if (
+        not _is_internal_capability(capability, actions={"read", "create", "manage_participants"})
+        or capability.viewer_access not in {"owner", "participant"}
+    ):
+        return None, _failure("forbidden", "forbidden")
+    owner_user_id = (
+        thread.get("ownerUserId")
+        if "ownerUserId" in thread
+        else capability.owner_user_id
+    )
+    owner_display_name = (
+        thread.get("ownerDisplayName")
+        if "ownerDisplayName" in thread
+        else capability.owner_display_name
+    )
+    if (
+        normalize_v2_user_id(owner_user_id) != owner_user_id
+        or type(owner_display_name) is not str
+        or not owner_display_name
+    ):
+        return None, _failure("malformed", "storage_protocol_error")
+    visible_participants = [
+        {
+            "userId": owner_user_id,
+            "displayName": owner_display_name,
+            "access": "owner",
+        }
+    ]
+    for participant in thread.get("participants", []):
+        try:
+            membership, team_error = team_member_resolver(
+                thread["workspaceId"],
+                participant["userId"],
+            )
+        except Exception:
+            return None, _failure("unavailable", "storage_unavailable")
+        if team_error == "unavailable":
+            return None, _failure("unavailable", "storage_unavailable")
+        if team_error is not None or type(membership) is not dict:
+            continue
+        if (
+            membership.get("memberUserId") != participant["userId"]
+            or membership.get("sourceInvitationId")
+            != participant["membershipRef"]
+        ):
+            continue
+        visible_participants.append(
+            {
+                "userId": participant["userId"],
+                "displayName": participant["displayName"],
+                "access": "participant",
+            }
+        )
+    if not 1 <= len(visible_participants) <= MAX_V2_EXPLICIT_PARTICIPANTS + 1:
+        return None, _failure("malformed", "storage_protocol_error")
+    return {
+        **_build_owner_thread_dto(thread),
+        "viewerAccess": capability.viewer_access,
+        "participants": visible_participants,
+    }, None
+
+
+def _resolve_participant_authority(
+    workspace_id: str,
+    participant_user_id: object,
+    *,
+    team_member_resolver=None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if team_member_resolver is None:
+        team_member_resolver = _resolve_active_team_member
+    canonical_user_id = normalize_v2_user_id(participant_user_id)
+    if canonical_user_id is None or canonical_user_id != participant_user_id:
+        return None, _failure("malformed", "invalid_request")
+    try:
+        membership, team_error = team_member_resolver(
+            workspace_id,
+            canonical_user_id,
+        )
+    except Exception:
+        return None, _failure("unavailable", "storage_unavailable")
+    if team_error == "unavailable":
+        return None, _failure("unavailable", "storage_unavailable")
+    if team_error is not None or type(membership) is not dict:
+        return None, _failure("forbidden", "forbidden")
+    membership_ref = normalize_v2_team_membership_ref(
+        membership.get("sourceInvitationId")
+    )
+    participant = normalize_v2_participant_authority(
+        {
+            "userId": membership.get("memberUserId"),
+            "membershipRef": membership_ref,
+            "displayName": membership.get("displayName"),
+        }
+    )
+    if participant is None or participant["userId"] != canonical_user_id:
+        return None, _failure("unavailable", "storage_protocol_error")
+    return participant, None
 
 
 def _create_storage_failure(value: object) -> dict[str, Any]:
@@ -549,9 +661,14 @@ def _create_v2_collaboration_for_owner(
     owner_context: object | None = None,
     owner_security_configuration: object | None = None,
 ) -> dict[str, Any]:
+    expected_fields = (
+        {"mailboxId", "sourceRef", "state"}
+        if owner_context is None
+        else {"mailboxId", "sourceRef", "state", "participantUserId"}
+    )
     if (
         type(payload) is not dict
-        or set(payload) != {"mailboxId", "sourceRef", "state"}
+        or set(payload) != expected_fields
         or type(payload.get("state")) is not str
         or payload.get("state") not in _ALLOWED_INITIAL_STATES
     ):
@@ -588,6 +705,21 @@ def _create_v2_collaboration_for_owner(
         or capability.mailbox_id != mailbox_id
     ):
         return _failure("forbidden", "forbidden")
+
+    participant_authority = None
+    if owner_context is not None:
+        if (
+            normalize_v2_user_id(capability.actor_user_id)
+            != capability.actor_user_id
+            or payload.get("participantUserId") == capability.actor_user_id
+        ):
+            return _failure("malformed", "invalid_request")
+        participant_authority, participant_error = _resolve_participant_authority(
+            capability.workspace_id,
+            payload.get("participantUserId"),
+        )
+        if participant_error is not None:
+            return participant_error
 
     def reuse_authorized_context(
         received_headers: object,
@@ -651,8 +783,7 @@ def _create_v2_collaboration_for_owner(
         return _failure("error", "invalid_request")
 
     collaboration_id = generate_v2_opaque_id()
-    proposed = normalize_v2_thread_record(
-        {
+    proposed_record = {
             "v": COLLABORATION_V2_THREAD_SCHEMA_VERSION,
             "collaborationId": collaboration_id,
             "ownerEmail": capability.owner_email,
@@ -665,7 +796,15 @@ def _create_v2_collaboration_for_owner(
             "createdAt": created_at,
             "updatedAt": created_at,
         }
-    )
+    if participant_authority is not None:
+        proposed_record.update(
+            {
+                "ownerUserId": capability.actor_user_id,
+                "ownerDisplayName": capability.actor_display_name,
+                "participants": [participant_authority],
+            }
+        )
+    proposed = normalize_v2_thread_record(proposed_record)
     if proposed is None:
         return _failure("malformed", "storage_protocol_error")
 
@@ -706,9 +845,19 @@ def _create_v2_collaboration_for_owner(
         ):
             return _failure("forbidden", "forbidden")
 
+    if owner_context is not None:
+        dto, dto_error = _build_verified_thread_dto(collaboration, capability)
+        if dto_error is not None:
+            return dto_error
+        if dto is None:
+            return _failure("malformed", "storage_protocol_error")
+        collaboration_dto = dto
+    else:
+        collaboration_dto = _build_owner_thread_dto(collaboration)
+
     return {
         "created": created.created,
-        "collaboration": _build_owner_thread_dto(collaboration),
+        "collaboration": collaboration_dto,
     }
 
 
@@ -732,6 +881,65 @@ def create_v2_collaboration_for_verified_owner(
         owner_context=owner_context,
         owner_security_configuration=owner_security_configuration,
     )
+
+
+def add_v2_participant_for_verified_owner(
+    owner_context: object,
+    headers: object,
+    collaboration_id: object,
+    payload: object,
+    *,
+    owner_security_configuration: object,
+) -> dict[str, Any]:
+    if type(payload) is not dict or set(payload) != {"participantUserId"}:
+        return _failure("malformed", "invalid_request")
+    authorized = resolve_verified_owner_collaboration_context(
+        owner_context,
+        headers,
+        collaboration_id=collaboration_id,
+        required_action="manage_participants",
+        owner_security_configuration=owner_security_configuration,
+    )
+    if type(authorized) is not dict or authorized.get("status") != "ok":
+        return _failure_from_result(
+            authorized,
+            default_status="error",
+            default_code="storage_protocol_error",
+        )
+    capability = authorized.get("context")
+    if (
+        not _is_internal_capability(capability, actions={"manage_participants"})
+        or capability.viewer_access != "owner"
+        or capability.collaboration_id != collaboration_id
+        or normalize_v2_user_id(capability.actor_user_id)
+        != capability.actor_user_id
+        or payload.get("participantUserId") == capability.actor_user_id
+    ):
+        return _failure("forbidden", "forbidden")
+    participant, participant_error = _resolve_participant_authority(
+        capability.workspace_id,
+        payload.get("participantUserId"),
+    )
+    if participant_error is not None:
+        return participant_error
+    if participant is None:
+        return _failure("malformed", "storage_protocol_error")
+    from .mutations import add_v2_participant
+
+    mutated = add_v2_participant(capability, participant)
+    if type(mutated) is not dict or mutated.get("status") != "ok":
+        return _failure_from_result(
+            mutated,
+            default_status="error",
+            default_code="storage_protocol_error",
+        )
+    thread = normalize_v2_thread_record(mutated.get("record"))
+    if thread is None:
+        return _failure("malformed", "storage_protocol_error")
+    dto, dto_error = _build_verified_thread_dto(thread, capability)
+    if dto_error is not None:
+        return dto_error
+    return _success(dto) if dto is not None else _failure("malformed", "storage_protocol_error")
 
 
 def lookup_v2_collaboration_for_verified_owner(
@@ -872,7 +1080,12 @@ def _read_v2_collaboration_for_owner(
     if thread is None or not _thread_matches_owner_capability(thread, capability):
         return _failure("forbidden", "forbidden")
 
-    return _success(_build_owner_thread_dto(thread))
+    if owner_context is None:
+        return _success(_build_owner_thread_dto(thread))
+    dto, dto_error = _build_verified_thread_dto(thread, capability)
+    if dto_error is not None:
+        return dto_error
+    return _success(dto) if dto is not None else _failure("malformed", "storage_protocol_error")
 
 
 def read_v2_collaboration_for_owner(

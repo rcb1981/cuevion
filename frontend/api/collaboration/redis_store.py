@@ -61,6 +61,7 @@ else:
         normalize_v2_owner_idempotency_key,
         normalize_v2_source_ref,
         normalize_v2_thread_record,
+        normalize_v2_user_id,
         normalize_v2_workspace_id,
     )
 
@@ -1436,6 +1437,18 @@ else:
       return asciiSecurityString(value, 26, false) and #value == 26
         and string.match(value, '^wsp_[A-Za-z0-9_-]+$') ~= nil
     end
+    local function canonicalUserId(value)
+      if not asciiSecurityString(value, 26, false) or #value ~= 26
+        or string.sub(value, 1, 4) ~= 'usr_'
+        or string.match(string.sub(value, 5), '^[A-Za-z0-9_-]+$') == nil then return false end
+      local final = string.sub(value, -1)
+      return final == 'A' or final == 'Q' or final == 'g' or final == 'w'
+    end
+    local function membershipRef(value)
+      return asciiSecurityString(value, 69, false) and #value >= 6
+        and string.sub(value, 1, 5) == 'tinv_'
+        and string.match(string.sub(value, 6), '^[A-Za-z0-9_-]+$') ~= nil
+    end
     local function canonicalEmail(value)
       if not asciiSecurityString(value, 320, false) or value ~= string.lower(value) then return false end
       local at = string.find(value, '@', 1, true)
@@ -1506,10 +1519,62 @@ else:
       end
       return count == #messages
     end
+    local function messagesEqual(a, b)
+      if type(a) ~= 'table' or type(b) ~= 'table' or #a ~= #b then return false end
+      for index = 1, #a do if not messageEqual(a[index], b[index]) then return false end end
+      return true
+    end
+    local function participantValid(value)
+      return type(value) == 'table' and keyCount(value) == 3
+        and canonicalUserId(value.userId) and membershipRef(value.membershipRef)
+        and displayString(value.displayName, 256, false)
+    end
+    local function participantEqual(a, b)
+      return type(a) == 'table' and type(b) == 'table'
+        and a.userId == b.userId and a.membershipRef == b.membershipRef
+        and a.displayName == b.displayName
+    end
+    local function participantsValid(values, ownerUserId)
+      if type(values) ~= 'table' or #values < 1 or #values > 15
+        or keyCount(values) ~= #values then return false end
+      local previous = nil
+      for index = 1, #values do
+        local value = values[index]
+        if not participantValid(value) or value.userId == ownerUserId
+          or (previous and previous >= value.userId) then return false end
+        previous = value.userId
+      end
+      return true
+    end
+    local function participantAuthorityValid(value)
+      local count = type(value) == 'table' and keyCount(value) or 0
+      if count == 11 then
+        return value.ownerUserId == nil and value.ownerDisplayName == nil
+          and value.participants == nil
+      end
+      return count == 14 and canonicalWorkspaceId(value.workspaceId)
+        and canonicalUserId(value.ownerUserId)
+        and displayString(value.ownerDisplayName, 256, false)
+        and participantsValid(value.participants, value.ownerUserId)
+    end
+    local function participantAuthorityEqual(a, b)
+      if a.ownerUserId == nil or b.ownerUserId == nil then
+        return a.ownerUserId == nil and b.ownerUserId == nil
+          and a.ownerDisplayName == nil and b.ownerDisplayName == nil
+          and a.participants == nil and b.participants == nil
+      end
+      if a.ownerUserId ~= b.ownerUserId or a.ownerDisplayName ~= b.ownerDisplayName
+        or #a.participants ~= #b.participants then return false end
+      for index = 1, #a.participants do
+        if not participantEqual(a.participants[index], b.participants[index]) then return false end
+      end
+      return true
+    end
     local function threadValid(value)
       local createdAt = type(value) == 'table' and integerValue(value.createdAt) or nil
       local updatedAt = type(value) == 'table' and integerValue(value.updatedAt) or nil
-      return type(value) == 'table' and keyCount(value) == 11 and value.v == '2' and exactInteger(value.v)
+      return type(value) == 'table' and participantAuthorityValid(value)
+        and value.v == '2' and exactInteger(value.v)
         and opaqueId(value.collaborationId) and canonicalEmail(value.ownerEmail)
         and (canonicalWorkspaceId(value.workspaceId) or value.workspaceId == value.ownerEmail)
         and mailboxId(value.mailboxId)
@@ -1665,7 +1730,8 @@ else:
         local targetOk, target = decodeWire(targetRaw)
         if not targetOk or not threadValid(target) or target.collaborationId ~= pointer
           or target.ownerEmail ~= proposed.ownerEmail or target.workspaceId ~= proposed.workspaceId
-          or target.mailboxId ~= proposed.mailboxId or not sourceEqual(target.sourceRef, proposed.sourceRef) then
+          or target.mailboxId ~= proposed.mailboxId or not sourceEqual(target.sourceRef, proposed.sourceRef)
+          or not participantAuthorityEqual(target, proposed) then
           return cjson.encode({status='source_pointer_conflict'})
         end
         redis.call('EXPIRE', targetKey, ARGV[3])
@@ -1748,6 +1814,10 @@ else:
                 and existing.get("workspaceId") == thread["workspaceId"]
                 and existing.get("mailboxId") == thread["mailboxId"]
                 and existing.get("sourceRef") == thread["sourceRef"]
+                and existing.get("ownerUserId") == thread.get("ownerUserId")
+                and existing.get("ownerDisplayName")
+                == thread.get("ownerDisplayName")
+                and existing.get("participants") == thread.get("participants")
             ):
                 return _V2RecordResult(existing, created=False)
             return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
@@ -1783,7 +1853,8 @@ else:
       or current.state ~= replacement.state
       or current.createdAt ~= replacement.createdAt
       or not sourceEqual(current.sourceRef, replacement.sourceRef)
-      or not sourceMessageEqual(current.sourceMessage, replacement.sourceMessage) then
+      or not sourceMessageEqual(current.sourceMessage, replacement.sourceMessage)
+      or not participantAuthorityEqual(current, replacement) then
       return cjson.encode({status='invalid_scope'})
     end
     if not timestampMilliseconds(ARGV[1]) or current.updatedAt ~= ARGV[1] then
@@ -2080,7 +2151,8 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
       or current.mailboxId ~= replacement.mailboxId
       or current.createdAt ~= replacement.createdAt
       or not sourceEqual(current.sourceRef, replacement.sourceRef)
-      or not sourceMessageEqual(current.sourceMessage, replacement.sourceMessage) then
+      or not sourceMessageEqual(current.sourceMessage, replacement.sourceMessage)
+      or not participantAuthorityEqual(current, replacement) then
       return cjson.encode({status='invalid_scope'})
     end
     if not timestampMilliseconds(ARGV[1]) or current.updatedAt ~= ARGV[1] then
@@ -2150,6 +2222,187 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         return result
 
 
+    _SAVE_V2_PARTICIPANTS_CAS_LUA = _V2_LUA_COMMON + r"""
+    local function findParticipant(values, userId)
+      if type(values) ~= 'table' then return nil end
+      for index = 1, #values do
+        if values[index].userId == userId then return values[index] end
+      end
+      return nil
+    end
+    if not positiveInteger(ARGV[3]) or not canonicalUserId(ARGV[4])
+      or not canonicalUserId(ARGV[5]) or not displayString(ARGV[6], 256, false)
+      or not membershipRef(ARGV[7]) or not displayString(ARGV[8], 256, false) then
+      return cjson.encode({status='malformed'})
+    end
+    local threadState, raw = readString(KEYS[1], 262144)
+    if threadState == 'missing' then return cjson.encode({status='missing'}) end
+    if threadState ~= 'ok' or #ARGV[2] > 262144 then return cjson.encode({status='malformed'}) end
+    local currentOk, current = decodeWire(raw)
+    local replacementOk, replacement = decodeWire(ARGV[2])
+    if not currentOk or not replacementOk or not rawTopLevelArray(raw, 'messages')
+      or not rawTopLevelArray(ARGV[2], 'messages') or not threadValid(current)
+      or not threadValid(replacement) then return cjson.encode({status='malformed'}) end
+    if not timestampMilliseconds(ARGV[1]) or current.updatedAt ~= ARGV[1] then
+      return cjson.encode({status='stale'})
+    end
+    if replacement.ownerUserId ~= ARGV[5] or replacement.ownerDisplayName ~= ARGV[6]
+      or replacement.ownerUserId == ARGV[4] then return cjson.encode({status='invalid_participants'}) end
+    if current.ownerUserId ~= nil and (
+      current.ownerUserId ~= replacement.ownerUserId
+      or current.ownerDisplayName ~= replacement.ownerDisplayName
+    ) then return cjson.encode({status='invalid_scope'}) end
+    if current.collaborationId ~= replacement.collaborationId
+      or current.v ~= replacement.v or current.ownerEmail ~= replacement.ownerEmail
+      or current.workspaceId ~= replacement.workspaceId
+      or current.mailboxId ~= replacement.mailboxId or current.state ~= replacement.state
+      or current.createdAt ~= replacement.createdAt
+      or not sourceEqual(current.sourceRef, replacement.sourceRef)
+      or not sourceMessageEqual(current.sourceMessage, replacement.sourceMessage)
+      or not messagesEqual(current.messages, replacement.messages) then
+      return cjson.encode({status='invalid_scope'})
+    end
+    local currentParticipants = current.participants or {}
+    local currentTarget = findParticipant(currentParticipants, ARGV[4])
+    local replacementTarget = findParticipant(replacement.participants, ARGV[4])
+    if not replacementTarget or replacementTarget.membershipRef ~= ARGV[7]
+      or replacementTarget.displayName ~= ARGV[8] then
+      return cjson.encode({status='invalid_participants'})
+    end
+    if (currentTarget and #replacement.participants ~= #currentParticipants)
+      or (not currentTarget and #replacement.participants ~= #currentParticipants + 1) then
+      return cjson.encode({status='invalid_participants'})
+    end
+    for index = 1, #currentParticipants do
+      local participant = currentParticipants[index]
+      if participant.userId ~= ARGV[4] then
+        local retained = findParticipant(replacement.participants, participant.userId)
+        if not retained or not participantEqual(participant, retained) then
+          return cjson.encode({status='invalid_participants'})
+        end
+      end
+    end
+    for index = 1, #replacement.participants do
+      local participant = replacement.participants[index]
+      if participant.userId ~= ARGV[4] then
+        local prior = findParticipant(currentParticipants, participant.userId)
+        if not prior or not participantEqual(participant, prior) then
+          return cjson.encode({status='invalid_participants'})
+        end
+      end
+    end
+    local pointer = redis.call('GET', KEYS[2])
+    if not pointer or pointer ~= current.collaborationId then
+      return cjson.encode({status='source_pointer_conflict'})
+    end
+    if integerValue(replacement.updatedAt) <= integerValue(current.updatedAt) then
+      return cjson.encode({status='nonadvancing'})
+    end
+    if redis.call('PTTL', KEYS[1]) <= 0 or redis.call('PTTL', KEYS[2]) <= 0 then
+      return cjson.encode({status='malformed'})
+    end
+    redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+    redis.call('EXPIRE', KEYS[2], ARGV[3])
+    return cjson.encode({status='saved'})
+    """.strip()
+
+
+    def _save_v2_participants_if_expected(
+        thread_record: dict,
+        expected_updated_at: int,
+        *,
+        participant_user_id: str,
+        command_transport=None,
+    ) -> dict:
+        thread = normalize_v2_thread_record(thread_record)
+        thread_wire = _v2_wire_json(thread, "thread") if thread is not None else None
+        canonical_participant_id = normalize_v2_user_id(participant_user_id)
+        participant = next(
+            (
+                entry
+                for entry in thread.get("participants", [])
+                if entry["userId"] == canonical_participant_id
+            ),
+            None,
+        ) if thread is not None else None
+        if (
+            thread is None
+            or thread_wire is None
+            or type(expected_updated_at) is not int
+            or not MIN_V2_TIMESTAMP_MILLISECONDS
+            <= expected_updated_at
+            <= MAX_V2_TIMESTAMP_MILLISECONDS
+            or canonical_participant_id is None
+            or type(participant) is not dict
+        ):
+            return {"status": "malformed", "error": {"code": "invalid_request"}}
+        thread_key = build_v2_thread_key(thread["collaborationId"])
+        hmac_keys = resolve_v2_index_hmac_keys()
+        source_key = (
+            build_v2_source_thread_key(
+                thread["ownerEmail"],
+                thread["mailboxId"],
+                thread["sourceRef"],
+                hmac_key=hmac_keys[0],
+            )
+            if hmac_keys is not None
+            else None
+        )
+        if thread_key is None or source_key is None:
+            return {
+                "status": "unavailable",
+                "error": {"code": "index_hmac_unavailable"},
+            }
+        result = _v2_eval(
+            [
+                "EVAL",
+                _SAVE_V2_PARTICIPANTS_CAS_LUA,
+                2,
+                thread_key,
+                source_key,
+                str(expected_updated_at),
+                thread_wire,
+                str(V2_THREAD_RETENTION_SECONDS),
+                canonical_participant_id,
+                thread["ownerUserId"],
+                thread["ownerDisplayName"],
+                participant["membershipRef"],
+                participant["displayName"],
+            ],
+            command_transport,
+            response_shapes={
+                "saved": set(),
+                "missing": set(),
+                "stale": set(),
+                "nonadvancing": set(),
+                "malformed": set(),
+                "invalid_scope": set(),
+                "invalid_participants": set(),
+                "source_pointer_conflict": set(),
+            },
+        )
+        if result.get("status") == "saved":
+            return _V2RecordResult(thread)
+        if result.get("status") == "missing":
+            return {
+                "status": "missing",
+                "error": {"code": "collaboration_not_found"},
+            }
+        if result.get("status") in {"stale", "nonadvancing"}:
+            return {"status": "conflict", "error": {"code": "stale_thread"}}
+        if result.get("status") in {
+            "malformed",
+            "invalid_scope",
+            "invalid_participants",
+            "source_pointer_conflict",
+        }:
+            return {
+                "status": "malformed",
+                "error": {"code": "storage_protocol_error"},
+            }
+        return result
+
+
     _APPEND_V2_OWNER_IDEMPOTENT_LUA = _V2_LUA_COMMON + r"""
     local IDEMPOTENCY_RECORD_MAX = 1024
     local RETENTION_MAX = 15552000
@@ -2185,7 +2438,8 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
       or not mailboxId(ARGV[10]) or not requestedVisibility(ARGV[11])
       or ARGV[12] ~= requestedVisibility(ARGV[11])
       or not displayString(ARGV[13], 256, false)
-      or not freeText(ARGV[14], 16384) then
+      or not freeText(ARGV[14], 16384)
+      or (ARGV[15] ~= 'owner' and ARGV[15] ~= 'internal') then
       return cjson.encode({status='malformed'})
     end
 
@@ -2242,7 +2496,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
           matchCount = matchCount + 1
         end
       end
-      if matchCount ~= 1 or matched.authorKind ~= 'owner'
+      if matchCount ~= 1 or matched.authorKind ~= ARGV[15]
         or matched.authorDisplayName ~= ARGV[13] or matched.text ~= ARGV[14]
         or matched.visibility ~= ARGV[12] or matched.createdAt ~= record.updatedAt
         or integerValue(current.updatedAt) < integerValue(record.updatedAt) then
@@ -2280,7 +2534,8 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
       or current.mailboxId ~= replacement.mailboxId
       or current.createdAt ~= replacement.createdAt
       or not sourceEqual(current.sourceRef, replacement.sourceRef)
-      or not sourceMessageEqual(current.sourceMessage, replacement.sourceMessage) then
+      or not sourceMessageEqual(current.sourceMessage, replacement.sourceMessage)
+      or not participantAuthorityEqual(current, replacement) then
       return cjson.encode({status='invalid_scope'})
     end
     if current.updatedAt ~= ARGV[1] then return cjson.encode({status='stale'}) end
@@ -2296,7 +2551,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
       end
     end
     local appended = replacement.messages[#replacement.messages]
-    if appended.authorKind ~= 'owner' or appended.authorDisplayName ~= ARGV[13]
+    if appended.authorKind ~= ARGV[15] or appended.authorDisplayName ~= ARGV[13]
       or appended.text ~= ARGV[14] or appended.visibility ~= ARGV[12]
       or appended.createdAt ~= replacement.updatedAt
       or record.fingerprint ~= ARGV[5] or record.collaborationId ~= ARGV[7]
@@ -2349,6 +2604,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         idempotency_key: str,
         fingerprint: str,
         action: str,
+        author_kind: str = "owner",
         command_transport=None,
     ) -> dict:
         thread = normalize_v2_thread_record(thread_record)
@@ -2365,13 +2621,14 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
             or type(fingerprint) is not str
             or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
             or action not in {"reply", "internal_note"}
+            or author_kind not in {"owner", "internal"}
             or not thread["messages"]
         ):
             return {"status": "malformed", "error": {"code": "invalid_request"}}
         appended = thread["messages"][-1]
         expected_visibility = "shared" if action == "reply" else "internal"
         if (
-            appended["authorKind"] != "owner"
+            appended["authorKind"] != author_kind
             or appended["visibility"] != expected_visibility
             or appended["createdAt"] != thread["updatedAt"]
         ):
@@ -2453,6 +2710,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
                 expected_visibility,
                 appended["authorDisplayName"],
                 appended["text"],
+                author_kind,
             ],
             command_transport,
             response_shapes={

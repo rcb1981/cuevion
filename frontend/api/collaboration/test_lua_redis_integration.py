@@ -7598,6 +7598,158 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(len(final_thread.get("record", {})["messages"]), 1)
 
+    def test_participant_add_real_redis_concurrency_cap_and_corrupt_fail_closed(self):
+        workspace_id = "wsp_" + "w" * 22
+        owner_user_id = "usr_" + "A" * 22
+
+        def participant(marker: str, provenance: str | None = None):
+            return {
+                "userId": "usr_" + marker * 21 + "A",
+                "membershipRef": provenance or f"tinv_{marker}",
+                "displayName": f"Participant {marker}",
+            }
+
+        def seed(marker: str, participants: list[dict]):
+            record = {
+                **self._canonical_owner_thread(marker),
+                "ownerUserId": owner_user_id,
+                "ownerDisplayName": "Owner",
+                "participants": participants,
+            }
+            created = redis_store._create_v2_thread(
+                record,
+                command_transport=self.client.transport,
+            )
+            self.assertEqual(created.get("status"), "ok", created)
+            return record
+
+        def capability(record: dict):
+            return authorization._InternalCollaborationCapability(
+                authorization._INTERNAL_CAPABILITY_SENTINEL,
+                record["ownerEmail"],
+                workspace_id,
+                record["mailboxId"],
+                "google",
+                record["collaborationId"],
+                "manage_participants",
+                "owner",
+                "Owner",
+                owner_user_id,
+                "owner",
+                owner_user_id,
+                "Owner",
+            )
+
+        duplicate_thread = seed("D", [participant("B")])
+        duplicate_target = participant("C")
+        duplicate_barrier = threading.Barrier(2)
+
+        def add_duplicate():
+            duplicate_barrier.wait()
+            return mutations.add_v2_participant(
+                capability(duplicate_thread),
+                duplicate_target,
+                command_transport=self.client.transport,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            duplicate_results = list(executor.map(lambda _index: add_duplicate(), range(2)))
+        self.assertTrue(all(result["status"] == "ok" for result in duplicate_results))
+        duplicate_loaded = redis_store._load_v2_thread(
+            duplicate_thread["collaborationId"],
+            command_transport=self.client.transport,
+        )["record"]
+        self.assertEqual(len(duplicate_loaded["participants"]), 2)
+        self.assertEqual(duplicate_loaded["messages"], duplicate_thread["messages"])
+        self.assertEqual(duplicate_loaded["sourceRef"], duplicate_thread["sourceRef"])
+
+        self.client.command(["FLUSHALL"])
+        distinct_thread = seed("E", [participant("B")])
+        distinct_barrier = threading.Barrier(2)
+
+        def add_distinct(target: dict):
+            distinct_barrier.wait()
+            return mutations.add_v2_participant(
+                capability(distinct_thread),
+                target,
+                command_transport=self.client.transport,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            distinct_results = list(
+                executor.map(add_distinct, [participant("C"), participant("D")])
+            )
+        self.assertTrue(
+            all(result["status"] == "ok" for result in distinct_results),
+            distinct_results,
+        )
+        distinct_loaded = redis_store._load_v2_thread(
+            distinct_thread["collaborationId"],
+            command_transport=self.client.transport,
+        )["record"]
+        self.assertEqual(len(distinct_loaded["participants"]), 3)
+        self.assertEqual(
+            {entry["userId"] for entry in distinct_loaded["participants"]},
+            {participant(marker)["userId"] for marker in ("B", "C", "D")},
+        )
+
+        self.client.command(["FLUSHALL"])
+        full_thread = seed(
+            "F",
+            [participant(chr(66 + index)) for index in range(14)],
+        )
+        cap_barrier = threading.Barrier(2)
+
+        def race_cap(target: dict):
+            cap_barrier.wait()
+            return mutations.add_v2_participant(
+                capability(full_thread),
+                target,
+                command_transport=self.client.transport,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            cap_results = list(
+                executor.map(race_cap, [participant("P"), participant("Q")])
+            )
+        self.assertEqual(
+            sorted(result["status"] for result in cap_results),
+            ["error", "ok"],
+        )
+        self.assertIn(
+            {"code": "invalid_request"},
+            [result.get("error") for result in cap_results],
+        )
+        cap_loaded = redis_store._load_v2_thread(
+            full_thread["collaborationId"],
+            command_transport=self.client.transport,
+        )["record"]
+        self.assertEqual(len(cap_loaded["participants"]), 15)
+
+        raw = self.client.command(["GET", self._thread_key(full_thread["collaborationId"])])
+        corrupted = json.loads(raw)
+        corrupted["participants"].append(dict(corrupted["participants"][0]))
+        corrupted_raw = compact_json(corrupted)
+        self.client.command(
+            [
+                "SET",
+                self._thread_key(full_thread["collaborationId"]),
+                corrupted_raw,
+                "EX",
+                redis_store.V2_THREAD_RETENTION_SECONDS,
+            ]
+        )
+        rejected = mutations.add_v2_participant(
+            capability(full_thread),
+            participant("R"),
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(rejected["error"], {"code": "storage_protocol_error"})
+        self.assertEqual(
+            self.client.command(["GET", self._thread_key(full_thread["collaborationId"])]),
+            corrupted_raw,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
