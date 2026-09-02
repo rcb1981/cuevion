@@ -470,6 +470,231 @@ class OwnerHttpBoundaryTests(unittest.TestCase):
             now=NOW,
         )[0]
 
+    def _invoke_create_with_guest_failure(self, result: object):
+        payload = {
+            "operation": "create_with_guest",
+            "mailboxId": MAILBOX_ID,
+            "sourceRef": {"providerMessageId": "gmail-message-1"},
+            "state": "needs_review",
+        }
+        with mock.patch.object(
+            owner_http.application,
+            "create_v2_collaboration_with_guest_for_verified_owner",
+            return_value=result,
+        ):
+            return _invoke(_request(payload, csrf=self._csrf()))
+
+    def _assert_logged_create_with_guest_failure(self, internal_code: str) -> str:
+        with mock.patch("builtins.print") as logger:
+            response = self._invoke_create_with_guest_failure(
+                {
+                    "status": "unavailable",
+                    "collaboration": None,
+                    "error": {"code": internal_code},
+                }
+            )
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            _json(response),
+            {"ok": False, "error": {"code": "service_unavailable"}},
+        )
+        logger.assert_called_once()
+        serialized = logger.call_args.args[0]
+        self.assertEqual(logger.call_args.kwargs, {"flush": True})
+        self.assertLessEqual(len(serialized), 256)
+        self.assertEqual(
+            json.loads(serialized),
+            {
+                "event": "cuevion_collaboration_owner_application_failure",
+                "operation": "create_with_guest",
+                "internalSafeCode": internal_code,
+                "publicStatus": 503,
+                "publicCode": "service_unavailable",
+            },
+        )
+        self.assertEqual(
+            set(json.loads(serialized)),
+            {
+                "event",
+                "operation",
+                "internalSafeCode",
+                "publicStatus",
+                "publicCode",
+            },
+        )
+        return serialized
+
+    def test_create_with_guest_provider_unavailable_emits_safe_503_event(self):
+        serialized = self._assert_logged_create_with_guest_failure(
+            "provider_unavailable"
+        )
+        for unsafe_marker in (
+            "mailboxId",
+            "sourceRef",
+            "providerMessageId",
+            "imapUid",
+            "uidValidity",
+            "collaborationId",
+            "inviteId",
+            "participantUserId",
+            "workspaceId",
+            "ownerEmail",
+            "invitedEmail",
+            "displayName",
+            "subject",
+            "sender",
+            "message text",
+            "source snapshot",
+            "token",
+            "tokenHash",
+            "sessionId",
+            "sessionHash",
+            "csrf",
+            "csrfToken",
+            "csrfTokenHash",
+            "cookie",
+            "Authorization",
+            "headers",
+            "Redis",
+            "raw result",
+            "exception",
+            "traceback",
+        ):
+            self.assertNotIn(unsafe_marker, serialized)
+
+    def test_create_with_guest_storage_unavailable_emits_distinct_safe_event(self):
+        self._assert_logged_create_with_guest_failure("storage_unavailable")
+
+    def test_create_with_guest_storage_protocol_error_emits_distinct_safe_event(self):
+        serialized = self._assert_logged_create_with_guest_failure(
+            "storage_protocol_error"
+        )
+        self.assertNotIn("raw", serialized.lower())
+
+    def test_create_with_guest_atomic_exchange_unavailable_emits_distinct_safe_event(self):
+        self._assert_logged_create_with_guest_failure(
+            "atomic_exchange_unavailable"
+        )
+
+    def test_create_with_guest_index_hmac_unavailable_emits_distinct_safe_event(self):
+        self._assert_logged_create_with_guest_failure("index_hmac_unavailable")
+
+    def test_lookup_not_found_and_unknown_operation_emit_no_incident_event(self):
+        lookup_payload = {
+            "operation": "lookup",
+            "mailboxId": MAILBOX_ID,
+            "sourceRef": {"providerMessageId": "gmail-message-1"},
+        }
+        with mock.patch.object(
+            owner_http.application,
+            "lookup_v2_collaboration_for_verified_owner",
+            return_value={
+                "status": "not_found",
+                "collaborationId": None,
+                "error": {"code": "collaboration_not_found"},
+            },
+        ), mock.patch("builtins.print") as logger:
+            response = _invoke(
+                _request(lookup_payload, csrf=self._csrf()),
+                mode="owner_read",
+            )
+            unknown_operation = _invoke(
+                _request({"operation": "caller_supplied"}, csrf=self._csrf())
+            )
+            direct_unknown_operation = owner_http._application_failure(
+                {
+                    "status": "unavailable",
+                    "error": {"code": "provider_unavailable"},
+                },
+                operation="caller_supplied",
+            )
+        self.assertEqual(response.status, 404)
+        self.assertEqual(
+            _json(response),
+            {"ok": False, "error": {"code": "not_found"}},
+        )
+        self.assertEqual(unknown_operation.status, 400)
+        self.assertEqual(direct_unknown_operation.status, 503)
+        logger.assert_not_called()
+
+    def test_successful_owner_read_emits_no_incident_event(self):
+        with mock.patch.object(
+            owner_http.application,
+            "read_v2_collaboration_for_verified_owner",
+            return_value={
+                "status": "ok",
+                "collaboration": _owner_collaboration(),
+                "error": None,
+            },
+        ), mock.patch("builtins.print") as logger:
+            response = _invoke(
+                _request(
+                    {
+                        "operation": "read",
+                        "collaborationId": COLLABORATION_ID,
+                    },
+                    csrf=self._csrf(),
+                ),
+                mode="owner_read",
+            )
+        self.assertEqual(response.status, 200)
+        logger.assert_not_called()
+
+    def test_unknown_application_failure_is_bounded_and_never_serializes_result(self):
+        unsafe_result = {
+            "status": "attacker-controlled-status",
+            "error": {"code": "attacker-controlled-code"},
+            "mailboxId": "private-mailbox",
+            "sourceRef": {"providerMessageId": "private-provider-message"},
+            "collaborationId": "private-collaboration",
+            "invitedEmail": "private@example.com",
+            "token": "private-token",
+            "exception": "private-exception-text",
+        }
+        with mock.patch("builtins.print") as logger:
+            response = self._invoke_create_with_guest_failure(unsafe_result)
+        self.assertEqual(response.status, 500)
+        self.assertEqual(
+            _json(response),
+            {"ok": False, "error": {"code": "internal_error"}},
+        )
+        logger.assert_called_once()
+        serialized = logger.call_args.args[0]
+        self.assertLessEqual(len(serialized), 256)
+        event = json.loads(serialized)
+        self.assertEqual(event["internalSafeCode"], "unknown_safe_failure")
+        for private_value in (
+            "attacker-controlled-status",
+            "attacker-controlled-code",
+            "private-mailbox",
+            "private-provider-message",
+            "private-collaboration",
+            "private@example.com",
+            "private-token",
+            "private-exception-text",
+        ):
+            self.assertNotIn(private_value, serialized)
+
+    def test_application_failure_logger_failure_preserves_public_response(self):
+        stderr = io.StringIO()
+        with mock.patch(
+            "builtins.print",
+            side_effect=RuntimeError("private logger exception"),
+        ), mock.patch("sys.stderr", new=stderr):
+            response = self._invoke_create_with_guest_failure(
+                {
+                    "status": "unavailable",
+                    "collaboration": None,
+                    "error": {"code": "provider_unavailable"},
+                }
+            )
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            _json(response),
+            {"ok": False, "error": {"code": "service_unavailable"}},
+        )
+        self.assertEqual(stderr.getvalue(), "")
+
     def test_csrf_bootstrap_requires_exact_origin_and_returns_session_token(self):
         response = _invoke(_request({"operation": "csrf"}))
         self.assertEqual(response.status, 200)

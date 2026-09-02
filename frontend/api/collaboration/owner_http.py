@@ -5,6 +5,7 @@ if __name__ != "api.collaboration.owner_http":
         "Collaboration helpers must be imported as api.collaboration.owner_http"
     )
 
+import json
 import os
 import time
 from collections.abc import Mapping
@@ -87,6 +88,24 @@ _APPLICATION_FAILURES = {
     "provider_unavailable": (503, "service_unavailable"),
     "atomic_exchange_unavailable": (503, "service_unavailable"),
 }
+_OWNER_APPLICATION_FAILURE_EVENT = (
+    "cuevion_collaboration_owner_application_failure"
+)
+_OWNER_APPLICATION_OPERATIONS = frozenset(
+    {
+        "csrf",
+        "read",
+        "lookup",
+        "create",
+        "create_with_guest",
+        "add_participant",
+        "append_shared",
+        "append_internal",
+        "issue_guest_invite",
+        "revoke_guest_invite",
+    }
+)
+_UNKNOWN_SAFE_FAILURE = "unknown_safe_failure"
 
 
 def _trusted_security_snapshot(environment: Mapping[str, str]) -> dict[str, str]:
@@ -145,16 +164,65 @@ def _owner_failure(error: OwnerSecurityError) -> PublicResponse:
     return json_failure(code, status=status)
 
 
-def _application_failure(result: object) -> PublicResponse:
+def _emit_application_failure_event(
+    *,
+    operation: str,
+    internal_safe_code: str,
+    public_status: int,
+    public_code: str,
+) -> None:
+    if (
+        operation not in _OWNER_APPLICATION_OPERATIONS
+        or (
+            internal_safe_code != _UNKNOWN_SAFE_FAILURE
+            and internal_safe_code not in _APPLICATION_FAILURES
+        )
+    ):
+        return
+    event = {
+        "event": _OWNER_APPLICATION_FAILURE_EVENT,
+        "operation": operation,
+        "internalSafeCode": internal_safe_code,
+        "publicStatus": public_status,
+        "publicCode": public_code,
+    }
+    try:
+        print(
+            json.dumps(
+                event,
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+    except Exception:
+        pass
+
+
+def _application_failure(result: object, *, operation: str) -> PublicResponse:
     code = None
     if type(result) is dict:
         error = result.get("error")
         if type(error) is dict and set(error) == {"code"}:
             code = error.get("code")
+    internal_safe_code = (
+        code
+        if type(code) is str and code in _APPLICATION_FAILURES
+        else _UNKNOWN_SAFE_FAILURE
+    )
     status, public_code = _APPLICATION_FAILURES.get(
-        code,
+        internal_safe_code,
         (500, "internal_error"),
     )
+    if status >= 500:
+        _emit_application_failure_event(
+            operation=operation,
+            internal_safe_code=internal_safe_code,
+            public_status=status,
+            public_code=public_code,
+        )
     return json_failure(public_code, status=status)
 
 
@@ -417,7 +485,7 @@ def owner_response(
                 and result.get("error") is None
             ):
                 return json_success({"collaboration": result["collaboration"]})
-            return _application_failure(result)
+            return _application_failure(result, operation=operation)
 
         if operation == "lookup":
             _require_exact_fields(
@@ -448,7 +516,7 @@ def owner_response(
                 return json_success(
                     {"collaborationId": result["collaborationId"]}
                 )
-            return _application_failure(result)
+            return _application_failure(result, operation=operation)
 
         if http_mode != "owner_write":
             raise OwnerSecurityError("rollout_unavailable")
@@ -491,7 +559,7 @@ def owner_response(
                 and type(result.get("collaboration")) is dict
             ):
                 return json_success(result, status=201 if result["created"] else 200)
-            return _application_failure(result)
+            return _application_failure(result, operation=operation)
 
         if operation == "create_with_guest":
             fields = {"operation", "mailboxId", "sourceRef", "state"}
@@ -524,7 +592,7 @@ def owner_response(
                     success,
                     status=201 if success["created"] else 200,
                 )
-            return _application_failure(result)
+            return _application_failure(result, operation=operation)
 
         if operation == "issue_guest_invite":
             fields = {"operation", "collaborationId"}
@@ -553,7 +621,7 @@ def owner_response(
             success = _issue_guest_success(result)
             if success is not None:
                 return json_success(success, status=201 if success["invitationCreated"] else 200)
-            return _application_failure(result)
+            return _application_failure(result, operation=operation)
 
         if operation == "revoke_guest_invite":
             _require_exact_fields(
@@ -577,7 +645,7 @@ def owner_response(
             success = _revoke_guest_success(result)
             if success is not None:
                 return json_success(success)
-            return _application_failure(result)
+            return _application_failure(result, operation=operation)
 
         if operation == "add_participant":
             _require_exact_fields(
@@ -607,7 +675,7 @@ def owner_response(
                 and result.get("error") is None
             ):
                 return json_success({"collaboration": result["collaboration"]})
-            return _application_failure(result)
+            return _application_failure(result, operation=operation)
 
         if operation in {"append_shared", "append_internal"}:
             _require_exact_fields(
@@ -650,7 +718,7 @@ def owner_response(
                 and type(result.get("updatedAt")) is int
             ):
                 return json_success(result)
-            return _application_failure(result)
+            return _application_failure(result, operation=operation)
 
         raise BoundaryError("invalid_value", 400)
     except OwnerSecurityError as error:
