@@ -54,6 +54,11 @@ import {
   loadStartupSession,
 } from "./lib/authApi";
 import { GMAIL_OAUTH_RECONNECT_REQUIRED_CONNECTION_MESSAGE } from "./lib/inboxConnectionApi";
+import { ExternalCollaborationGuestView } from "./components/collaboration/ExternalCollaborationGuestView";
+import {
+  parseCollaborationGuestEntryRoute,
+  type CollaborationGuestRoute,
+} from "./lib/collaborationGuestInviteLink";
 
 const WorkspaceShell = lazy(() =>
   import("./components/workspace/WorkspaceShell").then((module) => ({
@@ -579,6 +584,16 @@ function resolveRootAppRoute(): RootAppRoute {
   }
 
   return isOnboardingPreviewRoute() ? "preview" : "app";
+}
+
+export function resolveSafeCollaborationGuestRoute(): CollaborationGuestRoute | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  return parseCollaborationGuestEntryRoute(
+    window.location.hash,
+    window.location.search,
+  );
 }
 
 function createPreviewOnboardingState(): OnboardingState {
@@ -4931,10 +4946,29 @@ function CuevionApp() {
 }
 
 export default function App() {
+  const [collaborationGuestRoute, setCollaborationGuestRoute] =
+    useState<CollaborationGuestRoute | null>(() =>
+      resolveSafeCollaborationGuestRoute(),
+    );
   const [appRoute, setAppRoute] = useState<RootAppRoute>(() => resolveRootAppRoute());
 
   useEffect(() => {
-    scrubManagedInboxBrowserStorage();
+    if (!collaborationGuestRoute) {
+      scrubManagedInboxBrowserStorage();
+    }
+  }, [collaborationGuestRoute]);
+
+  useEffect(() => {
+    const handleGuestRouteChange = () => {
+      setCollaborationGuestRoute(resolveSafeCollaborationGuestRoute());
+    };
+
+    window.addEventListener("hashchange", handleGuestRouteChange);
+    window.addEventListener("popstate", handleGuestRouteChange);
+    return () => {
+      window.removeEventListener("hashchange", handleGuestRouteChange);
+      window.removeEventListener("popstate", handleGuestRouteChange);
+    };
   }, []);
 
   useEffect(() => {
@@ -4945,6 +4979,15 @@ export default function App() {
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
+
+  if (collaborationGuestRoute) {
+    return (
+      <ExternalCollaborationGuestView
+        key={collaborationGuestRoute.token ?? "guest-session"}
+        initialInviteToken={collaborationGuestRoute.token}
+      />
+    );
+  }
 
   if (appRoute === "login") {
     return <Auth0LoginView />;
