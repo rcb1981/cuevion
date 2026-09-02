@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from api.collaboration import (
     application,
@@ -4181,6 +4181,28 @@ class ExternalGuestApplicationTests(unittest.TestCase):
             "error": None,
         }
 
+    def owner_thread(self) -> dict:
+        return {
+            **_thread_record(),
+            "workspaceId": self.workspace_id,
+            "ownerUserId": self.owner_user_id,
+            "ownerDisplayName": "Owner Person",
+            "participants": [],
+        }
+
+    def safe_invitation(self, *, invited_email: str | None = None) -> dict:
+        invitation = {
+            "inviteId": INVITE_ID,
+            "collaborationId": COLLABORATION_ID,
+            "allowedActions": ["read", "reply"],
+            "identityAssurance": "link_possession",
+            "expiresAt": NOW + 3600,
+            "status": "active",
+        }
+        if invited_email is not None:
+            invitation["invitedEmail"] = invited_email
+        return invitation
+
     def test_external_first_create_supports_email_and_secure_link_without_team_participant(self):
         for invited_email in ("Reviewer@Example.com", None):
             captured: dict[str, dict] = {}
@@ -4409,6 +4431,265 @@ class ExternalGuestApplicationTests(unittest.TestCase):
         )
         for secret in ("tokenHash", "sessionHash", "csrfTokenHash", "ownerEmail", "workspaceId"):
             self.assertNotIn(secret, repr(projection))
+
+    def test_verified_owner_issue_wrapper_canonicalizes_and_returns_token_once(self):
+        capability = self.capability("issue_invite")
+        pending = {
+            **_invite_record(),
+            "workspaceId": self.workspace_id,
+            "status": "active",
+            "exchangedAt": None,
+            "exchangeCount": 0,
+            "invitedEmail": "reviewer@example.com",
+        }
+        pending.pop("activeSessionHash")
+        authorized = {"status": "ok", "context": capability, "error": None}
+        issued = {
+            "status": "ok",
+            "invite": self.safe_invitation(invited_email="reviewer@example.com"),
+            "token": "R" * 43,
+            "error": None,
+        }
+        with patch.object(
+            application,
+            "resolve_verified_owner_collaboration_context",
+            return_value=authorized,
+        ) as resolver, patch.object(
+            application, "issue_v2_invitation", return_value=issued
+        ) as issue, patch.object(
+            application, "_load_exact_thread", return_value=(self.owner_thread(), None)
+        ), patch.object(
+            application,
+            "_load_v2_external_guest_records",
+            return_value={
+                "status": "ok",
+                "records": [{"invite": pending, "session": None}],
+            },
+        ), patch.object(application.time, "time", return_value=NOW):
+            result = application.issue_v2_guest_invitation_for_verified_owner(
+                object(), object(), COLLABORATION_ID,
+                {"invitedEmail": "Reviewer@Example.com"},
+                owner_security_configuration=object(),
+            )
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["invitationCreated"])
+        self.assertEqual(result["token"], "R" * 43)
+        self.assertEqual(result["collaboration"]["viewerAccess"], "owner")
+        self.assertEqual(
+            result["collaboration"]["externalGuests"][0]["status"], "pending"
+        )
+        self.assertEqual(issue.call_args.kwargs["invited_email"], "reviewer@example.com")
+        self.assertEqual(resolver.call_args.kwargs["required_action"], "issue_invite")
+
+        duplicate = {
+            "status": "duplicate",
+            "invite": self.safe_invitation(invited_email="reviewer@example.com"),
+            "error": None,
+        }
+        with patch.object(
+            application,
+            "resolve_verified_owner_collaboration_context",
+            return_value=authorized,
+        ), patch.object(
+            application, "issue_v2_invitation", return_value=duplicate
+        ), patch.object(
+            application, "_load_exact_thread", return_value=(self.owner_thread(), None)
+        ), patch.object(
+            application,
+            "_load_v2_external_guest_records",
+            return_value={
+                "status": "ok",
+                "records": [{"invite": pending, "session": None}],
+            },
+        ), patch.object(application.time, "time", return_value=NOW):
+            duplicate_result = application.issue_v2_guest_invitation_for_verified_owner(
+                object(), object(), COLLABORATION_ID, {},
+                owner_security_configuration=object(),
+            )
+        self.assertFalse(duplicate_result["invitationCreated"])
+        self.assertNotIn("token", duplicate_result)
+
+    def test_issue_wrapper_denies_participant_and_malformed_or_failed_projection(self):
+        issue = Mock(side_effect=AssertionError("issue must not run"))
+        participant = self.capability("issue_invite", viewer_access="participant")
+        with patch.object(
+            application,
+            "resolve_verified_owner_collaboration_context",
+            return_value={"status": "ok", "context": participant, "error": None},
+        ), patch.object(application, "issue_v2_invitation", issue):
+            denied = application.issue_v2_guest_invitation_for_verified_owner(
+                object(), object(), COLLABORATION_ID, {},
+                owner_security_configuration=object(),
+            )
+        self.assertEqual(denied["error"], {"code": "forbidden"})
+        issue.assert_not_called()
+
+        wrong_scope = authorization._InternalCollaborationCapability(
+            authorization._INTERNAL_CAPABILITY_SENTINEL,
+            OWNER_EMAIL,
+            self.workspace_id,
+            MAILBOX_ID,
+            "google",
+            "B" * 22,
+            "issue_invite",
+            "owner",
+            "Owner Person",
+            self.owner_user_id,
+            "owner",
+            self.owner_user_id,
+            "Owner Person",
+        )
+        with patch.object(
+            application,
+            "resolve_verified_owner_collaboration_context",
+            return_value={"status": "ok", "context": wrong_scope, "error": None},
+        ), patch.object(application, "issue_v2_invitation", issue):
+            wrong_collaboration = (
+                application.issue_v2_guest_invitation_for_verified_owner(
+                    object(), object(), COLLABORATION_ID, {},
+                    owner_security_configuration=object(),
+                )
+            )
+        self.assertEqual(wrong_collaboration["error"], {"code": "forbidden"})
+        issue.assert_not_called()
+
+        malformed = application.issue_v2_guest_invitation_for_verified_owner(
+            object(), object(), COLLABORATION_ID,
+            {"invitedEmail": "not-an-email"},
+            owner_security_configuration=object(),
+        )
+        self.assertEqual(malformed["error"], {"code": "invalid_request"})
+
+        capability = self.capability("issue_invite")
+        issued = {
+            "status": "ok",
+            "invite": self.safe_invitation(),
+            "token": "R" * 43,
+            "error": None,
+        }
+        with patch.object(
+            application,
+            "resolve_verified_owner_collaboration_context",
+            return_value={"status": "ok", "context": capability, "error": None},
+        ), patch.object(
+            application, "issue_v2_invitation", return_value=issued
+        ), patch.object(
+            application, "_load_exact_thread", return_value=(self.owner_thread(), None)
+        ), patch.object(
+            application,
+            "_load_v2_external_guest_records",
+            return_value={
+                "status": "unavailable",
+                "error": {"code": "storage_unavailable"},
+            },
+        ):
+            failed = application.issue_v2_guest_invitation_for_verified_owner(
+                object(), object(), COLLABORATION_ID, {},
+                owner_security_configuration=object(),
+            )
+        self.assertEqual(failed["error"], {"code": "storage_unavailable"})
+
+    def test_verified_owner_revoke_wrapper_returns_canonical_revoked_state(self):
+        capability = self.capability("revoke_invite")
+        revoked_invite = {
+            **_invite_record(),
+            "workspaceId": self.workspace_id,
+            "status": "revoked",
+            "revokedAt": NOW,
+            "revokedBy": OWNER_EMAIL,
+        }
+        authorized = {"status": "ok", "context": capability, "error": None}
+        for domain_result in (
+            {"status": "ok"},
+            {"status": "already_revoked", "error": {"code": "already_revoked"}},
+        ):
+            with self.subTest(domain_result=domain_result), patch.object(
+                application,
+                "resolve_verified_owner_collaboration_context",
+                return_value=authorized,
+            ) as resolver, patch.object(
+                application,
+                "revoke_invitation_for_owner",
+                return_value=domain_result,
+            ) as revoke, patch.object(
+                application, "_load_exact_thread", return_value=(self.owner_thread(), None)
+            ), patch.object(
+                application,
+                "_load_v2_external_guest_records",
+                return_value={
+                    "status": "ok",
+                    "records": [{"invite": revoked_invite, "session": None}],
+                },
+            ), patch.object(application.time, "time", return_value=NOW):
+                result = application.revoke_v2_guest_invitation_for_verified_owner(
+                    object(), object(), COLLABORATION_ID, INVITE_ID,
+                    owner_security_configuration=object(),
+                )
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["invitation"]["status"], "revoked")
+            self.assertEqual(
+                result["collaboration"]["externalGuests"], [result["invitation"]]
+            )
+            self.assertEqual(revoke.call_args.args[1], INVITE_ID)
+            self.assertEqual(resolver.call_args.kwargs["required_action"], "revoke_invite")
+
+    def test_revoke_wrapper_denies_wrong_scope_and_fails_closed_on_projection_storage(self):
+        invalid = application.revoke_v2_guest_invitation_for_verified_owner(
+            object(), object(), COLLABORATION_ID, "short",
+            owner_security_configuration=object(),
+        )
+        self.assertEqual(invalid["error"], {"code": "invalid_request"})
+
+        wrong_scope = authorization._InternalCollaborationCapability(
+            authorization._INTERNAL_CAPABILITY_SENTINEL,
+            OWNER_EMAIL,
+            self.workspace_id,
+            MAILBOX_ID,
+            "google",
+            "B" * 22,
+            "revoke_invite",
+            "owner",
+            "Owner Person",
+            self.owner_user_id,
+            "owner",
+            self.owner_user_id,
+            "Owner Person",
+        )
+        revoke = Mock(side_effect=AssertionError("revoke must not run"))
+        with patch.object(
+            application,
+            "resolve_verified_owner_collaboration_context",
+            return_value={"status": "ok", "context": wrong_scope, "error": None},
+        ), patch.object(application, "revoke_invitation_for_owner", revoke):
+            denied = application.revoke_v2_guest_invitation_for_verified_owner(
+                object(), object(), COLLABORATION_ID, INVITE_ID,
+                owner_security_configuration=object(),
+            )
+        self.assertEqual(denied["error"], {"code": "forbidden"})
+        revoke.assert_not_called()
+
+        capability = self.capability("revoke_invite")
+        with patch.object(
+            application,
+            "resolve_verified_owner_collaboration_context",
+            return_value={"status": "ok", "context": capability, "error": None},
+        ), patch.object(
+            application, "revoke_invitation_for_owner", return_value={"status": "ok"}
+        ), patch.object(
+            application, "_load_exact_thread", return_value=(self.owner_thread(), None)
+        ), patch.object(
+            application,
+            "_load_v2_external_guest_records",
+            return_value={
+                "status": "unavailable",
+                "error": {"code": "storage_unavailable"},
+            },
+        ):
+            failed = application.revoke_v2_guest_invitation_for_verified_owner(
+                object(), object(), COLLABORATION_ID, INVITE_ID,
+                owner_security_configuration=object(),
+            )
+        self.assertEqual(failed["error"], {"code": "storage_unavailable"})
 
     def test_verified_owner_sees_external_guests_but_participant_does_not(self):
         thread = {

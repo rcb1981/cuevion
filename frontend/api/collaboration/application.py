@@ -18,8 +18,10 @@ from .guest_session import (
     INVITE_LIFETIME_SECONDS,
     _is_guest_read_capability,
     _resolve_guest_read_access,
+    issue_v2_invitation,
     normalize_v2_guest_session_record,
     read_guest_session_cookie,
+    revoke_invitation_for_owner,
 )
 from .models import (
     COLLABORATION_V2_THREAD_SCHEMA_VERSION,
@@ -277,7 +279,16 @@ def _build_verified_thread_dto(
     if team_member_resolver is None:
         team_member_resolver = _resolve_active_team_member
     if (
-        not _is_internal_capability(capability, actions={"read", "create", "manage_participants"})
+        not _is_internal_capability(
+            capability,
+            actions={
+                "read",
+                "create",
+                "manage_participants",
+                "issue_invite",
+                "revoke_invite",
+            },
+        )
         or capability.viewer_access not in {"owner", "participant"}
     ):
         return None, _failure("forbidden", "forbidden")
@@ -405,7 +416,13 @@ def _build_verified_owner_thread_dto(
     if (
         not _is_internal_capability(
             capability,
-            actions={"read", "create", "manage_participants"},
+            actions={
+                "read",
+                "create",
+                "manage_participants",
+                "issue_invite",
+                "revoke_invite",
+            },
         )
         or capability.viewer_access != "owner"
         or thread.get("ownerEmail") != capability.owner_email
@@ -455,6 +472,52 @@ def _safe_v2_invitation_metadata(invite: dict[str, Any]) -> dict[str, Any]:
     if "invitedEmail" in invite:
         result["invitedEmail"] = invite["invitedEmail"]
     return result
+
+
+def _normalize_safe_v2_invitation_metadata(
+    value: object,
+    *,
+    collaboration_id: str,
+) -> dict[str, Any] | None:
+    required = {
+        "inviteId",
+        "collaborationId",
+        "allowedActions",
+        "identityAssurance",
+        "expiresAt",
+        "status",
+    }
+    optional = {"invitedEmail"}
+    if (
+        type(value) is not dict
+        or not required <= set(value) <= required | optional
+        or not is_v2_opaque_id(value.get("inviteId"))
+        or value.get("collaborationId") != collaboration_id
+        or value.get("allowedActions") != ["read", "reply"]
+        or value.get("identityAssurance") != "link_possession"
+        or type(value.get("expiresAt")) is not int
+        or not MIN_V2_TIMESTAMP_SECONDS
+        <= value["expiresAt"]
+        <= MAX_V2_TIMESTAMP_SECONDS
+        or value.get("status") not in {"active", "exchanged", "revoked", "expired"}
+    ):
+        return None
+    invited_email = None
+    if "invitedEmail" in value:
+        invited_email = normalize_v2_email(value.get("invitedEmail"))
+        if invited_email is None or invited_email != value.get("invitedEmail"):
+            return None
+    normalized = {
+        "inviteId": value["inviteId"],
+        "collaborationId": collaboration_id,
+        "allowedActions": ["read", "reply"],
+        "identityAssurance": "link_possession",
+        "expiresAt": value["expiresAt"],
+        "status": value["status"],
+    }
+    if invited_email is not None:
+        normalized["invitedEmail"] = invited_email
+    return normalized
 
 
 def _resolve_participant_authority(
@@ -1269,6 +1332,176 @@ def add_v2_participant_for_verified_owner(
     if dto_error is not None:
         return dto_error
     return _success(dto) if dto is not None else _failure("malformed", "storage_protocol_error")
+
+
+def issue_v2_guest_invitation_for_verified_owner(
+    owner_context: object,
+    headers: object,
+    collaboration_id: object,
+    payload: object,
+    *,
+    owner_security_configuration: object,
+) -> dict[str, Any]:
+    if type(payload) is not dict or set(payload) not in (set(), {"invitedEmail"}):
+        return _failure("malformed", "invalid_request")
+    invited_email = None
+    if "invitedEmail" in payload:
+        invited_email = normalize_v2_email(payload.get("invitedEmail"))
+        if invited_email is None:
+            return _failure("malformed", "invalid_request")
+    authorized = resolve_verified_owner_collaboration_context(
+        owner_context,
+        headers,
+        collaboration_id=collaboration_id,
+        required_action="issue_invite",
+        owner_security_configuration=owner_security_configuration,
+    )
+    if type(authorized) is not dict or authorized.get("status") != "ok":
+        return _failure_from_result(
+            authorized,
+            default_status="error",
+            default_code="storage_protocol_error",
+        )
+    capability = authorized.get("context")
+    if (
+        not _is_internal_capability(capability, actions={"issue_invite"})
+        or capability.viewer_access != "owner"
+        or capability.collaboration_id != collaboration_id
+    ):
+        return _failure("forbidden", "forbidden")
+    issued = issue_v2_invitation(
+        capability,
+        collaboration_id,
+        invited_email=invited_email,
+    )
+    if type(issued) is not dict or issued.get("status") not in {"ok", "duplicate"}:
+        return _failure_from_result(
+            issued,
+            default_status="error",
+            default_code="storage_protocol_error",
+        )
+    invitation_created = issued.get("status") == "ok"
+    expected_keys = (
+        {"status", "invite", "token", "error"}
+        if invitation_created
+        else {"status", "invite", "error"}
+    )
+    invitation = _normalize_safe_v2_invitation_metadata(
+        issued.get("invite"),
+        collaboration_id=collaboration_id,
+    )
+    token = issued.get("token") if invitation_created else None
+    if (
+        set(issued) != expected_keys
+        or issued.get("error") is not None
+        or invitation is None
+        or (invitation_created and hash_v2_secret(token) is None)
+    ):
+        return _failure("malformed", "storage_protocol_error")
+    thread, load_failure = _load_exact_thread(collaboration_id)
+    if load_failure is not None:
+        return load_failure
+    if thread is None or not _thread_matches_owner_capability(thread, capability):
+        return _failure("forbidden", "forbidden")
+    collaboration, dto_error = _build_verified_owner_thread_dto(
+        thread, capability
+    )
+    if dto_error is not None:
+        return dto_error
+    if collaboration is None:
+        return _failure("malformed", "storage_protocol_error")
+    result = {
+        "status": "ok",
+        "invitationCreated": invitation_created,
+        "collaboration": collaboration,
+        "invitation": invitation,
+        "error": None,
+    }
+    if invitation_created:
+        result["token"] = token
+    return result
+
+
+def revoke_v2_guest_invitation_for_verified_owner(
+    owner_context: object,
+    headers: object,
+    collaboration_id: object,
+    invite_id: object,
+    *,
+    owner_security_configuration: object,
+) -> dict[str, Any]:
+    if not is_v2_opaque_id(invite_id):
+        return _failure("malformed", "invalid_request")
+    authorized = resolve_verified_owner_collaboration_context(
+        owner_context,
+        headers,
+        collaboration_id=collaboration_id,
+        required_action="revoke_invite",
+        owner_security_configuration=owner_security_configuration,
+    )
+    if type(authorized) is not dict or authorized.get("status") != "ok":
+        return _failure_from_result(
+            authorized,
+            default_status="error",
+            default_code="storage_protocol_error",
+        )
+    capability = authorized.get("context")
+    if (
+        not _is_internal_capability(capability, actions={"revoke_invite"})
+        or capability.viewer_access != "owner"
+        or capability.collaboration_id != collaboration_id
+    ):
+        return _failure("forbidden", "forbidden")
+    revoked = revoke_invitation_for_owner(capability, invite_id)
+    if type(revoked) is not dict or revoked.get("status") not in {
+        "ok",
+        "already_revoked",
+    }:
+        return _failure_from_result(
+            revoked,
+            default_status="error",
+            default_code="storage_protocol_error",
+        )
+    if (
+        revoked.get("status") == "ok"
+        and set(revoked) != {"status"}
+    ) or (
+        revoked.get("status") == "already_revoked"
+        and revoked
+        != {
+            "status": "already_revoked",
+            "error": {"code": "already_revoked"},
+        }
+    ):
+        return _failure("malformed", "storage_protocol_error")
+    thread, load_failure = _load_exact_thread(collaboration_id)
+    if load_failure is not None:
+        return load_failure
+    if thread is None or not _thread_matches_owner_capability(thread, capability):
+        return _failure("forbidden", "forbidden")
+    collaboration, dto_error = _build_verified_owner_thread_dto(
+        thread, capability
+    )
+    if dto_error is not None:
+        return dto_error
+    if collaboration is None:
+        return _failure("malformed", "storage_protocol_error")
+    invitation = next(
+        (
+            guest
+            for guest in collaboration["externalGuests"]
+            if guest.get("inviteId") == invite_id
+        ),
+        None,
+    )
+    if type(invitation) is not dict or invitation.get("status") != "revoked":
+        return _failure("malformed", "storage_protocol_error")
+    return {
+        "status": "ok",
+        "collaboration": collaboration,
+        "invitation": invitation,
+        "error": None,
+    }
 
 
 def lookup_v2_collaboration_for_verified_owner(

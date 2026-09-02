@@ -34,6 +34,7 @@ WORKSPACE_ID = "wsp_" + ("w" * 22)
 OTHER_WORKSPACE_ID = "wsp_" + ("x" * 22)
 MAILBOX_ID = "primary.mailbox"
 COLLABORATION_ID = "A" * 22
+INVITE_ID = "I" * 22
 ISSUER = "https://cuevion.eu.auth0.com/"
 SUBJECT = "auth0|0123456789abcdef"
 OWNER_USER_ID = "usr_" + "A" * 22
@@ -46,6 +47,7 @@ IDEMPOTENCY_KEY = base64.urlsafe_b64encode(b"i" * 32).rstrip(b"=").decode("ascii
 CSRF_KEY = b"owner-csrf-key-material-32-bytes!"
 ALLOWLIST_KEY = b"owner-allowlist-material-32-bytes"
 RATE_LIMIT_KEY = b"owner-rate-limit-material-32-bytes!"
+RAW_INVITE_TOKEN = base64.urlsafe_b64encode(b"r" * 32).rstrip(b"=").decode("ascii")
 
 _OWNER_DOMAIN = b"cuevion/collaboration-v2/owner-allowlist/v1\x00"
 _MAILBOX_DOMAIN = b"cuevion/collaboration-v2/mailbox-allowlist/v1\x00"
@@ -194,6 +196,46 @@ def _invoke(request: _Request, *, mode: str = "owner_write"):
 
 def _json(response: http_adapter.PublicResponse) -> dict:
     return json.loads(response.body.decode("utf-8"))
+
+
+def _owner_collaboration(*, guest_status: str = "pending") -> dict:
+    return {
+        "collaborationId": COLLABORATION_ID,
+        "mailboxId": MAILBOX_ID,
+        "state": "needs_review",
+        "createdAt": NOW * 1000,
+        "updatedAt": NOW * 1000,
+        "source": {},
+        "messages": [],
+        "viewerAccess": "owner",
+        "participants": [
+            {
+                "userId": OWNER_USER_ID,
+                "displayName": "Owner Person",
+                "access": "owner",
+            }
+        ],
+        "externalGuests": [
+            {
+                "inviteId": INVITE_ID,
+                "status": guest_status,
+                "expiresAt": NOW + 3600,
+                "invitedEmail": "reviewer@example.com",
+            }
+        ],
+    }
+
+
+def _safe_invitation() -> dict:
+    return {
+        "inviteId": INVITE_ID,
+        "collaborationId": COLLABORATION_ID,
+        "allowedActions": ["read", "reply"],
+        "identityAssurance": "link_possession",
+        "expiresAt": NOW + 3600,
+        "status": "active",
+        "invitedEmail": "reviewer@example.com",
+    }
 
 
 class OwnerAuthenticationAdapterTests(unittest.TestCase):
@@ -1299,6 +1341,318 @@ class OwnerHttpBoundaryTests(unittest.TestCase):
             {"ok": False, "error": {"code": "service_unavailable"}},
         )
         self.assertNotIn(private_error, unavailable.body.decode("utf-8"))
+
+    def test_create_with_guest_http_is_owner_write_only_and_preserves_token_semantics(self):
+        base = {
+            "operation": "create_with_guest",
+            "mailboxId": MAILBOX_ID,
+            "sourceRef": {"providerMessageId": "gmail-message-1"},
+            "state": "needs_review",
+        }
+        created_result = {
+            "created": True,
+            "invitationCreated": True,
+            "collaboration": _owner_collaboration(),
+            "invitation": _safe_invitation(),
+            "token": RAW_INVITE_TOKEN,
+        }
+        service = mock.Mock(return_value=created_result)
+        with mock.patch.object(
+            owner_http.application,
+            "create_v2_collaboration_with_guest_for_verified_owner",
+            service,
+        ):
+            read_mode = _invoke(
+                _request(base, csrf=self._csrf()), mode="owner_read"
+            )
+            self.assertEqual(read_mode.status, 404)
+            service.assert_not_called()
+
+            self.assertEqual(_invoke(_request(base)).status, 403)
+            wrong_origin = _request(base, csrf=self._csrf())
+            wrong_origin.headers.pairs[0] = ("Origin", "https://evil.example")
+            self.assertEqual(_invoke(wrong_origin).status, 403)
+            service.assert_not_called()
+
+            email_payload = {
+                **base,
+                "invitedEmail": "Reviewer@Example.com",
+            }
+            accepted = _invoke(_request(email_payload, csrf=self._csrf()))
+            self.assertEqual(accepted.status, 201)
+            data = _json(accepted)["data"]
+            self.assertEqual(data["token"], RAW_INVITE_TOKEN)
+            self.assertEqual(data["collaboration"]["viewerAccess"], "owner")
+            self.assertEqual(
+                data["collaboration"]["externalGuests"][0]["status"],
+                "pending",
+            )
+        self.assertEqual(service.call_count, 1)
+        self.assertIs(service.call_args.args[0], self.context)
+        self.assertEqual(
+            service.call_args.args[2],
+            {
+                "mailboxId": MAILBOX_ID,
+                "sourceRef": {"providerMessageId": "gmail-message-1"},
+                "state": "needs_review",
+                "invitedEmail": "Reviewer@Example.com",
+            },
+        )
+        self.assertEqual(
+            self.rate_limiter.call_args.args[1], owner_rate_limit.RATE_LIMIT_WRITE
+        )
+
+        duplicate_result = {
+            "created": False,
+            "invitationCreated": False,
+            "collaboration": _owner_collaboration(),
+            "invitation": _safe_invitation(),
+        }
+        with mock.patch.object(
+            owner_http.application,
+            "create_v2_collaboration_with_guest_for_verified_owner",
+            return_value=duplicate_result,
+        ):
+            duplicate = _invoke(_request(base, csrf=self._csrf()))
+        self.assertEqual(duplicate.status, 200)
+        self.assertNotIn("token", _json(duplicate)["data"])
+
+    def test_create_with_guest_rejects_field_confusion_and_malformed_email(self):
+        base = {
+            "operation": "create_with_guest",
+            "mailboxId": MAILBOX_ID,
+            "sourceRef": {"providerMessageId": "gmail-message-1"},
+            "state": "needs_review",
+        }
+        service = mock.Mock(side_effect=AssertionError("invalid request must not mutate"))
+        with mock.patch.object(
+            owner_http.application,
+            "create_v2_collaboration_with_guest_for_verified_owner",
+            service,
+        ):
+            for malformed in (
+                {**base, "participantUserId": PARTICIPANT_USER_ID},
+                {**base, "displayName": "Guest"},
+                {key: value for key, value in base.items() if key != "state"},
+            ):
+                with self.subTest(malformed=malformed):
+                    self.assertEqual(
+                        _invoke(_request(malformed, csrf=self._csrf())).status,
+                        400,
+                    )
+        service.assert_not_called()
+
+        with mock.patch.object(
+            owner_http.application,
+            "create_v2_collaboration_with_guest_for_verified_owner",
+            return_value={
+                "status": "malformed",
+                "collaboration": None,
+                "error": {"code": "invalid_request"},
+            },
+        ):
+            malformed_email = _invoke(
+                _request(
+                    {**base, "invitedEmail": "not-an-email"},
+                    csrf=self._csrf(),
+                )
+            )
+        self.assertEqual(malformed_email.status, 400)
+
+    def test_issue_guest_invite_http_supports_email_optional_and_duplicate(self):
+        base = {
+            "operation": "issue_guest_invite",
+            "collaborationId": COLLABORATION_ID,
+        }
+        issued_result = {
+            "status": "ok",
+            "invitationCreated": True,
+            "collaboration": _owner_collaboration(),
+            "invitation": _safe_invitation(),
+            "token": RAW_INVITE_TOKEN,
+            "error": None,
+        }
+        service = mock.Mock(return_value=issued_result)
+        with mock.patch.object(
+            owner_http.application,
+            "issue_v2_guest_invitation_for_verified_owner",
+            service,
+        ):
+            self.assertEqual(
+                _invoke(_request(base, csrf=self._csrf()), mode="owner_read").status,
+                404,
+            )
+            service.assert_not_called()
+            accepted = _invoke(
+                _request(
+                    {**base, "invitedEmail": "Reviewer@Example.com"},
+                    csrf=self._csrf(),
+                )
+            )
+        self.assertEqual(accepted.status, 201)
+        self.assertEqual(_json(accepted)["data"]["token"], RAW_INVITE_TOKEN)
+        self.assertEqual(
+            service.call_args.args[3],
+            {"invitedEmail": "Reviewer@Example.com"},
+        )
+        self.assertEqual(
+            self.rate_limiter.call_args.args[1], owner_rate_limit.RATE_LIMIT_WRITE
+        )
+
+        duplicate_result = {
+            "status": "ok",
+            "invitationCreated": False,
+            "collaboration": _owner_collaboration(),
+            "invitation": _safe_invitation(),
+            "error": None,
+        }
+        with mock.patch.object(
+            owner_http.application,
+            "issue_v2_guest_invitation_for_verified_owner",
+            return_value=duplicate_result,
+        ) as duplicate_service:
+            duplicate = _invoke(_request(base, csrf=self._csrf()))
+        self.assertEqual(duplicate.status, 200)
+        self.assertNotIn("token", _json(duplicate)["data"])
+        self.assertEqual(duplicate_service.call_args.args[3], {})
+
+    def test_issue_guest_invite_rate_errors_and_secret_fields_fail_closed(self):
+        payload = {
+            "operation": "issue_guest_invite",
+            "collaborationId": COLLABORATION_ID,
+        }
+        service = mock.Mock(side_effect=AssertionError("limited mutation must not run"))
+        with mock.patch.object(
+            owner_http.application,
+            "issue_v2_guest_invitation_for_verified_owner",
+            service,
+        ):
+            self.rate_limiter.return_value = owner_rate_limit.OwnerRateLimitDecision(
+                "limited", 3
+            )
+            limited = _invoke(_request(payload, csrf=self._csrf()))
+        self.assertEqual(limited.status, 429)
+        service.assert_not_called()
+
+        self.rate_limiter.return_value = owner_rate_limit.OwnerRateLimitDecision(
+            "allowed"
+        )
+        for code, status in (
+            ("guest_capacity_reached", 409),
+            ("stale_invitation", 409),
+            ("invite_not_found", 404),
+            ("storage_unavailable", 503),
+        ):
+            with self.subTest(code=code), mock.patch.object(
+                owner_http.application,
+                "issue_v2_guest_invitation_for_verified_owner",
+                return_value={
+                    "status": "error",
+                    "collaboration": None,
+                    "error": {"code": code},
+                },
+            ):
+                response = _invoke(_request(payload, csrf=self._csrf()))
+            self.assertEqual(response.status, status)
+
+        unsafe = {
+            "status": "ok",
+            "invitationCreated": True,
+            "collaboration": _owner_collaboration(),
+            "invitation": {**_safe_invitation(), "tokenHash": "private"},
+            "token": RAW_INVITE_TOKEN,
+            "error": None,
+        }
+        with mock.patch.object(
+            owner_http.application,
+            "issue_v2_guest_invitation_for_verified_owner",
+            return_value=unsafe,
+        ):
+            rejected = _invoke(_request(payload, csrf=self._csrf()))
+        self.assertEqual(rejected.status, 500)
+        self.assertNotIn("private", rejected.body.decode("utf-8"))
+
+    def test_revoke_guest_invite_http_requires_both_ids_and_returns_revoked_state(self):
+        payload = {
+            "operation": "revoke_guest_invite",
+            "collaborationId": COLLABORATION_ID,
+            "inviteId": INVITE_ID,
+        }
+        result = {
+            "status": "ok",
+            "collaboration": _owner_collaboration(guest_status="revoked"),
+            "invitation": _owner_collaboration(guest_status="revoked")[
+                "externalGuests"
+            ][0],
+            "error": None,
+        }
+        service = mock.Mock(return_value=result)
+        with mock.patch.object(
+            owner_http.application,
+            "revoke_v2_guest_invitation_for_verified_owner",
+            service,
+        ):
+            self.assertEqual(
+                _invoke(_request(payload, csrf=self._csrf()), mode="owner_read").status,
+                404,
+            )
+            service.assert_not_called()
+            accepted = _invoke(_request(payload, csrf=self._csrf()))
+            for missing in ("collaborationId", "inviteId"):
+                malformed = {key: value for key, value in payload.items() if key != missing}
+                self.assertEqual(
+                    _invoke(_request(malformed, csrf=self._csrf())).status,
+                    400,
+                )
+        self.assertEqual(accepted.status, 200)
+        data = _json(accepted)["data"]
+        self.assertEqual(data["invitation"]["status"], "revoked")
+        self.assertEqual(
+            data["collaboration"]["externalGuests"][0]["status"], "revoked"
+        )
+        self.assertEqual(service.call_args.args[2:], (COLLABORATION_ID, INVITE_ID))
+        self.assertEqual(
+            self.rate_limiter.call_args.args[1], owner_rate_limit.RATE_LIMIT_WRITE
+        )
+
+    def test_revoke_guest_invite_scope_failures_are_masked_and_rate_limited(self):
+        payload = {
+            "operation": "revoke_guest_invite",
+            "collaborationId": COLLABORATION_ID,
+            "inviteId": INVITE_ID,
+        }
+        for code, status in (
+            ("invalid_request", 400),
+            ("forbidden", 404),
+            ("invite_not_found", 404),
+            ("invite_expired", 409),
+            ("stale_invitation", 409),
+            ("storage_protocol_error", 503),
+        ):
+            with self.subTest(code=code), mock.patch.object(
+                owner_http.application,
+                "revoke_v2_guest_invitation_for_verified_owner",
+                return_value={
+                    "status": "error",
+                    "collaboration": None,
+                    "error": {"code": code},
+                },
+            ):
+                response = _invoke(_request(payload, csrf=self._csrf()))
+            self.assertEqual(response.status, status)
+
+        service = mock.Mock(side_effect=AssertionError("limited revoke must not run"))
+        with mock.patch.object(
+            owner_http.application,
+            "revoke_v2_guest_invitation_for_verified_owner",
+            service,
+        ):
+            self.rate_limiter.return_value = owner_rate_limit.OwnerRateLimitDecision(
+                "limited", 2
+            )
+            limited = _invoke(_request(payload, csrf=self._csrf()))
+        self.assertEqual(limited.status, 429)
+        service.assert_not_called()
 
 
 class OwnerRouteActivationTests(unittest.TestCase):

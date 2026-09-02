@@ -20,7 +20,15 @@ from .http_adapter import (
     require_request_method,
 )
 from .http_boundary import BoundaryError, get_security_header
-from .models import is_v2_opaque_id, normalize_v2_owner_idempotency_key
+from .models import (
+    MAX_V2_TIMESTAMP_SECONDS,
+    MIN_V2_TIMESTAMP_SECONDS,
+    hash_v2_secret,
+    is_v2_opaque_id,
+    normalize_v2_email,
+    normalize_v2_external_guest_projection,
+    normalize_v2_owner_idempotency_key,
+)
 from .owner_authentication import resolve_verified_auth0_owner
 from .owner_request_security import (
     OwnerSecurityError,
@@ -45,6 +53,8 @@ _OWNER_BODY_FIELDS = frozenset(
         "state",
         "text",
         "participantUserId",
+        "invitedEmail",
+        "inviteId",
     }
 )
 _SECURITY_CONFIGURATION_NAMES = (
@@ -64,7 +74,13 @@ _APPLICATION_FAILURES = {
     "forbidden": (404, "not_found"),
     "source_changed": (409, "conflict"),
     "stale_thread": (409, "conflict"),
+    "stale_invitation": (409, "conflict"),
     "idempotency_conflict": (409, "conflict"),
+    "guest_capacity_reached": (409, "conflict"),
+    "invite_expired": (409, "conflict"),
+    "invite_revoked": (409, "conflict"),
+    "already_revoked": (409, "conflict"),
+    "invite_not_found": (404, "not_found"),
     "storage_unavailable": (503, "service_unavailable"),
     "storage_protocol_error": (503, "service_unavailable"),
     "index_hmac_unavailable": (503, "service_unavailable"),
@@ -145,6 +161,146 @@ def _application_failure(result: object) -> PublicResponse:
 def _require_exact_fields(payload: dict, fields: frozenset[str]) -> None:
     if type(payload) is not dict or set(payload) != fields:
         raise BoundaryError("invalid_json_fields", 400)
+
+
+def _safe_invitation_metadata(
+    value: object,
+    *,
+    collaboration_id: object,
+) -> dict | None:
+    required = {
+        "inviteId",
+        "collaborationId",
+        "allowedActions",
+        "identityAssurance",
+        "expiresAt",
+        "status",
+    }
+    optional = {"invitedEmail"}
+    if (
+        type(value) is not dict
+        or not required <= set(value) <= required | optional
+        or not is_v2_opaque_id(value.get("inviteId"))
+        or value.get("collaborationId") != collaboration_id
+        or value.get("allowedActions") != ["read", "reply"]
+        or value.get("identityAssurance") != "link_possession"
+        or type(value.get("expiresAt")) is not int
+        or not MIN_V2_TIMESTAMP_SECONDS
+        <= value["expiresAt"]
+        <= MAX_V2_TIMESTAMP_SECONDS
+        or value.get("status") not in {"active", "exchanged", "revoked", "expired"}
+    ):
+        return None
+    if "invitedEmail" in value:
+        invited_email = normalize_v2_email(value.get("invitedEmail"))
+        if invited_email is None or invited_email != value.get("invitedEmail"):
+            return None
+    return value
+
+
+def _external_guest_lifecycle(value: object) -> dict | None:
+    normalized = normalize_v2_external_guest_projection([value])
+    return normalized[0] if normalized == [value] else None
+
+
+def _create_with_guest_success(result: object) -> dict | None:
+    if type(result) is not dict:
+        return None
+    invitation_created = result.get("invitationCreated")
+    expected = (
+        {"created", "invitationCreated", "collaboration", "invitation", "token"}
+        if invitation_created is True
+        else {"created", "invitationCreated", "collaboration", "invitation"}
+    )
+    collaboration = result.get("collaboration")
+    collaboration_id = (
+        collaboration.get("collaborationId")
+        if type(collaboration) is dict
+        else None
+    )
+    if (
+        set(result) != expected
+        or type(result.get("created")) is not bool
+        or type(invitation_created) is not bool
+        or type(collaboration) is not dict
+        or not is_v2_opaque_id(collaboration_id)
+        or _safe_invitation_metadata(
+            result.get("invitation"), collaboration_id=collaboration_id
+        )
+        is None
+        or (invitation_created and hash_v2_secret(result.get("token")) is None)
+    ):
+        return None
+    return result
+
+
+def _issue_guest_success(result: object) -> dict | None:
+    if type(result) is not dict:
+        return None
+    invitation_created = result.get("invitationCreated")
+    expected = (
+        {
+            "status",
+            "invitationCreated",
+            "collaboration",
+            "invitation",
+            "token",
+            "error",
+        }
+        if invitation_created is True
+        else {
+            "status",
+            "invitationCreated",
+            "collaboration",
+            "invitation",
+            "error",
+        }
+    )
+    collaboration = result.get("collaboration")
+    collaboration_id = (
+        collaboration.get("collaborationId")
+        if type(collaboration) is dict
+        else None
+    )
+    if (
+        set(result) != expected
+        or result.get("status") != "ok"
+        or type(invitation_created) is not bool
+        or type(collaboration) is not dict
+        or not is_v2_opaque_id(collaboration_id)
+        or result.get("error") is not None
+        or _safe_invitation_metadata(
+            result.get("invitation"), collaboration_id=collaboration_id
+        )
+        is None
+        or (invitation_created and hash_v2_secret(result.get("token")) is None)
+    ):
+        return None
+    return {
+        key: result[key]
+        for key in (
+            "invitationCreated",
+            "collaboration",
+            "invitation",
+            *(("token",) if invitation_created else ()),
+        )
+    }
+
+
+def _revoke_guest_success(result: object) -> dict | None:
+    if (
+        type(result) is not dict
+        or set(result) != {"status", "collaboration", "invitation", "error"}
+        or result.get("status") != "ok"
+        or type(result.get("collaboration")) is not dict
+        or result.get("error") is not None
+        or _external_guest_lifecycle(result.get("invitation")) is None
+    ):
+        return None
+    return {
+        "collaboration": result["collaboration"],
+        "invitation": result["invitation"],
+    }
 
 
 def _resolve_context(
@@ -335,6 +491,92 @@ def owner_response(
                 and type(result.get("collaboration")) is dict
             ):
                 return json_success(result, status=201 if result["created"] else 200)
+            return _application_failure(result)
+
+        if operation == "create_with_guest":
+            fields = {"operation", "mailboxId", "sourceRef", "state"}
+            if "invitedEmail" in payload:
+                fields.add("invitedEmail")
+            _require_exact_fields(payload, frozenset(fields))
+            limited = _rate_limit_response(
+                context,
+                owner_rate_limit.RATE_LIMIT_WRITE,
+                rate_limit_configuration,
+            )
+            if limited is not None:
+                return limited
+            application_payload = {
+                "mailboxId": payload.get("mailboxId"),
+                "sourceRef": payload.get("sourceRef"),
+                "state": payload.get("state"),
+            }
+            if "invitedEmail" in payload:
+                application_payload["invitedEmail"] = payload.get("invitedEmail")
+            result = application.create_v2_collaboration_with_guest_for_verified_owner(
+                context,
+                raw_headers,
+                application_payload,
+                owner_security_configuration=configuration,
+            )
+            success = _create_with_guest_success(result)
+            if success is not None:
+                return json_success(
+                    success,
+                    status=201 if success["created"] else 200,
+                )
+            return _application_failure(result)
+
+        if operation == "issue_guest_invite":
+            fields = {"operation", "collaborationId"}
+            if "invitedEmail" in payload:
+                fields.add("invitedEmail")
+            _require_exact_fields(payload, frozenset(fields))
+            limited = _rate_limit_response(
+                context,
+                owner_rate_limit.RATE_LIMIT_WRITE,
+                rate_limit_configuration,
+            )
+            if limited is not None:
+                return limited
+            application_payload = (
+                {"invitedEmail": payload.get("invitedEmail")}
+                if "invitedEmail" in payload
+                else {}
+            )
+            result = application.issue_v2_guest_invitation_for_verified_owner(
+                context,
+                raw_headers,
+                payload.get("collaborationId"),
+                application_payload,
+                owner_security_configuration=configuration,
+            )
+            success = _issue_guest_success(result)
+            if success is not None:
+                return json_success(success, status=201 if success["invitationCreated"] else 200)
+            return _application_failure(result)
+
+        if operation == "revoke_guest_invite":
+            _require_exact_fields(
+                payload,
+                frozenset({"operation", "collaborationId", "inviteId"}),
+            )
+            limited = _rate_limit_response(
+                context,
+                owner_rate_limit.RATE_LIMIT_WRITE,
+                rate_limit_configuration,
+            )
+            if limited is not None:
+                return limited
+            result = application.revoke_v2_guest_invitation_for_verified_owner(
+                context,
+                raw_headers,
+                payload.get("collaborationId"),
+                payload.get("inviteId"),
+                owner_security_configuration=configuration,
+            )
+            success = _revoke_guest_success(result)
+            if success is not None:
+                return json_success(success)
             return _application_failure(result)
 
         if operation == "add_participant":
