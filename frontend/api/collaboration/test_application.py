@@ -1966,6 +1966,7 @@ class OwnerMutationApplicationTests(unittest.TestCase):
                 "append_v2_internal_note_for_owner",
                 "append_v2_shared_message_for_owner",
                 "create_v2_collaboration_for_owner",
+                "create_v2_collaboration_with_guest_for_verified_owner",
                 "read_v2_collaboration_for_guest",
                 "read_v2_collaboration_for_owner",
             ],
@@ -3466,6 +3467,7 @@ class GuestReadApplicationTests(unittest.TestCase):
                 "append_v2_internal_note_for_owner",
                 "append_v2_shared_message_for_owner",
                 "create_v2_collaboration_for_owner",
+                "create_v2_collaboration_with_guest_for_verified_owner",
                 "read_v2_collaboration_for_guest",
                 "read_v2_collaboration_for_owner",
             ],
@@ -4013,6 +4015,10 @@ class ParticipantAuthorityApplicationTests(unittest.TestCase):
             application,
             "_load_exact_thread",
             return_value=(old, None),
+        ), patch.object(
+            application,
+            "_load_v2_external_guest_records",
+            return_value={"status": "ok", "records": []},
         ):
             result = application.read_v2_collaboration_for_verified_owner(
                 object(), object(), COLLABORATION_ID,
@@ -4036,6 +4042,10 @@ class ParticipantAuthorityApplicationTests(unittest.TestCase):
             application,
             "_resolve_active_team_member",
             return_value=(None, "not_active"),
+        ), patch.object(
+            application,
+            "_load_v2_external_guest_records",
+            return_value={"status": "ok", "records": []},
         ):
             inactive = application.read_v2_collaboration_for_verified_owner(
                 object(), object(), COLLABORATION_ID,
@@ -4082,6 +4092,267 @@ class ParticipantAuthorityApplicationTests(unittest.TestCase):
                 owner_security_configuration=object(),
             )
         self.assertEqual(denied["error"], {"code": "forbidden"})
+
+
+class ExternalGuestApplicationTests(unittest.TestCase):
+    workspace_id = "wsp_" + "W" * 22
+    owner_user_id = "usr_" + "A" * 22
+
+    def capability(self, action: str, *, viewer_access: str = "owner"):
+        participant_user_id = "usr_" + "B" * 21 + "A"
+        return authorization._InternalCollaborationCapability(
+            authorization._INTERNAL_CAPABILITY_SENTINEL,
+            OWNER_EMAIL,
+            self.workspace_id,
+            MAILBOX_ID,
+            "google",
+            None if action == "create" else COLLABORATION_ID,
+            action,
+            "owner" if viewer_access == "owner" else "internal",
+            "Owner Person" if viewer_access == "owner" else "Participant",
+            self.owner_user_id if viewer_access == "owner" else participant_user_id,
+            viewer_access,
+            self.owner_user_id,
+            "Owner Person",
+        )
+
+    def source_result(self) -> dict:
+        return {
+            "status": "ok",
+            "source": {
+                "sourceRef": {"provider": "google", "providerMessageId": "provider-1"},
+                "sourceMessage": _thread_record()["sourceMessage"],
+            },
+            "error": None,
+        }
+
+    def test_external_first_create_supports_email_and_secure_link_without_team_participant(self):
+        for invited_email in ("Reviewer@Example.com", None):
+            captured: dict[str, dict] = {}
+
+            def create(thread, invite, *, now):
+                captured["thread"] = thread
+                captured["invite"] = invite
+                self.assertEqual(now, NOW)
+                return redis_store._V2ThreadInviteCreateResult(
+                    thread, invite, True, True
+                )
+
+            payload = {
+                "mailboxId": MAILBOX_ID,
+                "sourceRef": {"providerMessageId": "provider-1"},
+                "state": "needs_review",
+            }
+            if invited_email is not None:
+                payload["invitedEmail"] = invited_email
+            with self.subTest(invited_email=invited_email), patch.object(
+                application,
+                "resolve_verified_owner_collaboration_context",
+                return_value={"status": "ok", "context": self.capability("create"), "error": None},
+            ), patch.object(
+                application, "resolve_source_message", return_value=self.source_result()
+            ), patch.object(
+                application, "generate_v2_opaque_id", side_effect=[COLLABORATION_ID, INVITE_ID]
+            ), patch.object(
+                application, "generate_v2_bearer_secret", return_value="R" * 43
+            ), patch.object(
+                application.time, "time_ns", return_value=NOW_MILLISECONDS * 1_000_000
+            ), patch.object(
+                application, "_create_v2_thread_with_guest", side_effect=create
+            ):
+                result = application.create_v2_collaboration_with_guest_for_verified_owner(
+                    object(), object(), payload,
+                    owner_security_configuration=object(),
+                )
+            self.assertTrue(result["created"])
+            self.assertTrue(result["invitationCreated"])
+            self.assertEqual(result["token"], "R" * 43)
+            self.assertNotIn("participants", captured["thread"])
+            self.assertNotIn("ownerUserId", captured["thread"])
+            self.assertNotIn("externalGuests", result["collaboration"])
+            expected_email = invited_email.lower() if invited_email is not None else None
+            self.assertEqual(captured["invite"].get("invitedEmail"), expected_email)
+            self.assertEqual(result["invitation"].get("invitedEmail"), expected_email)
+            self.assertNotIn("tokenHash", repr(result))
+
+    def test_external_create_payload_is_distinct_and_malformed_email_never_persists(self):
+        base = {
+            "mailboxId": MAILBOX_ID,
+            "sourceRef": {"providerMessageId": "provider-1"},
+            "state": "needs_review",
+        }
+        with patch.object(
+            application, "resolve_verified_owner_collaboration_context"
+        ) as authorize, patch.object(
+            application, "_create_v2_thread_with_guest"
+        ) as create:
+            malformed_email = application.create_v2_collaboration_with_guest_for_verified_owner(
+                object(), object(), {**base, "invitedEmail": "not-an-email"},
+                owner_security_configuration=object(),
+            )
+            team_shape = application.create_v2_collaboration_with_guest_for_verified_owner(
+                object(), object(), {**base, "participantUserId": "usr_" + "B" * 21 + "A"},
+                owner_security_configuration=object(),
+            )
+        self.assertEqual(malformed_email["error"], {"code": "invalid_request"})
+        self.assertEqual(team_shape["error"], {"code": "invalid_request"})
+        authorize.assert_not_called()
+        create.assert_not_called()
+
+    def test_duplicate_and_failed_create_never_return_an_unpersisted_token(self):
+        capability = self.capability("create")
+        source = self.source_result()
+
+        def duplicate(thread, invite, *, now):
+            return redis_store._V2ThreadInviteCreateResult(thread, invite, False, False)
+
+        with patch.object(
+            application, "resolve_verified_owner_collaboration_context",
+            return_value={"status": "ok", "context": capability, "error": None},
+        ), patch.object(application, "resolve_source_message", return_value=source), patch.object(
+            application, "generate_v2_opaque_id", side_effect=[COLLABORATION_ID, INVITE_ID]
+        ), patch.object(application, "generate_v2_bearer_secret", return_value="R" * 43), patch.object(
+            application.time, "time_ns", return_value=NOW_MILLISECONDS * 1_000_000
+        ), patch.object(application, "_create_v2_thread_with_guest", side_effect=duplicate):
+            duplicate_result = application.create_v2_collaboration_with_guest_for_verified_owner(
+                object(), object(), {
+                    "mailboxId": MAILBOX_ID,
+                    "sourceRef": {"providerMessageId": "provider-1"},
+                    "state": "needs_review",
+                }, owner_security_configuration=object(),
+            )
+        self.assertFalse(duplicate_result["invitationCreated"])
+        self.assertNotIn("token", duplicate_result)
+
+        def added_to_existing(thread, invite, *, now):
+            return redis_store._V2ThreadInviteCreateResult(thread, invite, False, True)
+
+        with patch.object(
+            application, "resolve_verified_owner_collaboration_context",
+            return_value={"status": "ok", "context": capability, "error": None},
+        ), patch.object(application, "resolve_source_message", return_value=source), patch.object(
+            application, "generate_v2_opaque_id", side_effect=[COLLABORATION_ID, INVITE_ID]
+        ), patch.object(application, "generate_v2_bearer_secret", return_value="R" * 43), patch.object(
+            application.time, "time_ns", return_value=NOW_MILLISECONDS * 1_000_000
+        ), patch.object(
+            application, "_create_v2_thread_with_guest", side_effect=added_to_existing
+        ):
+            added = application.create_v2_collaboration_with_guest_for_verified_owner(
+                object(), object(), {
+                    "mailboxId": MAILBOX_ID,
+                    "sourceRef": {"providerMessageId": "provider-1"},
+                    "state": "needs_review",
+                }, owner_security_configuration=object(),
+            )
+        self.assertFalse(added["created"])
+        self.assertTrue(added["invitationCreated"])
+        self.assertEqual(added["token"], "R" * 43)
+
+        with patch.object(
+            application, "resolve_verified_owner_collaboration_context",
+            return_value={"status": "ok", "context": capability, "error": None},
+        ), patch.object(application, "resolve_source_message", return_value=source), patch.object(
+            application, "generate_v2_opaque_id", side_effect=[COLLABORATION_ID, INVITE_ID]
+        ), patch.object(application, "generate_v2_bearer_secret", return_value="R" * 43), patch.object(
+            application.time, "time_ns", return_value=NOW_MILLISECONDS * 1_000_000
+        ), patch.object(
+            application, "_create_v2_thread_with_guest",
+            return_value={"status": "conflict", "error": {"code": "guest_capacity_reached"}},
+        ):
+            failed = application.create_v2_collaboration_with_guest_for_verified_owner(
+                object(), object(), {
+                    "mailboxId": MAILBOX_ID,
+                    "sourceRef": {"providerMessageId": "provider-1"},
+                    "state": "needs_review",
+                }, owner_security_configuration=object(),
+            )
+        self.assertEqual(failed["error"], {"code": "guest_capacity_reached"})
+        self.assertNotIn("token", failed)
+
+    def test_owner_projection_maps_lifecycle_and_keeps_secrets_out(self):
+        pending = {
+            **_invite_record(),
+            "inviteId": "P" * 22,
+            "status": "active",
+            "exchangedAt": None,
+            "exchangeCount": 0,
+        }
+        pending.pop("activeSessionHash")
+        pending["invitedEmail"] = "reviewer@example.com"
+        active_invite = _invite_record()
+        active_session = _session_record()
+        logged_session = {**active_session, "status": "logged_out", "loggedOutAt": NOW - 1}
+        revoked_invite = {
+            **active_invite,
+            "inviteId": "V" * 22,
+            "status": "revoked",
+            "revokedAt": NOW - 1,
+            "revokedBy": OWNER_EMAIL,
+        }
+        revoked_invite["activeSessionHash"] = active_session["sessionHash"]
+        expired_session = {**active_session, "status": "expired", "expiresAt": NOW}
+        records = [
+            {"invite": revoked_invite, "session": active_session},
+            {"invite": pending, "session": None},
+            {"invite": {**active_invite, "inviteId": "L" * 22}, "session": logged_session},
+            {"invite": {**active_invite, "inviteId": "E" * 22}, "session": expired_session},
+            {"invite": active_invite, "session": active_session},
+        ]
+        projection = application._project_v2_external_guests(records, now=NOW)
+        self.assertEqual(
+            {entry["inviteId"]: entry["status"] for entry in projection},
+            {
+                "E" * 22: "expired",
+                INVITE_ID: "active",
+                "L" * 22: "logged_out",
+                "P" * 22: "pending",
+                "V" * 22: "revoked",
+            },
+        )
+        self.assertNotIn("displayName", next(entry for entry in projection if entry["status"] == "pending"))
+        self.assertEqual(
+            next(entry for entry in projection if entry["status"] == "active")["displayName"],
+            "Guest Reviewer",
+        )
+        for secret in ("tokenHash", "sessionHash", "csrfTokenHash", "ownerEmail", "workspaceId"):
+            self.assertNotIn(secret, repr(projection))
+
+    def test_verified_owner_sees_external_guests_but_participant_does_not(self):
+        thread = {
+            **_thread_record(),
+            "workspaceId": self.workspace_id,
+            "ownerUserId": self.owner_user_id,
+            "ownerDisplayName": "Owner Person",
+            "participants": [],
+        }
+        pending = {**_invite_record(), "workspaceId": self.workspace_id, "status": "active", "exchangedAt": None, "exchangeCount": 0}
+        pending.pop("activeSessionHash")
+        with patch.object(
+            application, "resolve_verified_owner_collaboration_context",
+            return_value={"status": "ok", "context": self.capability("read"), "error": None},
+        ), patch.object(application, "_load_exact_thread", return_value=(thread, None)), patch.object(
+            application, "_load_v2_external_guest_records",
+            return_value={"status": "ok", "records": [{"invite": pending, "session": None}]},
+        ), patch.object(application.time, "time", return_value=NOW):
+            owner_result = application.read_v2_collaboration_for_verified_owner(
+                object(), object(), COLLABORATION_ID,
+                owner_security_configuration=object(),
+            )
+        self.assertEqual(owner_result["collaboration"]["externalGuests"][0]["status"], "pending")
+
+        participant = self.capability("read", viewer_access="participant")
+        with patch.object(
+            application, "resolve_verified_owner_collaboration_context",
+            return_value={"status": "ok", "context": participant, "error": None},
+        ), patch.object(application, "_load_exact_thread", return_value=(thread, None)), patch.object(
+            application, "_load_v2_external_guest_records"
+        ) as load_guests:
+            participant_result = application.read_v2_collaboration_for_verified_owner(
+                object(), object(), COLLABORATION_ID,
+                owner_security_configuration=object(),
+            )
+        self.assertNotIn("externalGuests", participant_result["collaboration"])
+        load_guests.assert_not_called()
 
 
 if __name__ == "__main__":

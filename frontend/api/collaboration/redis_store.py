@@ -43,6 +43,8 @@ else:
 
     from .models import (
         COLLABORATION_THREAD_SCHEMA_VERSION,
+        MAX_V2_EXTERNAL_GUESTS,
+        MAX_V2_GUEST_SESSION_LIFETIME_SECONDS,
         MAX_V2_INVITE_BYTES,
         MAX_V2_THREAD_BYTES,
         MIN_V2_TIMESTAMP_SECONDS,
@@ -696,6 +698,7 @@ else:
     V2_INDEX_HMAC_PREVIOUS_ENV = "CUEVION_COLLAB_INDEX_HMAC_KEY_PREVIOUS"
     _V2_BASE64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
     V2_THREAD_KEY_PREFIX = f"{V2_KEY_PREFIX}:thread:"
+    V2_INVITE_KEY_PREFIX = f"{V2_KEY_PREFIX}:invite:"
 
 
     @dataclass(frozen=True, slots=True)
@@ -739,6 +742,26 @@ else:
                 "message": self.message,
                 "updatedAt": self.updated_at,
                 "recovered": self.recovered,
+            }.get(name, default)
+
+
+    @dataclass(frozen=True, slots=True)
+    class _V2ThreadInviteCreateResult:
+        """Atomic external-first creation or safe existing-thread convergence."""
+
+        thread: dict
+        invite: dict
+        thread_created: bool
+        invite_created: bool
+        status: str = "ok"
+
+        def get(self, name: str, default=None):
+            return {
+                "status": self.status,
+                "thread": self.thread,
+                "invite": self.invite,
+                "threadCreated": self.thread_created,
+                "inviteCreated": self.invite_created,
             }.get(name, default)
 
 
@@ -835,7 +858,7 @@ else:
     def build_v2_invite_key(invite_id: str) -> str | None:
         if not isinstance(invite_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{22,128}", invite_id):
             return None
-        return f"{V2_KEY_PREFIX}:invite:{invite_id}"
+        return f"{V2_INVITE_KEY_PREFIX}{invite_id}"
 
 
     def build_v2_invite_token_key(token_hash: str) -> str | None:
@@ -861,6 +884,33 @@ else:
 
     def build_v2_guest_session_key(session_hash: str) -> str | None:
         return f"{V2_KEY_PREFIX}:guest-session:{session_hash}" if isinstance(session_hash, str) and re.fullmatch(r"[0-9a-f]{64}", session_hash) else None
+
+
+    def build_v2_external_guest_index_key(collaboration_id: str) -> str | None:
+        return (
+            f"{V2_KEY_PREFIX}:thread-external-invites:{collaboration_id}"
+            if build_v2_thread_key(collaboration_id) is not None
+            else None
+        )
+
+
+    def _normalize_v2_external_guest_index(value: object) -> dict | None:
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"v", "inviteIds"}
+            or value.get("v") != "1"
+            or not isinstance(value.get("inviteIds"), list)
+            or len(value["inviteIds"]) > MAX_V2_EXTERNAL_GUESTS
+        ):
+            return None
+        invite_ids = value["inviteIds"]
+        if (
+            any(build_v2_invite_key(invite_id) is None for invite_id in invite_ids)
+            or len(set(invite_ids)) != len(invite_ids)
+            or invite_ids != sorted(invite_ids)
+        ):
+            return None
+        return {"v": "1", "inviteIds": list(invite_ids)}
 
 
     def _v2_error(code: str) -> dict:
@@ -1825,6 +1875,223 @@ else:
             return {"status": "conflict", "error": {"code": "stale_thread"}}
         if result.get("status") in {"source_pointer_conflict", "malformed"}:
             return {"status": "conflict", "error": {"code": "source_pointer_conflict"}}
+        return result
+
+
+    _CREATE_V2_THREAD_WITH_GUEST_LUA = _V2_LUA_COMMON + r"""
+    if #ARGV[1] > 262144 or #ARGV[2] > 16384
+      or not positiveInteger(ARGV[5]) or not timestampSeconds(ARGV[6])
+      or not positiveInteger(ARGV[7]) or (ARGV[8] ~= '0' and ARGV[8] ~= '1') then
+      return cjson.encode({status='malformed'})
+    end
+    local hasPrevious = ARGV[8] == '1'
+    if #KEYS ~= (hasPrevious and 8 or 6) then
+      return cjson.encode({status='malformed'})
+    end
+    local threadOk, proposedThread = decodeWire(ARGV[1])
+    local inviteOk, proposedInvite = decodeWire(ARGV[2])
+    local now = integerValue(ARGV[6])
+    if not threadOk or not rawTopLevelArray(ARGV[1], 'messages')
+      or not threadValid(proposedThread) or proposedThread.collaborationId ~= ARGV[3]
+      or not inviteOk or not inviteValid(proposedInvite)
+      or proposedInvite.status ~= 'active' or proposedInvite.createdAt ~= ARGV[6]
+      or integerValue(proposedInvite.expiresAt) - now ~= integerValue(ARGV[5])
+      or proposedInvite.inviteId ~= ARGV[4] or proposedInvite.tokenHash ~= ARGV[10]
+      or proposedInvite.ownerEmail ~= proposedThread.ownerEmail
+      or proposedInvite.workspaceId ~= proposedThread.workspaceId
+      or proposedInvite.mailboxId ~= proposedThread.mailboxId
+      or proposedInvite.collaborationId ~= proposedThread.collaborationId then
+      return cjson.encode({status='malformed'})
+    end
+    local currentPointer = redis.call('GET', KEYS[2])
+    local previousPointer = hasPrevious and redis.call('GET', KEYS[7]) or nil
+    if currentPointer and previousPointer and currentPointer ~= previousPointer then
+      return cjson.encode({status='source_pointer_conflict'})
+    end
+    local pointer = currentPointer or previousPointer
+    if pointer then
+      if not opaqueId(pointer) then
+        return cjson.encode({status='source_pointer_conflict'})
+      end
+      local targetKey = ARGV[9] .. pointer
+      local targetRaw = redis.call('GET', targetKey)
+      if targetRaw then
+        if redis.call('PTTL', targetKey) <= 0
+          or (currentPointer and redis.call('PTTL', KEYS[2]) <= 0)
+          or (previousPointer and redis.call('PTTL', KEYS[7]) <= 0)
+          or #targetRaw > 262144 or not rawTopLevelArray(targetRaw, 'messages') then
+          return cjson.encode({status='source_pointer_conflict'})
+        end
+        local targetOk, target = decodeWire(targetRaw)
+        if not targetOk or not threadValid(target) or target.collaborationId ~= pointer
+          or target.ownerEmail ~= proposedThread.ownerEmail
+          or target.workspaceId ~= proposedThread.workspaceId
+          or target.mailboxId ~= proposedThread.mailboxId
+          or not sourceEqual(target.sourceRef, proposedThread.sourceRef) then
+          return cjson.encode({status='source_pointer_conflict'})
+        end
+        return cjson.encode({status='existing', collaborationId=pointer})
+      end
+    end
+    if redis.call('EXISTS', KEYS[1]) == 1
+      or redis.call('EXISTS', KEYS[3]) == 1
+      or redis.call('EXISTS', KEYS[4]) == 1
+      or redis.call('EXISTS', KEYS[5]) == 1
+      or redis.call('EXISTS', KEYS[6]) == 1
+      or (hasPrevious and redis.call('EXISTS', KEYS[8]) == 1) then
+      return cjson.encode({status='conflict'})
+    end
+    redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[7])
+    redis.call('SET', KEYS[2], ARGV[3], 'EX', ARGV[7])
+    redis.call('SET', KEYS[3], ARGV[2], 'EX', ARGV[5])
+    redis.call('SET', KEYS[4], ARGV[4], 'EX', ARGV[5])
+    redis.call('SET', KEYS[5], ARGV[2], 'EX', ARGV[5])
+    redis.call('SET', KEYS[6], cjson.encode({v='1', inviteIds={ARGV[4]}}), 'EX', ARGV[5])
+    if hasPrevious then
+      redis.call('DEL', KEYS[7])
+      redis.call('DEL', KEYS[8])
+    end
+    return cjson.encode({status='created'})
+    """.strip()
+
+
+    def _create_v2_thread_with_guest(
+        thread_record: dict,
+        invite_record: dict,
+        *,
+        now: int,
+        command_transport=None,
+    ) -> dict:
+        thread = normalize_v2_thread_record(thread_record)
+        invite = normalize_v2_invite_record(invite_record)
+        thread_wire = _v2_wire_json(thread, "thread") if thread is not None else None
+        invite_wire = _v2_wire_json(invite, "invite") if invite is not None else None
+        if (
+            thread is None
+            or invite is None
+            or thread_wire is None
+            or invite_wire is None
+            or type(now) is not int
+            or not MIN_V2_TIMESTAMP_SECONDS <= now <= MAX_V2_TIMESTAMP_SECONDS
+            or invite["status"] != "active"
+            or invite["createdAt"] != now
+            or invite["ownerEmail"] != thread["ownerEmail"]
+            or invite["workspaceId"] != thread["workspaceId"]
+            or invite["mailboxId"] != thread["mailboxId"]
+            or invite["collaborationId"] != thread["collaborationId"]
+        ):
+            return {"status": "malformed", "error": {"code": "invalid_request"}}
+        invite_ttl = invite["expiresAt"] - now
+        if invite_ttl <= 0:
+            return {"status": "expired", "error": {"code": "invite_expired"}}
+        hmac_keys = resolve_v2_index_hmac_keys()
+        if hmac_keys is None:
+            return {"status": "unavailable", "error": {"code": "index_hmac_unavailable"}}
+        current_hmac, previous_hmac = hmac_keys
+        thread_key = build_v2_thread_key(thread["collaborationId"])
+        source_key = build_v2_source_thread_key(
+            thread["ownerEmail"], thread["mailboxId"], thread["sourceRef"],
+            hmac_key=current_hmac,
+        )
+        invite_key = build_v2_invite_key(invite["inviteId"])
+        token_key = build_v2_invite_token_key(invite["tokenHash"])
+        identity_key = build_v2_thread_invite_key(
+            invite["ownerEmail"], invite["collaborationId"], invite.get("invitedEmail"),
+            hmac_key=current_hmac,
+        )
+        external_guest_index_key = build_v2_external_guest_index_key(
+            thread["collaborationId"]
+        )
+        previous_source_key = (
+            build_v2_source_thread_key(
+                thread["ownerEmail"], thread["mailboxId"], thread["sourceRef"],
+                hmac_key=previous_hmac,
+            )
+            if previous_hmac is not None
+            else None
+        )
+        previous_identity_key = (
+            build_v2_thread_invite_key(
+                invite["ownerEmail"], invite["collaborationId"],
+                invite.get("invitedEmail"), hmac_key=previous_hmac,
+            )
+            if previous_hmac is not None
+            else None
+        )
+        required_keys = (
+            thread_key, source_key, invite_key, token_key, identity_key,
+            external_guest_index_key,
+        )
+        if any(key is None for key in required_keys) or (
+            previous_hmac is not None
+            and (previous_source_key is None or previous_identity_key is None)
+        ):
+            return {"status": "unavailable", "error": {"code": "index_hmac_unavailable"}}
+        has_previous = (
+            previous_source_key is not None
+            and previous_identity_key is not None
+            and previous_source_key != source_key
+            and previous_identity_key != identity_key
+        )
+        keys = list(required_keys)
+        if has_previous:
+            keys.extend((previous_source_key, previous_identity_key))
+        result = _v2_eval(
+            [
+                "EVAL", _CREATE_V2_THREAD_WITH_GUEST_LUA, len(keys), *keys,
+                thread_wire, invite_wire, thread["collaborationId"],
+                invite["inviteId"], str(invite_ttl), str(now),
+                str(V2_THREAD_RETENTION_SECONDS), "1" if has_previous else "0",
+                V2_THREAD_KEY_PREFIX, invite["tokenHash"],
+            ],
+            command_transport,
+            response_shapes={
+                "created": set(), "existing": {"collaborationId"},
+                "conflict": set(), "source_pointer_conflict": set(),
+                "malformed": set(),
+            },
+        )
+        if result.get("status") == "created":
+            return _V2ThreadInviteCreateResult(thread, invite, True, True)
+        if result.get("status") == "existing":
+            existing_id = result.get("collaborationId")
+            loaded = _load_v2_thread_by_source(
+                thread["ownerEmail"], thread["mailboxId"], thread["sourceRef"],
+                workspace_id=thread["workspaceId"],
+                command_transport=command_transport,
+            )
+            existing_thread = loaded.get("record") if loaded.get("status") == "ok" else None
+            if (
+                build_v2_thread_key(existing_id) is None
+                or not isinstance(existing_thread, dict)
+                or existing_thread.get("collaborationId") != existing_id
+            ):
+                return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
+            converged_invite = normalize_v2_invite_record(
+                {**invite, "collaborationId": existing_id}
+            )
+            if converged_invite is None:
+                return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
+            invitation_result = _create_v2_invite(
+                converged_invite, now=now, command_transport=command_transport
+            )
+            if not isinstance(invitation_result, _V2RecordResult):
+                return invitation_result
+            return _V2ThreadInviteCreateResult(
+                existing_thread,
+                invitation_result.record,
+                False,
+                invitation_result.created is True,
+            )
+        if result.get("status") == "conflict":
+            return {"status": "conflict", "error": {"code": "invalid_request"}}
+        if result.get("status") == "source_pointer_conflict":
+            return {
+                "status": "conflict",
+                "error": {"code": "source_changed"},
+            }
+        if result.get("status") == "malformed":
+            return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
         return result
 
 
@@ -2798,6 +3065,56 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         and existing.allowedActions[2] == proposed.allowedActions[2]
         and existing.visibility == proposed.visibility and existing.createdBy.ownerEmail == proposed.ownerEmail
     end
+    local function loadGuestIndex(indexKey, proposed, now, invitePrefix, maximum)
+      local state, raw = readString(indexKey, 4096)
+      if state == 'missing' then return {}, 0, nil end
+      if state ~= 'ok' then return nil, nil, 'conflict' end
+      local ok, index = pcall(cjson.decode, raw)
+      if not ok or type(index) ~= 'table' or keyCount(index) ~= 2
+        or index.v ~= '1' or type(index.inviteIds) ~= 'table'
+        or #index.inviteIds > maximum or keyCount(index.inviteIds) ~= #index.inviteIds then
+        return nil, nil, 'conflict'
+      end
+      local retained = {}
+      local maximumPttl = 0
+      local previous = nil
+      for position = 1, #index.inviteIds do
+        local inviteId = index.inviteIds[position]
+        if not opaqueId(inviteId) or (previous and previous >= inviteId) then
+          return nil, nil, 'conflict'
+        end
+        previous = inviteId
+        local inviteState, inviteRaw = readString(invitePrefix .. inviteId, 16384)
+        if inviteState == 'ok' then
+          local inviteOk, invite = decodeWire(inviteRaw)
+          local invitePttl = redis.call('PTTL', invitePrefix .. inviteId)
+          if not inviteOk or not inviteValid(invite) or invite.inviteId ~= inviteId
+            or invite.ownerEmail ~= proposed.ownerEmail
+            or invite.workspaceId ~= proposed.workspaceId
+            or invite.mailboxId ~= proposed.mailboxId
+            or invite.collaborationId ~= proposed.collaborationId
+            or invitePttl <= 0 then
+            return nil, nil, 'conflict'
+          end
+          if integerValue(invite.expiresAt) > now then
+            table.insert(retained, inviteId)
+            maximumPttl = math.max(maximumPttl, invitePttl)
+          end
+        elseif inviteState ~= 'missing' then
+          return nil, nil, 'conflict'
+        end
+      end
+      return retained, maximumPttl, nil
+    end
+    local function addGuestReference(inviteIds, inviteId, maximum)
+      for position = 1, #inviteIds do
+        if inviteIds[position] == inviteId then return true end
+      end
+      if #inviteIds >= maximum then return false end
+      table.insert(inviteIds, inviteId)
+      table.sort(inviteIds)
+      return true
+    end
     if #ARGV[1] > 16384 or not positiveInteger(ARGV[2]) or not timestampSeconds(ARGV[3]) then
       return cjson.encode({status='malformed'})
     end
@@ -2805,11 +3122,35 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     local now = integerValue(ARGV[3])
     if not proposedOk or not inviteValid(proposed) or proposed.status ~= 'active' or proposed.createdAt ~= ARGV[3]
       or integerValue(proposed.expiresAt) - now ~= integerValue(ARGV[2])
-      or proposed.inviteId ~= ARGV[4] or (ARGV[7] ~= '0' and ARGV[7] ~= '1') then
+      or proposed.inviteId ~= ARGV[4] or proposed.tokenHash ~= ARGV[12]
+      or (ARGV[7] ~= '0' and ARGV[7] ~= '1') then
       return cjson.encode({status='malformed'})
     end
     local hasPrevious = ARGV[7] == '1'
     local baseKeyCount = hasPrevious and 4 or 3
+    local hasExisting = ARGV[8] ~= ''
+    local threadKeyIndex = baseKeyCount + (hasExisting and 3 or 1)
+    local indexKeyIndex = threadKeyIndex + 1
+    if #KEYS ~= indexKeyIndex or not positiveInteger(ARGV[11]) then
+      return cjson.encode({status='malformed'})
+    end
+    local threadState, threadRaw = readString(KEYS[threadKeyIndex], 262144)
+    if threadState ~= 'ok' or not rawTopLevelArray(threadRaw, 'messages')
+      or redis.call('PTTL', KEYS[threadKeyIndex]) <= 0 then
+      return cjson.encode({status='conflict'})
+    end
+    local threadOk, thread = decodeWire(threadRaw)
+    if not threadOk or not threadValid(thread)
+      or thread.ownerEmail ~= proposed.ownerEmail
+      or thread.workspaceId ~= proposed.workspaceId
+      or thread.mailboxId ~= proposed.mailboxId
+      or thread.collaborationId ~= proposed.collaborationId then
+      return cjson.encode({status='conflict'})
+    end
+    local guestIds, guestIndexPttl, guestIndexError = loadGuestIndex(
+      KEYS[indexKeyIndex], proposed, now, ARGV[10], integerValue(ARGV[11])
+    )
+    if guestIndexError then return cjson.encode({status=guestIndexError}) end
     local currentState, currentRaw = readString(KEYS[3], 16384)
     local previousRaw = nil
     local previousState = 'missing'
@@ -2839,7 +3180,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     if existing then
       local canonicalKeyIndex = baseKeyCount + 1
       local tokenKeyIndex = baseKeyCount + 2
-      if #KEYS ~= tokenKeyIndex or existing.status ~= 'active' or integerValue(existing.expiresAt) <= now
+      if existing.status ~= 'active' or integerValue(existing.expiresAt) <= now
         or existing.inviteId ~= ARGV[8] or existing.tokenHash ~= ARGV[9]
         or not inviteMatchesRequested(existing, proposed) then return cjson.encode({status='conflict'}) end
       local canonicalState, canonicalRaw = readString(KEYS[canonicalKeyIndex], 16384)
@@ -2868,6 +3209,9 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         or (previous and (previousPttl <= 0 or previousPttl > canonicalPttl + 1000 or previousPttl > absolutePttl)) then
         return cjson.encode({status='conflict'})
       end
+      if not addGuestReference(guestIds, canonical.inviteId, integerValue(ARGV[11])) then
+        return cjson.encode({status='capacity'})
+      end
       if previous then
         if not current then
           local migrationPttl = math.min(absolutePttl, canonicalPttl, tokenPttl, previousPttl)
@@ -2875,17 +3219,24 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         end
         redis.call('DEL', KEYS[4])
       end
+      guestIndexPttl = math.max(guestIndexPttl, canonicalPttl)
+      redis.call('SET', KEYS[indexKeyIndex], cjson.encode({v='1', inviteIds=guestIds}), 'PX', math.floor(guestIndexPttl))
       return cjson.encode({status='duplicate', inviteId=existing.inviteId})
     end
-    if #KEYS ~= baseKeyCount or ARGV[8] ~= '' or ARGV[9] ~= '' then
+    if ARGV[8] ~= '' or ARGV[9] ~= '' then
       return cjson.encode({status='malformed'})
     end
     if redis.call('EXISTS', KEYS[1]) == 1 or redis.call('EXISTS', KEYS[2]) == 1 then
       return cjson.encode({status='conflict'})
     end
+    if not addGuestReference(guestIds, proposed.inviteId, integerValue(ARGV[11])) then
+      return cjson.encode({status='capacity'})
+    end
     redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
     redis.call('SET', KEYS[2], ARGV[4], 'EX', ARGV[2])
     redis.call('SET', KEYS[3], ARGV[1], 'EX', ARGV[2])
+    guestIndexPttl = math.max(guestIndexPttl, integerValue(ARGV[2]) * 1000)
+    redis.call('SET', KEYS[indexKeyIndex], cjson.encode({v='1', inviteIds=guestIds}), 'PX', math.floor(guestIndexPttl))
     return cjson.encode({status='created'})
     """.strip()
 
@@ -2994,6 +3345,10 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         invited_email = invite.get("invitedEmail")
         invite_key = build_v2_invite_key(invite["inviteId"])
         token_key = build_v2_invite_token_key(invite["tokenHash"])
+        thread_key = build_v2_thread_key(invite["collaborationId"])
+        external_guest_index_key = build_v2_external_guest_index_key(
+            invite["collaborationId"]
+        )
         hmac_keys = resolve_v2_index_hmac_keys()
         identity_key = (
             build_v2_thread_invite_key(
@@ -3009,7 +3364,13 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
             if hmac_keys is not None and hmac_keys[1] is not None
             else None
         )
-        if invite_key is None or token_key is None or identity_key is None:
+        if (
+            invite_key is None
+            or token_key is None
+            or identity_key is None
+            or thread_key is None
+            or external_guest_index_key is None
+        ):
             return {"status": "unavailable", "error": {"code": "index_hmac_unavailable"}}
         has_previous = previous_identity_key is not None and previous_identity_key != identity_key
         result = None
@@ -3055,6 +3416,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
                         canonical_id = candidate_id
                         canonical_token_hash = candidate_token_hash
                         keys.extend((canonical_key, canonical_token_key))
+            keys.extend((thread_key, external_guest_index_key))
 
             result = _v2_eval(
                 [
@@ -3063,11 +3425,13 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
                     str(ttl), str(now), invite["inviteId"],
                     current_raw or "", previous_raw or "", "1" if has_previous else "0",
                     canonical_id, canonical_token_hash,
+                    V2_INVITE_KEY_PREFIX, str(MAX_V2_EXTERNAL_GUESTS),
+                    invite["tokenHash"],
                 ],
                 command_transport,
                 response_shapes={
                     "created": set(), "duplicate": {"inviteId"}, "conflict": set(),
-                    "malformed": set(), "retry": set(),
+                    "malformed": set(), "retry": set(), "capacity": set(),
                 },
             )
             if result.get("status") != "retry":
@@ -3133,6 +3497,11 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
             return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
         if result.get("status") == "conflict":
             return {"status": "conflict", "error": {"code": "invalid_request"}}
+        if result.get("status") == "capacity":
+            return {
+                "status": "conflict",
+                "error": {"code": "guest_capacity_reached"},
+            }
         if result.get("status") == "malformed":
             return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
         return result
@@ -3161,6 +3530,101 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         if invite is None or invite["inviteId"] != invite_id.strip():
             return {"status": "malformed"}
         return _v2_invite_runtime_result(invite, now)
+
+
+    def _load_v2_external_guest_records(
+        collaboration_id: str,
+        *,
+        owner_email: str,
+        workspace_id: str,
+        mailbox_id: str,
+        now: int,
+        session_normalizer,
+        command_transport=None,
+    ) -> dict:
+        if (
+            build_v2_thread_key(collaboration_id) is None
+            or normalize_v2_email(owner_email) != owner_email
+            or normalize_v2_workspace_id(workspace_id) != workspace_id
+            or not isinstance(mailbox_id, str)
+            or not re.fullmatch(r"[a-z0-9][a-z0-9._:-]{0,255}", mailbox_id)
+            or type(now) is not int
+            or not MIN_V2_TIMESTAMP_SECONDS <= now <= MAX_V2_TIMESTAMP_SECONDS
+            or not callable(session_normalizer)
+        ):
+            return {"status": "malformed", "error": {"code": "invalid_request"}}
+        index_key = build_v2_external_guest_index_key(collaboration_id)
+        if index_key is None:
+            return {"status": "malformed", "error": {"code": "invalid_request"}}
+        index_result = _v2_command(["GET", index_key], command_transport)
+        if index_result.get("status") != "ok":
+            return index_result
+        raw_index = index_result.get("result")
+        if raw_index is None:
+            return {"status": "ok", "records": []}
+        try:
+            if not isinstance(raw_index, str) or len(raw_index.encode("utf-8")) > 4096:
+                raise ValueError("invalid external guest index")
+            index = _normalize_v2_external_guest_index(
+                _strict_json_loads(raw_index, reject_numbers=True)
+            )
+        except (UnicodeEncodeError, ValueError, json.JSONDecodeError, RecursionError):
+            index = None
+        if index is None:
+            return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
+        records: list[dict] = []
+        for invite_id in index["inviteIds"]:
+            invite_key = build_v2_invite_key(invite_id)
+            if invite_key is None:
+                return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
+            loaded_invite = _v2_read_json(invite_key, "invite", command_transport)
+            if loaded_invite.get("status") == "missing":
+                continue
+            if loaded_invite.get("status") != "ok":
+                return loaded_invite
+            invite = normalize_v2_invite_record(loaded_invite.get("record"))
+            if (
+                invite is None
+                or invite["inviteId"] != invite_id
+                or invite["ownerEmail"] != owner_email
+                or invite["workspaceId"] != workspace_id
+                or invite["mailboxId"] != mailbox_id
+                or invite["collaborationId"] != collaboration_id
+            ):
+                return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
+            session = None
+            session_hash = invite.get("activeSessionHash")
+            if session_hash is not None:
+                session_key = build_v2_guest_session_key(session_hash)
+                if session_key is None:
+                    return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
+                loaded_session = _v2_read_json(session_key, "session", command_transport)
+                if loaded_session.get("status") == "missing":
+                    exchanged_at = invite.get("exchangedAt")
+                    safely_elapsed = (
+                        type(exchanged_at) is int
+                        and now >= exchanged_at + MAX_V2_GUEST_SESSION_LIFETIME_SECONDS
+                    )
+                    if invite["status"] != "revoked" and not safely_elapsed:
+                        return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
+                elif loaded_session.get("status") != "ok":
+                    return loaded_session
+                else:
+                    session = session_normalizer(loaded_session.get("record"))
+                    if (
+                        session is None
+                        or session["sessionHash"] != session_hash
+                        or session["inviteId"] != invite_id
+                        or session["ownerEmail"] != owner_email
+                        or session["workspaceId"] != workspace_id
+                        or session["mailboxId"] != mailbox_id
+                        or session["collaborationId"] != collaboration_id
+                        or session["createdAt"] != invite.get("exchangedAt")
+                        or session["expiresAt"] > invite["expiresAt"]
+                    ):
+                        return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
+            records.append({"invite": invite, "session": session})
+        return {"status": "ok", "records": records}
 
 
     def _load_v2_invite_by_token(raw_token: str, *, now: int, command_transport=None) -> dict:

@@ -47,6 +47,7 @@ else:
     MAX_V2_INVITE_BYTES = 16_384
     MAX_V2_MESSAGES = 500
     MAX_V2_EXPLICIT_PARTICIPANTS = 15
+    MAX_V2_EXTERNAL_GUESTS = 16
     MAX_V2_MESSAGE_TEXT = 16_384
     MAX_V2_SOURCE_BODY = 131_072
     MAX_V2_INVITE_LIFETIME_SECONDS = 24 * 60 * 60
@@ -93,6 +94,7 @@ else:
             "atomic_exchange_unavailable",
             "already_revoked",
             "already_logged_out",
+            "guest_capacity_reached",
             "internal_error",
         }
     )
@@ -1146,6 +1148,65 @@ else:
             )
             else None
         )
+
+
+    def normalize_v2_external_guest_projection_item(value: Any) -> dict | None:
+        required = {"inviteId", "status", "expiresAt"}
+        optional = {"displayName", "invitedEmail"}
+        if not isinstance(value, dict) or not _v2_exact_keys(value, required, optional):
+            return None
+        invite_id = value.get("inviteId")
+        status = _v2_bounded_string(value.get("status"), max_length=16)
+        expires_at = _v2_timestamp_seconds(value.get("expiresAt"))
+        display_name = (
+            _v2_bounded_string(value.get("displayName"), max_length=256)
+            if "displayName" in value
+            else None
+        )
+        invited_email = (
+            normalize_v2_email(value.get("invitedEmail"))
+            if "invitedEmail" in value
+            else None
+        )
+        if (
+            not is_v2_opaque_id(invite_id)
+            or status not in {"pending", "active", "logged_out", "revoked", "expired"}
+            or expires_at is None
+            or ("displayName" in value and display_name is None)
+            or (
+                "invitedEmail" in value
+                and (
+                    invited_email is None
+                    or value.get("invitedEmail") != invited_email
+                )
+            )
+            or (status == "pending" and display_name is not None)
+        ):
+            return None
+        normalized = {
+            "inviteId": invite_id,
+            "status": status,
+            "expiresAt": expires_at,
+        }
+        if display_name is not None:
+            normalized["displayName"] = display_name
+        if invited_email is not None:
+            normalized["invitedEmail"] = invited_email
+        return normalized
+
+
+    def normalize_v2_external_guest_projection(value: Any) -> list[dict] | None:
+        if not isinstance(value, list) or len(value) > MAX_V2_EXTERNAL_GUESTS:
+            return None
+        normalized = [
+            normalize_v2_external_guest_projection_item(entry) for entry in value
+        ]
+        if any(entry is None for entry in normalized):
+            return None
+        invite_ids = [entry["inviteId"] for entry in normalized]
+        if len(set(invite_ids)) != len(invite_ids):
+            return None
+        return sorted(normalized, key=lambda entry: entry["inviteId"])
 
 
     def build_v2_guest_thread_dto(value: Any) -> dict | None:

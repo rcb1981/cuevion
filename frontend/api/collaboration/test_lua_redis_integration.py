@@ -28,6 +28,7 @@ from .models import (
     encode_v2_wire_record,
     hash_v2_secret,
     normalize_v2_email,
+    normalize_v2_invite_record,
     normalize_v2_source_message,
     normalize_v2_thread_record,
 )
@@ -372,9 +373,58 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         )
         self.environment.start()
         os.environ.pop(redis_store.V2_INDEX_HMAC_PREVIOUS_ENV, None)
+        self._real_create_v2_invite = redis_store._create_v2_invite
+        self._create_invite_patch = patch.object(
+            redis_store,
+            "_create_v2_invite",
+            side_effect=self._create_invite_with_canonical_thread,
+        )
+        self._create_invite_patch.start()
 
     def tearDown(self):
+        self._create_invite_patch.stop()
         self.environment.stop()
+
+    def _create_invite_with_canonical_thread(
+        self,
+        invite: dict,
+        *,
+        now: int,
+        command_transport=None,
+    ):
+        normalized = normalize_v2_invite_record(invite)
+        if normalized is not None:
+            self._seed_invite_thread(normalized)
+        return self._real_create_v2_invite(
+            invite,
+            now=now,
+            command_transport=command_transport,
+        )
+
+    def _seed_invite_thread(self, invite: dict) -> None:
+        thread_key = self._thread_key(invite["collaborationId"])
+        if self.client.command(["EXISTS", thread_key]) != 0:
+            return
+        thread = {
+            **thread_record(),
+            "collaborationId": invite["collaborationId"],
+            "ownerEmail": invite["ownerEmail"],
+            "workspaceId": invite["workspaceId"],
+            "mailboxId": invite["mailboxId"],
+            "sourceRef": {
+                "provider": "google",
+                "providerMessageId": "invite-fixture-" + invite["collaborationId"],
+            },
+        }
+        self.client.command(
+            [
+                "SET",
+                thread_key,
+                wire_json(thread, "thread"),
+                "EX",
+                redis_store.V2_THREAD_RETENTION_SECONDS,
+            ]
+        )
 
     def _source_key(self, thread: dict, *, hmac_key: bytes | None = None) -> str:
         key = redis_store.build_v2_source_thread_key(
@@ -7062,6 +7112,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
 
         self.client.command(["FLUSHALL"])
         active_invite = invite_record()
+        self._seed_invite_thread(active_invite)
         identity_key = self._invite_keys(active_invite)[2]
         self._corrupt_key_type(identity_key, "integer_string")
         assert_unchanged(
@@ -7075,6 +7126,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         )
 
         self.client.command(["FLUSHALL"])
+        self._seed_invite_thread(active_invite)
         self._corrupt_key_type(self._invite_keys(active_invite)[0], "list")
         assert_unchanged(
             "create_invite_wrong_primary_list",
@@ -7087,6 +7139,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         )
 
         self.client.command(["FLUSHALL"])
+        self._seed_invite_thread(active_invite)
         self._corrupt_key_type(self._invite_keys(active_invite)[1], "hash")
         assert_unchanged(
             "create_invite_wrong_token_hash",
@@ -7777,6 +7830,364 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         self.assertEqual(
             self.client.command(["GET", self._thread_key(full_thread["collaborationId"])]),
             corrupted_raw,
+        )
+
+    def test_external_first_atomic_create_commits_complete_hash_only_graph(self):
+        thread = thread_record()
+        raw_token = "r" * 43
+        invite = {
+            **invite_record(raw_token),
+            "invitedEmail": "reviewer@example.com",
+        }
+        observed: list[list] = []
+
+        def transport(command):
+            observed.append(command)
+            return self.client.transport(command)
+
+        created = redis_store._create_v2_thread_with_guest(
+            thread,
+            invite,
+            now=invite["createdAt"],
+            command_transport=transport,
+        )
+        self.assertEqual(created.get("status"), "ok", created)
+        self.assertTrue(created.get("threadCreated"), created)
+        self.assertTrue(created.get("inviteCreated"), created)
+        thread_key = self._thread_key(thread["collaborationId"])
+        source_key = self._source_key(thread)
+        invite_key, token_key, identity_key = self._invite_keys(invite)
+        index_key = redis_store.build_v2_external_guest_index_key(
+            thread["collaborationId"]
+        )
+        self.assertEqual(
+            json.loads(self.client.command(["GET", index_key])),
+            {"v": "1", "inviteIds": [invite["inviteId"]]},
+        )
+        self.assertEqual(
+            typed_wire_json(self.client.command(["GET", thread_key]), "thread"),
+            thread,
+        )
+        self.assertEqual(
+            typed_wire_json(self.client.command(["GET", invite_key]), "invite"),
+            invite,
+        )
+        self.assertEqual(self.client.command(["GET", source_key]), thread["collaborationId"])
+        self.assertEqual(self.client.command(["GET", token_key]), invite["inviteId"])
+        self.assertEqual(
+            typed_wire_json(self.client.command(["GET", identity_key]), "invite"),
+            invite,
+        )
+        self.assertNotIn(raw_token, repr(observed))
+        self.assertNotIn(raw_token, repr(self.client.command(["KEYS", "*"])))
+        self.assertIn(invite["tokenHash"], repr(observed))
+        for key in (thread_key, source_key, invite_key, token_key, identity_key, index_key):
+            self.assertGreater(self.client.command(["PTTL", key]), 0)
+
+    def test_external_first_failure_and_cross_workspace_leave_no_partial_graph(self):
+        thread = thread_record()
+        invite = invite_record("f" * 43)
+        index_key = redis_store.build_v2_external_guest_index_key(
+            thread["collaborationId"]
+        )
+        self.client.command(["SET", index_key, '{"v":"1","inviteIds":[]}', "EX", 60])
+        failed = redis_store._create_v2_thread_with_guest(
+            thread,
+            invite,
+            now=invite["createdAt"],
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(failed.get("status"), "conflict", failed)
+        self.assertEqual(
+            self.client.command(["KEYS", f"{redis_store.V2_KEY_PREFIX}:*"]),
+            [index_key],
+        )
+
+        self.client.command(["FLUSHALL"])
+        cross_workspace = {**invite, "workspaceId": OTHER_WORKSPACE_ID}
+        rejected = redis_store._create_v2_thread_with_guest(
+            thread,
+            cross_workspace,
+            now=invite["createdAt"],
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(rejected.get("error"), {"code": "invalid_request"})
+        self.assertEqual(
+            self.client.command(["KEYS", f"{redis_store.V2_KEY_PREFIX}:*"]),
+            [],
+        )
+
+    def test_external_first_same_source_race_converges_without_orphans(self):
+        first_thread = thread_record()
+        second_thread = {
+            **first_thread,
+            "collaborationId": "B" * 22,
+        }
+
+        def proposed(thread, marker: int):
+            return {
+                **invite_record(f"{marker:043d}"),
+                "inviteId": f"{marker:022d}",
+                "collaborationId": thread["collaborationId"],
+                "invitedEmail": f"guest{marker}@example.com",
+            }
+
+        invitations = (proposed(first_thread, 1), proposed(second_thread, 2))
+        barrier = threading.Barrier(2)
+
+        def create(pair):
+            thread, invite = pair
+            client = _RespClient(self.socket_path)
+            barrier.wait(timeout=5)
+            return redis_store._create_v2_thread_with_guest(
+                thread,
+                invite,
+                now=invite["createdAt"],
+                command_transport=client.transport,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(create, zip((first_thread, second_thread), invitations)))
+        self.assertTrue(all(result.get("status") == "ok" for result in results), results)
+        self.assertEqual(sum(result.get("threadCreated") is True for result in results), 1)
+        self.assertTrue(all(result.get("inviteCreated") is True for result in results), results)
+        canonical_ids = {result.thread["collaborationId"] for result in results}
+        self.assertEqual(len(canonical_ids), 1)
+        canonical_id = canonical_ids.pop()
+        self.assertEqual(
+            self.client.command(["KEYS", f"{redis_store.V2_THREAD_KEY_PREFIX}*"]),
+            [self._thread_key(canonical_id)],
+        )
+        index_key = redis_store.build_v2_external_guest_index_key(canonical_id)
+        self.assertEqual(
+            json.loads(self.client.command(["GET", index_key]))["inviteIds"],
+            sorted(invite["inviteId"] for invite in invitations),
+        )
+        for result in results:
+            self.assertEqual(result.invite["collaborationId"], canonical_id)
+            self.assertIsNotNone(
+                self.client.command(
+                    ["GET", redis_store.build_v2_invite_key(result.invite["inviteId"])]
+                )
+            )
+
+    def test_existing_thread_guest_index_cap_and_same_identity_are_race_safe(self):
+        thread = thread_record()
+        created_thread = redis_store._create_v2_thread(
+            thread, command_transport=self.client.transport
+        )
+        self.assertTrue(created_thread.get("created"), created_thread)
+
+        def candidate(index: int, *, email: str | None = None):
+            result = {
+                **invite_record(f"{index:043d}"),
+                "inviteId": f"{index:022d}",
+                "invitedEmail": email or f"guest{index}@example.com",
+            }
+            if index == 1 and email is None:
+                result.pop("invitedEmail")
+            return result
+
+        same_email_barrier = threading.Barrier(2)
+
+        def issue_same_email(index: int):
+            client = _RespClient(self.socket_path)
+            invite = candidate(index + 80, email="same@example.com")
+            same_email_barrier.wait(timeout=5)
+            return redis_store._create_v2_invite(
+                invite,
+                now=invite["createdAt"],
+                command_transport=client.transport,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            same_email = list(pool.map(issue_same_email, range(2)))
+        self.assertTrue(all(result.get("status") == "ok" for result in same_email), same_email)
+        self.assertEqual(sum(result.get("created") is True for result in same_email), 1)
+        same_index_key = redis_store.build_v2_external_guest_index_key(
+            thread["collaborationId"]
+        )
+        self.assertEqual(
+            len(json.loads(self.client.command(["GET", same_index_key]))["inviteIds"]),
+            1,
+        )
+
+        self.client.command(["FLUSHALL"])
+        redis_store._create_v2_thread(thread, command_transport=self.client.transport)
+        email_less = candidate(1)
+        email_less_result = redis_store._create_v2_invite(
+            email_less,
+            now=email_less["createdAt"],
+            command_transport=self.client.transport,
+        )
+        self.assertTrue(email_less_result.get("created"), email_less_result)
+
+        barrier = threading.Barrier(19)
+
+        def issue(index: int):
+            client = _RespClient(self.socket_path)
+            invite = candidate(index)
+            barrier.wait(timeout=5)
+            return redis_store._create_v2_invite(
+                invite,
+                now=invite["createdAt"],
+                command_transport=client.transport,
+            )
+
+        with ThreadPoolExecutor(max_workers=19) as pool:
+            outcomes = list(pool.map(issue, range(2, 21)))
+        self.assertEqual(sum(result.get("created") is True for result in outcomes), 15)
+        self.assertEqual(
+            sum(result.get("error") == {"code": "guest_capacity_reached"} for result in outcomes),
+            4,
+        )
+        index_key = redis_store.build_v2_external_guest_index_key(
+            thread["collaborationId"]
+        )
+        indexed = json.loads(self.client.command(["GET", index_key]))["inviteIds"]
+        self.assertEqual(len(indexed), redis_store.MAX_V2_EXTERNAL_GUESTS)
+        self.assertEqual(
+            len(self.client.command(["KEYS", f"{redis_store.V2_INVITE_KEY_PREFIX}*"])),
+            redis_store.MAX_V2_EXTERNAL_GUESTS,
+        )
+        stored_invitations = [
+            typed_wire_json(
+                self.client.command(["GET", redis_store.build_v2_invite_key(invite_id)]),
+                "invite",
+            )
+            for invite_id in indexed
+        ]
+        self.assertTrue(any("invitedEmail" not in invite for invite in stored_invitations))
+        self.assertTrue(any("invitedEmail" in invite for invite in stored_invitations))
+
+        existing = next(invite for invite in stored_invitations if "invitedEmail" in invite)
+        existing_id = existing["inviteId"]
+        duplicate = candidate(99, email=existing["invitedEmail"])
+        duplicate_result = redis_store._create_v2_invite(
+            duplicate,
+            now=duplicate["createdAt"],
+            command_transport=self.client.transport,
+        )
+        self.assertFalse(duplicate_result.get("created"), duplicate_result)
+        self.assertEqual(duplicate_result["record"]["inviteId"], existing_id)
+        self.assertEqual(
+            len(json.loads(self.client.command(["GET", index_key]))["inviteIds"]),
+            redis_store.MAX_V2_EXTERNAL_GUESTS,
+        )
+
+        removed_id = indexed[0]
+        self.client.command(["DEL", redis_store.build_v2_invite_key(removed_id)])
+        replacement = candidate(60)
+        pruned = redis_store._create_v2_invite(
+            replacement,
+            now=replacement["createdAt"],
+            command_transport=self.client.transport,
+        )
+        self.assertTrue(pruned.get("created"), pruned)
+        pruned_ids = json.loads(self.client.command(["GET", index_key]))["inviteIds"]
+        self.assertEqual(len(pruned_ids), redis_store.MAX_V2_EXTERNAL_GUESTS)
+        self.assertNotIn(removed_id, pruned_ids)
+        self.assertIn(replacement["inviteId"], pruned_ids)
+
+    def test_external_guest_index_loader_is_bounded_compatible_and_fail_closed(self):
+        thread = thread_record()
+        redis_store._create_v2_thread(thread, command_transport=self.client.transport)
+        missing = redis_store._load_v2_external_guest_records(
+            thread["collaborationId"],
+            owner_email=thread["ownerEmail"],
+            workspace_id=thread["workspaceId"],
+            mailbox_id=thread["mailboxId"],
+            now=SEC + 100,
+            session_normalizer=guest_session.normalize_v2_guest_session_record,
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(missing, {"status": "ok", "records": []})
+
+        invite = invite_record("l" * 43)
+        redis_store._create_v2_invite(
+            invite,
+            now=invite["createdAt"],
+            command_transport=self.client.transport,
+        )
+        loaded = redis_store._load_v2_external_guest_records(
+            thread["collaborationId"],
+            owner_email=thread["ownerEmail"],
+            workspace_id=thread["workspaceId"],
+            mailbox_id=thread["mailboxId"],
+            now=SEC + 100,
+            session_normalizer=guest_session.normalize_v2_guest_session_record,
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(loaded["records"], [{"invite": invite, "session": None}])
+        invite_key = redis_store.build_v2_invite_key(invite["inviteId"])
+        self.client.command(["DEL", invite_key])
+        omitted = redis_store._load_v2_external_guest_records(
+            thread["collaborationId"],
+            owner_email=thread["ownerEmail"],
+            workspace_id=thread["workspaceId"],
+            mailbox_id=thread["mailboxId"],
+            now=SEC + 100,
+            session_normalizer=guest_session.normalize_v2_guest_session_record,
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(omitted, {"status": "ok", "records": []})
+        index_key = redis_store.build_v2_external_guest_index_key(
+            thread["collaborationId"]
+        )
+        self.client.command(["SET", index_key, '{"v":"1","inviteIds":["bad"]}', "EX", 60])
+        corrupt = redis_store._load_v2_external_guest_records(
+            thread["collaborationId"],
+            owner_email=thread["ownerEmail"],
+            workspace_id=thread["workspaceId"],
+            mailbox_id=thread["mailboxId"],
+            now=SEC + 100,
+            session_normalizer=guest_session.normalize_v2_guest_session_record,
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(corrupt.get("error"), {"code": "storage_protocol_error"})
+
+    def test_existing_thread_guest_issue_does_not_touch_another_collaboration(self):
+        first = thread_record()
+        second = {
+            **first,
+            "collaborationId": "B" * 22,
+            "sourceRef": {"provider": "google", "providerMessageId": "gmail-2"},
+        }
+        redis_store._create_v2_thread(first, command_transport=self.client.transport)
+        redis_store._create_v2_thread(second, command_transport=self.client.transport)
+        second_invite = {
+            **invite_record("b" * 43),
+            "inviteId": "B" * 22,
+            "collaborationId": second["collaborationId"],
+            "invitedEmail": "second@example.com",
+        }
+        redis_store._create_v2_invite(
+            second_invite,
+            now=second_invite["createdAt"],
+            command_transport=self.client.transport,
+        )
+        protected_keys = (
+            self._thread_key(second["collaborationId"]),
+            *self._invite_keys(second_invite),
+            redis_store.build_v2_external_guest_index_key(second["collaborationId"]),
+        )
+        protected_values = tuple(
+            self.client.command(["GET", key]) for key in protected_keys
+        )
+        first_invite = {
+            **invite_record("a" * 43),
+            "inviteId": "A" * 22,
+            "invitedEmail": "first@example.com",
+        }
+        issued = redis_store._create_v2_invite(
+            first_invite,
+            now=first_invite["createdAt"],
+            command_transport=self.client.transport,
+        )
+        self.assertTrue(issued.get("created"), issued)
+        self.assertEqual(
+            tuple(self.client.command(["GET", key]) for key in protected_keys),
+            protected_values,
         )
 
 

@@ -4,6 +4,7 @@ import copy
 import unittest
 
 from .models import (
+    MAX_V2_EXTERNAL_GUESTS,
     build_v2_guest_thread_dto,
     generate_v2_bearer_secret,
     generate_v2_opaque_id,
@@ -11,6 +12,8 @@ from .models import (
     decode_v2_wire_record,
     encode_v2_wire_record,
     normalize_v2_invite_record,
+    normalize_v2_external_guest_projection,
+    normalize_v2_external_guest_projection_item,
     normalize_v2_thread_record,
     build_v2_guest_shared_reply,
     build_v2_owner_internal_message,
@@ -106,6 +109,73 @@ def sample_participant_thread() -> dict:
 
 
 class CollaborationV2ModelTests(unittest.TestCase):
+    def test_external_guest_projection_normalizes_pending_and_active(self):
+        pending = {
+            "inviteId": "P" * 22,
+            "invitedEmail": "reviewer@example.com",
+            "status": "pending",
+            "expiresAt": SEC + 100,
+        }
+        active = {
+            "inviteId": "A" * 22,
+            "displayName": "Trusted Reviewer",
+            "status": "active",
+            "expiresAt": SEC + 200,
+        }
+        self.assertEqual(normalize_v2_external_guest_projection_item(pending), pending)
+        self.assertEqual(normalize_v2_external_guest_projection_item(active), active)
+        self.assertEqual(
+            [entry["inviteId"] for entry in normalize_v2_external_guest_projection([pending, active])],
+            ["A" * 22, "P" * 22],
+        )
+
+    def test_external_guest_projection_rejects_malformed_public_fields(self):
+        valid = {"inviteId": "P" * 22, "status": "pending", "expiresAt": SEC + 100}
+        for field, value in (
+            ("inviteId", "short"),
+            ("invitedEmail", "not-an-email"),
+            ("status", "invited"),
+            ("expiresAt", "1800000100"),
+        ):
+            changed = {**valid, field: value}
+            self.assertIsNone(normalize_v2_external_guest_projection_item(changed), field)
+        for secret in ("tokenHash", "sessionHash", "csrfTokenHash", "ownerEmail", "workspaceId"):
+            self.assertIsNone(
+                normalize_v2_external_guest_projection_item({**valid, secret: "secret"}),
+                secret,
+            )
+        self.assertIsNone(
+            normalize_v2_external_guest_projection_item({**valid, "displayName": "Too early"})
+        )
+
+    def test_external_guest_projection_is_bounded_and_deduplicated(self):
+        maximum = [
+            {
+                "inviteId": f"{index:022d}",
+                "status": "pending",
+                "expiresAt": SEC + 100,
+            }
+            for index in range(MAX_V2_EXTERNAL_GUESTS)
+        ]
+        self.assertEqual(len(normalize_v2_external_guest_projection(maximum)), MAX_V2_EXTERNAL_GUESTS)
+        self.assertIsNone(
+            normalize_v2_external_guest_projection(
+                maximum + [{**maximum[0], "inviteId": "Z" * 22}]
+            )
+        )
+        self.assertIsNone(normalize_v2_external_guest_projection([maximum[0], maximum[0]]))
+
+    def test_external_guest_projection_never_enters_participant_authority(self):
+        participant_thread = sample_participant_thread()
+        participant_thread["participants"][0] = {
+            "userId": "I" * 22,
+            "membershipRef": "tinv_guest",
+            "displayName": "Guest",
+        }
+        self.assertIsNone(normalize_v2_thread_record(participant_thread))
+        normalized = normalize_v2_thread_record(sample_participant_thread())
+        self.assertNotIn("externalGuests", normalized)
+
     def test_participant_authority_is_backward_compatible_and_deterministic(self):
         old = normalize_v2_thread_record(sample_thread())
         self.assertIsNotNone(old)

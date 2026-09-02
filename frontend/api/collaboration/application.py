@@ -15,8 +15,10 @@ from .authorization import (
     resolve_verified_owner_collaboration_context,
 )
 from .guest_session import (
+    INVITE_LIFETIME_SECONDS,
     _is_guest_read_capability,
     _resolve_guest_read_access,
+    normalize_v2_guest_session_record,
     read_guest_session_cookie,
 )
 from .models import (
@@ -30,8 +32,13 @@ from .models import (
     MIN_V2_TIMESTAMP_SECONDS,
     _v2_free_text,
     build_v2_guest_thread_dto,
+    generate_v2_bearer_secret,
     generate_v2_opaque_id,
+    hash_v2_secret,
     is_v2_opaque_id,
+    normalize_v2_email,
+    normalize_v2_external_guest_projection,
+    normalize_v2_invite_record,
     normalize_v2_source_ref,
     normalize_v2_participant_authority,
     normalize_v2_team_membership_ref,
@@ -40,7 +47,10 @@ from .models import (
 )
 from .redis_store import (
     _V2RecordResult,
+    _V2ThreadInviteCreateResult,
     _create_v2_thread,
+    _create_v2_thread_with_guest,
+    _load_v2_external_guest_records,
     _load_v2_thread,
     _load_v2_thread_by_source,
 )
@@ -262,6 +272,7 @@ def _build_verified_thread_dto(
     capability: object,
     *,
     team_member_resolver=None,
+    external_guests: object | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     if team_member_resolver is None:
         team_member_resolver = _resolve_active_team_member
@@ -320,11 +331,81 @@ def _build_verified_thread_dto(
         )
     if not 1 <= len(visible_participants) <= MAX_V2_EXPLICIT_PARTICIPANTS + 1:
         return None, _failure("malformed", "storage_protocol_error")
-    return {
+    result = {
         **_build_owner_thread_dto(thread),
         "viewerAccess": capability.viewer_access,
         "participants": visible_participants,
-    }, None
+    }
+    if external_guests is not None:
+        normalized_external_guests = normalize_v2_external_guest_projection(
+            external_guests
+        )
+        if capability.viewer_access != "owner":
+            return None, _failure("forbidden", "forbidden")
+        if normalized_external_guests is None:
+            return None, _failure("malformed", "storage_protocol_error")
+        result["externalGuests"] = normalized_external_guests
+    return result, None
+
+
+def _project_v2_external_guests(records: object, *, now: int) -> list[dict] | None:
+    if not isinstance(records, list) or type(now) is not int:
+        return None
+    projected: list[dict] = []
+    for record in records:
+        if not isinstance(record, dict) or set(record) != {"invite", "session"}:
+            return None
+        invite = record.get("invite")
+        session = record.get("session")
+        if not isinstance(invite, dict) or (
+            session is not None and normalize_v2_guest_session_record(session) != session
+        ):
+            return None
+        if invite.get("status") == "revoked":
+            status = "revoked"
+        elif invite.get("status") == "expired" or invite.get("expiresAt", 0) <= now:
+            status = "expired"
+        elif invite.get("status") == "active":
+            status = "pending"
+        elif invite.get("status") == "exchanged" and session is None:
+            status = "expired"
+        elif invite.get("status") == "exchanged" and session.get("status") == "logged_out":
+            status = "logged_out"
+        elif invite.get("status") == "exchanged" and session.get("status") == "revoked":
+            status = "revoked"
+        elif invite.get("status") == "exchanged" and (
+            session.get("status") == "expired" or session.get("expiresAt", 0) <= now
+        ):
+            status = "expired"
+        elif invite.get("status") == "exchanged" and session.get("status") == "active":
+            status = "active"
+        else:
+            return None
+        item = {
+            "inviteId": invite.get("inviteId"),
+            "status": status,
+            "expiresAt": invite.get("expiresAt"),
+        }
+        if invite.get("invitedEmail") is not None:
+            item["invitedEmail"] = invite["invitedEmail"]
+        if session is not None:
+            item["displayName"] = session["guestDisplayName"]
+        projected.append(item)
+    return normalize_v2_external_guest_projection(projected)
+
+
+def _safe_v2_invitation_metadata(invite: dict[str, Any]) -> dict[str, Any]:
+    result = {
+        "inviteId": invite["inviteId"],
+        "collaborationId": invite["collaborationId"],
+        "allowedActions": ["read", "reply"],
+        "identityAssurance": "link_possession",
+        "expiresAt": invite["expiresAt"],
+        "status": invite["status"],
+    }
+    if "invitedEmail" in invite:
+        result["invitedEmail"] = invite["invitedEmail"]
+    return result
 
 
 def _resolve_participant_authority(
@@ -883,6 +964,195 @@ def create_v2_collaboration_for_verified_owner(
     )
 
 
+def create_v2_collaboration_with_guest_for_verified_owner(
+    owner_context: object,
+    headers: object,
+    payload: object,
+    *,
+    owner_security_configuration: object,
+) -> dict[str, Any]:
+    base_fields = {"mailboxId", "sourceRef", "state"}
+    if (
+        type(payload) is not dict
+        or frozenset(payload) not in {frozenset(base_fields), frozenset(base_fields | {"invitedEmail"})}
+        or type(payload.get("state")) is not str
+        or payload.get("state") not in _ALLOWED_INITIAL_STATES
+    ):
+        return _failure("malformed", "invalid_request")
+    invited_email = (
+        normalize_v2_email(payload.get("invitedEmail"))
+        if "invitedEmail" in payload
+        else None
+    )
+    if "invitedEmail" in payload and invited_email is None:
+        return _failure("malformed", "invalid_request")
+
+    mailbox_id = payload.get("mailboxId")
+    authorized = resolve_verified_owner_collaboration_context(
+        owner_context,
+        headers,
+        mailbox_id,
+        required_action="create",
+        owner_security_configuration=owner_security_configuration,
+    )
+    if type(authorized) is not dict or authorized.get("status") != "ok":
+        return _failure_from_result(
+            authorized,
+            default_status="error",
+            default_code="storage_protocol_error",
+        )
+    if set(authorized) != {"status", "context", "error"} or authorized.get("error") is not None:
+        return _failure("malformed", "storage_protocol_error")
+    capability = authorized.get("context")
+    if (
+        not _is_internal_capability(capability, actions={"create"})
+        or capability.viewer_access != "owner"
+        or capability.collaboration_id is not None
+        or capability.mailbox_id != mailbox_id
+        or normalize_v2_email(capability.owner_email) != capability.owner_email
+    ):
+        return _failure("forbidden", "forbidden")
+
+    def reuse_authorized_context(
+        received_headers: object,
+        received_mailbox_id: object,
+        *,
+        required_action: str,
+    ) -> dict[str, Any]:
+        if (
+            received_headers is not headers
+            or received_mailbox_id != capability.mailbox_id
+            or required_action != "create"
+        ):
+            return {
+                "status": "forbidden",
+                "context": None,
+                "error": {"code": "forbidden"},
+            }
+        return authorized
+
+    resolved = resolve_source_message(
+        headers,
+        {"mailboxId": capability.mailbox_id, "sourceRef": payload.get("sourceRef")},
+        authorization_resolver=reuse_authorized_context,
+    )
+    if type(resolved) is not dict or resolved.get("status") != "ok":
+        return _failure_from_result(
+            resolved,
+            default_status="error",
+            default_code="storage_protocol_error",
+        )
+    if set(resolved) != {"status", "source", "error"} or resolved.get("error") is not None:
+        return _failure("malformed", "storage_protocol_error")
+    source = resolved.get("source")
+    locator = payload.get("sourceRef")
+    if type(source) is not dict or set(source) != {"sourceRef", "sourceMessage"} or type(locator) is not dict:
+        return _failure("malformed", "storage_protocol_error")
+    expected_source_ref = normalize_v2_source_ref(
+        {"provider": capability.mailbox_provider, **locator}
+    )
+    canonical_source_ref = normalize_v2_source_ref(source.get("sourceRef"))
+    if (
+        expected_source_ref is None
+        or canonical_source_ref is None
+        or source.get("sourceRef") != canonical_source_ref
+        or canonical_source_ref != expected_source_ref
+    ):
+        return _failure("malformed", "storage_protocol_error")
+
+    created_at = time.time_ns() // 1_000_000
+    invitation_created_at = created_at // 1_000
+    if (
+        not MIN_V2_TIMESTAMP_MILLISECONDS <= created_at <= MAX_V2_TIMESTAMP_MILLISECONDS
+        or not MIN_V2_TIMESTAMP_SECONDS <= invitation_created_at <= MAX_V2_TIMESTAMP_SECONDS
+        or invitation_created_at + INVITE_LIFETIME_SECONDS > MAX_V2_TIMESTAMP_SECONDS
+    ):
+        return _failure("error", "invalid_request")
+    collaboration_id = generate_v2_opaque_id()
+    proposed = normalize_v2_thread_record(
+        {
+            "v": COLLABORATION_V2_THREAD_SCHEMA_VERSION,
+            "collaborationId": collaboration_id,
+            "ownerEmail": capability.owner_email,
+            "workspaceId": capability.workspace_id,
+            "mailboxId": capability.mailbox_id,
+            "sourceRef": canonical_source_ref,
+            "sourceMessage": source.get("sourceMessage"),
+            "state": payload["state"],
+            "messages": [],
+            "createdAt": created_at,
+            "updatedAt": created_at,
+        }
+    )
+    raw_token = generate_v2_bearer_secret()
+    token_hash = hash_v2_secret(raw_token)
+    proposed_invite_record = {
+        "v": 2,
+        "inviteId": generate_v2_opaque_id(),
+        "tokenHash": token_hash,
+        "ownerEmail": capability.owner_email,
+        "workspaceId": capability.workspace_id,
+        "mailboxId": capability.mailbox_id,
+        "collaborationId": collaboration_id,
+        "identityAssurance": "link_possession",
+        "allowedActions": ["read", "reply"],
+        "visibility": "shared_only",
+        "createdBy": {
+            "ownerEmail": capability.owner_email,
+            "displayName": capability.actor_display_name,
+        },
+        "createdAt": invitation_created_at,
+        "expiresAt": invitation_created_at + INVITE_LIFETIME_SECONDS,
+        "status": "active",
+        "exchangedAt": None,
+        "exchangeCount": 0,
+        "revokedAt": None,
+        "revokedBy": None,
+    }
+    if invited_email is not None:
+        proposed_invite_record["invitedEmail"] = invited_email
+    proposed_invite = normalize_v2_invite_record(proposed_invite_record)
+    if proposed is None or proposed_invite is None or token_hash is None:
+        return _failure("malformed", "storage_protocol_error")
+
+    stored = _create_v2_thread_with_guest(
+        proposed,
+        proposed_invite,
+        now=invitation_created_at,
+    )
+    if type(stored) is not _V2ThreadInviteCreateResult:
+        return _create_storage_failure(stored)
+    if stored.status != "ok" or type(stored.thread_created) is not bool or type(stored.invite_created) is not bool:
+        return _failure("malformed", "storage_protocol_error")
+    thread = normalize_v2_thread_record(stored.thread)
+    invitation = normalize_v2_invite_record(stored.invite)
+    if (
+        thread is None
+        or invitation is None
+        or not _thread_matches_create_binding(thread, capability, canonical_source_ref)
+        or invitation["ownerEmail"] != thread["ownerEmail"]
+        or invitation["workspaceId"] != thread["workspaceId"]
+        or invitation["mailboxId"] != thread["mailboxId"]
+        or invitation["collaborationId"] != thread["collaborationId"]
+        or invitation.get("invitedEmail") != invited_email
+    ):
+        return _failure("malformed", "storage_protocol_error")
+    if stored.thread_created and (thread != proposed or thread["collaborationId"] != collaboration_id):
+        return _failure("malformed", "storage_protocol_error")
+    if stored.invite_created and invitation["tokenHash"] != token_hash:
+        return _failure("malformed", "storage_protocol_error")
+
+    result = {
+        "created": stored.thread_created,
+        "invitationCreated": stored.invite_created,
+        "collaboration": _build_owner_thread_dto(thread),
+        "invitation": _safe_v2_invitation_metadata(invitation),
+    }
+    if stored.invite_created:
+        result["token"] = raw_token
+    return result
+
+
 def add_v2_participant_for_verified_owner(
     owner_context: object,
     headers: object,
@@ -1082,7 +1352,31 @@ def _read_v2_collaboration_for_owner(
 
     if owner_context is None:
         return _success(_build_owner_thread_dto(thread))
-    dto, dto_error = _build_verified_thread_dto(thread, capability)
+    external_guests = None
+    if capability.viewer_access == "owner":
+        current_time = int(time.time())
+        if not MIN_V2_TIMESTAMP_SECONDS <= current_time <= MAX_V2_TIMESTAMP_SECONDS:
+            return _failure("error", "invalid_request")
+        loaded_guests = _load_v2_external_guest_records(
+            thread["collaborationId"],
+            owner_email=thread["ownerEmail"],
+            workspace_id=thread["workspaceId"],
+            mailbox_id=thread["mailboxId"],
+            now=current_time,
+            session_normalizer=normalize_v2_guest_session_record,
+        )
+        if type(loaded_guests) is not dict or loaded_guests.get("status") != "ok":
+            return _create_storage_failure(loaded_guests)
+        external_guests = _project_v2_external_guests(
+            loaded_guests.get("records"), now=current_time
+        )
+        if external_guests is None:
+            return _failure("malformed", "storage_protocol_error")
+    dto, dto_error = _build_verified_thread_dto(
+        thread,
+        capability,
+        external_guests=external_guests,
+    )
     if dto_error is not None:
         return dto_error
     return _success(dto) if dto is not None else _failure("malformed", "storage_protocol_error")
@@ -1160,6 +1454,7 @@ __all__ = [
     "append_v2_internal_note_for_owner",
     "append_v2_shared_message_for_owner",
     "create_v2_collaboration_for_owner",
+    "create_v2_collaboration_with_guest_for_verified_owner",
     "read_v2_collaboration_for_guest",
     "read_v2_collaboration_for_owner",
 ]
