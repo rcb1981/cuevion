@@ -74,7 +74,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             from unittest.mock import patch
 
             {DEPLOYMENT_PATH_ASSERTIONS}
-            short_names = ("models", "redis_store", "authorization", "source_message", "guest_session", "mutations", "http_boundary", "http_adapter", "owner_request_security", "owner_authentication", "application", "owner_rate_limit", "owner_http")
+            short_names = ("models", "redis_store", "authorization", "source_message", "guest_session", "mutations", "http_boundary", "http_adapter", "owner_request_security", "owner_authentication", "application", "owner_rate_limit", "owner_http", "guest_rate_limit", "guest_http")
             with patch.dict(os.environ, {{}}, clear=True), patch(
                 "urllib.request.urlopen", side_effect=AssertionError("network during import")
             ), patch(
@@ -125,7 +125,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             "guest_session", "mutations", "http_boundary", "http_adapter",
             "owner_request_security", "owner_authentication", "application",
             "owner_rate_limit", "owner_http", "allowlist_bootstrap_http",
-            "owner_write_readiness_http",
+            "owner_write_readiness_http", "guest_rate_limit", "guest_http",
         )
         for short_name in short_names:
             for order in ("package_first", "top_level_first"):
@@ -265,6 +265,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             "api.collaboration.thread",
             "api.collaboration.invite",
             "api.collaboration.owner",
+            "api.collaboration.guest",
             "api.collaboration.allowlist_bootstrap",
             "api.collaboration.owner_write_readiness",
             "api.contact.support",
@@ -296,6 +297,8 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             "api.collaboration.application",
             "api.collaboration.owner_rate_limit",
             "api.collaboration.owner_http",
+            "api.collaboration.guest_rate_limit",
+            "api.collaboration.guest_http",
             "api.collaboration.allowlist_bootstrap_http",
             "api.collaboration.owner_write_readiness_http",
             "api.user_config_store",
@@ -463,6 +466,8 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             ("api.collaboration.owner_authentication_copy", "api/collaboration/owner_authentication.py"),
             ("api.collaboration.owner_rate_limit_copy", "api/collaboration/owner_rate_limit.py"),
             ("api.collaboration.owner_http_copy", "api/collaboration/owner_http.py"),
+            ("api.collaboration.guest_rate_limit_copy", "api/collaboration/guest_rate_limit.py"),
+            ("api.collaboration.guest_http_copy", "api/collaboration/guest_http.py"),
             ("api.collaboration.allowlist_bootstrap_http_copy", "api/collaboration/allowlist_bootstrap_http.py"),
             ("api.collaboration.owner_write_readiness_http_copy", "api/collaboration/owner_write_readiness_http.py"),
             ("collaboration.owner_request_security", "api/collaboration/owner_request_security.py"),
@@ -926,6 +931,64 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
         self.assertNotIn("BaseHTTPRequestHandler", source)
         self.assertNotIn("os.environ", source)
         self.assertNotIn("os.getenv", source)
+
+    def test_guest_route_import_is_dormant_io_free_and_legacy_independent(self):
+        script = textwrap.dedent(
+            f"""
+            import builtins
+            import importlib
+            import os
+            import sys
+            from unittest.mock import patch
+
+            {DEPLOYMENT_PATH_ASSERTIONS}
+            dormant_modules = (
+                "api.collaboration.guest_http",
+                "api.collaboration.guest_rate_limit",
+                "api.collaboration.guest_session",
+                "api.collaboration.application",
+                "api.collaboration.redis_store",
+                "api.collaboration.thread",
+                "api.collaboration.invite",
+            )
+            assert all(name not in sys.modules for name in dormant_modules)
+            with patch("os.getenv", side_effect=AssertionError("environment read")), patch.object(
+                os._Environ, "__getitem__", side_effect=AssertionError("environment read")
+            ), patch.object(
+                os._Environ, "get", side_effect=AssertionError("environment read")
+            ), patch(
+                "builtins.open", side_effect=AssertionError("file I/O during import")
+            ), patch(
+                "urllib.request.urlopen", side_effect=AssertionError("network during import")
+            ), patch(
+                "socket.create_connection", side_effect=AssertionError("socket during import")
+            ):
+                route = importlib.import_module("api.collaboration.guest")
+            assert route.__name__ == "api.collaboration.guest"
+            assert all(name not in sys.modules for name in dormant_modules)
+            assert "api.collaboration.http_adapter" in sys.modules
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=FRONTEND_ROOT,
+            env=_deployment_env(),
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"stdout={result.stdout!r} stderr={result.stderr!r}",
+        )
+
+        for name in ("guest.py", "guest_http.py", "guest_rate_limit.py"):
+            source = (CURRENT_DIR / name).read_text()
+            self.assertNotIn("CUEVION_LEGACY_COLLAB_V1_HTTP_MODE", source)
+            self.assertNotIn("api.collaboration.thread", source)
+            self.assertNotIn("api.collaboration.invite", source)
 
     def test_http_adapter_import_is_canonical_inactive_and_io_free(self):
         script = textwrap.dedent(

@@ -342,7 +342,7 @@ class CollaborationV2GuestSessionTests(unittest.TestCase):
                 SESSION_ID, now=SEC + 200
             )
         self.assertEqual(result["status"], "ok")
-        self.assertFalse(hasattr(guest_session, "bootstrap_v2_guest_session"))
+        self.assertTrue(callable(guest_session.bootstrap_v2_guest_session))
         self.assertNotIn("csrfToken", result)
         self.assertNotIn("sessionHash", repr(result))
         self.assertEqual(session, original)

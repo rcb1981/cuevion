@@ -1963,6 +1963,7 @@ class OwnerMutationApplicationTests(unittest.TestCase):
         self.assertEqual(
             application.__all__,
             [
+                "append_v2_shared_reply_for_guest",
                 "append_v2_internal_note_for_owner",
                 "append_v2_shared_message_for_owner",
                 "create_v2_collaboration_for_owner",
@@ -3464,6 +3465,7 @@ class GuestReadApplicationTests(unittest.TestCase):
         self.assertEqual(
             application.__all__,
             [
+                "append_v2_shared_reply_for_guest",
                 "append_v2_internal_note_for_owner",
                 "append_v2_shared_message_for_owner",
                 "create_v2_collaboration_for_owner",

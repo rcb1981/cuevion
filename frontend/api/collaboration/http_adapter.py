@@ -42,6 +42,9 @@ PUBLIC_JSON_MAXIMUM_DEPTH = 16
 
 _CANONICAL_CONTENT_LENGTH_RE = re.compile(r"^(?:0|[1-9][0-9]*)$")
 _HTTP_TOKEN_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+_ALLOW_METHODS_RE = re.compile(
+    r"^[!#$%&'*+.^_`|~0-9A-Z-]+(?:, [!#$%&'*+.^_`|~0-9A-Z-]+)*$"
+)
 _PUBLIC_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _ALLOWLIST_ENTRY_RE = re.compile(r"^v1_[A-Za-z0-9_-]{43}$")
 _LIST_ITERATOR_TYPE = type(iter([]))
@@ -444,6 +447,34 @@ def json_rate_limited(retry_after_seconds: object) -> PublicResponse:
     )
 
 
+def _validate_set_cookie_value(value: object) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or len(value.encode("ascii", errors="ignore")) != len(value)
+        or len(value) > 4096
+        or "," in value
+        or any(not 0x20 <= ord(character) <= 0x7E for character in value)
+        or "=" not in value.partition(";")[0]
+    ):
+        raise ValueError("invalid Set-Cookie value")
+    return value
+
+
+def with_set_cookie(response: object, cookie: object) -> PublicResponse:
+    validated = _validate_public_response(response)
+    value = _validate_set_cookie_value(cookie)
+    if validated.status not in (200, 201) or any(
+        name.lower() == "set-cookie" for name, _value in validated.headers
+    ):
+        raise ValueError("invalid Set-Cookie response")
+    return PublicResponse(
+        status=validated.status,
+        headers=validated.headers + (("Set-Cookie", value),),
+        body=validated.body,
+    )
+
+
 def empty_success() -> PublicResponse:
     """Build the sole supported empty response: HTTP 204."""
 
@@ -459,11 +490,14 @@ def empty_success() -> PublicResponse:
 
 
 def _validate_allow_method(allow_method: object) -> str:
+    methods = allow_method.split(", ") if type(allow_method) is str else []
     if (
         type(allow_method) is not str
         or not allow_method.isascii()
         or allow_method != allow_method.upper()
-        or _HTTP_TOKEN_RE.fullmatch(allow_method) is None
+        or _ALLOW_METHODS_RE.fullmatch(allow_method) is None
+        or len(set(methods)) != len(methods)
+        or methods != sorted(methods)
     ):
         raise ValueError("invalid Allow configuration")
     return allow_method
@@ -586,18 +620,26 @@ def _validate_public_response(response: object) -> PublicResponse:
         else:
             raise ValueError("invalid public response")
         expected_headers = expected.headers
-        if response.status == 405:
-            if len(response.headers) != len(expected_headers) + 1:
+        response_headers = response.headers
+        cookie_header: tuple[str, str] | None = None
+        if response_headers and response_headers[-1][0] == "Set-Cookie":
+            if response.status not in (200, 201):
                 raise ValueError("invalid public response")
-            allow_name, allow_value = response.headers[-1]
+            _validate_set_cookie_value(response_headers[-1][1])
+            cookie_header = response_headers[-1]
+            response_headers = response_headers[:-1]
+        if response.status == 405:
+            if len(response_headers) != len(expected_headers) + 1:
+                raise ValueError("invalid public response")
+            allow_name, allow_value = response_headers[-1]
             if allow_name != "Allow":
                 raise ValueError("invalid public response")
             _validate_allow_method(allow_value)
             expected_headers += (("Allow", allow_value),)
         elif response.status == 429:
-            if len(response.headers) != len(expected_headers) + 1:
+            if len(response_headers) != len(expected_headers) + 1:
                 raise ValueError("invalid public response")
-            retry_name, retry_value = response.headers[-1]
+            retry_name, retry_value = response_headers[-1]
             if (
                 retry_name != "Retry-After"
                 or _CANONICAL_CONTENT_LENGTH_RE.fullmatch(retry_value) is None
@@ -605,6 +647,8 @@ def _validate_public_response(response: object) -> PublicResponse:
             ):
                 raise ValueError("invalid public response")
             expected_headers += (("Retry-After", retry_value),)
+        if cookie_header is not None:
+            expected_headers += (cookie_header,)
         if response.headers != expected_headers or response.body != expected.body:
             raise ValueError("invalid public response")
     return response
@@ -701,5 +745,6 @@ __all__ = (
     "require_enabled_http_mode",
     "require_request_method",
     "validate_no_body_request",
+    "with_set_cookie",
     "write_public_response",
 )

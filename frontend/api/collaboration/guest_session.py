@@ -6,6 +6,8 @@ if __name__ != "api.collaboration.guest_session":
         "api.collaboration.guest_session"
     )
 
+import base64
+import hashlib
 import hmac
 import os
 import re
@@ -43,6 +45,7 @@ GUEST_SESSION_LIFETIME_SECONDS = 8 * 60 * 60
 GUEST_SESSION_COOKIE_NAME = "cuevion_collab_guest_session"
 GUEST_SESSION_COOKIE_PATH = "/api/collaboration/guest"
 CSRF_HEADER_NAME = "X-Cuevion-CSRF"
+GUEST_CSRF_HMAC_ENV = "CUEVION_COLLAB_V2_GUEST_CSRF_KEY"
 MAX_COOKIE_HEADER_BYTES = 8192
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _BEARER_RE = re.compile(r"^[A-Za-z0-9_-]{43,128}$")
@@ -60,6 +63,140 @@ _SAFE_GUEST_ERROR_CODES = {
 
 _GUEST_READ_SENTINEL = object()
 _GUEST_MUTATION_SENTINEL = object()
+_GUEST_CSRF_CONFIGURATION_SENTINEL = object()
+_GUEST_CSRF_DOMAIN = b"cuevion/collaboration-v2/guest-csrf/v1\x00"
+_DISTINCT_GUEST_CSRF_SECRET_NAMES = (
+    "CUEVION_COLLAB_V2_OWNER_CSRF_KEY",
+    "CUEVION_COLLAB_V2_OWNER_CSRF_KEY_PREVIOUS",
+    "CUEVION_COLLAB_V2_RATE_LIMIT_HMAC_KEY",
+    "CUEVION_COLLAB_V2_ALLOWLIST_HMAC_KEY",
+    "CUEVION_COLLAB_INDEX_HMAC_KEY",
+    "CUEVION_COLLAB_INDEX_HMAC_KEY_PREVIOUS",
+)
+GUEST_CSRF_CONFIGURATION_NAMES = (
+    GUEST_CSRF_HMAC_ENV,
+    *_DISTINCT_GUEST_CSRF_SECRET_NAMES,
+)
+
+
+class GuestCsrfConfiguration:
+    """Opaque, parser-minted guest CSRF derivation configuration."""
+
+    __slots__ = ("_sentinel", "_hmac_key")
+
+    def __new__(cls, *_args: object, **_kwargs: object):
+        raise TypeError("GuestCsrfConfiguration is parser-minted")
+
+    def __setattr__(self, _name: str, _value: object) -> None:
+        raise TypeError("GuestCsrfConfiguration is immutable")
+
+    def __delattr__(self, _name: str) -> None:
+        raise TypeError("GuestCsrfConfiguration is immutable")
+
+    def __repr__(self) -> str:
+        return "<GuestCsrfConfiguration>"
+
+    __str__ = __repr__
+
+    def __reduce__(self) -> object:
+        raise TypeError("GuestCsrfConfiguration is not serializable")
+
+    def __reduce_ex__(self, _protocol: object) -> object:
+        raise TypeError("GuestCsrfConfiguration is not serializable")
+
+
+def _decode_guest_csrf_secret(value: object) -> bytes | None:
+    if type(value) is not str or not value or len(value) > 1024:
+        return None
+    if re.fullmatch(r"^[A-Za-z0-9_-]+$", value) is None:
+        return None
+    required_padding = (-len(value)) % 4
+    if required_padding == 3:
+        return None
+    try:
+        decoded = base64.urlsafe_b64decode(
+            (value + ("=" * required_padding)).encode("ascii")
+        )
+    except (UnicodeEncodeError, ValueError):
+        return None
+    canonical = base64.urlsafe_b64encode(decoded).rstrip(b"=").decode("ascii")
+    return (
+        decoded
+        if len(decoded) >= 32 and hmac.compare_digest(canonical, value)
+        else None
+    )
+
+
+def parse_guest_csrf_configuration(
+    trusted_configuration: object,
+) -> GuestCsrfConfiguration:
+    if type(trusted_configuration) is not dict:
+        raise ValueError("invalid guest CSRF configuration")
+    keys = tuple(dict.__iter__(trusted_configuration))
+    if (
+        any(type(key) is not str for key in keys)
+        or GUEST_CSRF_HMAC_ENV not in keys
+        or not set(keys).issubset(GUEST_CSRF_CONFIGURATION_NAMES)
+    ):
+        raise ValueError("invalid guest CSRF configuration")
+    snapshot = dict.copy(trusted_configuration)
+    guest_key = _decode_guest_csrf_secret(
+        dict.__getitem__(snapshot, GUEST_CSRF_HMAC_ENV)
+    )
+    if guest_key is None:
+        raise ValueError("invalid guest CSRF configuration")
+    for name in _DISTINCT_GUEST_CSRF_SECRET_NAMES:
+        if name not in snapshot:
+            continue
+        other_key = _decode_guest_csrf_secret(dict.__getitem__(snapshot, name))
+        if other_key is None or hmac.compare_digest(guest_key, other_key):
+            raise ValueError("invalid guest CSRF configuration")
+    configuration = object.__new__(GuestCsrfConfiguration)
+    object.__setattr__(configuration, "_sentinel", _GUEST_CSRF_CONFIGURATION_SENTINEL)
+    object.__setattr__(configuration, "_hmac_key", bytes(bytearray(guest_key)))
+    return configuration
+
+
+def _require_guest_csrf_configuration(
+    value: object,
+) -> GuestCsrfConfiguration:
+    if type(value) is not GuestCsrfConfiguration:
+        raise ValueError("invalid guest CSRF configuration")
+    try:
+        sentinel = object.__getattribute__(value, "_sentinel")
+        hmac_key = object.__getattribute__(value, "_hmac_key")
+    except Exception:
+        raise ValueError("invalid guest CSRF configuration") from None
+    if (
+        sentinel is not _GUEST_CSRF_CONFIGURATION_SENTINEL
+        or type(hmac_key) is not bytes
+        or len(hmac_key) < 32
+    ):
+        raise ValueError("invalid guest CSRF configuration")
+    return value
+
+
+def is_v2_guest_bearer(value: object) -> bool:
+    return type(value) is str and _BEARER_RE.fullmatch(value) is not None
+
+
+def derive_guest_csrf_token(
+    raw_session_id: object,
+    configuration: object,
+) -> str | None:
+    if not is_v2_guest_bearer(raw_session_id):
+        return None
+    try:
+        parsed = _require_guest_csrf_configuration(configuration)
+        digest = hmac.new(
+            parsed._hmac_key,
+            _GUEST_CSRF_DOMAIN + raw_session_id.encode("ascii"),
+            hashlib.sha256,
+        ).digest()
+        token = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    except Exception:
+        return None
+    return token if is_v2_guest_bearer(token) and token != raw_session_id else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,6 +469,7 @@ def exchange_v2_invitation(
     now: int | None = None,
     session_lifetime_seconds: int = GUEST_SESSION_LIFETIME_SECONDS,
     command_transport=None,
+    csrf_token_deriver=None,
 ) -> dict:
     current_time = int(time.time()) if now is None else now
     display_name = _bounded_string(guest_display_name, 256)
@@ -353,7 +491,17 @@ def exchange_v2_invitation(
     if invite["status"] != "active" or invite["exchangeCount"] != 0:
         return _failure("exchanged", "invite_already_exchanged")
     raw_session_id = generate_v2_bearer_secret()
-    raw_csrf_token = generate_v2_bearer_secret()
+    if csrf_token_deriver is None:
+        raw_csrf_token = generate_v2_bearer_secret()
+    else:
+        try:
+            raw_csrf_token = csrf_token_deriver(raw_session_id)
+        except Exception:
+            return _failure("unavailable", "storage_unavailable")
+    if not is_v2_guest_bearer(raw_csrf_token) or hmac.compare_digest(
+        raw_session_id, raw_csrf_token
+    ):
+        return _failure("unavailable", "storage_unavailable")
     session_hash = hash_v2_secret(raw_session_id)
     expires_at = min(
         current_time + session_lifetime_seconds,
@@ -431,6 +579,7 @@ def _bootstrap_v2_guest_session_read_only(
     *,
     now: int | None = None,
     command_transport=None,
+    expected_csrf_token_hash: str | None = None,
 ) -> dict:
     """Load the bootstrap DTO without rotating CSRF or touching session state."""
     current_time = int(time.time()) if now is None else now
@@ -439,6 +588,13 @@ def _bootstrap_v2_guest_session_read_only(
         or not MIN_V2_TIMESTAMP_SECONDS <= current_time <= MAX_V2_TIMESTAMP_SECONDS
         or not isinstance(raw_session_id, str)
         or not _BEARER_RE.fullmatch(raw_session_id)
+        or (
+            expected_csrf_token_hash is not None
+            and (
+                type(expected_csrf_token_hash) is not str
+                or _HASH_RE.fullmatch(expected_csrf_token_hash) is None
+            )
+        )
     ):
         return _failure("missing", "session_not_found")
     loaded = _load_v2_guest_session_record(
@@ -470,6 +626,35 @@ def _bootstrap_v2_guest_session_read_only(
         return _guest_failure(invite_loaded)
     if not _validate_session_invite(session, invite_loaded["record"]):
         return _failure("revoked", "session_revoked")
+    if expected_csrf_token_hash is not None and not hmac.compare_digest(
+        session["csrfTokenHash"], expected_csrf_token_hash
+    ):
+        return _failure("revoked", "session_revoked")
+    if expected_csrf_token_hash is not None:
+        try:
+            thread_loaded = _load_v2_thread(
+                session["collaborationId"],
+                command_transport=command_transport,
+            )
+        except Exception:
+            return _failure("unavailable", "storage_unavailable")
+        thread = (
+            normalize_v2_thread_record(thread_loaded.get("record"))
+            if hasattr(thread_loaded, "get")
+            and thread_loaded.get("status") == "ok"
+            else None
+        )
+        if thread is None:
+            if isinstance(thread_loaded, dict) and thread_loaded.get("status") == "missing":
+                return _failure("revoked", "session_revoked")
+            return _failure("unavailable", "storage_protocol_error")
+        if (
+            thread["ownerEmail"] != session["ownerEmail"]
+            or thread["workspaceId"] != session["workspaceId"]
+            or thread["mailboxId"] != session["mailboxId"]
+            or thread["collaborationId"] != session["collaborationId"]
+        ):
+            return _failure("revoked", "session_revoked")
     return {
         "status": "ok",
         "session": {
@@ -479,6 +664,42 @@ def _bootstrap_v2_guest_session_read_only(
             "identityAssurance": "link_possession",
             "expiresAt": session["expiresAt"],
         },
+        "error": None,
+    }
+
+
+def bootstrap_v2_guest_session(
+    raw_session_id: object,
+    *,
+    csrf_token_deriver,
+    now: int | None = None,
+    command_transport=None,
+) -> dict:
+    if not is_v2_guest_bearer(raw_session_id) or not callable(csrf_token_deriver):
+        return _failure("missing", "session_not_found")
+    try:
+        csrf_token = csrf_token_deriver(raw_session_id)
+    except Exception:
+        return _failure("unavailable", "storage_unavailable")
+    csrf_hash = hash_v2_secret(csrf_token)
+    if (
+        not is_v2_guest_bearer(csrf_token)
+        or hmac.compare_digest(raw_session_id, csrf_token)
+        or csrf_hash is None
+    ):
+        return _failure("unavailable", "storage_unavailable")
+    result = _bootstrap_v2_guest_session_read_only(
+        raw_session_id,
+        now=now,
+        command_transport=command_transport,
+        expected_csrf_token_hash=csrf_hash,
+    )
+    if result.get("status") != "ok":
+        return _guest_failure(result)
+    return {
+        "status": "ok",
+        "session": result["session"],
+        "csrfToken": csrf_token,
         "error": None,
     }
 
@@ -538,6 +759,7 @@ def resolve_guest_v2_mutation_context(
     *,
     now: int | None = None,
     command_transport=None,
+    environment: Mapping[str, str] | None = None,
 ) -> dict:
     """Validate the complete raw request boundary and mint one mutation capability."""
     current_time = int(time.time()) if now is None else now
@@ -547,11 +769,13 @@ def resolve_guest_v2_mutation_context(
         return _failure("malformed", "invalid_request")
     headers = _adapt_raw_security_headers(
         raw_headers,
-        required={"origin", "content-type", CSRF_HEADER_NAME.lower(), "cookie"},
+        required={"origin", "content-type", "cookie"},
     )
     if headers is None:
         return _failure("malformed", "invalid_request")
-    origin_result = _validate_adapted_origin(headers["origin"])
+    if CSRF_HEADER_NAME.lower() not in headers:
+        return _failure("forbidden", "csrf_failed")
+    origin_result = _validate_adapted_origin(headers["origin"], environment)
     if origin_result["status"] != "ok":
         return origin_result
     if headers["content-type"] not in {
@@ -787,11 +1011,26 @@ def read_guest_session_cookie(raw_headers: object) -> str | None:
     return _read_guest_cookie_value(headers["cookie"]) if headers is not None else None
 
 
+def resolve_guest_session_cookie(raw_headers: object) -> dict:
+    headers = _adapt_raw_security_headers(raw_headers, required=set())
+    if headers is None:
+        return _failure("malformed", "invalid_request")
+    if "cookie" not in headers:
+        return _failure("missing", "session_not_found")
+    cookie_is_valid, raw_session_id = _parse_guest_cookie_value(headers["cookie"])
+    if not cookie_is_valid:
+        return _failure("malformed", "invalid_request")
+    if raw_session_id is None:
+        return _failure("missing", "session_not_found")
+    return {"status": "ok", "sessionId": raw_session_id, "error": None}
+
+
 def build_guest_session_cookie(
     raw_session_id: str,
     *,
     expires_at: int,
     now: int,
+    environment: Mapping[str, str] | None = None,
 ) -> str | None:
     if not isinstance(raw_session_id, str) or not _BEARER_RE.fullmatch(raw_session_id):
         return None
@@ -805,17 +1044,38 @@ def build_guest_session_cookie(
         "HttpOnly",
         "SameSite=Lax",
     ]
-    if _secure_cookie_required():
+    if _secure_cookie_required(environment):
         attributes.append("Secure")
     return "; ".join(attributes)
 
 
-def _secure_cookie_required() -> bool:
-    environment = os.getenv("VERCEL_ENV", "production").strip().lower()
-    return environment not in {"development", "test"}
+def _environment_value(
+    environment: Mapping[str, str] | None,
+    name: str,
+    default: str = "",
+) -> object:
+    if environment is None:
+        return os.getenv(name, default)
+    try:
+        return environment.get(name, default)
+    except Exception:
+        return None
 
 
-def clear_guest_session_cookie() -> str:
+def _secure_cookie_required(
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    value = _environment_value(environment, "VERCEL_ENV", "production")
+    return type(value) is not str or value.strip().lower() not in {
+        "development",
+        "test",
+    }
+
+
+def clear_guest_session_cookie(
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> str:
     attributes = [
         f"{GUEST_SESSION_COOKIE_NAME}=",
         f"Path={GUEST_SESSION_COOKIE_PATH}",
@@ -823,7 +1083,7 @@ def clear_guest_session_cookie() -> str:
         "HttpOnly",
         "SameSite=Lax",
     ]
-    if _secure_cookie_required():
+    if _secure_cookie_required(environment):
         attributes.append("Secure")
     return "; ".join(attributes)
 
@@ -865,14 +1125,34 @@ def _canonical_origin(value: object) -> str | None:
     return canonical if value == canonical else None
 
 
-def _validate_adapted_origin(supplied_value: str) -> dict:
-    configured = os.getenv("CUEVION_APP_ORIGIN", "") or None
+def guest_origin_configuration_is_valid(
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    configured = _environment_value(environment, "CUEVION_APP_ORIGIN", "")
+    expected = _canonical_origin(configured)
+    if expected is not None:
+        return True
+    return (
+        type(configured) is str
+        and configured == ""
+        and not _secure_cookie_required(environment)
+    )
+
+
+def _validate_adapted_origin(
+    supplied_value: str,
+    environment: Mapping[str, str] | None = None,
+) -> dict:
+    raw_configured = _environment_value(environment, "CUEVION_APP_ORIGIN", "")
+    if type(raw_configured) is not str:
+        return _failure("forbidden", "origin_rejected")
+    configured = raw_configured if raw_configured else None
     expected = _canonical_origin(configured)
     supplied = _canonical_origin(supplied_value)
     if configured is not None and expected is None:
         return _failure("forbidden", "origin_rejected")
     if expected is None:
-        if _secure_cookie_required():
+        if _secure_cookie_required(environment):
             return _failure("forbidden", "origin_rejected")
         if supplied is None:
             return _failure("forbidden", "origin_rejected")
@@ -885,8 +1165,12 @@ def _validate_adapted_origin(supplied_value: str) -> dict:
     return {"status": "ok", "error": None}
 
 
-def validate_guest_request_origin(raw_headers: object) -> dict:
+def validate_guest_request_origin(
+    raw_headers: object,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> dict:
     headers = _adapt_raw_security_headers(raw_headers, required={"origin"})
     if headers is None:
         return _failure("forbidden", "origin_rejected")
-    return _validate_adapted_origin(headers["origin"])
+    return _validate_adapted_origin(headers["origin"], environment)

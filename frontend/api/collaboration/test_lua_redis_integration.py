@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import os
 import socket
@@ -16,9 +17,12 @@ from unittest.mock import patch
 
 from . import (
     authorization,
+    guest_http,
+    guest_rate_limit,
     guest_session,
     mutations,
     owner_rate_limit,
+    http_adapter,
     redis_store,
     source_message,
 )
@@ -44,6 +48,8 @@ TTL_OBSERVATION_TOLERANCE_SECONDS = 1
 PTTL_OBSERVATION_TOLERANCE_MS = 2_000
 PTTL_MEASUREMENT_JITTER_MS = 100
 OWNER_RATE_LIMIT_KEY = b"real-redis-owner-rate-limit-key-01"
+GUEST_RATE_LIMIT_KEY = b"real-redis-guest-rate-limit-key-01"
+GUEST_CSRF_KEY = b"real-redis-guest-csrf-key-value-01"
 WORKSPACE_ID = "wsp_" + "W" * 22
 OTHER_WORKSPACE_ID = "wsp_" + "X" * 22
 
@@ -84,6 +90,19 @@ def owner_rate_limit_configuration():
     )
     return owner_rate_limit.parse_owner_rate_limit_configuration(
         {owner_rate_limit.RATE_LIMIT_HMAC_ENV: encoded}
+    )
+
+
+def guest_rate_limit_configuration():
+    return guest_rate_limit.parse_guest_rate_limit_configuration(
+        {
+            guest_rate_limit.RATE_LIMIT_HMAC_ENV: base64.urlsafe_b64encode(
+                GUEST_RATE_LIMIT_KEY
+            ).rstrip(b"=").decode("ascii"),
+            guest_session.GUEST_CSRF_HMAC_ENV: base64.urlsafe_b64encode(
+                GUEST_CSRF_KEY
+            ).rstrip(b"=").decode("ascii"),
+        }
     )
 
 
@@ -304,6 +323,28 @@ class _RespClient:
         if prefix == b"*":
             return [cls._read(stream) for _ in range(int(value))]
         raise RuntimeError("unknown Redis response")
+
+
+class _HttpHeaders:
+    def __init__(self, pairs: list[tuple[str, str]]) -> None:
+        self.pairs = pairs
+
+    def raw_items(self):
+        return iter(self.pairs)
+
+
+class _HttpRequest:
+    def __init__(
+        self,
+        *,
+        method: str,
+        body: bytes = b"",
+        headers: list[tuple[str, str]],
+    ) -> None:
+        self.command = method
+        self.path = guest_http.GUEST_ENDPOINT_PATH
+        self.headers = _HttpHeaders(headers)
+        self.rfile = io.BytesIO(body)
 
 
 class _PttlSample(tuple):
@@ -5490,7 +5531,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(bootstrap.get("status"), "ok", bootstrap)
         self.assertNotIn("csrfToken", bootstrap)
-        self.assertFalse(hasattr(guest_session, "bootstrap_v2_guest_session"))
+        self.assertTrue(callable(guest_session.bootstrap_v2_guest_session))
         self.assertFalse(
             any(command[0] in {"EVAL", "SET"} for command in bootstrap_commands),
             bootstrap_commands,
@@ -7368,6 +7409,316 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                 command_transport=self.client.transport,
             ),
         )
+
+    def test_public_guest_http_real_redis_exchange_bootstrap_read_reply_logout(self):
+        raw_invite_token = "t" * 43
+        invite = invite_record(raw_invite_token)
+        created = redis_store._create_v2_invite(
+            invite,
+            now=invite["createdAt"],
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(created.get("status"), "ok", created)
+        loaded_thread = redis_store._load_v2_thread(
+            invite["collaborationId"],
+            command_transport=self.client.transport,
+        )["record"]
+        seeded_thread = {
+            **loaded_thread,
+            "messages": [
+                message_record(1, text="Owner internal", created_at=MS + 101),
+                {
+                    **message_record(2, text="Owner shared", created_at=MS + 102),
+                    "visibility": "shared",
+                },
+            ],
+            "updatedAt": MS + 102,
+        }
+        self.assertEqual(normalize_v2_thread_record(seeded_thread), seeded_thread)
+        self.client.command(
+            [
+                "SET",
+                self._thread_key(invite["collaborationId"]),
+                wire_json(seeded_thread, "thread"),
+                "EX",
+                str(redis_store.V2_THREAD_RETENTION_SECONDS),
+            ]
+        )
+        self.client.command(
+            [
+                "SET",
+                self._source_key(seeded_thread),
+                invite["collaborationId"],
+                "EX",
+                str(redis_store.V2_THREAD_RETENTION_SECONDS),
+            ]
+        )
+
+        environment = {
+            "VERCEL_ENV": "production",
+            "CUEVION_APP_ORIGIN": "https://app.cuevion.test",
+            guest_session.GUEST_CSRF_HMAC_ENV: base64.urlsafe_b64encode(
+                GUEST_CSRF_KEY
+            ).rstrip(b"=").decode("ascii"),
+            guest_rate_limit.RATE_LIMIT_HMAC_ENV: base64.urlsafe_b64encode(
+                GUEST_RATE_LIMIT_KEY
+            ).rstrip(b"=").decode("ascii"),
+        }
+        storage_commands = []
+
+        def transport(command):
+            raw_result = self.client.command(command)
+            storage_commands.append((command, raw_result))
+            return {"result": raw_result}
+
+        def post(operation: dict, *, cookie: str | None = None, csrf: str | None = None):
+            body = json.dumps(operation, separators=(",", ":")).encode("utf-8")
+            headers = [
+                ("Origin", "https://app.cuevion.test"),
+                ("Content-Type", "application/json"),
+                ("Content-Length", str(len(body))),
+            ]
+            if cookie is not None:
+                headers.append(("Cookie", cookie))
+            if csrf is not None:
+                headers.append((guest_session.CSRF_HEADER_NAME, csrf))
+            return _HttpRequest(method="POST", body=body, headers=headers)
+
+        def get(cookie: str):
+            return _HttpRequest(
+                method="GET",
+                headers=[("Content-Length", "0"), ("Cookie", cookie)],
+            )
+
+        def invoke(request: _HttpRequest, now: int):
+            return http_adapter.invoke_safely(
+                lambda: guest_http.guest_response(
+                    request,
+                    http_mode=guest_http.GUEST_HTTP_MODE_ACTIVE,
+                    environment=environment,
+                    now=now,
+                    command_transport=transport,
+                ),
+                allow_method="GET, POST",
+            )
+
+        exchange = invoke(
+            post(
+                {
+                    "operation": "exchange",
+                    "token": raw_invite_token,
+                    "displayName": "External Reviewer",
+                }
+            ),
+            SEC + 101,
+        )
+        self.assertEqual(exchange.status, 200, exchange.body)
+        exchange_payload = json.loads(exchange.body)["data"]
+        csrf_token = exchange_payload["csrfToken"]
+        set_cookie = dict(exchange.headers)["Set-Cookie"]
+        cookie_pair = set_cookie.split(";", 1)[0]
+        raw_session_id = cookie_pair.split("=", 1)[1]
+        self.assertNotIn(raw_session_id, exchange.body.decode("utf-8"))
+        self.assertNotIn(raw_invite_token, exchange.body.decode("utf-8"))
+        session_key = redis_store.build_v2_guest_session_key(
+            hash_v2_secret(raw_session_id)
+        )
+        assert session_key is not None
+        stored_session_before = self.client.command(["GET", session_key])
+        self.assertNotIn(raw_session_id, stored_session_before)
+        self.assertNotIn(csrf_token, stored_session_before)
+        self.assertIn(hash_v2_secret(csrf_token), stored_session_before)
+
+        bootstrap_one = invoke(
+            post({"operation": "bootstrap"}, cookie=cookie_pair),
+            SEC + 102,
+        )
+        bootstrap_two = invoke(
+            post({"operation": "bootstrap"}, cookie=cookie_pair),
+            SEC + 102,
+        )
+        self.assertEqual(bootstrap_one.status, 200, bootstrap_one.body)
+        self.assertEqual(bootstrap_two.status, 200, bootstrap_two.body)
+        self.assertEqual(
+            json.loads(bootstrap_one.body)["data"]["csrfToken"],
+            csrf_token,
+        )
+        self.assertEqual(
+            json.loads(bootstrap_two.body)["data"]["csrfToken"],
+            csrf_token,
+        )
+        self.assertEqual(
+            self.client.command(["GET", session_key]),
+            stored_session_before,
+        )
+
+        read = invoke(get(cookie_pair), SEC + 103)
+        self.assertEqual(read.status, 200, read.body)
+        read_collaboration = json.loads(read.body)["data"]["collaboration"]
+        self.assertEqual(
+            [message["text"] for message in read_collaboration["messages"]],
+            ["Owner shared"],
+        )
+        self.assertNotIn("Owner internal", read.body.decode("utf-8"))
+        self.assertNotIn("participants", read.body.decode("utf-8"))
+        self.assertNotIn("externalGuests", read.body.decode("utf-8"))
+
+        with patch.object(mutations.time, "time", return_value=SEC + 104), patch.object(
+            mutations.time,
+            "time_ns",
+            return_value=(SEC + 104) * 1_000_000_000,
+        ):
+            reply = invoke(
+                post(
+                    {"operation": "reply", "text": "Guest shared reply"},
+                    cookie=cookie_pair,
+                    csrf=csrf_token,
+                ),
+                SEC + 104,
+            )
+        self.assertEqual(reply.status, 200, reply.body)
+        reply_collaboration = json.loads(reply.body)["data"]["collaboration"]
+        self.assertEqual(
+            [message["text"] for message in reply_collaboration["messages"]],
+            ["Owner shared", "Guest shared reply"],
+        )
+        self.assertEqual(
+            reply_collaboration["messages"][-1]["authorDisplayName"],
+            "External Reviewer",
+        )
+        self.assertNotIn("Owner internal", reply.body.decode("utf-8"))
+
+        logout = invoke(
+            post({"operation": "logout"}, cookie=cookie_pair, csrf=csrf_token),
+            SEC + 105,
+        )
+        self.assertEqual(logout.status, 200, logout.body)
+        self.assertIn("Max-Age=0", dict(logout.headers)["Set-Cookie"])
+        denied = invoke(get(cookie_pair), SEC + 106)
+        self.assertEqual(denied.status, 401, denied.body)
+        self.assertEqual(
+            json.loads(denied.body)["error"]["code"],
+            "session_revoked",
+        )
+        serialized_commands = repr(storage_commands)
+        self.assertNotIn(raw_invite_token, serialized_commands)
+        self.assertNotIn(raw_session_id, serialized_commands)
+        self.assertNotIn(csrf_token, serialized_commands)
+
+    def test_guest_rate_limit_real_redis_scoped_global_secrecy_and_state_isolation(self):
+        _invite, _session, invite_keys, session_key = self._create_exchanged_invitation()
+        thread_key = self._thread_key("A" * 22)
+        collaboration_before = {
+            key: self.client.command(["GET", key])
+            for key in (thread_key, invite_keys[0], invite_keys[1], session_key)
+        }
+        configuration = guest_rate_limit_configuration()
+        raw_bearer = "s" * 43
+        policy = guest_rate_limit.guest_rate_limit_policy(
+            guest_rate_limit.RATE_LIMIT_EXCHANGE
+        )
+        assert policy is not None
+        commands = []
+
+        def capture(command):
+            commands.append(command)
+            return self.client.transport(command)
+
+        decisions = [
+            guest_rate_limit.consume_guest_rate_limit(
+                raw_bearer,
+                guest_rate_limit.RATE_LIMIT_EXCHANGE,
+                configuration,
+                command_transport=capture,
+            )
+            for _ in range(policy.scoped_limit)
+        ]
+        self.assertEqual(
+            [decision.status for decision in decisions],
+            ["allowed"] * policy.scoped_limit,
+        )
+        limited = guest_rate_limit.consume_guest_rate_limit(
+            raw_bearer,
+            guest_rate_limit.RATE_LIMIT_EXCHANGE,
+            configuration,
+            command_transport=capture,
+        )
+        self.assertEqual(limited.status, "limited")
+        self.assertGreaterEqual(limited.retry_after_seconds, 1)
+        self.assertLessEqual(limited.retry_after_seconds, 60)
+        keys = guest_rate_limit.build_guest_rate_limit_keys(
+            raw_bearer,
+            guest_rate_limit.RATE_LIMIT_EXCHANGE,
+            configuration,
+        )
+        assert keys is not None
+        encoded_rate_key = base64.urlsafe_b64encode(GUEST_RATE_LIMIT_KEY).rstrip(
+            b"="
+        ).decode("ascii")
+        for key in keys:
+            self.assertNotIn(raw_bearer, key)
+            self.assertNotIn(encoded_rate_key, key)
+            ttl = self.client.command(["PTTL", key])
+            self.assertGreater(ttl, 0)
+            self.assertLessEqual(ttl, 61_000)
+            self.assertNotIn(raw_bearer, self.client.command(["GET", key]))
+        self.assertTrue(all(command[0] == "EVAL" for command in commands))
+        self.assertTrue(all("SCAN" not in command for command in commands))
+        self.assertNotIn(raw_bearer, repr(commands))
+        collaboration_after = {
+            key: self.client.command(["GET", key])
+            for key in collaboration_before
+        }
+        self.assertEqual(collaboration_after, collaboration_before)
+
+    def test_guest_rate_limit_real_redis_global_fallback_and_protocol_failure(self):
+        configuration = guest_rate_limit_configuration()
+        policy = guest_rate_limit.guest_rate_limit_policy(
+            guest_rate_limit.RATE_LIMIT_EXCHANGE
+        )
+        assert policy is not None
+
+        def bearer(index: int) -> str:
+            return base64.urlsafe_b64encode(
+                hashlib.sha256(f"random-invite-{index}".encode("ascii")).digest()
+            ).rstrip(b"=").decode("ascii")
+
+        statuses = [
+            guest_rate_limit.consume_guest_rate_limit(
+                bearer(index),
+                guest_rate_limit.RATE_LIMIT_EXCHANGE,
+                configuration,
+                command_transport=self.client.transport,
+            ).status
+            for index in range(policy.global_limit)
+        ]
+        self.assertEqual(statuses, ["allowed"] * policy.global_limit)
+        global_limited = guest_rate_limit.consume_guest_rate_limit(
+            bearer(policy.global_limit),
+            guest_rate_limit.RATE_LIMIT_EXCHANGE,
+            configuration,
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(global_limited.status, "limited")
+
+        self.client.command(["FLUSHALL"])
+        keys = guest_rate_limit.build_guest_rate_limit_keys(
+            bearer(1),
+            guest_rate_limit.RATE_LIMIT_REPLY,
+            configuration,
+        )
+        assert keys is not None
+        malformed = '{"v":"1","window":"01","count":"1"}'
+        self.client.command(["SET", keys[1], malformed, "PX", "60000"])
+        rejected = guest_rate_limit.consume_guest_rate_limit(
+            bearer(1),
+            guest_rate_limit.RATE_LIMIT_REPLY,
+            configuration,
+            command_transport=self.client.transport,
+        )
+        self.assertEqual(rejected.status, "unavailable")
+        self.assertEqual(self.client.command(["GET", keys[1]]), malformed)
+        self.assertEqual(self.client.command(["EXISTS", keys[0]]), 0)
 
     def test_owner_rate_limit_real_redis_boundary_refill_classes_and_ttl(self):
         context = owner_rate_limit_context()

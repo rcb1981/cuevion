@@ -16,11 +16,13 @@ from .authorization import (
 )
 from .guest_session import (
     INVITE_LIFETIME_SECONDS,
+    _is_guest_mutation_capability,
     _is_guest_read_capability,
     _resolve_guest_read_access,
     issue_v2_invitation,
     normalize_v2_guest_session_record,
     read_guest_session_cookie,
+    resolve_guest_v2_mutation_context,
     revoke_invitation_for_owner,
 )
 from .models import (
@@ -173,8 +175,17 @@ def _thread_load_failure(value: object) -> dict[str, Any]:
 
 def _load_exact_thread(
     collaboration_id: str,
+    *,
+    command_transport=None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    loaded = _load_v2_thread(collaboration_id)
+    loaded = (
+        _load_v2_thread(collaboration_id)
+        if command_transport is None
+        else _load_v2_thread(
+            collaboration_id,
+            command_transport=command_transport,
+        )
+    )
 
     if type(loaded) is _V2RecordResult:
         if loaded.status != "ok":
@@ -1675,10 +1686,13 @@ def read_v2_collaboration_for_verified_owner(
     )
 
 
-def read_v2_collaboration_for_guest(
+def _read_v2_collaboration_for_guest(
     raw_headers: object,
+    *,
+    now: int | None = None,
+    command_transport=None,
 ) -> dict[str, Any]:
-    current_time = int(time.time())
+    current_time = int(time.time()) if now is None else now
     if (
         type(current_time) is not int
         or current_time < MIN_V2_TIMESTAMP_SECONDS
@@ -1693,6 +1707,7 @@ def read_v2_collaboration_for_guest(
     resolved = _resolve_guest_read_access(
         raw_session_id,
         now=current_time,
+        command_transport=command_transport,
     )
 
     if type(resolved) is not tuple or len(resolved) != 3:
@@ -1709,7 +1724,10 @@ def read_v2_collaboration_for_guest(
     if not _guest_session_matches_capability(session, capability):
         return _failure("revoked", "session_revoked")
 
-    thread, load_failure = _load_exact_thread(capability.collaboration_id)
+    thread, load_failure = _load_exact_thread(
+        capability.collaboration_id,
+        command_transport=command_transport,
+    )
     if load_failure is not None:
         return load_failure
     if thread is None or not _thread_matches_guest_capability(thread, capability):
@@ -1721,7 +1739,97 @@ def read_v2_collaboration_for_guest(
     return _success(dto)
 
 
+def read_v2_collaboration_for_guest(
+    raw_headers: object,
+) -> dict[str, Any]:
+    return _read_v2_collaboration_for_guest(raw_headers)
+
+
+def append_v2_shared_reply_for_guest(
+    raw_headers: object,
+    text: object,
+    *,
+    now: int | None = None,
+    command_transport=None,
+    environment=None,
+) -> dict[str, Any]:
+    current_time = int(time.time()) if now is None else now
+    if (
+        type(current_time) is not int
+        or not MIN_V2_TIMESTAMP_SECONDS <= current_time <= MAX_V2_TIMESTAMP_SECONDS
+        or type(text) is not str
+        or _v2_free_text(text, max_length=MAX_V2_MESSAGE_TEXT) != text
+    ):
+        return _failure("malformed", "invalid_request")
+    resolved = resolve_guest_v2_mutation_context(
+        "POST",
+        raw_headers,
+        now=current_time,
+        command_transport=command_transport,
+        environment=environment,
+    )
+    if type(resolved) is not dict or resolved.get("status") != "ok":
+        return _failure_from_result(
+            resolved,
+            default_status="error",
+            default_code="storage_protocol_error",
+        )
+    if set(resolved) != {"status", "context", "error"} or resolved.get("error") is not None:
+        return _failure("malformed", "storage_protocol_error")
+    capability = resolved.get("context")
+    if not _is_guest_mutation_capability(capability):
+        return _failure("revoked", "session_revoked")
+
+    from .mutations import append_guest_v2_reply
+
+    mutated = append_guest_v2_reply(
+        capability,
+        text,
+        command_transport=command_transport,
+    )
+    if (
+        type(mutated) is not dict
+        or mutated.get("status") != "ok"
+        or mutated.get("error") is not None
+        or type(mutated.get("message")) is not dict
+        or type(mutated.get("updatedAt")) is not int
+    ):
+        return _failure_from_result(
+            mutated,
+            default_status="error",
+            default_code="storage_protocol_error",
+        )
+    thread, load_failure = _load_exact_thread(
+        capability.collaboration_id,
+        command_transport=command_transport,
+    )
+    if load_failure is not None:
+        return load_failure
+    if (
+        thread is None
+        or not _thread_matches_guest_capability(thread, capability)
+    ):
+        return _failure("forbidden", "forbidden")
+    if (
+        thread["updatedAt"] < mutated["updatedAt"]
+        or not any(
+            message.get("id") == mutated["message"].get("id")
+            and message.get("authorKind") == "guest"
+            and message.get("authorDisplayName") == capability.guest_display_name
+            and message.get("text") == text
+            and message.get("visibility") == "shared"
+            for message in thread["messages"]
+        )
+    ):
+        return _failure("malformed", "storage_protocol_error")
+    dto = build_v2_guest_thread_dto(thread)
+    if type(dto) is not dict:
+        return _failure("malformed", "storage_protocol_error")
+    return _success(dto)
+
+
 __all__ = [
+    "append_v2_shared_reply_for_guest",
     "append_v2_internal_note_for_owner",
     "append_v2_shared_message_for_owner",
     "create_v2_collaboration_for_owner",
