@@ -225,8 +225,40 @@ try {
     assert.doesNotMatch(message, /\b(?:401|403|404|409|429|500|503)\b/);
   }
   assert.equal(
-    getCollaborationAccessFailureMessage("service_unavailable"),
+    getCollaborationAccessFailureMessage("not_found", "start"),
     "Collaboration changes are temporarily unavailable.",
+  );
+  assert.equal(
+    getCollaborationAccessFailureMessage("service_unavailable", "start"),
+    "Collaboration changes are temporarily unavailable.",
+  );
+  assert.equal(
+    getCollaborationAccessFailureMessage("not_found", "manage"),
+    "This Collaboration is no longer available.",
+  );
+  assert.equal(
+    getCollaborationAccessFailureMessage("invalid_collaboration_id", "manage"),
+    "This Collaboration is no longer available.",
+  );
+  assert.equal(
+    getCollaborationAccessFailureMessage("unauthorized", "start"),
+    "Sign in again to change Collaboration access.",
+  );
+  assert.equal(
+    getCollaborationAccessFailureMessage("forbidden", "manage"),
+    "You don’t have permission to change Collaboration access.",
+  );
+  assert.equal(
+    getCollaborationAccessFailureMessage("conflict", "manage"),
+    "Collaboration access changed. Review the current access and try again.",
+  );
+  assert.equal(
+    getCollaborationAccessFailureMessage("rate_limited", "manage"),
+    "Too many Collaboration changes were requested. Try again shortly.",
+  );
+  assert.equal(
+    getCollaborationAccessFailureMessage("network_failure", "start"),
+    "The change may not have completed. Check your connection and try again explicitly.",
   );
 
   const source = readFileSync(
@@ -254,8 +286,23 @@ try {
   assert.equal((source.match(/issueGuestInvitationForOwner\(/g) ?? []).length, 1);
   assert.equal((source.match(/revokeGuestInvitationForOwner\(/g) ?? []).length, 1);
   assert.match(source, /Email \(optional\)/);
+  assert.equal(
+    (source.match(/Email is optional and only helps identify the guest\. Access is controlled by the secure link, which you’ll share yourself\./g) ?? []).length,
+    2,
+  );
   assert.match(source, /createCollaborationForOwner\([\s\S]*?selectedTeamMemberId/);
   assert.match(source, /createCollaborationWithGuestForOwner\([\s\S]*?normalizedExternalEmail \|\| undefined/);
+  assert.match(source, /createCollaborationForOwner\([\s\S]*?getCollaborationAccessFailureMessage\(result\.status, "start"\)/);
+  assert.match(source, /createCollaborationWithGuestForOwner\([\s\S]*?getCollaborationAccessFailureMessage\(result\.status, "start"\)/);
+  assert.equal(
+    (source.match(/getCollaborationAccessFailureMessage\(result\.status, "start"\)/g) ?? []).length,
+    2,
+  );
+  assert.equal(
+    (source.match(/getCollaborationAccessFailureMessage\(result\.status\)/g) ?? []).length,
+    3,
+    "existing Add Team, Invite External, and Revoke mutations keep management failure semantics",
+  );
   assert.match(source, /issueGuestInvitationForOwner\([\s\S]*?normalizedInvitedEmail \|\| undefined/);
   assert.match(source, /revokeGuestInvitationForOwner\(collaborationId, inviteId\)/);
   assert.match(source, /onCanonicalCollaboration\(result\.collaboration, contextKey\)/);

@@ -31,6 +31,7 @@ export type CollaborationTeamRosterMember = {
 };
 
 type ParticipantType = "team" | "external";
+type CollaborationAccessFailureContext = "start" | "manage";
 type MutationState =
   | { status: "idle" }
   | { status: "loading" }
@@ -99,7 +100,20 @@ export function getEligibleCollaborationTeamMembers({
   });
 }
 
-export function getCollaborationAccessFailureMessage(status: string) {
+export function getCollaborationAccessFailureMessage(
+  status: string,
+  context: CollaborationAccessFailureContext = "manage",
+) {
+  if (
+    context === "start" &&
+    (status === "not_found" ||
+      status === "service_unavailable" ||
+      status === "invalid_source_locator" ||
+      status === "invalid_response" ||
+      status === "internal_error")
+  ) {
+    return "Collaboration changes are temporarily unavailable.";
+  }
   if (status === "unauthorized") {
     return "Sign in again to change Collaboration access.";
   }
@@ -346,7 +360,7 @@ export function CollaborationAccessPanel({
         if (result.status !== "success") {
           setStartMutation({
             status: "failure",
-            message: getCollaborationAccessFailureMessage(result.status),
+            message: getCollaborationAccessFailureMessage(result.status, "start"),
           });
           return;
         }
@@ -366,7 +380,7 @@ export function CollaborationAccessPanel({
       if (result.status !== "success") {
         setStartMutation({
           status: "failure",
-          message: getCollaborationAccessFailureMessage(result.status),
+          message: getCollaborationAccessFailureMessage(result.status, "start"),
         });
         return;
       }
@@ -381,7 +395,7 @@ export function CollaborationAccessPanel({
       if (isCurrentRequest(requestId)) {
         setStartMutation({
           status: "failure",
-          message: getCollaborationAccessFailureMessage("network_failure"),
+          message: getCollaborationAccessFailureMessage("network_failure", "start"),
         });
       }
     });
@@ -724,7 +738,7 @@ export function CollaborationAccessPanel({
                 className={fieldClass}
               />
               <span className="block text-[0.74rem] leading-5 text-[var(--workspace-text-faint)]">
-                Email is optional and only helps identify the guest. You’ll share the secure link yourself.
+                Email is optional and only helps identify the guest. Access is controlled by the secure link, which you’ll share yourself.
               </span>
             </label>
           ) : null}
@@ -862,7 +876,7 @@ export function CollaborationAccessPanel({
                 <label className="block space-y-1.5">
                   <span className="text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">Email (optional)</span>
                   <input type="email" value={inviteEmail} onChange={(event) => { setInviteEmail(event.target.value); setInviteMutation({ status: "idle" }); }} placeholder="guest@example.com" className={fieldClass} />
-                  <span className="block text-[0.74rem] leading-5 text-[var(--workspace-text-faint)]">Email is optional and only helps identify the guest. You’ll share the secure link yourself.</span>
+                  <span className="block text-[0.74rem] leading-5 text-[var(--workspace-text-faint)]">Email is optional and only helps identify the guest. Access is controlled by the secure link, which you’ll share yourself.</span>
                 </label>
                 {inviteMutation.status === "failure" ? <div role="alert" aria-live="polite" className="text-[0.76rem] leading-5 text-[var(--workspace-text-faint)]">{inviteMutation.message}</div> : null}
                 <div className="flex flex-wrap justify-end gap-2">
