@@ -13,8 +13,13 @@ export const COLLABORATION_OWNER_READ_ENDPOINT = COLLABORATION_OWNER_ENDPOINT;
 
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9_-]{22,128}$/;
 const CANONICAL_USER_ID_PATTERN = /^usr_[A-Za-z0-9_-]{21}[AQgw]$/;
+const CANONICAL_EMAIL_PATTERN =
+  /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
 const UNSAFE_DISPLAY_NAME_PATTERN = /[\p{Cc}\p{Cf}\p{Cs}]/u;
 const MAX_PARTICIPANT_DISPLAY_NAME_BYTES = 256;
+const MAX_EXTERNAL_GUESTS = 16;
+const MIN_EXTERNAL_GUEST_TIMESTAMP_SECONDS = 1_577_836_800;
+const MAX_EXTERNAL_GUEST_TIMESTAMP_SECONDS = 4_102_444_800;
 
 export type CollaborationOwnerReadState =
   | "needs_review"
@@ -37,7 +42,22 @@ export type CollaborationOwnerReadParticipant = {
   access: "owner" | "participant";
 };
 
-export type CollaborationOwnerReadDto = {
+export type CollaborationExternalGuestStatus =
+  | "pending"
+  | "active"
+  | "logged_out"
+  | "revoked"
+  | "expired";
+
+export type CollaborationExternalGuest = {
+  inviteId: string;
+  status: CollaborationExternalGuestStatus;
+  expiresAt: number;
+  invitedEmail?: string;
+  displayName?: string;
+};
+
+type CollaborationOwnerReadDtoBase = {
   collaborationId: string;
   mailboxId: string;
   state: CollaborationOwnerReadState;
@@ -51,9 +71,21 @@ export type CollaborationOwnerReadDto = {
     bodyText: string;
   };
   messages: CollaborationOwnerReadMessage[];
-  viewerAccess: "owner" | "participant";
   participants: CollaborationOwnerReadParticipant[];
 };
+
+export type CollaborationOwnerViewerReadDto = CollaborationOwnerReadDtoBase & {
+  viewerAccess: "owner";
+  externalGuests: CollaborationExternalGuest[];
+};
+
+export type CollaborationParticipantViewerReadDto = CollaborationOwnerReadDtoBase & {
+  viewerAccess: "participant";
+};
+
+export type CollaborationOwnerReadDto =
+  | CollaborationOwnerViewerReadDto
+  | CollaborationParticipantViewerReadDto;
 
 export type CollaborationOwnerReadFailureStatus =
   | "invalid_collaboration_id"
@@ -113,6 +145,73 @@ function isExactRecord(value: unknown, keys: readonly string[]): value is Record
 
 function isSafeTimestamp(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isCanonicalExternalGuestEmail(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    value !== value.toLowerCase() ||
+    new TextEncoder().encode(value).length > 320 ||
+    !CANONICAL_EMAIL_PATTERN.test(value)
+  ) {
+    return false;
+  }
+  const [localPart, domain] = value.split("@");
+  return localPart.length <= 64 && domain.length <= 253;
+}
+
+function parseExternalGuest(value: unknown): CollaborationExternalGuest | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const keys = [
+    "inviteId",
+    "status",
+    "expiresAt",
+    ...(Object.prototype.hasOwnProperty.call(record, "invitedEmail")
+      ? ["invitedEmail"]
+      : []),
+    ...(Object.prototype.hasOwnProperty.call(record, "displayName")
+      ? ["displayName"]
+      : []),
+  ];
+  if (
+    !isExactRecord(record, keys) ||
+    !isValidCollaborationOwnerReadId(record.inviteId) ||
+    (record.status !== "pending" &&
+      record.status !== "active" &&
+      record.status !== "logged_out" &&
+      record.status !== "revoked" &&
+      record.status !== "expired") ||
+    typeof record.expiresAt !== "number" ||
+    !Number.isSafeInteger(record.expiresAt) ||
+    record.expiresAt < MIN_EXTERNAL_GUEST_TIMESTAMP_SECONDS ||
+    record.expiresAt > MAX_EXTERNAL_GUEST_TIMESTAMP_SECONDS ||
+    (Object.prototype.hasOwnProperty.call(record, "invitedEmail") &&
+      !isCanonicalExternalGuestEmail(record.invitedEmail)) ||
+    (Object.prototype.hasOwnProperty.call(record, "displayName") &&
+      (typeof record.displayName !== "string" ||
+        record.displayName.length === 0 ||
+        record.displayName !== record.displayName.trim() ||
+        UNSAFE_DISPLAY_NAME_PATTERN.test(record.displayName) ||
+        new TextEncoder().encode(record.displayName).length > 256)) ||
+    (record.status === "pending" &&
+      Object.prototype.hasOwnProperty.call(record, "displayName"))
+  ) {
+    return null;
+  }
+  return {
+    inviteId: record.inviteId,
+    status: record.status,
+    expiresAt: record.expiresAt,
+    ...(typeof record.invitedEmail === "string"
+      ? { invitedEmail: record.invitedEmail }
+      : {}),
+    ...(typeof record.displayName === "string"
+      ? { displayName: record.displayName }
+      : {}),
+  };
 }
 
 export function isValidCollaborationOwnerReadId(value: unknown): value is string {
@@ -183,55 +282,63 @@ function parseParticipant(value: unknown): CollaborationOwnerReadParticipant | n
 export function parseCollaborationOwnerReadDto(
   value: unknown,
 ): CollaborationOwnerReadDto | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const viewerAccess = record.viewerAccess;
+  const exactKeys = [
+    "collaborationId",
+    "mailboxId",
+    "state",
+    "createdAt",
+    "updatedAt",
+    "source",
+    "messages",
+    "viewerAccess",
+    "participants",
+    ...(viewerAccess === "owner" ? ["externalGuests"] : []),
+  ];
   if (
-    !isExactRecord(value, [
-      "collaborationId",
-      "mailboxId",
-      "state",
-      "createdAt",
-      "updatedAt",
-      "source",
-      "messages",
-      "viewerAccess",
-      "participants",
-    ]) ||
-    !isValidCollaborationOwnerReadId(value.collaborationId) ||
-    typeof value.mailboxId !== "string" ||
-    value.mailboxId.length === 0 ||
-    value.mailboxId !== value.mailboxId.trim() ||
-    (value.state !== "needs_review" &&
-      value.state !== "needs_action" &&
-      value.state !== "note_only" &&
-      value.state !== "resolved") ||
-    !isSafeTimestamp(value.createdAt) ||
-    !isSafeTimestamp(value.updatedAt) ||
-    value.updatedAt < value.createdAt ||
-    !isExactRecord(value.source, [
+    (viewerAccess !== "owner" && viewerAccess !== "participant") ||
+    !isExactRecord(record, exactKeys) ||
+    !isValidCollaborationOwnerReadId(record.collaborationId) ||
+    typeof record.mailboxId !== "string" ||
+    record.mailboxId.length === 0 ||
+    record.mailboxId !== record.mailboxId.trim() ||
+    (record.state !== "needs_review" &&
+      record.state !== "needs_action" &&
+      record.state !== "note_only" &&
+      record.state !== "resolved") ||
+    !isSafeTimestamp(record.createdAt) ||
+    !isSafeTimestamp(record.updatedAt) ||
+    record.updatedAt < record.createdAt ||
+    !isExactRecord(record.source, [
       "subject",
       "senderDisplay",
       "fromDisplay",
       "timestamp",
       "bodyText",
     ]) ||
-    typeof value.source.subject !== "string" ||
-    typeof value.source.senderDisplay !== "string" ||
-    typeof value.source.fromDisplay !== "string" ||
-    typeof value.source.timestamp !== "string" ||
-    typeof value.source.bodyText !== "string" ||
-    !Array.isArray(value.messages) ||
-    (value.viewerAccess !== "owner" && value.viewerAccess !== "participant") ||
-    !Array.isArray(value.participants) ||
-    value.participants.length < 1 ||
-    value.participants.length > 16
+    typeof record.source.subject !== "string" ||
+    typeof record.source.senderDisplay !== "string" ||
+    typeof record.source.fromDisplay !== "string" ||
+    typeof record.source.timestamp !== "string" ||
+    typeof record.source.bodyText !== "string" ||
+    !Array.isArray(record.messages) ||
+    !Array.isArray(record.participants) ||
+    record.participants.length < 1 ||
+    record.participants.length > 16 ||
+    (viewerAccess === "owner" && !Array.isArray(record.externalGuests))
   ) {
     return null;
   }
 
-  const messages = value.messages.map(parseMessage);
+  const messages = record.messages.map(parseMessage);
   if (messages.some((message) => message === null)) {
     return null;
   }
-  const participants = value.participants.map(parseParticipant);
+  const participants = record.participants.map(parseParticipant);
   if (
     participants.some((participant) => participant === null) ||
     participants[0]?.access !== "owner" ||
@@ -253,23 +360,46 @@ export function parseCollaborationOwnerReadDto(
     return null;
   }
 
-  return {
-    collaborationId: value.collaborationId,
-    mailboxId: value.mailboxId,
-    state: value.state,
-    createdAt: value.createdAt,
-    updatedAt: value.updatedAt,
+  const externalGuests =
+    viewerAccess === "owner"
+      ? (record.externalGuests as unknown[]).map(parseExternalGuest)
+      : [];
+  if (
+    externalGuests.length > MAX_EXTERNAL_GUESTS ||
+    externalGuests.some((guest) => guest === null)
+  ) {
+    return null;
+  }
+  const parsedExternalGuests = externalGuests as CollaborationExternalGuest[];
+  if (
+    parsedExternalGuests.some(
+      (guest, index) =>
+        index > 0 &&
+        parsedExternalGuests[index - 1].inviteId >= guest.inviteId,
+    )
+  ) {
+    return null;
+  }
+
+  const parsedBase: CollaborationOwnerReadDtoBase = {
+    collaborationId: record.collaborationId,
+    mailboxId: record.mailboxId,
+    state: record.state as CollaborationOwnerReadState,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
     source: {
-      subject: value.source.subject,
-      senderDisplay: value.source.senderDisplay,
-      fromDisplay: value.source.fromDisplay,
-      timestamp: value.source.timestamp,
-      bodyText: value.source.bodyText,
+      subject: record.source.subject,
+      senderDisplay: record.source.senderDisplay,
+      fromDisplay: record.source.fromDisplay,
+      timestamp: record.source.timestamp,
+      bodyText: record.source.bodyText,
     },
     messages: messages as CollaborationOwnerReadMessage[],
-    viewerAccess: value.viewerAccess,
     participants: parsedParticipants,
   };
+  return viewerAccess === "owner"
+    ? { ...parsedBase, viewerAccess, externalGuests: parsedExternalGuests }
+    : { ...parsedBase, viewerAccess };
 }
 
 function isValidSourceLocator(

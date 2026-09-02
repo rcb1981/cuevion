@@ -336,12 +336,14 @@ def _build_verified_thread_dto(
         "viewerAccess": capability.viewer_access,
         "participants": visible_participants,
     }
+    if capability.viewer_access == "owner" and external_guests is None:
+        return None, _failure("malformed", "storage_protocol_error")
+    if capability.viewer_access == "participant" and external_guests is not None:
+        return None, _failure("forbidden", "forbidden")
     if external_guests is not None:
         normalized_external_guests = normalize_v2_external_guest_projection(
             external_guests
         )
-        if capability.viewer_access != "owner":
-            return None, _failure("forbidden", "forbidden")
         if normalized_external_guests is None:
             return None, _failure("malformed", "storage_protocol_error")
         result["externalGuests"] = normalized_external_guests
@@ -392,6 +394,53 @@ def _project_v2_external_guests(records: object, *, now: int) -> list[dict] | No
             item["displayName"] = session["guestDisplayName"]
         projected.append(item)
     return normalize_v2_external_guest_projection(projected)
+
+
+def _build_verified_owner_thread_dto(
+    thread: dict[str, Any],
+    capability: object,
+    *,
+    team_member_resolver=None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if (
+        not _is_internal_capability(
+            capability,
+            actions={"read", "create", "manage_participants"},
+        )
+        or capability.viewer_access != "owner"
+        or thread.get("ownerEmail") != capability.owner_email
+        or thread.get("workspaceId") != capability.workspace_id
+        or thread.get("mailboxId") != capability.mailbox_id
+        or (
+            capability.collaboration_id is not None
+            and thread.get("collaborationId") != capability.collaboration_id
+        )
+    ):
+        return None, _failure("forbidden", "forbidden")
+    current_time = int(time.time())
+    if not MIN_V2_TIMESTAMP_SECONDS <= current_time <= MAX_V2_TIMESTAMP_SECONDS:
+        return None, _failure("error", "invalid_request")
+    loaded_guests = _load_v2_external_guest_records(
+        thread["collaborationId"],
+        owner_email=thread["ownerEmail"],
+        workspace_id=thread["workspaceId"],
+        mailbox_id=thread["mailboxId"],
+        now=current_time,
+        session_normalizer=normalize_v2_guest_session_record,
+    )
+    if type(loaded_guests) is not dict or loaded_guests.get("status") != "ok":
+        return None, _create_storage_failure(loaded_guests)
+    external_guests = _project_v2_external_guests(
+        loaded_guests.get("records"), now=current_time
+    )
+    if external_guests is None:
+        return None, _failure("malformed", "storage_protocol_error")
+    return _build_verified_thread_dto(
+        thread,
+        capability,
+        team_member_resolver=team_member_resolver,
+        external_guests=external_guests,
+    )
 
 
 def _safe_v2_invitation_metadata(invite: dict[str, Any]) -> dict[str, Any]:
@@ -927,7 +976,9 @@ def _create_v2_collaboration_for_owner(
             return _failure("forbidden", "forbidden")
 
     if owner_context is not None:
-        dto, dto_error = _build_verified_thread_dto(collaboration, capability)
+        dto, dto_error = _build_verified_owner_thread_dto(
+            collaboration, capability
+        )
         if dto_error is not None:
             return dto_error
         if dto is None:
@@ -1142,10 +1193,18 @@ def create_v2_collaboration_with_guest_for_verified_owner(
     if stored.invite_created and invitation["tokenHash"] != token_hash:
         return _failure("malformed", "storage_protocol_error")
 
+    collaboration_dto, dto_error = _build_verified_owner_thread_dto(
+        thread, capability
+    )
+    if dto_error is not None:
+        return dto_error
+    if collaboration_dto is None:
+        return _failure("malformed", "storage_protocol_error")
+
     result = {
         "created": stored.thread_created,
         "invitationCreated": stored.invite_created,
-        "collaboration": _build_owner_thread_dto(thread),
+        "collaboration": collaboration_dto,
         "invitation": _safe_v2_invitation_metadata(invitation),
     }
     if stored.invite_created:
@@ -1206,7 +1265,7 @@ def add_v2_participant_for_verified_owner(
     thread = normalize_v2_thread_record(mutated.get("record"))
     if thread is None:
         return _failure("malformed", "storage_protocol_error")
-    dto, dto_error = _build_verified_thread_dto(thread, capability)
+    dto, dto_error = _build_verified_owner_thread_dto(thread, capability)
     if dto_error is not None:
         return dto_error
     return _success(dto) if dto is not None else _failure("malformed", "storage_protocol_error")
@@ -1352,31 +1411,10 @@ def _read_v2_collaboration_for_owner(
 
     if owner_context is None:
         return _success(_build_owner_thread_dto(thread))
-    external_guests = None
     if capability.viewer_access == "owner":
-        current_time = int(time.time())
-        if not MIN_V2_TIMESTAMP_SECONDS <= current_time <= MAX_V2_TIMESTAMP_SECONDS:
-            return _failure("error", "invalid_request")
-        loaded_guests = _load_v2_external_guest_records(
-            thread["collaborationId"],
-            owner_email=thread["ownerEmail"],
-            workspace_id=thread["workspaceId"],
-            mailbox_id=thread["mailboxId"],
-            now=current_time,
-            session_normalizer=normalize_v2_guest_session_record,
-        )
-        if type(loaded_guests) is not dict or loaded_guests.get("status") != "ok":
-            return _create_storage_failure(loaded_guests)
-        external_guests = _project_v2_external_guests(
-            loaded_guests.get("records"), now=current_time
-        )
-        if external_guests is None:
-            return _failure("malformed", "storage_protocol_error")
-    dto, dto_error = _build_verified_thread_dto(
-        thread,
-        capability,
-        external_guests=external_guests,
-    )
+        dto, dto_error = _build_verified_owner_thread_dto(thread, capability)
+    else:
+        dto, dto_error = _build_verified_thread_dto(thread, capability)
     if dto_error is not None:
         return dto_error
     return _success(dto) if dto is not None else _failure("malformed", "storage_protocol_error")

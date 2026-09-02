@@ -3925,6 +3925,10 @@ class ParticipantAuthorityApplicationTests(unittest.TestCase):
             application,
             "_create_v2_thread",
             side_effect=create,
+        ), patch.object(
+            application,
+            "_load_v2_external_guest_records",
+            return_value={"status": "ok", "records": []},
         ), patch.object(application.time, "time_ns", return_value=NOW_MILLISECONDS * 1_000_000):
             result = application.create_v2_collaboration_for_verified_owner(
                 object(),
@@ -3951,6 +3955,7 @@ class ParticipantAuthorityApplicationTests(unittest.TestCase):
             ],
         )
         self.assertEqual(result["collaboration"]["viewerAccess"], "owner")
+        self.assertEqual(result["collaboration"]["externalGuests"], [])
         self.assertEqual(
             [person["access"] for person in result["collaboration"]["participants"]],
             ["owner", "participant"],
@@ -4025,6 +4030,7 @@ class ParticipantAuthorityApplicationTests(unittest.TestCase):
                 owner_security_configuration=object(),
             )
         self.assertEqual(result["collaboration"]["viewerAccess"], "owner")
+        self.assertEqual(result["collaboration"]["externalGuests"], [])
         self.assertEqual(
             result["collaboration"]["participants"],
             [{"userId": self.owner_user_id, "displayName": "Owner Person", "access": "owner"}],
@@ -4058,6 +4064,14 @@ class ParticipantAuthorityApplicationTests(unittest.TestCase):
         owner_capability = self.capability("manage_participants")
         modern = self.modern_thread()
         modern["participants"][0]["membershipRef"] = "tinv_new"
+        pending = {
+            **_invite_record(),
+            "workspaceId": self.workspace_id,
+            "status": "active",
+            "exchangedAt": None,
+            "exchangeCount": 0,
+        }
+        pending.pop("activeSessionHash")
         authorized = {"status": "ok", "context": owner_capability, "error": None}
         with patch.object(
             application,
@@ -4071,14 +4085,55 @@ class ParticipantAuthorityApplicationTests(unittest.TestCase):
             mutations,
             "add_v2_participant",
             return_value={"status": "ok", "record": modern, "changed": True, "error": None},
-        ) as add:
+        ) as add, patch.object(
+            application,
+            "_load_v2_external_guest_records",
+            return_value={
+                "status": "ok",
+                "records": [{"invite": pending, "session": None}],
+            },
+        ), patch.object(application.time, "time", return_value=NOW):
             result = application.add_v2_participant_for_verified_owner(
                 object(), object(), COLLABORATION_ID,
                 {"participantUserId": self.participant_user_id},
                 owner_security_configuration=object(),
             )
         self.assertEqual(result["status"], "ok")
+        self.assertEqual(
+            result["collaboration"]["externalGuests"],
+            [
+                {
+                    "inviteId": INVITE_ID,
+                    "status": "pending",
+                    "expiresAt": pending["expiresAt"],
+                }
+            ],
+        )
         self.assertEqual(add.call_args.args[1]["membershipRef"], "tinv_new")
+
+        with patch.object(
+            application,
+            "resolve_verified_owner_collaboration_context",
+            return_value=authorized,
+        ), patch.object(
+            application,
+            "_resolve_active_team_member",
+            return_value=(self.participant_membership("tinv_new"), None),
+        ), patch.object(
+            mutations,
+            "add_v2_participant",
+            return_value={"status": "ok", "record": modern, "changed": False, "error": None},
+        ), patch.object(
+            application,
+            "_load_v2_external_guest_records",
+            return_value={"status": "ok", "records": []},
+        ):
+            no_guests = application.add_v2_participant_for_verified_owner(
+                object(), object(), COLLABORATION_ID,
+                {"participantUserId": self.participant_user_id},
+                owner_security_configuration=object(),
+            )
+        self.assertEqual(no_guests["collaboration"]["externalGuests"], [])
 
         participant = self.capability("manage_participants", viewer_access="participant")
         with patch.object(
@@ -4159,6 +4214,15 @@ class ExternalGuestApplicationTests(unittest.TestCase):
                 application.time, "time_ns", return_value=NOW_MILLISECONDS * 1_000_000
             ), patch.object(
                 application, "_create_v2_thread_with_guest", side_effect=create
+            ), patch.object(
+                application,
+                "_load_v2_external_guest_records",
+                side_effect=lambda *_args, **_kwargs: {
+                    "status": "ok",
+                    "records": [{"invite": captured["invite"], "session": None}],
+                },
+            ), patch.object(
+                application.time, "time", return_value=NOW
             ):
                 result = application.create_v2_collaboration_with_guest_for_verified_owner(
                     object(), object(), payload,
@@ -4169,11 +4233,32 @@ class ExternalGuestApplicationTests(unittest.TestCase):
             self.assertEqual(result["token"], "R" * 43)
             self.assertNotIn("participants", captured["thread"])
             self.assertNotIn("ownerUserId", captured["thread"])
-            self.assertNotIn("externalGuests", result["collaboration"])
+            self.assertEqual(result["collaboration"]["viewerAccess"], "owner")
+            self.assertEqual(
+                result["collaboration"]["participants"],
+                [
+                    {
+                        "userId": self.owner_user_id,
+                        "displayName": "Owner Person",
+                        "access": "owner",
+                    }
+                ],
+            )
             expected_email = invited_email.lower() if invited_email is not None else None
+            expected_guest = {
+                "inviteId": INVITE_ID,
+                "status": "pending",
+                "expiresAt": captured["invite"]["expiresAt"],
+            }
+            if expected_email is not None:
+                expected_guest["invitedEmail"] = expected_email
+            self.assertEqual(
+                result["collaboration"]["externalGuests"], [expected_guest]
+            )
             self.assertEqual(captured["invite"].get("invitedEmail"), expected_email)
             self.assertEqual(result["invitation"].get("invitedEmail"), expected_email)
             self.assertNotIn("tokenHash", repr(result))
+            self.assertNotIn("token", repr(result["collaboration"]))
 
     def test_external_create_payload_is_distinct_and_malformed_email_never_persists(self):
         base = {
@@ -4213,7 +4298,11 @@ class ExternalGuestApplicationTests(unittest.TestCase):
             application, "generate_v2_opaque_id", side_effect=[COLLABORATION_ID, INVITE_ID]
         ), patch.object(application, "generate_v2_bearer_secret", return_value="R" * 43), patch.object(
             application.time, "time_ns", return_value=NOW_MILLISECONDS * 1_000_000
-        ), patch.object(application, "_create_v2_thread_with_guest", side_effect=duplicate):
+        ), patch.object(application, "_create_v2_thread_with_guest", side_effect=duplicate), patch.object(
+            application,
+            "_load_v2_external_guest_records",
+            return_value={"status": "ok", "records": []},
+        ):
             duplicate_result = application.create_v2_collaboration_with_guest_for_verified_owner(
                 object(), object(), {
                     "mailboxId": MAILBOX_ID,
@@ -4236,6 +4325,10 @@ class ExternalGuestApplicationTests(unittest.TestCase):
             application.time, "time_ns", return_value=NOW_MILLISECONDS * 1_000_000
         ), patch.object(
             application, "_create_v2_thread_with_guest", side_effect=added_to_existing
+        ), patch.object(
+            application,
+            "_load_v2_external_guest_records",
+            return_value={"status": "ok", "records": []},
         ):
             added = application.create_v2_collaboration_with_guest_for_verified_owner(
                 object(), object(), {
@@ -4353,6 +4446,40 @@ class ExternalGuestApplicationTests(unittest.TestCase):
             )
         self.assertNotIn("externalGuests", participant_result["collaboration"])
         load_guests.assert_not_called()
+
+    def test_owner_guest_projection_storage_failure_fails_closed(self):
+        thread = {
+            **_thread_record(),
+            "workspaceId": self.workspace_id,
+            "ownerUserId": self.owner_user_id,
+            "ownerDisplayName": "Owner Person",
+            "participants": [],
+        }
+        with patch.object(
+            application,
+            "resolve_verified_owner_collaboration_context",
+            return_value={
+                "status": "ok",
+                "context": self.capability("read"),
+                "error": None,
+            },
+        ), patch.object(
+            application, "_load_exact_thread", return_value=(thread, None)
+        ), patch.object(
+            application,
+            "_load_v2_external_guest_records",
+            return_value={
+                "status": "unavailable",
+                "error": {"code": "storage_unavailable"},
+            },
+        ):
+            result = application.read_v2_collaboration_for_verified_owner(
+                object(), object(), COLLABORATION_ID,
+                owner_security_configuration=object(),
+            )
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["error"], {"code": "storage_unavailable"})
+        self.assertIsNone(result["collaboration"])
 
 
 if __name__ == "__main__":

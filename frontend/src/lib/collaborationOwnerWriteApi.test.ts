@@ -17,6 +17,7 @@ type FetchOutcome = Response | (() => Promise<Response>);
 const COLLABORATION_ID = "A".repeat(22);
 const OWNER_USER_ID = `usr_${"A".repeat(22)}`;
 const PARTICIPANT_USER_ID = `usr_${"B".repeat(21)}A`;
+const EXTERNAL_GUEST_ID = "C".repeat(22);
 const NOW_MS = 1_800_000_000_000;
 
 function response(
@@ -50,7 +51,7 @@ function collaboration(
     "needs_review",
   viewerAccess: "owner" | "participant" = "owner",
 ) {
-  return {
+  const base = {
     collaborationId: COLLABORATION_ID,
     mailboxId,
     state,
@@ -87,6 +88,9 @@ function collaboration(
       },
     ],
   } as const;
+  return viewerAccess === "owner"
+    ? { ...base, viewerAccess, externalGuests: [] as const }
+    : { ...base, viewerAccess };
 }
 
 function createResponse(
@@ -680,6 +684,26 @@ async function run() {
       const malformed = [
         response(201, {
           ok: true,
+          data: {
+            created: true,
+            collaboration: (() => {
+              const { externalGuests: _externalGuests, ...missing } = authoritative;
+              return missing;
+            })(),
+          },
+        }),
+        response(201, {
+          ok: true,
+          data: {
+            created: true,
+            collaboration: {
+              ...authoritative,
+              externalGuests: [{ inviteId: "short", status: "pending", expiresAt: NOW_MS / 1000 }],
+            },
+          },
+        }),
+        response(201, {
+          ok: true,
           data: { created: true, collaboration: oldDto },
         }),
         response(201, {
@@ -860,12 +884,24 @@ async function run() {
 
     await test("sends the exact add-participant contract without idempotency or identity extras", reset, async () => {
       const calls: FetchCall[] = [];
+      const authoritative = {
+        ...collaboration("mailbox-google"),
+        externalGuests: [
+          {
+            inviteId: EXTERNAL_GUEST_ID,
+            status: "active",
+            expiresAt: NOW_MS / 1000,
+            invitedEmail: "reviewer@example.test",
+            displayName: "Guest Reviewer",
+          },
+        ],
+      } as const;
       installFetch(
         [
           csrfResponse("csrf-token"),
           response(200, {
             ok: true,
-            data: { collaboration: collaboration("mailbox-google") },
+            data: { collaboration: authoritative },
           }),
         ],
         calls,
@@ -877,7 +913,7 @@ async function run() {
         ),
         {
           status: "success",
-          collaboration: collaboration("mailbox-google"),
+          collaboration: authoritative,
         },
       );
       assert.equal(calls.length, 2);
@@ -1002,8 +1038,26 @@ async function run() {
 
     await test("rejects malformed add-participant success DTOs through the shared strict parser", reset, async () => {
       const valid = collaboration("mailbox-google");
+      const { externalGuests: _externalGuests, ...missingExternalGuests } = valid;
       const malformed = [
         { ok: true, data: {} },
+        { ok: true, data: { collaboration: missingExternalGuests } },
+        {
+          ok: true,
+          data: {
+            collaboration: {
+              ...valid,
+              externalGuests: [
+                {
+                  inviteId: EXTERNAL_GUEST_ID,
+                  status: "active",
+                  expiresAt: NOW_MS / 1000,
+                  tokenHash: "secret",
+                },
+              ],
+            },
+          },
+        },
         { ok: true, data: { collaboration: { ...valid, viewerAccess: "guest" } } },
         {
           ok: true,

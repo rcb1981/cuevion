@@ -19,6 +19,8 @@ const MESSAGE_ID = "B".repeat(22);
 const OWNER_USER_ID = `usr_${"A".repeat(22)}`;
 const PARTICIPANT_USER_ID = `usr_${"B".repeat(21)}A`;
 const SECOND_PARTICIPANT_USER_ID = `usr_${"C".repeat(21)}A`;
+const PENDING_GUEST_ID = "C".repeat(22);
+const ACTIVE_GUEST_ID = "D".repeat(22);
 const NOW_MS = 1_800_000_000_000;
 const googleLocator = {
   mailboxId: "mailbox-1",
@@ -61,6 +63,7 @@ const collaboration = {
       access: "participant",
     },
   ],
+  externalGuests: [],
 } as const;
 
 function response(
@@ -317,6 +320,7 @@ async function run() {
         assert.deepEqual(Object.keys(result.collaboration).sort(), [
           "collaborationId",
           "createdAt",
+          "externalGuests",
           "mailboxId",
           "messages",
           "participants",
@@ -332,11 +336,97 @@ async function run() {
     });
 
     await test("accepts a valid participant-viewer DTO", async () => {
+      const { externalGuests: _externalGuests, ...participantBase } = collaboration;
       const dto = {
-        ...collaboration,
+        ...participantBase,
         viewerAccess: "participant",
       };
       assert.deepEqual(parseCollaborationOwnerReadDto(dto), dto);
+    });
+
+    await test("strictly parses the canonical owner external guest projection", async () => {
+      const pending = {
+        inviteId: PENDING_GUEST_ID,
+        status: "pending",
+        expiresAt: NOW_MS / 1000,
+        invitedEmail: "reviewer@example.test",
+      } as const;
+      const active = {
+        inviteId: ACTIVE_GUEST_ID,
+        status: "active",
+        expiresAt: NOW_MS / 1000 + 1,
+        invitedEmail: "active@example.test",
+        displayName: "Guest Reviewer",
+      } as const;
+      const dto = { ...collaboration, externalGuests: [pending, active] };
+      assert.deepEqual(parseCollaborationOwnerReadDto(dto), dto);
+      assert.deepEqual(
+        parseCollaborationOwnerReadDto({ ...collaboration, externalGuests: [pending] }),
+        { ...collaboration, externalGuests: [pending] },
+      );
+    });
+
+    await test("rejects viewer/guest shape confusion and malformed guest authority", async () => {
+      const { externalGuests: _externalGuests, ...missingExternalGuests } = collaboration;
+      const pending = {
+        inviteId: PENDING_GUEST_ID,
+        status: "pending",
+        expiresAt: NOW_MS / 1000,
+        invitedEmail: "reviewer@example.test",
+      } as const;
+      const active = {
+        inviteId: ACTIVE_GUEST_ID,
+        status: "active",
+        expiresAt: NOW_MS / 1000 + 1,
+        displayName: "Guest Reviewer",
+      } as const;
+      const malformedValues: unknown[] = [
+        missingExternalGuests,
+        { ...missingExternalGuests, viewerAccess: "participant", externalGuests: [] },
+        { ...collaboration, externalGuests: [{ ...pending, inviteId: "short" }] },
+        { ...collaboration, externalGuests: [{ ...pending, status: "invited" }] },
+        { ...collaboration, externalGuests: [{ ...pending, expiresAt: NOW_MS }] },
+        {
+          ...collaboration,
+          externalGuests: [{ ...pending, invitedEmail: "Reviewer@example.test" }],
+        },
+        {
+          ...collaboration,
+          externalGuests: [{ ...active, displayName: "Guest\nReviewer" }],
+        },
+        { ...collaboration, externalGuests: [{ ...pending, displayName: "Reviewer" }] },
+        { ...collaboration, externalGuests: [{ ...pending, tokenHash: "secret" }] },
+        { ...collaboration, externalGuests: [pending, pending] },
+        { ...collaboration, externalGuests: [active, pending] },
+        {
+          ...collaboration,
+          externalGuests: Array.from({ length: 17 }, (_, index) => ({
+            ...pending,
+            inviteId: `${String.fromCharCode(65 + index).repeat(22)}`,
+          })),
+        },
+      ];
+      for (const malformed of malformedValues) {
+        assert.equal(parseCollaborationOwnerReadDto(malformed), null);
+      }
+      for (const securityField of [
+        "token",
+        "sessionHash",
+        "csrfToken",
+        "csrfTokenHash",
+        "ownerEmail",
+        "workspaceId",
+        "mailboxId",
+        "redisKey",
+      ]) {
+        assert.equal(
+          parseCollaborationOwnerReadDto({
+            ...collaboration,
+            externalGuests: [{ ...pending, [securityField]: "secret" }],
+          }),
+          null,
+        );
+      }
     });
 
     await test("strictly validates participant authority projection", async () => {
@@ -419,6 +509,10 @@ async function run() {
 
     await test("fails closed for partial, malformed, or legacy-extended success DTOs", async () => {
       const malformedValues = [
+        (() => {
+          const { externalGuests: _externalGuests, ...missing } = collaboration;
+          return missing;
+        })(),
         { ...collaboration, mailboxId: undefined },
         { ...collaboration, state: "open" },
         { ...collaboration, participants: undefined },
