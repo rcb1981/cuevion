@@ -22,6 +22,7 @@ from .models import (
     hash_v2_secret,
     normalize_v2_email,
     normalize_v2_thread_record,
+    normalize_v2_workspace_id,
     MAX_V2_GUEST_SESSION_LIFETIME_SECONDS,
     MIN_V2_TIMESTAMP_SECONDS,
     MAX_V2_TIMESTAMP_SECONDS,
@@ -154,7 +155,7 @@ def normalize_v2_guest_session_record(value: object) -> dict | None:
     session_hash = value.get("sessionHash")
     csrf_hash = value.get("csrfTokenHash")
     owner_email = normalize_v2_email(value.get("ownerEmail"))
-    workspace_id = normalize_v2_email(value.get("workspaceId"))
+    workspace_id = normalize_v2_workspace_id(value.get("workspaceId"))
     guest_display_name = _bounded_string(value.get("guestDisplayName"), 256)
     timestamps: dict[str, int | None] = {}
     for key in ("createdAt", "lastUsedAt", "expiresAt"):
@@ -183,7 +184,6 @@ def normalize_v2_guest_session_record(value: object) -> dict | None:
         or not owner_email
         or value.get("ownerEmail") != owner_email
         or value.get("workspaceId") != workspace_id
-        or workspace_id != owner_email
         or not isinstance(value.get("collaborationId"), str)
         or not _OPAQUE_ID_RE.fullmatch(value["collaborationId"])
         or value.get("allowedActions") != ["read", "reply"]
@@ -262,8 +262,8 @@ def issue_v2_invitation(
     if (
         not isinstance(collaboration_id, str)
         or collaboration_id != capability_collaboration_id
-        or owner_email is None
-        or workspace_id != owner_email
+        or normalize_v2_email(owner_email) != owner_email
+        or normalize_v2_workspace_id(workspace_id) != workspace_id
         or not _bounded_string(mailbox_id, 256)
         or creator_email != owner_email
         or not creator_name
@@ -299,7 +299,7 @@ def issue_v2_invitation(
         "inviteId": generate_v2_opaque_id(),
         "tokenHash": token_hash,
         "ownerEmail": thread["ownerEmail"],
-        "workspaceId": workspace_id,
+        "workspaceId": thread["workspaceId"],
         "mailboxId": thread["mailboxId"],
         "collaborationId": thread["collaborationId"],
         "identityAssurance": "link_possession",
@@ -609,12 +609,20 @@ def revoke_invitation_for_owner(
 ) -> dict:
     current_time = int(time.time()) if now is None else now
     valid_capability = _is_internal_capability(context, actions={"revoke_invite"})
-    normalized_owner = context.owner_email if valid_capability else None
+    normalized_owner = (
+        normalize_v2_email(context.owner_email) if valid_capability else None
+    )
+    normalized_workspace = (
+        normalize_v2_workspace_id(context.workspace_id)
+        if valid_capability
+        else None
+    )
     normalized_revoker = normalized_owner
     if (
         not valid_capability
         or normalized_owner is None
-        or context.workspace_id != normalized_owner
+        or context.owner_email != normalized_owner
+        or normalized_workspace != context.workspace_id
         or type(current_time) is not int
         or not MIN_V2_TIMESTAMP_SECONDS <= current_time <= MAX_V2_TIMESTAMP_SECONDS
     ):
@@ -630,7 +638,7 @@ def revoke_invitation_for_owner(
     if (
         canonical is None
         or canonical["ownerEmail"] != normalized_owner
-        or canonical["workspaceId"] != normalized_owner
+        or canonical["workspaceId"] != normalized_workspace
         or canonical["mailboxId"] != context.mailbox_id
         or canonical["collaborationId"] != collaboration_id
     ):

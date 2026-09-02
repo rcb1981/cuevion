@@ -557,11 +557,12 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
 
         seconds = 1_800_000_000
         milliseconds = seconds * 1000
+        workspace_id = "wsp_" + "W" * 22
         thread = {
             "v": 2,
             "collaborationId": "A" * 22,
             "ownerEmail": "owner@example.com",
-            "workspaceId": "owner@example.com",
+            "workspaceId": workspace_id,
             "mailboxId": "mailbox-1",
             "sourceRef": {"provider": "google", "providerMessageId": "gmail-1"},
             "sourceMessage": {
@@ -578,26 +579,17 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
         }
 
         def mint_internal(action: str):
-            result = authorization.resolve_internal_collaboration_context(
-                [],
-                "mailbox-1",
-                collaboration_id=thread["collaborationId"],
-                required_action=action,
-                user_resolver=lambda _headers: (
-                    {"email": "owner@example.com", "name": "Owner"},
-                    None,
-                ),
-                mailbox_resolver=lambda _headers, mailbox_id: {
-                    "status": "ok",
-                    "user": {"email": "owner@example.com"},
-                    "inbox": {"id": mailbox_id, "provider": "google"},
-                },
-                thread_loader=lambda _collaboration_id: {
-                    "status": "ok", "record": thread,
-                },
+            return authorization._InternalCollaborationCapability(
+                authorization._INTERNAL_CAPABILITY_SENTINEL,
+                thread["ownerEmail"],
+                workspace_id,
+                thread["mailboxId"],
+                "google",
+                thread["collaborationId"],
+                action,
+                "owner",
+                "Owner",
             )
-            self.assertEqual(result["status"], "ok")
-            return result["context"]
 
         reply_context = mint_internal("reply")
         create_context = mint_internal("create")
@@ -605,6 +597,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
         self.assertEqual(
             type(reply_context).__module__, "api.collaboration.authorization"
         )
+        self.assertEqual(reply_context.workspace_id, workspace_id)
         with patch.object(models.time, "time_ns", return_value=(milliseconds + 101) * 1_000_000):
             self.assertIsNotNone(models.build_v2_owner_shared_message(reply_context, "Reply"))
 
@@ -714,7 +707,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             "sessionHash": models.hash_v2_secret(raw_session_id),
             "inviteId": "I" * 22,
             "ownerEmail": "owner@example.com",
-            "workspaceId": "owner@example.com",
+            "workspaceId": workspace_id,
             "mailboxId": "mailbox-1",
             "collaborationId": thread["collaborationId"],
             "allowedActions": ["read", "reply"],

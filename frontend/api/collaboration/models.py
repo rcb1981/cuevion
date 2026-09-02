@@ -1001,7 +1001,7 @@ else:
         invite_id = value.get("inviteId")
         token_hash = value.get("tokenHash")
         owner_email = normalize_v2_email(value.get("ownerEmail"))
-        workspace_id = normalize_v2_email(value.get("workspaceId"))
+        workspace_id = normalize_v2_workspace_id(value.get("workspaceId"))
         mailbox_id = _v2_mailbox_id(value.get("mailboxId"))
         collaboration_id = value.get("collaborationId")
         invited_email = (
@@ -1025,7 +1025,6 @@ else:
             or not owner_email
             or value.get("ownerEmail") != owner_email
             or value.get("workspaceId") != workspace_id
-            or workspace_id != owner_email
             or not mailbox_id
             or not is_v2_opaque_id(collaboration_id)
             or (

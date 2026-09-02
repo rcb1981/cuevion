@@ -1592,7 +1592,7 @@ else:
       if count < 18 or count > 20 or invite.v ~= '2' or not exactInteger(invite.v)
         or not opaqueId(invite.inviteId) or type(invite.tokenHash) ~= 'string'
         or #invite.tokenHash ~= 64 or string.match(invite.tokenHash, '^[0-9a-f]+$') == nil
-        or not canonicalEmail(invite.ownerEmail) or invite.workspaceId ~= invite.ownerEmail
+        or not canonicalEmail(invite.ownerEmail) or not canonicalWorkspaceId(invite.workspaceId)
         or not mailboxId(invite.mailboxId) or not opaqueId(invite.collaborationId)
         or invite.identityAssurance ~= 'link_possession'
         or not denseStringArray(invite.allowedActions, 'read', 'reply')
@@ -1643,7 +1643,7 @@ else:
       if keyCount(session) ~= 18 or session.v ~= '2' or not exactInteger(session.v)
         or type(session.sessionHash) ~= 'string' or #session.sessionHash ~= 64 or string.match(session.sessionHash, '^[0-9a-f]+$') == nil
         or type(session.csrfTokenHash) ~= 'string' or #session.csrfTokenHash ~= 64 or string.match(session.csrfTokenHash, '^[0-9a-f]+$') == nil
-        or not opaqueId(session.inviteId) or not canonicalEmail(session.ownerEmail) or session.workspaceId ~= session.ownerEmail
+        or not opaqueId(session.inviteId) or not canonicalEmail(session.ownerEmail) or not canonicalWorkspaceId(session.workspaceId)
         or not mailboxId(session.mailboxId) or not opaqueId(session.collaborationId)
         or not denseStringArray(session.allowedActions, 'read', 'reply') or session.visibility ~= 'shared_only'
         or session.identityAssurance ~= 'link_possession' or not displayString(session.guestDisplayName, 256, false)
@@ -3613,7 +3613,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
             type(now) is not int
             or not MIN_V2_TIMESTAMP_SECONDS <= now <= MAX_V2_TIMESTAMP_SECONDS
             or normalize_v2_email(owner_email) != owner_email
-            or workspace_id != owner_email
+            or normalize_v2_workspace_id(workspace_id) != workspace_id
             or revoked_by != owner_email
         ):
             return {"status": "malformed", "error": {"code": "invalid_request"}}
@@ -3745,7 +3745,8 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
             type(now) is not int
             or not MIN_V2_TIMESTAMP_SECONDS <= now <= MAX_V2_TIMESTAMP_SECONDS
             or normalized_owner is None
-            or workspace_id != normalized_owner
+            or owner_email != normalized_owner
+            or normalize_v2_workspace_id(workspace_id) != workspace_id
             or not isinstance(mailbox_id, str)
             or not re.fullmatch(r"[a-z0-9][a-z0-9._:-]{0,255}", mailbox_id)
             or build_v2_thread_key(collaboration_id) is None

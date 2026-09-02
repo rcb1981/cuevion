@@ -29,6 +29,8 @@ INVITE_ID = "I" * 22
 MAILBOX_ID = "mailbox-1"
 OWNER_EMAIL = "owner@example.com"
 OTHER_OWNER_EMAIL = "other@example.com"
+GUEST_WORKSPACE_ID = "wsp_" + "G" * 22
+OTHER_GUEST_WORKSPACE_ID = "wsp_" + "H" * 22
 NOW = 1_800_000_000
 NOW_MILLISECONDS = NOW * 1000
 RAW_SESSION_ID = "RawGuestSessionPrivateMarker" + ("x" * 15)
@@ -95,7 +97,7 @@ def _session_record() -> dict:
         "sessionHash": session_hash,
         "inviteId": INVITE_ID,
         "ownerEmail": OWNER_EMAIL,
-        "workspaceId": OWNER_EMAIL,
+        "workspaceId": GUEST_WORKSPACE_ID,
         "mailboxId": MAILBOX_ID,
         "collaborationId": COLLABORATION_ID,
         "allowedActions": ["read", "reply"],
@@ -120,7 +122,7 @@ def _invite_record() -> dict:
         "inviteId": INVITE_ID,
         "tokenHash": "a" * 64,
         "ownerEmail": OWNER_EMAIL,
-        "workspaceId": OWNER_EMAIL,
+        "workspaceId": GUEST_WORKSPACE_ID,
         "mailboxId": MAILBOX_ID,
         "collaborationId": COLLABORATION_ID,
         "identityAssurance": "link_possession",
@@ -314,9 +316,33 @@ def _guest_store(
     invite: dict | None = None,
 ) -> StatefulV2Store:
     store = StatefulV2Store()
-    thread_record = _thread_record() if thread is None else thread
-    session_record = _session_record() if session is None else session
-    invite_record = _invite_record() if invite is None else invite
+    thread_record = (
+        {
+            **_thread_record(),
+            "workspaceId": GUEST_WORKSPACE_ID,
+            "ownerUserId": "usr_" + "A" * 22,
+            "ownerDisplayName": "Owner Person",
+            "participants": [
+                {
+                    "userId": "usr_" + "B" * 21 + "A",
+                    "membershipRef": "tinv_guest_read_fixture",
+                    "displayName": "Internal Teammate",
+                }
+            ],
+        }
+        if thread is None
+        else thread
+    )
+    session_record = (
+        {**_session_record(), "workspaceId": GUEST_WORKSPACE_ID}
+        if session is None
+        else session
+    )
+    invite_record = (
+        {**_invite_record(), "workspaceId": GUEST_WORKSPACE_ID}
+        if invite is None
+        else invite
+    )
     store.put_json(
         redis_store.build_v2_thread_key(COLLABORATION_ID),
         thread_record,
@@ -3488,7 +3514,7 @@ class GuestReadApplicationTests(unittest.TestCase):
     def test_invitation_thread_scope_mismatch_and_cross_thread_attempts_fail(self):
         mismatched_thread = _thread_record()
         mismatched_thread["ownerEmail"] = OTHER_OWNER_EMAIL
-        mismatched_thread["workspaceId"] = OTHER_OWNER_EMAIL
+        mismatched_thread["workspaceId"] = OTHER_GUEST_WORKSPACE_ID
         store = _guest_store(thread=mismatched_thread)
         result = _read_guest(store)
         self.assertEqual(result["error"], {"code": "forbidden"})

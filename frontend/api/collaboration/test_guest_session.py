@@ -14,12 +14,13 @@ CSRF_TOKEN = "c" * 43
 INVITE_TOKEN = "i" * 43
 SEC = 1_800_000_000
 MS = SEC * 1000
+WORKSPACE_ID = "wsp_" + "W" * 22
 
 
 def thread_record() -> dict:
     return {
         "v": 2, "collaborationId": "A" * 22,
-        "ownerEmail": "owner@example.com", "workspaceId": "owner@example.com",
+        "ownerEmail": "owner@example.com", "workspaceId": WORKSPACE_ID,
         "mailboxId": "mailbox-1",
         "sourceRef": {"provider": "google", "providerMessageId": "gmail-1"},
         "sourceMessage": {
@@ -33,7 +34,7 @@ def thread_record() -> dict:
 def invite_record(*, status="active", expires_at=SEC + 100 + 86_400) -> dict:
     record = {
         "v": 2, "inviteId": "B" * 22, "tokenHash": hash_v2_secret(INVITE_TOKEN),
-        "ownerEmail": "owner@example.com", "workspaceId": "owner@example.com",
+        "ownerEmail": "owner@example.com", "workspaceId": WORKSPACE_ID,
         "mailboxId": "mailbox-1", "collaborationId": "A" * 22,
         "identityAssurance": "link_possession", "allowedActions": ["read", "reply"],
         "visibility": "shared_only",
@@ -52,7 +53,7 @@ def invite_record(*, status="active", expires_at=SEC + 100 + 86_400) -> dict:
 def session_record() -> dict:
     return {
         "v": 2, "sessionHash": hash_v2_secret(SESSION_ID), "inviteId": "B" * 22,
-        "ownerEmail": "owner@example.com", "workspaceId": "owner@example.com",
+        "ownerEmail": "owner@example.com", "workspaceId": WORKSPACE_ID,
         "mailboxId": "mailbox-1", "collaborationId": "A" * 22,
         "allowedActions": ["read", "reply"], "visibility": "shared_only",
         "identityAssurance": "link_possession", "guestDisplayName": "Reviewer",
@@ -78,12 +79,13 @@ def internal_capability(action: str, *, display_name: str = "Owner"):
             "inbox": {"id": mailbox_id, "provider": "google"},
         },
         thread_loader=lambda _collaboration_id: {
-            "status": "ok", "record": thread_record()
+            "status": "ok",
+            "record": {**thread_record(), "workspaceId": "owner@example.com"},
         },
     )
     if result["status"] != "ok":
         raise AssertionError(result)
-    return result["context"]
+    return replace(result["context"], workspace_id=WORKSPACE_ID)
 
 
 class CollaborationV2GuestSessionTests(unittest.TestCase):
@@ -95,6 +97,14 @@ class CollaborationV2GuestSessionTests(unittest.TestCase):
         record = session_record()
         record["visibility"] = "internal"
         self.assertIsNone(guest_session.normalize_v2_guest_session_record(record))
+        for malformed_workspace in (
+            "owner@example.com",
+            "wsp_short",
+            "wsp_" + "W" * 21 + ".",
+        ):
+            record = session_record()
+            record["workspaceId"] = malformed_workspace
+            self.assertIsNone(guest_session.normalize_v2_guest_session_record(record))
 
     def test_session_terminal_state_matrix_requires_one_immutable_audit(self):
         active = session_record()
@@ -174,6 +184,8 @@ class CollaborationV2GuestSessionTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(captured[0]["expiresAt"] - captured[0]["createdAt"], 86_400)
         self.assertEqual(captured[0]["invitedEmail"], "reviewer@example.com")
+        self.assertEqual(captured[0]["workspaceId"], WORKSPACE_ID)
+        self.assertNotEqual(captured[0]["ownerEmail"], captured[0]["workspaceId"])
         self.assertNotIn(result["token"], repr(captured[0]))
         self.assertEqual(captured[0]["tokenHash"], hash_v2_secret(result["token"]))
 
@@ -208,6 +220,35 @@ class CollaborationV2GuestSessionTests(unittest.TestCase):
         )
         self.assertEqual(denied["error"]["code"], "invalid_request")
 
+        for label, changed_context, changed_thread, expected_code in (
+            (
+                "malformed-capability-workspace",
+                replace(context, workspace_id="owner@example.com"),
+                thread_record(),
+                "invalid_request",
+            ),
+            (
+                "capability-thread-workspace-mismatch",
+                context,
+                {**thread_record(), "workspaceId": "wsp_" + "X" * 22},
+                "forbidden",
+            ),
+        ):
+            with self.subTest(label=label), patch.object(
+                guest_session, "_create_v2_invite"
+            ) as invite_store:
+                rejected = guest_session.issue_v2_invitation(
+                    changed_context,
+                    "A" * 22,
+                    now=SEC + 100,
+                    thread_loader=lambda *_args, record=changed_thread, **_kwargs: {
+                        "status": "ok",
+                        "record": record,
+                    },
+                )
+            self.assertEqual(rejected["error"]["code"], expected_code)
+            invite_store.assert_not_called()
+
     def test_invitation_revocation_derives_actor_from_resolved_context(self):
         thread = thread_record()
         context = internal_capability("revoke_invite")
@@ -235,10 +276,28 @@ class CollaborationV2GuestSessionTests(unittest.TestCase):
         self.assertEqual(result["session"]["expiresAt"], SEC + 100 + 28_800)
         self.assertEqual(captured[0]["session_ttl"], 28_800)
         persisted = captured[0]["session_record"]
+        self.assertEqual(persisted["workspaceId"], WORKSPACE_ID)
+        self.assertNotEqual(persisted["ownerEmail"], persisted["workspaceId"])
         self.assertNotIn(result["sessionId"], repr(persisted))
         self.assertNotIn(result["csrfToken"], repr(persisted))
         self.assertEqual(persisted["sessionHash"], hash_v2_secret(result["sessionId"]))
         self.assertEqual(persisted["csrfTokenHash"], hash_v2_secret(result["csrfToken"]))
+
+        historical = {**invite_record(), "workspaceId": "owner@example.com"}
+        with patch.object(
+            guest_session,
+            "_load_v2_invite_by_token",
+            return_value={"status": "ok", "record": historical},
+        ), patch.object(guest_session, "_atomic_exchange_v2_invite") as exchange:
+            rejected = guest_session.exchange_v2_invitation(
+                INVITE_TOKEN,
+                guest_display_name="Reviewer",
+                now=SEC + 100,
+            )
+        self.assertEqual(rejected["error"]["code"], "invalid_request")
+        self.assertNotIn("sessionId", rejected)
+        self.assertNotIn("csrfToken", rejected)
+        exchange.assert_not_called()
 
     def test_exchange_is_single_use_under_racing_attempts(self):
         outcomes = [{"status": "ok"}, {"status": "exchanged", "error": {"code": "invite_already_exchanged"}}]
@@ -349,6 +408,14 @@ class CollaborationV2GuestSessionTests(unittest.TestCase):
         session = session_record()
         invite = invite_record(status="exchanged")
         invite["activeSessionHash"] = "f" * 64
+        with patch.object(guest_session, "_load_v2_guest_session_record", return_value={"status": "ok", "record": session}), patch.object(guest_session, "_load_v2_invite_by_id", return_value={"status": "ok", "record": invite}):
+            result = guest_session._bootstrap_v2_guest_session_read_only(
+                SESSION_ID, now=SEC + 200
+            )
+        self.assertEqual(result["error"]["code"], "session_revoked")
+        invite = invite_record(status="exchanged")
+        invite["activeSessionHash"] = session["sessionHash"]
+        invite["workspaceId"] = "wsp_" + "X" * 22
         with patch.object(guest_session, "_load_v2_guest_session_record", return_value={"status": "ok", "record": session}), patch.object(guest_session, "_load_v2_invite_by_id", return_value={"status": "ok", "record": invite}):
             result = guest_session._bootstrap_v2_guest_session_read_only(
                 SESSION_ID, now=SEC + 200

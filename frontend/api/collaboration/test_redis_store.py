@@ -41,10 +41,60 @@ from .redis_store import (
     _v2_json_from_wire,
     _v2_wire_json,
 )
-from .v2_stateful_test_store import StatefulV2Store
+from .v2_stateful_test_store import StatefulV2Store as _StatefulV2Store
 
 SEC = 1_800_000_000
 MS = SEC * 1000
+WORKSPACE_ID = "wsp_" + "W" * 22
+OTHER_WORKSPACE_ID = "wsp_" + "X" * 22
+
+
+class StatefulV2Store(_StatefulV2Store):
+    """Keep the non-authoritative simulator aligned with canonical guest scope."""
+
+    def _revoke_invite(self, keys, args):
+        invite = self.get_json(keys[0])
+        if invite is None:
+            return {"status": "missing"}
+        if redis_store.normalize_v2_invite_record(invite) is None:
+            return {"status": "malformed"}
+        if (
+            invite.get("ownerEmail") != args[0]
+            or invite.get("workspaceId") != args[1]
+            or invite.get("mailboxId") != args[2]
+            or invite.get("collaborationId") != args[3]
+            or invite.get("inviteId") != args[4]
+            or args[5] != args[0]
+            or args[6] != "revoke_invite"
+        ):
+            return {"status": "forbidden"}
+        if invite.get("v") != 2:
+            return {"status": "malformed"}
+        if invite.get("status") == "revoked":
+            return {"status": "already_revoked"}
+        if invite.get("activeSessionHash") and len(keys) < 2:
+            return {"status": "retry"}
+        now = int(args[7])
+        if len(keys) > 1 and keys[1] in self.values:
+            session = self.get_json(keys[1])
+            if (
+                normalize_v2_guest_session_record(session) is None
+                or session.get("sessionHash") != invite.get("activeSessionHash")
+                or session.get("inviteId") != invite.get("inviteId")
+                or session.get("ownerEmail") != invite.get("ownerEmail")
+                or session.get("workspaceId") != invite.get("workspaceId")
+                or session.get("mailboxId") != invite.get("mailboxId")
+                or session.get("collaborationId") != invite.get("collaborationId")
+                or session.get("allowedActions") != ["read", "reply"]
+                or session.get("visibility") != "shared_only"
+                or session.get("expiresAt", 0) > invite.get("expiresAt", -1)
+            ):
+                return {"status": "malformed"}
+            session.update(status="revoked", revokedAt=now)
+            self.put_json(keys[1], session)
+        invite.update(status="revoked", revokedAt=now, revokedBy=args[5])
+        self.put_json(keys[0], invite)
+        return {"status": "revoked_ok"}
 
 
 def _seconds(value):
@@ -92,7 +142,7 @@ def revoke_v2_guest_session(raw_session_id, *, now, command_transport):
         hash_v2_secret(raw_session_id),
         invite_id="B" * 22,
         owner_email="owner@example.com",
-        workspace_id="owner@example.com",
+        workspace_id=WORKSPACE_ID,
         mailbox_id="mailbox-1",
         collaboration_id="A" * 22,
         now=_seconds(now),
@@ -117,7 +167,7 @@ def revoke_v2_invite(invite_id, *, owner_email, revoked_by, now, command_transpo
     return _revoke_v2_invite(
         invite_id,
         owner_email=owner_email,
-        workspace_id=owner_email,
+        workspace_id=WORKSPACE_ID,
         mailbox_id="mailbox-1",
         collaboration_id="A" * 22,
         revoked_by=revoked_by,
@@ -129,7 +179,7 @@ def revoke_v2_invite(invite_id, *, owner_email, revoked_by, now, command_transpo
 def thread_record() -> dict:
     return {
         "v": 2, "collaborationId": "A" * 22,
-        "ownerEmail": "owner@example.com", "workspaceId": "owner@example.com",
+        "ownerEmail": "owner@example.com", "workspaceId": WORKSPACE_ID,
         "mailboxId": "mailbox-1",
         "sourceRef": {"provider": "google", "providerMessageId": "gmail-1"},
         "sourceMessage": {
@@ -143,7 +193,7 @@ def thread_record() -> dict:
 def invite_record() -> dict:
     return {
         "v": 2, "inviteId": "B" * 22, "tokenHash": "c" * 64,
-        "ownerEmail": "owner@example.com", "workspaceId": "owner@example.com",
+        "ownerEmail": "owner@example.com", "workspaceId": WORKSPACE_ID,
         "mailboxId": "mailbox-1", "collaborationId": "A" * 22,
         "invitedEmail": "reviewer@example.com", "identityAssurance": "link_possession",
         "allowedActions": ["read", "reply"], "visibility": "shared_only",
@@ -354,7 +404,7 @@ class CollaborationV2RedisStoreTests(unittest.TestCase):
 
         session = {
             "v": 2, "sessionHash": hash_v2_secret("s" * 43), "csrfTokenHash": hash_v2_secret("c" * 43),
-            "inviteId": "B" * 22, "ownerEmail": "owner@example.com", "workspaceId": "owner@example.com",
+            "inviteId": "B" * 22, "ownerEmail": "owner@example.com", "workspaceId": WORKSPACE_ID,
             "mailboxId": "mailbox-1", "collaborationId": "A" * 22,
             "allowedActions": ["read", "reply"], "visibility": "shared_only", "identityAssurance": "link_possession",
             "guestDisplayName": "Guest", "createdAt": 101, "lastUsedAt": 101, "expiresAt": 150,
@@ -375,7 +425,7 @@ class CollaborationV2RedisStoreTests(unittest.TestCase):
         session = {
             "v": 2, "sessionHash": hash_v2_secret("s" * 43),
             "csrfTokenHash": hash_v2_secret("c" * 43), "inviteId": "B" * 22,
-            "ownerEmail": "owner@example.com", "workspaceId": "owner@example.com",
+            "ownerEmail": "owner@example.com", "workspaceId": WORKSPACE_ID,
             "mailboxId": "mailbox-1", "collaborationId": "A" * 22,
             "allowedActions": ["read", "reply"], "visibility": "shared_only",
             "identityAssurance": "link_possession", "guestDisplayName": "Guest",
@@ -523,6 +573,7 @@ class CollaborationV2RedisStoreTests(unittest.TestCase):
 
         result = load_v2_thread_by_source(
             "owner@example.com", "mailbox-1", record["sourceRef"],
+            workspace_id=record["workspaceId"],
             command_transport=transport,
         )
         self.assertEqual(result["status"], "ok")
@@ -532,6 +583,7 @@ class CollaborationV2RedisStoreTests(unittest.TestCase):
         mismatch_calls = []
         mismatch = load_v2_thread_by_source(
             "owner@example.com", "mailbox-1", record["sourceRef"],
+            workspace_id=record["workspaceId"],
             command_transport=lambda command: (
                 mismatch_calls.append(command)
                 or {"result": json.dumps({"status": "found", "collaborationId": record["collaborationId"]}) if len(mismatch_calls) == 1 else wire_json(mismatched, "thread")}
@@ -800,7 +852,7 @@ class CollaborationV2RedisStoreTests(unittest.TestCase):
         invite["tokenHash"] = hash_v2_secret(raw_token)
         create_v2_invite(invite, now=100, command_transport=store)
         for overrides in (
-            {"workspace_id": "other@example.com"},
+            {"workspace_id": OTHER_WORKSPACE_ID},
             {"mailbox_id": "mailbox-other"},
             {"collaboration_id": "Z" * 22},
         ):

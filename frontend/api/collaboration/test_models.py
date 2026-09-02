@@ -18,6 +18,7 @@ from .models import (
 
 SEC = 1_800_000_000
 MS = SEC * 1000
+WORKSPACE_ID = "wsp_" + "W" * 22
 
 
 def sample_thread() -> dict:
@@ -25,7 +26,7 @@ def sample_thread() -> dict:
         "v": 2,
         "collaborationId": "A" * 22,
         "ownerEmail": "owner@example.com",
-        "workspaceId": "owner@example.com",
+        "workspaceId": WORKSPACE_ID,
         "mailboxId": "mailbox-1",
         "sourceRef": {"provider": "google", "providerMessageId": "gmail-1"},
         "sourceMessage": {
@@ -65,7 +66,7 @@ def sample_invite() -> dict:
         "inviteId": "D" * 22,
         "tokenHash": "a" * 64,
         "ownerEmail": "owner@example.com",
-        "workspaceId": "owner@example.com",
+        "workspaceId": WORKSPACE_ID,
         "mailboxId": "mailbox-1",
         "collaborationId": "A" * 22,
         "invitedEmail": "reviewer@example.com",
@@ -306,6 +307,16 @@ class CollaborationV2ModelTests(unittest.TestCase):
     def test_invitation_schema_enforces_possession_capabilities_and_state(self):
         normalized = normalize_v2_invite_record(sample_invite())
         self.assertEqual(normalized["invitedEmail"], "reviewer@example.com")
+        self.assertEqual(normalized["workspaceId"], WORKSPACE_ID)
+        self.assertNotEqual(normalized["workspaceId"], normalized["ownerEmail"])
+        for malformed_workspace in (
+            "owner@example.com",
+            "wsp_short",
+            "wsp_" + "W" * 21 + ".",
+        ):
+            malformed = sample_invite()
+            malformed["workspaceId"] = malformed_workspace
+            self.assertIsNone(normalize_v2_invite_record(malformed))
         for field, value in (
             ("allowedActions", ["read", "reply", "resolve"]),
             ("visibility", "all"),

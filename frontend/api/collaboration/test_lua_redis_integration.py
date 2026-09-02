@@ -43,6 +43,8 @@ TTL_OBSERVATION_TOLERANCE_SECONDS = 1
 PTTL_OBSERVATION_TOLERANCE_MS = 2_000
 PTTL_MEASUREMENT_JITTER_MS = 100
 OWNER_RATE_LIMIT_KEY = b"real-redis-owner-rate-limit-key-01"
+WORKSPACE_ID = "wsp_" + "W" * 22
+OTHER_WORKSPACE_ID = "wsp_" + "X" * 22
 
 
 def owner_rate_limit_context(
@@ -89,7 +91,7 @@ def thread_record() -> dict:
         "v": 2,
         "collaborationId": "A" * 22,
         "ownerEmail": "owner@example.com",
-        "workspaceId": "owner@example.com",
+        "workspaceId": WORKSPACE_ID,
         "mailboxId": "mailbox-1",
         "sourceRef": {"provider": "google", "providerMessageId": "gmail-1"},
         "sourceMessage": {
@@ -124,7 +126,7 @@ def invite_record(raw_token: str = "t" * 43) -> dict:
         "inviteId": "I" * 22,
         "tokenHash": hash_v2_secret(raw_token),
         "ownerEmail": "owner@example.com",
-        "workspaceId": "owner@example.com",
+        "workspaceId": WORKSPACE_ID,
         "mailboxId": "mailbox-1",
         "collaborationId": "A" * 22,
         "identityAssurance": "link_possession",
@@ -148,7 +150,7 @@ def session_record(secret: str) -> dict:
         "csrfTokenHash": hash_v2_secret("c" * 43),
         "inviteId": "I" * 22,
         "ownerEmail": "owner@example.com",
-        "workspaceId": "owner@example.com",
+        "workspaceId": WORKSPACE_ID,
         "mailboxId": "mailbox-1",
         "collaborationId": "A" * 22,
         "allowedActions": ["read", "reply"],
@@ -1453,6 +1455,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
             thread["ownerEmail"],
             thread["mailboxId"],
             thread["sourceRef"],
+            workspace_id=thread["workspaceId"],
             command_transport=self.client.transport,
         )
         self.assertEqual(loaded.get("record"), thread)
@@ -1586,6 +1589,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                     thread["ownerEmail"],
                     thread["mailboxId"],
                     thread["sourceRef"],
+                    workspace_id=thread["workspaceId"],
                     command_transport=self.client.transport,
                 )
                 self.assertNotEqual(rejected.get("status"), "ok", rejected)
@@ -1822,6 +1826,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                     thread["ownerEmail"],
                     thread["mailboxId"],
                     thread["sourceRef"],
+                    workspace_id=thread["workspaceId"],
                     command_transport=self._transport_mutating_eval(
                         redis_store._LOAD_AND_MIGRATE_V2_SOURCE_LUA, mutate_source
                     ),
@@ -4841,7 +4846,18 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(self.client.command(["GET", redis_store.build_v2_thread_key(canonical_id)]))
 
     def test_real_guest_append_revalidates_capability_and_preserves_atomic_state(self):
-        thread = thread_record()
+        thread = {
+            **thread_record(),
+            "ownerUserId": "usr_" + "A" * 22,
+            "ownerDisplayName": "Owner",
+            "participants": [
+                {
+                    "userId": "usr_" + "B" * 21 + "A",
+                    "membershipRef": "tinv_guest_reply_fixture",
+                    "displayName": "Internal Teammate",
+                }
+            ],
+        }
         thread_key = self._thread_key(thread["collaborationId"])
         source_key = self._source_key(thread)
         redis_store._create_v2_thread(thread, command_transport=self.client.transport)
@@ -4861,6 +4877,8 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         stored_thread = typed_wire_json(self.client.command(["GET", thread_key]), "thread")
         self.assertEqual(stored_thread["updatedAt"], (SEC + 102) * 1000)
         self.assertEqual(len(stored_thread["messages"]), 1)
+        self.assertEqual(stored_thread["workspaceId"], WORKSPACE_ID)
+        self.assertEqual(stored_thread["participants"], thread["participants"])
         self.assertEqual(
             {
                 "authorKind": stored_thread["messages"][0]["authorKind"],
@@ -5314,6 +5332,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
             before = self._pttls(thread_key, current_key)
             current = redis_store._load_v2_thread_by_source(
                 thread["ownerEmail"], thread["mailboxId"], thread["sourceRef"],
+                workspace_id=thread["workspaceId"],
                 command_transport=self.client.transport,
             )
             self.assertEqual(current.get("record"), thread)
@@ -5332,6 +5351,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
             os.environ[redis_store.V2_INDEX_HMAC_PREVIOUS_ENV] = old_encoded
             migrated = redis_store._load_v2_thread_by_source(
                 thread["ownerEmail"], thread["mailboxId"], thread["sourceRef"],
+                workspace_id=thread["workspaceId"],
                 command_transport=self.client.transport,
             )
             self.assertEqual(migrated.get("record"), thread)
@@ -5349,6 +5369,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
             self.client.command(["SET", previous_key, thread["collaborationId"], "PX", 70_000])
             same = redis_store._load_v2_thread_by_source(
                 thread["ownerEmail"], thread["mailboxId"], thread["sourceRef"],
+                workspace_id=thread["workspaceId"],
                 command_transport=self.client.transport,
             )
             self.assertEqual(same.get("record"), thread)
@@ -5396,6 +5417,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                     before = self._snapshot_v2_state()
                     rejected = redis_store._load_v2_thread_by_source(
                         thread["ownerEmail"], thread["mailboxId"], thread["sourceRef"],
+                        workspace_id=thread["workspaceId"],
                         command_transport=self.client.transport,
                     )
                     self.assertEqual(rejected.get("error"), {"code": "source_pointer_conflict"})
@@ -5959,7 +5981,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
             },
             thread_loader=lambda _collaboration_id: {
                 "status": "ok",
-                "record": thread_record(),
+                "record": {**thread_record(), "workspaceId": "owner@example.com"},
             },
         )
         self.assertEqual(internal_result.get("status"), "ok", internal_result)
@@ -6267,6 +6289,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
             canonical["ownerEmail"],
             canonical["mailboxId"],
             canonical["sourceRef"],
+            workspace_id=canonical["workspaceId"],
             command_transport=self.client.transport,
         )
         self.assertEqual(loaded.get("record"), canonical)
@@ -6377,6 +6400,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                     canonical["ownerEmail"],
                     canonical["mailboxId"],
                     canonical["sourceRef"],
+                    workspace_id=canonical["workspaceId"],
                     command_transport=self._transport_mutating_eval(
                         redis_store._LOAD_AND_MIGRATE_V2_SOURCE_LUA,
                         lambda command, start, ref=malformed_ref: command.__setitem__(
@@ -6463,6 +6487,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                     canonical["ownerEmail"],
                     canonical["mailboxId"],
                     canonical["sourceRef"],
+                    workspace_id=canonical["workspaceId"],
                     command_transport=self._transport_mutating_eval(
                         redis_store._LOAD_AND_MIGRATE_V2_SOURCE_LUA,
                         lambda command, start, ref=different_ref: command.__setitem__(
@@ -6519,6 +6544,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                 canonical["ownerEmail"],
                 canonical["mailboxId"],
                 canonical["sourceRef"],
+                workspace_id=canonical["workspaceId"],
                 command_transport=self._transport_mutating_eval(
                     redis_store._LOAD_AND_MIGRATE_V2_SOURCE_LUA,
                     lambda command, start, index=scope_index, value=wrong_scope: command.__setitem__(
@@ -6547,6 +6573,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
             os.environ[redis_store.V2_INDEX_HMAC_PREVIOUS_ENV] = old_encoded
             migrated = redis_store._load_v2_thread_by_source(
                 canonical["ownerEmail"], canonical["mailboxId"], canonical["sourceRef"],
+                workspace_id=canonical["workspaceId"],
                 command_transport=self.client.transport,
             )
             self.assertEqual(migrated.get("record"), canonical)
@@ -6929,6 +6956,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
             {"status": "unavailable", "error": {"code": "storage_unavailable"}},
             lambda: redis_store._load_v2_thread_by_source(
                 base["ownerEmail"], base["mailboxId"], base["sourceRef"],
+                workspace_id=base["workspaceId"],
                 command_transport=self.client.transport,
             ),
         )
@@ -6941,6 +6969,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
             {"status": "unavailable", "error": {"code": "storage_unavailable"}},
             lambda: redis_store._load_v2_thread_by_source(
                 base["ownerEmail"], base["mailboxId"], base["sourceRef"],
+                workspace_id=base["workspaceId"],
                 command_transport=self.client.transport,
             ),
         )
