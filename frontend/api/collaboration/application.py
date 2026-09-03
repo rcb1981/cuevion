@@ -5,6 +5,7 @@ if __name__ != "api.collaboration.application":
         "api.collaboration.application must be imported by its canonical package path"
     )
 
+import json
 import time
 from typing import Any
 
@@ -34,6 +35,7 @@ from .models import (
     MAX_V2_TIMESTAMP_SECONDS,
     MIN_V2_TIMESTAMP_MILLISECONDS,
     MIN_V2_TIMESTAMP_SECONDS,
+    _v2_bounded_string,
     _v2_free_text,
     build_v2_guest_thread_dto,
     generate_v2_bearer_secret,
@@ -90,6 +92,30 @@ _ALLOWED_INITIAL_STATES = frozenset(
     }
 )
 
+_CREATE_WITH_GUEST_STAGE_FAILURE_EVENT = (
+    "cuevion_collaboration_create_with_guest_stage_failure"
+)
+_CREATE_WITH_GUEST_FAILURE_STAGES = frozenset(
+    {
+        "authorization_result",
+        "source_resolve",
+        "source_success_shape",
+        "source_binding",
+        "proposed_thread",
+        "proposed_invite",
+        "token_hash",
+        "atomic_store",
+        "atomic_store_result",
+        "returned_thread",
+        "returned_invite",
+        "returned_binding",
+        "created_thread_consistency",
+        "created_invite_consistency",
+        "owner_projection",
+        "final_result",
+    }
+)
+
 _CANONICAL_OWNER_MUTATION_ERROR_CODES = {
     "collaboration_not_found": "collaboration_not_found",
     "forbidden": "forbidden",
@@ -131,6 +157,57 @@ def _failure(status: str, code: str) -> dict[str, Any]:
         "collaboration": None,
         "error": {"code": safe_code},
     }
+
+
+def _observe_create_with_guest_storage_protocol_failure(
+    stage: str,
+    capability: object,
+) -> None:
+    if stage not in _CREATE_WITH_GUEST_FAILURE_STAGES:
+        return
+    try:
+        display_name = getattr(capability, "actor_display_name", None)
+        canonical_display_name = _v2_bounded_string(display_name, max_length=256)
+        event = {
+            "event": _CREATE_WITH_GUEST_STAGE_FAILURE_EVENT,
+            "stage": stage,
+            "internalSafeCode": "storage_protocol_error",
+            "ownerDisplayNameCanonical": (
+                canonical_display_name is not None
+                and canonical_display_name == display_name
+            ),
+        }
+        print(
+            json.dumps(
+                event,
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+    except Exception:
+        pass
+
+
+def _return_create_with_guest_failure(
+    result: dict[str, Any],
+    *,
+    stage: str,
+    capability: object,
+) -> dict[str, Any]:
+    error = result.get("error") if type(result) is dict else None
+    if (
+        type(result) is dict
+        and set(result) == {"status", "collaboration", "error"}
+        and result.get("collaboration") is None
+        and type(error) is dict
+        and set(error) == {"code"}
+        and error.get("code") == "storage_protocol_error"
+    ):
+        _observe_create_with_guest_storage_protocol_failure(stage, capability)
+    return result
 
 
 def _failure_from_result(
@@ -1121,13 +1198,23 @@ def create_v2_collaboration_with_guest_for_verified_owner(
         owner_security_configuration=owner_security_configuration,
     )
     if type(authorized) is not dict or authorized.get("status") != "ok":
-        return _failure_from_result(
-            authorized,
-            default_status="error",
-            default_code="storage_protocol_error",
+        return _return_create_with_guest_failure(
+            _failure_from_result(
+                authorized,
+                default_status="error",
+                default_code="storage_protocol_error",
+            ),
+            stage="authorization_result",
+            capability=(
+                authorized.get("context") if type(authorized) is dict else None
+            ),
         )
     if set(authorized) != {"status", "context", "error"} or authorized.get("error") is not None:
-        return _failure("malformed", "storage_protocol_error")
+        return _return_create_with_guest_failure(
+            _failure("malformed", "storage_protocol_error"),
+            stage="authorization_result",
+            capability=authorized.get("context"),
+        )
     capability = authorized.get("context")
     if (
         not _is_internal_capability(capability, actions={"create"})
@@ -1162,17 +1249,29 @@ def create_v2_collaboration_with_guest_for_verified_owner(
         authorization_resolver=reuse_authorized_context,
     )
     if type(resolved) is not dict or resolved.get("status") != "ok":
-        return _failure_from_result(
-            resolved,
-            default_status="error",
-            default_code="storage_protocol_error",
+        return _return_create_with_guest_failure(
+            _failure_from_result(
+                resolved,
+                default_status="error",
+                default_code="storage_protocol_error",
+            ),
+            stage="source_resolve",
+            capability=capability,
         )
     if set(resolved) != {"status", "source", "error"} or resolved.get("error") is not None:
-        return _failure("malformed", "storage_protocol_error")
+        return _return_create_with_guest_failure(
+            _failure("malformed", "storage_protocol_error"),
+            stage="source_success_shape",
+            capability=capability,
+        )
     source = resolved.get("source")
     locator = payload.get("sourceRef")
     if type(source) is not dict or set(source) != {"sourceRef", "sourceMessage"} or type(locator) is not dict:
-        return _failure("malformed", "storage_protocol_error")
+        return _return_create_with_guest_failure(
+            _failure("malformed", "storage_protocol_error"),
+            stage="source_success_shape",
+            capability=capability,
+        )
     expected_source_ref = normalize_v2_source_ref(
         {"provider": capability.mailbox_provider, **locator}
     )
@@ -1183,7 +1282,11 @@ def create_v2_collaboration_with_guest_for_verified_owner(
         or source.get("sourceRef") != canonical_source_ref
         or canonical_source_ref != expected_source_ref
     ):
-        return _failure("malformed", "storage_protocol_error")
+        return _return_create_with_guest_failure(
+            _failure("malformed", "storage_protocol_error"),
+            stage="source_binding",
+            capability=capability,
+        )
 
     created_at = time.time_ns() // 1_000_000
     invitation_created_at = created_at // 1_000
@@ -1237,8 +1340,24 @@ def create_v2_collaboration_with_guest_for_verified_owner(
     if invited_email is not None:
         proposed_invite_record["invitedEmail"] = invited_email
     proposed_invite = normalize_v2_invite_record(proposed_invite_record)
-    if proposed is None or proposed_invite is None or token_hash is None:
-        return _failure("malformed", "storage_protocol_error")
+    if proposed is None:
+        return _return_create_with_guest_failure(
+            _failure("malformed", "storage_protocol_error"),
+            stage="proposed_thread",
+            capability=capability,
+        )
+    if proposed_invite is None:
+        return _return_create_with_guest_failure(
+            _failure("malformed", "storage_protocol_error"),
+            stage="proposed_invite",
+            capability=capability,
+        )
+    if token_hash is None:
+        return _return_create_with_guest_failure(
+            _failure("malformed", "storage_protocol_error"),
+            stage="token_hash",
+            capability=capability,
+        )
 
     stored = _create_v2_thread_with_guest(
         proposed,
@@ -1246,34 +1365,72 @@ def create_v2_collaboration_with_guest_for_verified_owner(
         now=invitation_created_at,
     )
     if type(stored) is not _V2ThreadInviteCreateResult:
-        return _create_storage_failure(stored)
+        return _return_create_with_guest_failure(
+            _create_storage_failure(stored),
+            stage="atomic_store",
+            capability=capability,
+        )
     if stored.status != "ok" or type(stored.thread_created) is not bool or type(stored.invite_created) is not bool:
-        return _failure("malformed", "storage_protocol_error")
+        return _return_create_with_guest_failure(
+            _failure("malformed", "storage_protocol_error"),
+            stage="atomic_store_result",
+            capability=capability,
+        )
     thread = normalize_v2_thread_record(stored.thread)
     invitation = normalize_v2_invite_record(stored.invite)
+    if thread is None:
+        return _return_create_with_guest_failure(
+            _failure("malformed", "storage_protocol_error"),
+            stage="returned_thread",
+            capability=capability,
+        )
+    if invitation is None:
+        return _return_create_with_guest_failure(
+            _failure("malformed", "storage_protocol_error"),
+            stage="returned_invite",
+            capability=capability,
+        )
     if (
-        thread is None
-        or invitation is None
-        or not _thread_matches_create_binding(thread, capability, canonical_source_ref)
+        not _thread_matches_create_binding(thread, capability, canonical_source_ref)
         or invitation["ownerEmail"] != thread["ownerEmail"]
         or invitation["workspaceId"] != thread["workspaceId"]
         or invitation["mailboxId"] != thread["mailboxId"]
         or invitation["collaborationId"] != thread["collaborationId"]
         or invitation.get("invitedEmail") != invited_email
     ):
-        return _failure("malformed", "storage_protocol_error")
+        return _return_create_with_guest_failure(
+            _failure("malformed", "storage_protocol_error"),
+            stage="returned_binding",
+            capability=capability,
+        )
     if stored.thread_created and (thread != proposed or thread["collaborationId"] != collaboration_id):
-        return _failure("malformed", "storage_protocol_error")
+        return _return_create_with_guest_failure(
+            _failure("malformed", "storage_protocol_error"),
+            stage="created_thread_consistency",
+            capability=capability,
+        )
     if stored.invite_created and invitation["tokenHash"] != token_hash:
-        return _failure("malformed", "storage_protocol_error")
+        return _return_create_with_guest_failure(
+            _failure("malformed", "storage_protocol_error"),
+            stage="created_invite_consistency",
+            capability=capability,
+        )
 
     collaboration_dto, dto_error = _build_verified_owner_thread_dto(
         thread, capability
     )
     if dto_error is not None:
-        return dto_error
+        return _return_create_with_guest_failure(
+            dto_error,
+            stage="owner_projection",
+            capability=capability,
+        )
     if collaboration_dto is None:
-        return _failure("malformed", "storage_protocol_error")
+        return _return_create_with_guest_failure(
+            _failure("malformed", "storage_protocol_error"),
+            stage="final_result",
+            capability=capability,
+        )
 
     result = {
         "created": stored.thread_created,

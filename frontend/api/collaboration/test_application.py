@@ -6,7 +6,7 @@ import json
 import sys
 import unittest
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -4155,8 +4155,19 @@ class ExternalGuestApplicationTests(unittest.TestCase):
     workspace_id = "wsp_" + "W" * 22
     owner_user_id = "usr_" + "A" * 22
 
-    def capability(self, action: str, *, viewer_access: str = "owner"):
+    def capability(
+        self,
+        action: str,
+        *,
+        viewer_access: str = "owner",
+        actor_display_name: str | None = None,
+    ):
         participant_user_id = "usr_" + "B" * 21 + "A"
+        resolved_actor_display_name = (
+            actor_display_name
+            if actor_display_name is not None
+            else ("Owner Person" if viewer_access == "owner" else "Participant")
+        )
         return authorization._InternalCollaborationCapability(
             authorization._INTERNAL_CAPABILITY_SENTINEL,
             OWNER_EMAIL,
@@ -4166,7 +4177,7 @@ class ExternalGuestApplicationTests(unittest.TestCase):
             None if action == "create" else COLLABORATION_ID,
             action,
             "owner" if viewer_access == "owner" else "internal",
-            "Owner Person" if viewer_access == "owner" else "Participant",
+            resolved_actor_display_name,
             self.owner_user_id if viewer_access == "owner" else participant_user_id,
             viewer_access,
             self.owner_user_id,
@@ -4204,6 +4215,365 @@ class ExternalGuestApplicationTests(unittest.TestCase):
         if invited_email is not None:
             invitation["invitedEmail"] = invited_email
         return invitation
+
+    def run_observed_external_create(
+        self,
+        *,
+        actor_display_name: str = "Owner Person",
+        source_result: dict | None = None,
+        store_side_effect=None,
+        projection_failure: dict | None = None,
+        logger_side_effect=None,
+    ):
+        capability = self.capability(
+            "create", actor_display_name=actor_display_name
+        )
+        resolved = self.source_result() if source_result is None else source_result
+
+        def successful_store(thread, invite, *, now):
+            return redis_store._V2ThreadInviteCreateResult(
+                thread, invite, True, True
+            )
+
+        logger = Mock(side_effect=logger_side_effect)
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    application,
+                    "resolve_verified_owner_collaboration_context",
+                    return_value={
+                        "status": "ok",
+                        "context": capability,
+                        "error": None,
+                    },
+                )
+            )
+            resolve_source = stack.enter_context(
+                patch.object(
+                    application,
+                    "resolve_source_message",
+                    return_value=resolved,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    application,
+                    "generate_v2_opaque_id",
+                    side_effect=[COLLABORATION_ID, INVITE_ID],
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    application,
+                    "generate_v2_bearer_secret",
+                    return_value="R" * 43,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    application.time,
+                    "time_ns",
+                    return_value=NOW_MILLISECONDS * 1_000_000,
+                )
+            )
+            create = stack.enter_context(
+                patch.object(
+                    application,
+                    "_create_v2_thread_with_guest",
+                    side_effect=store_side_effect or successful_store,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    application,
+                    "_load_v2_external_guest_records",
+                    return_value={"status": "ok", "records": []},
+                )
+            )
+            stack.enter_context(patch.object(application.time, "time", return_value=NOW))
+            if projection_failure is not None:
+                stack.enter_context(
+                    patch.object(
+                        application,
+                        "_build_verified_owner_thread_dto",
+                        return_value=(None, projection_failure),
+                    )
+                )
+            stack.enter_context(patch("builtins.print", logger))
+            result = application.create_v2_collaboration_with_guest_for_verified_owner(
+                object(),
+                object(),
+                {
+                    "mailboxId": MAILBOX_ID,
+                    "sourceRef": {"providerMessageId": "provider-1"},
+                    "state": "needs_review",
+                },
+                owner_security_configuration=object(),
+            )
+        return result, create, logger, resolve_source
+
+    def assert_stage_event(
+        self,
+        logger: Mock,
+        *,
+        stage: str,
+        owner_display_name_canonical: bool,
+    ) -> str:
+        self.assertEqual(logger.call_count, 1)
+        line = logger.call_args.args[0]
+        self.assertEqual(
+            json.loads(line),
+            {
+                "event": "cuevion_collaboration_create_with_guest_stage_failure",
+                "stage": stage,
+                "internalSafeCode": "storage_protocol_error",
+                "ownerDisplayNameCanonical": owner_display_name_canonical,
+            },
+        )
+        self.assertLessEqual(len(line.encode("utf-8")), 256)
+        return line
+
+    def test_create_with_guest_stage_allowlist_is_exact_and_bounded(self):
+        expected_stages = {
+            "authorization_result",
+            "source_resolve",
+            "source_success_shape",
+            "source_binding",
+            "proposed_thread",
+            "proposed_invite",
+            "token_hash",
+            "atomic_store",
+            "atomic_store_result",
+            "returned_thread",
+            "returned_invite",
+            "returned_binding",
+            "created_thread_consistency",
+            "created_invite_consistency",
+            "owner_projection",
+            "final_result",
+        }
+        self.assertEqual(application._CREATE_WITH_GUEST_FAILURE_STAGES, expected_stages)
+        for stage in expected_stages:
+            line = json.dumps(
+                {
+                    "event": "cuevion_collaboration_create_with_guest_stage_failure",
+                    "stage": stage,
+                    "internalSafeCode": "storage_protocol_error",
+                    "ownerDisplayNameCanonical": True,
+                },
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            self.assertLessEqual(len(line.encode("utf-8")), 256)
+
+    def test_create_with_guest_source_storage_protocol_stage_is_identifier_free(self):
+        result, create, logger, resolve_source = self.run_observed_external_create(
+            source_result={
+                "status": "unavailable",
+                "error": {"code": "storage_protocol_error"},
+            }
+        )
+
+        self.assertEqual(result["error"], {"code": "storage_protocol_error"})
+        resolve_source.assert_called_once()
+        create.assert_not_called()
+        line = self.assert_stage_event(
+            logger,
+            stage="source_resolve",
+            owner_display_name_canonical=True,
+        )
+        self.assertNotIn("provider-1", line)
+        self.assertNotIn(OWNER_EMAIL, line)
+
+    def test_create_with_guest_whitespace_display_name_observes_proposed_invite(self):
+        result, create, logger, resolve_source = self.run_observed_external_create(
+            actor_display_name="Owner "
+        )
+
+        self.assertEqual(result["error"], {"code": "storage_protocol_error"})
+        resolve_source.assert_called_once()
+        create.assert_not_called()
+        line = self.assert_stage_event(
+            logger,
+            stage="proposed_invite",
+            owner_display_name_canonical=False,
+        )
+        self.assertNotIn("Owner ", line)
+
+    def test_create_with_guest_atomic_store_stage_has_canonical_display_control(self):
+        result, create, logger, resolve_source = self.run_observed_external_create(
+            store_side_effect=lambda *_args, **_kwargs: {
+                "status": "unavailable",
+                "error": {"code": "storage_protocol_error"},
+            }
+        )
+
+        self.assertEqual(result["error"], {"code": "storage_protocol_error"})
+        resolve_source.assert_called_once()
+        create.assert_called_once()
+        self.assert_stage_event(
+            logger,
+            stage="atomic_store",
+            owner_display_name_canonical=True,
+        )
+
+    def test_create_with_guest_returned_record_stages_are_distinct(self):
+        def malformed_thread(thread, invite, *, now):
+            return redis_store._V2ThreadInviteCreateResult(
+                {**thread, "state": "invalid"}, invite, True, True
+            )
+
+        result, _create, logger, _resolve_source = self.run_observed_external_create(
+            store_side_effect=malformed_thread
+        )
+        self.assertEqual(result["error"], {"code": "storage_protocol_error"})
+        self.assert_stage_event(
+            logger,
+            stage="returned_thread",
+            owner_display_name_canonical=True,
+        )
+
+        def malformed_invite(thread, invite, *, now):
+            return redis_store._V2ThreadInviteCreateResult(
+                thread, {**invite, "status": "invalid"}, True, True
+            )
+
+        result, _create, logger, _resolve_source = self.run_observed_external_create(
+            store_side_effect=malformed_invite
+        )
+        self.assertEqual(result["error"], {"code": "storage_protocol_error"})
+        self.assert_stage_event(
+            logger,
+            stage="returned_invite",
+            owner_display_name_canonical=True,
+        )
+
+    def test_create_with_guest_owner_projection_stage_preserves_failure(self):
+        failure = application._failure("malformed", "storage_protocol_error")
+        result, create, logger, resolve_source = self.run_observed_external_create(
+            projection_failure=failure
+        )
+
+        self.assertEqual(result, failure)
+        resolve_source.assert_called_once()
+        create.assert_called_once()
+        self.assert_stage_event(
+            logger,
+            stage="owner_projection",
+            owner_display_name_canonical=True,
+        )
+
+    def test_create_with_guest_success_emits_no_stage_event(self):
+        result, create, logger, resolve_source = self.run_observed_external_create()
+
+        self.assertTrue(result["created"])
+        self.assertTrue(result["invitationCreated"])
+        self.assertEqual(result["token"], "R" * 43)
+        resolve_source.assert_called_once()
+        create.assert_called_once()
+        logger.assert_not_called()
+
+    def test_create_with_guest_non_protocol_failures_emit_no_stage_event(self):
+        for code, status in (
+            ("provider_unavailable", "unavailable"),
+            ("storage_unavailable", "unavailable"),
+            ("source_not_found", "not_found"),
+            ("index_hmac_unavailable", "unavailable"),
+        ):
+            with self.subTest(code=code):
+                result, create, logger, resolve_source = self.run_observed_external_create(
+                    source_result={
+                        "status": status,
+                        "error": {"code": code},
+                    }
+                )
+            self.assertEqual(result["error"], {"code": code})
+            resolve_source.assert_called_once()
+            create.assert_not_called()
+            logger.assert_not_called()
+
+    def test_create_with_guest_stage_event_has_exact_safe_fields_only(self):
+        result, _create, logger, _resolve_source = self.run_observed_external_create(
+            actor_display_name="Hostile Owner Marker "
+        )
+        self.assertEqual(result["error"], {"code": "storage_protocol_error"})
+        line = self.assert_stage_event(
+            logger,
+            stage="proposed_invite",
+            owner_display_name_canonical=False,
+        )
+        for field in (
+            "mailboxId",
+            "sourceRef",
+            "providerMessageId",
+            "imapUid",
+            "uidValidity",
+            "collaborationId",
+            "inviteId",
+            "workspaceId",
+            "participantUserId",
+            "ownerUserId",
+            "ownerEmail",
+            "invitedEmail",
+            "displayName",
+            "actorDisplayName",
+            "subject",
+            "body",
+            "token",
+            "tokenHash",
+            "session",
+            "csrf",
+            "cookie",
+            "authorization",
+            "Redis",
+            "headers",
+        ):
+            self.assertNotIn(json.dumps(field), line)
+        for hostile_value in (
+            OWNER_EMAIL,
+            MAILBOX_ID,
+            COLLABORATION_ID,
+            INVITE_ID,
+            "provider-1",
+            "Hostile Owner Marker ",
+            PRIVATE_SOURCE_MARKER,
+            RAW_SESSION_ID,
+            CSRF_HASH,
+            "R" * 43,
+        ):
+            self.assertNotIn(hostile_value, line)
+
+    def test_create_with_guest_logger_failure_is_behavior_neutral(self):
+        result, create, logger, resolve_source = self.run_observed_external_create(
+            actor_display_name="Owner ",
+            logger_side_effect=RuntimeError("logger unavailable"),
+        )
+
+        self.assertEqual(result["error"], {"code": "storage_protocol_error"})
+        resolve_source.assert_called_once()
+        create.assert_not_called()
+        self.assertEqual(logger.call_count, 1)
+
+    def test_create_with_guest_malformed_failure_object_is_not_logged(self):
+        malformed = {
+            "status": "malformed",
+            "collaboration": None,
+            "error": {
+                "code": "storage_protocol_error",
+                "unsafe": PRIVATE_EXCEPTION_MARKER,
+            },
+        }
+        logger = Mock()
+        with patch("builtins.print", logger):
+            returned = application._return_create_with_guest_failure(
+                malformed,
+                stage="source_resolve",
+                capability=self.capability("create"),
+            )
+        self.assertIs(returned, malformed)
+        logger.assert_not_called()
 
     def test_external_first_create_supports_email_and_secure_link_without_team_participant(self):
         for invited_email in ("Reviewer@Example.com", None):
