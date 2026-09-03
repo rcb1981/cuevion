@@ -259,6 +259,35 @@ class CollaborationV2RedisStoreTests(unittest.TestCase):
         self.assertLessEqual(len(line.encode("utf-8")), 192)
         return line
 
+    def assert_atomic_guest_lua_malformed_events(
+        self,
+        logger: Mock,
+        predicate: str,
+    ) -> tuple[str, str]:
+        self.assertEqual(logger.call_count, 2)
+        d4_line, d5_line = (call.args[0] for call in logger.call_args_list)
+        self.assertEqual(
+            json.loads(d4_line),
+            {
+                "event": "cuevion_collaboration_atomic_guest_store_failure",
+                "stage": "lua_malformed",
+                "internalSafeCode": "storage_protocol_error",
+            },
+        )
+        self.assertEqual(
+            json.loads(d5_line),
+            {
+                "event": "cuevion_collaboration_atomic_guest_lua_malformed",
+                "predicate": predicate,
+            },
+        )
+        self.assertEqual(set(json.loads(d5_line)), {"event", "predicate"})
+        self.assertLessEqual(
+            len(d5_line.encode("utf-8")),
+            redis_store._ATOMIC_GUEST_LUA_MALFORMED_EVENT_MAX_BYTES,
+        )
+        return d4_line, d5_line
+
     def run_atomic_guest_store(self, transport, *, logger_side_effect=None):
         commands = []
 
@@ -515,6 +544,90 @@ class CollaborationV2RedisStoreTests(unittest.TestCase):
             )
             self.assertLessEqual(len(line.encode("utf-8")), 192)
 
+    def test_atomic_guest_lua_malformed_predicate_allowlist_and_output_are_bounded(self):
+        expected_predicates = frozenset(
+            {
+                "argv_shape",
+                "key_count",
+                "thread_decode",
+                "thread_messages",
+                "thread_valid",
+                "thread_id_binding",
+                "invite_decode",
+                "invite_valid",
+                "invite_status",
+                "invite_created_at",
+                "invite_ttl",
+                "invite_id_binding",
+                "invite_token_binding",
+                "invite_owner_binding",
+                "invite_workspace_binding",
+                "invite_mailbox_binding",
+                "invite_collaboration_binding",
+            }
+        )
+        self.assertEqual(
+            redis_store._ATOMIC_GUEST_LUA_MALFORMED_PREDICATES,
+            expected_predicates,
+        )
+        self.assertEqual(
+            redis_store._ATOMIC_GUEST_LUA_MALFORMED_EVENT_MAX_BYTES,
+            128,
+        )
+        self.assertLess(
+            redis_store._ATOMIC_GUEST_LUA_MALFORMED_EVENT_MAX_BYTES,
+            192,
+        )
+        event_sizes = []
+        for predicate in expected_predicates:
+            with self.subTest(predicate=predicate):
+                logger = Mock()
+                observer = redis_store._new_atomic_guest_lua_malformed_observer()
+                with patch("builtins.print", logger):
+                    observer(predicate)
+                self.assertEqual(logger.call_count, 1)
+                line = logger.call_args.args[0]
+                self.assertEqual(
+                    json.loads(line),
+                    {
+                        "event": "cuevion_collaboration_atomic_guest_lua_malformed",
+                        "predicate": predicate,
+                    },
+                )
+                self.assertEqual(set(json.loads(line)), {"event", "predicate"})
+                self.assertLessEqual(
+                    len(line.encode("utf-8")),
+                    redis_store._ATOMIC_GUEST_LUA_MALFORMED_EVENT_MAX_BYTES,
+                )
+                event_sizes.append(len(line.encode("utf-8")))
+        self.assertEqual(max(event_sizes), 103)
+        self.assertLessEqual(
+            max(event_sizes) + 1,
+            redis_store._ATOMIC_GUEST_LUA_MALFORMED_EVENT_MAX_BYTES,
+        )
+
+        logger = Mock()
+        observer = redis_store._new_atomic_guest_lua_malformed_observer()
+        with patch("builtins.print", logger):
+            observer("thread_valid")
+            observer("invite_valid")
+        self.assertEqual(logger.call_count, 1)
+        self.assertEqual(json.loads(logger.call_args.args[0])["predicate"], "thread_valid")
+
+        for rejected in (
+            None,
+            1,
+            ["thread_valid"],
+            "",
+            "PrivateArbitraryPredicateMarker",
+        ):
+            with self.subTest(rejected=rejected):
+                logger = Mock()
+                observer = redis_store._new_atomic_guest_lua_malformed_observer()
+                with patch("builtins.print", logger):
+                    observer(rejected)
+                logger.assert_not_called()
+
     def test_atomic_guest_store_rest_protocol_stages_are_exact_and_secret_free(self):
         class Response:
             def __init__(self, raw: bytes):
@@ -661,7 +774,11 @@ class CollaborationV2RedisStoreTests(unittest.TestCase):
 
     def test_atomic_guest_store_lua_malformed_is_accepted_then_mapped(self):
         result, commands, logger = self.run_atomic_guest_store(
-            lambda _command: {"result": json.dumps({"status": "malformed"})}
+            lambda _command: {
+                "result": json.dumps(
+                    {"status": "malformed", "predicate": "thread_valid"}
+                )
+            }
         )
 
         self.assertEqual(
@@ -673,7 +790,84 @@ class CollaborationV2RedisStoreTests(unittest.TestCase):
         )
         self.assertEqual(len(commands), 1)
         self.assertEqual(commands[0][0], "EVAL")
-        self.assert_atomic_guest_store_event(logger, "lua_malformed")
+        self.assertNotIn("predicate", result)
+        self.assert_atomic_guest_lua_malformed_events(logger, "thread_valid")
+
+    def test_atomic_guest_store_consumes_every_lua_malformed_predicate_internally(self):
+        for predicate in redis_store._ATOMIC_GUEST_LUA_MALFORMED_PREDICATES:
+            with self.subTest(predicate=predicate):
+                result, commands, logger = self.run_atomic_guest_store(
+                    lambda _command, value=predicate: {
+                        "result": json.dumps(
+                            {"status": "malformed", "predicate": value}
+                        )
+                    }
+                )
+                self.assertEqual(
+                    result,
+                    {
+                        "status": "malformed",
+                        "error": {"code": "storage_protocol_error"},
+                    },
+                )
+                self.assertNotIn("predicate", result)
+                self.assertEqual(len(commands), 1)
+                self.assertEqual(commands[0][0], "EVAL")
+                self.assert_atomic_guest_lua_malformed_events(logger, predicate)
+
+    def test_atomic_guest_store_rejects_non_allowlisted_predicate_from_d5(self):
+        private_marker = "PrivateArbitraryPredicateMarker"
+        for predicate in (private_marker, "", None, ["thread_valid"]):
+            with self.subTest(predicate=predicate):
+                result, commands, logger = self.run_atomic_guest_store(
+                    lambda _command, value=predicate: {
+                        "result": json.dumps(
+                            {"status": "malformed", "predicate": value}
+                        )
+                    }
+                )
+                self.assertEqual(
+                    result,
+                    {
+                        "status": "malformed",
+                        "error": {"code": "storage_protocol_error"},
+                    },
+                )
+                self.assertEqual(len(commands), 1)
+                line = self.assert_atomic_guest_store_event(logger, "lua_malformed")
+                self.assertNotIn(private_marker, line)
+
+    def test_atomic_guest_store_lua_malformed_response_shape_is_exact(self):
+        private_marker = "PrivateMalformedShapeMarker"
+        cases = (
+            {"status": "malformed"},
+            {
+                "status": "malformed",
+                "predicate": "thread_valid",
+                "private": private_marker,
+            },
+        )
+        for payload in cases:
+            with self.subTest(fields=set(payload)):
+                result, commands, logger = self.run_atomic_guest_store(
+                    lambda _command, value=payload: {
+                        "result": json.dumps(value)
+                    }
+                )
+                self.assertEqual(
+                    result,
+                    {
+                        "status": "unavailable",
+                        "error": {"code": "storage_protocol_error"},
+                    },
+                )
+                self.assertNotIn("predicate", result)
+                self.assertEqual(len(commands), 1)
+                line = self.assert_atomic_guest_store_event(
+                    logger,
+                    "eval_status_shape",
+                )
+                self.assertNotIn(private_marker, line)
 
     def test_atomic_guest_store_existing_convergence_stages_are_distinct(self):
         calls = 0
@@ -962,6 +1156,45 @@ class CollaborationV2RedisStoreTests(unittest.TestCase):
             self.assertEqual(len(commands), 1)
             logger.assert_not_called()
 
+        existing_thread = {**thread_record(), "collaborationId": "C" * 22}
+        logger = Mock()
+        commands = []
+        with patch.object(
+            redis_store,
+            "_load_v2_thread_by_source",
+            return_value={"status": "ok", "record": existing_thread},
+        ), patch.object(
+            redis_store,
+            "_create_v2_invite",
+            return_value={
+                "status": "conflict",
+                "error": {"code": "guest_capacity_reached"},
+            },
+        ), patch("builtins.print", logger):
+            result = _storage_create_v2_thread_with_guest(
+                thread_record(),
+                invite,
+                now=invite["createdAt"],
+                command_transport=lambda command: commands.append(command)
+                or {
+                    "result": json.dumps(
+                        {
+                            "status": "existing",
+                            "collaborationId": existing_thread["collaborationId"],
+                        }
+                    )
+                },
+            )
+        self.assertEqual(
+            result,
+            {
+                "status": "conflict",
+                "error": {"code": "guest_capacity_reached"},
+            },
+        )
+        self.assertEqual(len(commands), 1)
+        logger.assert_not_called()
+
     def test_atomic_guest_store_logger_failure_is_behavior_neutral(self):
         result, commands, logger = self.run_atomic_guest_store(
             lambda _command: {"result": "PrivateInvalidEvalJson{"},
@@ -978,16 +1211,67 @@ class CollaborationV2RedisStoreTests(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         self.assertEqual(logger.call_count, 1)
 
+    def test_atomic_guest_lua_malformed_logger_failure_preserves_result_and_d4(self):
+        def fail_d5(line, **_kwargs):
+            if json.loads(line).get("event") == (
+                "cuevion_collaboration_atomic_guest_lua_malformed"
+            ):
+                raise RuntimeError("PrivateD5LoggerExceptionMarker")
+
+        result, commands, logger = self.run_atomic_guest_store(
+            lambda _command: {
+                "result": json.dumps(
+                    {"status": "malformed", "predicate": "thread_valid"}
+                )
+            },
+            logger_side_effect=fail_d5,
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "status": "malformed",
+                "error": {"code": "storage_protocol_error"},
+            },
+        )
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(logger.call_count, 2)
+        self.assertEqual(
+            json.loads(logger.call_args_list[0].args[0]),
+            {
+                "event": "cuevion_collaboration_atomic_guest_store_failure",
+                "stage": "lua_malformed",
+                "internalSafeCode": "storage_protocol_error",
+            },
+        )
+        self.assertEqual(
+            json.loads(logger.call_args_list[1].args[0]),
+            {
+                "event": "cuevion_collaboration_atomic_guest_lua_malformed",
+                "predicate": "thread_valid",
+            },
+        )
+        self.assertNotIn(
+            "PrivateD5LoggerExceptionMarker",
+            repr(logger.call_args_list),
+        )
+
     def test_atomic_guest_store_event_contains_no_request_or_storage_secrets(self):
         result, commands, logger = self.run_atomic_guest_store(
-            lambda _command: {"result": json.dumps({"status": "malformed"})}
+            lambda _command: {
+                "result": json.dumps(
+                    {"status": "malformed", "predicate": "thread_valid"}
+                )
+            }
         )
         self.assertEqual(result["error"], {"code": "storage_protocol_error"})
-        line = self.assert_atomic_guest_store_event(logger, "lua_malformed")
-        self.assertEqual(
-            set(json.loads(line)),
-            {"event", "stage", "internalSafeCode"},
+        d4_line, d5_line = self.assert_atomic_guest_lua_malformed_events(
+            logger,
+            "thread_valid",
         )
+        self.assertEqual(set(json.loads(d4_line)), {"event", "stage", "internalSafeCode"})
+        self.assertEqual(set(json.loads(d5_line)), {"event", "predicate"})
+        lines = d4_line + d5_line
         thread = thread_record()
         invite = invite_record()
         for field in (
@@ -1022,7 +1306,7 @@ class CollaborationV2RedisStoreTests(unittest.TestCase):
             "exception",
             "traceback",
         ):
-            self.assertNotIn(json.dumps(field), line)
+            self.assertNotIn(json.dumps(field), lines)
         command = commands[0]
         private_values = (
             thread["ownerEmail"],
@@ -1040,7 +1324,7 @@ class CollaborationV2RedisStoreTests(unittest.TestCase):
             "PrivateLoggerExceptionMarker",
         )
         for private_value in private_values:
-            self.assertNotIn(private_value, line)
+            self.assertNotIn(private_value, lines)
 
     def test_strict_response_decoder_rejects_duplicate_keys_at_every_level(self):
         inner_responses = {

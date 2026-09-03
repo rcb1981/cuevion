@@ -8235,6 +8235,166 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         for key in (thread_key, source_key, invite_key, token_key, identity_key, index_key):
             self.assertGreater(self.client.command(["PTTL", key]), 0)
 
+    def test_external_first_atomic_create_lua_malformed_predicates_are_exact(self):
+        def wire_field(argument_offset: int, field: str, value):
+            def mutate(command, argv_start):
+                wire = json.loads(command[argv_start + argument_offset])
+                wire[field] = value
+                command[argv_start + argument_offset] = compact_json(wire)
+
+            return mutate
+
+        def invalid_key_count(command, argv_start):
+            del command[argv_start - 1]
+            command[2] = int(command[2]) - 1
+
+        def mismatched_invite_owner(command, argv_start):
+            wire = json.loads(command[argv_start + 1])
+            wire["ownerEmail"] = "other@example.com"
+            wire["createdBy"]["ownerEmail"] = "other@example.com"
+            command[argv_start + 1] = compact_json(wire)
+
+        def mismatched_created_at(command, argv_start):
+            command[argv_start + 5] = str(int(command[argv_start + 5]) + 1)
+
+        def mismatched_ttl(command, argv_start):
+            command[argv_start + 4] = str(int(command[argv_start + 4]) + 1)
+
+        cases = (
+            (
+                "argv_shape",
+                lambda command, argv_start: command.__setitem__(argv_start + 7, "2"),
+            ),
+            ("key_count", invalid_key_count),
+            (
+                "thread_decode",
+                lambda command, argv_start: command.__setitem__(argv_start, "{"),
+            ),
+            ("thread_messages", wire_field(0, "messages", {})),
+            ("thread_valid", wire_field(0, "state", "invalid")),
+            (
+                "thread_id_binding",
+                lambda command, argv_start: command.__setitem__(
+                    argv_start + 2,
+                    "B" * 22,
+                ),
+            ),
+            (
+                "invite_decode",
+                lambda command, argv_start: command.__setitem__(
+                    argv_start + 1,
+                    "{",
+                ),
+            ),
+            ("invite_valid", wire_field(1, "visibility", "invalid")),
+            ("invite_status", wire_field(1, "status", "expired")),
+            ("invite_created_at", mismatched_created_at),
+            ("invite_ttl", mismatched_ttl),
+            (
+                "invite_id_binding",
+                lambda command, argv_start: command.__setitem__(
+                    argv_start + 3,
+                    "J" * 22,
+                ),
+            ),
+            (
+                "invite_token_binding",
+                lambda command, argv_start: command.__setitem__(
+                    argv_start + 9,
+                    "0" * 64,
+                ),
+            ),
+            ("invite_owner_binding", mismatched_invite_owner),
+            (
+                "invite_workspace_binding",
+                wire_field(1, "workspaceId", OTHER_WORKSPACE_ID),
+            ),
+            ("invite_mailbox_binding", wire_field(1, "mailboxId", "mailbox-2")),
+            (
+                "invite_collaboration_binding",
+                wire_field(1, "collaborationId", "B" * 22),
+            ),
+        )
+        self.assertEqual(
+            {predicate for predicate, _mutate in cases},
+            redis_store._ATOMIC_GUEST_LUA_MALFORMED_PREDICATES,
+        )
+
+        for predicate, mutate in cases:
+            with self.subTest(predicate=predicate):
+                self.client.command(["FLUSHALL"])
+                thread = thread_record()
+                invite = invite_record()
+                commands = []
+                mutated_transport = self._transport_mutating_eval(
+                    redis_store._CREATE_V2_THREAD_WITH_GUEST_LUA,
+                    mutate,
+                )
+
+                def transport(command):
+                    commands.append(command)
+                    return mutated_transport(command)
+
+                with patch("builtins.print") as logger:
+                    result = redis_store._create_v2_thread_with_guest(
+                        thread,
+                        invite,
+                        now=invite["createdAt"],
+                        command_transport=transport,
+                    )
+
+                self.assertEqual(
+                    result,
+                    {
+                        "status": "malformed",
+                        "error": {"code": "storage_protocol_error"},
+                    },
+                )
+                self.assertNotIn("predicate", result)
+                self.assertEqual(len(commands), 1)
+                self.assertEqual(commands[0][0], "EVAL")
+                self.assertEqual(commands[0][1], redis_store._CREATE_V2_THREAD_WITH_GUEST_LUA)
+                events = [json.loads(call.args[0]) for call in logger.call_args_list]
+                self.assertEqual(
+                    events,
+                    [
+                        {
+                            "event": "cuevion_collaboration_atomic_guest_store_failure",
+                            "stage": "lua_malformed",
+                            "internalSafeCode": "storage_protocol_error",
+                        },
+                        {
+                            "event": "cuevion_collaboration_atomic_guest_lua_malformed",
+                            "predicate": predicate,
+                        },
+                    ],
+                )
+                self.assertLessEqual(
+                    len(logger.call_args_list[1].args[0].encode("utf-8")),
+                    redis_store._ATOMIC_GUEST_LUA_MALFORMED_EVENT_MAX_BYTES,
+                )
+                self.assertEqual(self.client.command(["DBSIZE"]), 0)
+
+    def test_external_first_atomic_create_email_optionality_emits_no_d5(self):
+        for invited_email in (None, "reviewer@example.com"):
+            with self.subTest(invited_email=invited_email):
+                self.client.command(["FLUSHALL"])
+                thread = thread_record()
+                invite = invite_record()
+                if invited_email is not None:
+                    invite["invitedEmail"] = invited_email
+                with patch("builtins.print") as logger:
+                    created = redis_store._create_v2_thread_with_guest(
+                        thread,
+                        invite,
+                        now=invite["createdAt"],
+                        command_transport=self.client.transport,
+                    )
+                self.assertEqual(created.get("status"), "ok", created)
+                self.assertTrue(created.get("threadCreated"), created)
+                self.assertTrue(created.get("inviteCreated"), created)
+                logger.assert_not_called()
+
     def test_external_first_failure_and_cross_workspace_leave_no_partial_graph(self):
         thread = thread_record()
         invite = invite_record("f" * 43)
@@ -8297,8 +8457,9 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                 command_transport=client.transport,
             )
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(pool.map(create, zip((first_thread, second_thread), invitations)))
+        with patch("builtins.print") as logger:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(create, zip((first_thread, second_thread), invitations)))
         self.assertTrue(all(result.get("status") == "ok" for result in results), results)
         self.assertEqual(sum(result.get("threadCreated") is True for result in results), 1)
         self.assertTrue(all(result.get("inviteCreated") is True for result in results), results)
@@ -8321,6 +8482,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                     ["GET", redis_store.build_v2_invite_key(result.invite["inviteId"])]
                 )
             )
+        logger.assert_not_called()
 
     def test_existing_thread_guest_index_cap_and_same_identity_are_race_safe(self):
         thread = thread_record()

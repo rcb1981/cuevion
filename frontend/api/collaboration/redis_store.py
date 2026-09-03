@@ -702,6 +702,31 @@ else:
     _ATOMIC_GUEST_STORE_FAILURE_EVENT = (
         "cuevion_collaboration_atomic_guest_store_failure"
     )
+    _ATOMIC_GUEST_LUA_MALFORMED_EVENT = (
+        "cuevion_collaboration_atomic_guest_lua_malformed"
+    )
+    _ATOMIC_GUEST_LUA_MALFORMED_EVENT_MAX_BYTES = 128
+    _ATOMIC_GUEST_LUA_MALFORMED_PREDICATES = frozenset(
+        {
+            "argv_shape",
+            "key_count",
+            "thread_decode",
+            "thread_messages",
+            "thread_valid",
+            "thread_id_binding",
+            "invite_decode",
+            "invite_valid",
+            "invite_status",
+            "invite_created_at",
+            "invite_ttl",
+            "invite_id_binding",
+            "invite_token_binding",
+            "invite_owner_binding",
+            "invite_workspace_binding",
+            "invite_mailbox_binding",
+            "invite_collaboration_binding",
+        }
+    )
     _ATOMIC_GUEST_STORE_FAILURE_STAGES = frozenset(
         {
             "rest_empty_body",
@@ -966,6 +991,42 @@ else:
                     ),
                     flush=True,
                 )
+            except Exception:
+                pass
+
+        return observe
+
+
+    def _new_atomic_guest_lua_malformed_observer():
+        emitted = False
+
+        def observe(predicate: str) -> None:
+            nonlocal emitted
+            if (
+                emitted
+                or type(predicate) is not str
+                or predicate not in _ATOMIC_GUEST_LUA_MALFORMED_PREDICATES
+            ):
+                return
+            emitted = True
+            try:
+                event = {
+                    "event": _ATOMIC_GUEST_LUA_MALFORMED_EVENT,
+                    "predicate": predicate,
+                }
+                serialized = json.dumps(
+                    event,
+                    allow_nan=False,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                if (
+                    len(serialized.encode("utf-8"))
+                    > _ATOMIC_GUEST_LUA_MALFORMED_EVENT_MAX_BYTES
+                ):
+                    return
+                print(serialized, flush=True)
             except Exception:
                 pass
 
@@ -2015,27 +2076,30 @@ else:
     if #ARGV[1] > 262144 or #ARGV[2] > 16384
       or not positiveInteger(ARGV[5]) or not timestampSeconds(ARGV[6])
       or not positiveInteger(ARGV[7]) or (ARGV[8] ~= '0' and ARGV[8] ~= '1') then
-      return cjson.encode({status='malformed'})
+      return cjson.encode({status='malformed', predicate='argv_shape'})
     end
     local hasPrevious = ARGV[8] == '1'
     if #KEYS ~= (hasPrevious and 8 or 6) then
-      return cjson.encode({status='malformed'})
+      return cjson.encode({status='malformed', predicate='key_count'})
     end
     local threadOk, proposedThread = decodeWire(ARGV[1])
     local inviteOk, proposedInvite = decodeWire(ARGV[2])
     local now = integerValue(ARGV[6])
-    if not threadOk or not rawTopLevelArray(ARGV[1], 'messages')
-      or not threadValid(proposedThread) or proposedThread.collaborationId ~= ARGV[3]
-      or not inviteOk or not inviteValid(proposedInvite)
-      or proposedInvite.status ~= 'active' or proposedInvite.createdAt ~= ARGV[6]
-      or integerValue(proposedInvite.expiresAt) - now ~= integerValue(ARGV[5])
-      or proposedInvite.inviteId ~= ARGV[4] or proposedInvite.tokenHash ~= ARGV[10]
-      or proposedInvite.ownerEmail ~= proposedThread.ownerEmail
-      or proposedInvite.workspaceId ~= proposedThread.workspaceId
-      or proposedInvite.mailboxId ~= proposedThread.mailboxId
-      or proposedInvite.collaborationId ~= proposedThread.collaborationId then
-      return cjson.encode({status='malformed'})
-    end
+    if not threadOk then return cjson.encode({status='malformed', predicate='thread_decode'}) end
+    if not rawTopLevelArray(ARGV[1], 'messages') then return cjson.encode({status='malformed', predicate='thread_messages'}) end
+    if not threadValid(proposedThread) then return cjson.encode({status='malformed', predicate='thread_valid'}) end
+    if proposedThread.collaborationId ~= ARGV[3] then return cjson.encode({status='malformed', predicate='thread_id_binding'}) end
+    if not inviteOk then return cjson.encode({status='malformed', predicate='invite_decode'}) end
+    if not inviteValid(proposedInvite) then return cjson.encode({status='malformed', predicate='invite_valid'}) end
+    if proposedInvite.status ~= 'active' then return cjson.encode({status='malformed', predicate='invite_status'}) end
+    if proposedInvite.createdAt ~= ARGV[6] then return cjson.encode({status='malformed', predicate='invite_created_at'}) end
+    if integerValue(proposedInvite.expiresAt) - now ~= integerValue(ARGV[5]) then return cjson.encode({status='malformed', predicate='invite_ttl'}) end
+    if proposedInvite.inviteId ~= ARGV[4] then return cjson.encode({status='malformed', predicate='invite_id_binding'}) end
+    if proposedInvite.tokenHash ~= ARGV[10] then return cjson.encode({status='malformed', predicate='invite_token_binding'}) end
+    if proposedInvite.ownerEmail ~= proposedThread.ownerEmail then return cjson.encode({status='malformed', predicate='invite_owner_binding'}) end
+    if proposedInvite.workspaceId ~= proposedThread.workspaceId then return cjson.encode({status='malformed', predicate='invite_workspace_binding'}) end
+    if proposedInvite.mailboxId ~= proposedThread.mailboxId then return cjson.encode({status='malformed', predicate='invite_mailbox_binding'}) end
+    if proposedInvite.collaborationId ~= proposedThread.collaborationId then return cjson.encode({status='malformed', predicate='invite_collaboration_binding'}) end
     local currentPointer = redis.call('GET', KEYS[2])
     local previousPointer = hasPrevious and redis.call('GET', KEYS[7]) or nil
     if currentPointer and previousPointer and currentPointer ~= previousPointer then
@@ -2172,6 +2236,7 @@ else:
         protocol_failure_observer = (
             _new_atomic_guest_store_protocol_failure_observer()
         )
+        lua_malformed_observer = _new_atomic_guest_lua_malformed_observer()
         result = _v2_eval(
             [
                 "EVAL", _CREATE_V2_THREAD_WITH_GUEST_LUA, len(keys), *keys,
@@ -2184,7 +2249,7 @@ else:
             response_shapes={
                 "created": set(), "existing": {"collaborationId"},
                 "conflict": set(), "source_pointer_conflict": set(),
-                "malformed": set(),
+                "malformed": {"predicate"},
             },
             protocol_failure_observer=protocol_failure_observer,
         )
@@ -2235,6 +2300,7 @@ else:
             }
         if result.get("status") == "malformed":
             protocol_failure_observer("lua_malformed")
+            lua_malformed_observer(result.get("predicate"))
             return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
         return result
 
