@@ -699,6 +699,27 @@ else:
     _V2_BASE64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
     V2_THREAD_KEY_PREFIX = f"{V2_KEY_PREFIX}:thread:"
     V2_INVITE_KEY_PREFIX = f"{V2_KEY_PREFIX}:invite:"
+    _ATOMIC_GUEST_STORE_FAILURE_EVENT = (
+        "cuevion_collaboration_atomic_guest_store_failure"
+    )
+    _ATOMIC_GUEST_STORE_FAILURE_STAGES = frozenset(
+        {
+            "rest_empty_body",
+            "rest_json_decode",
+            "rest_response_shape",
+            "command_payload_shape",
+            "command_error_envelope",
+            "command_result_envelope",
+            "eval_json_decode",
+            "eval_result_shape",
+            "eval_status_shape",
+            "lua_malformed",
+            "existing_id",
+            "existing_thread_reload",
+            "existing_invite_normalization",
+            "existing_invite_create",
+        }
+    )
 
 
     @dataclass(frozen=True, slots=True)
@@ -917,6 +938,61 @@ else:
         return {"status": "unavailable", "error": {"code": code}}
 
 
+    def _new_atomic_guest_store_protocol_failure_observer():
+        emitted = False
+
+        def observe(stage: str) -> None:
+            nonlocal emitted
+            if (
+                emitted
+                or type(stage) is not str
+                or stage not in _ATOMIC_GUEST_STORE_FAILURE_STAGES
+            ):
+                return
+            emitted = True
+            try:
+                event = {
+                    "event": _ATOMIC_GUEST_STORE_FAILURE_EVENT,
+                    "stage": stage,
+                    "internalSafeCode": "storage_protocol_error",
+                }
+                print(
+                    json.dumps(
+                        event,
+                        allow_nan=False,
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+            except Exception:
+                pass
+
+        return observe
+
+
+    def _notify_v2_protocol_failure(observer, stage: str) -> None:
+        if observer is None:
+            return
+        try:
+            observer(stage)
+        except Exception:
+            pass
+
+
+    def _is_exact_v2_storage_protocol_failure(value: object) -> bool:
+        if type(value) is not dict or set(value) != {"status", "error"}:
+            return False
+        error = value.get("error")
+        return (
+            value.get("status") in {"malformed", "unavailable"}
+            and type(error) is dict
+            and set(error) == {"code"}
+            and error.get("code") == "storage_protocol_error"
+        )
+
+
     def _strict_json_object(pairs: list[tuple[str, object]]) -> dict:
         result: dict = {}
         for key, value in pairs:
@@ -941,7 +1017,12 @@ else:
         return json.loads(raw, **options)
 
 
-    def _perform_v2_rest_command(config: dict, command: list) -> dict:
+    def _perform_v2_rest_command(
+        config: dict,
+        command: list,
+        *,
+        protocol_failure_observer=None,
+    ) -> dict:
         request = Request(
             config["rest_url"],
             data=json.dumps(command, separators=(",", ":")).encode("utf-8"),
@@ -957,17 +1038,33 @@ else:
                 if len(body) > MAX_V2_KV_RESPONSE_BYTES:
                     return _v2_error("storage_unavailable")
                 if not body:
+                    _notify_v2_protocol_failure(
+                        protocol_failure_observer, "rest_empty_body"
+                    )
                     return _v2_error("storage_protocol_error")
                 try:
                     payload = _strict_json_loads(body.decode("utf-8"))
                 except (UnicodeDecodeError, ValueError, RecursionError):
+                    _notify_v2_protocol_failure(
+                        protocol_failure_observer, "rest_json_decode"
+                    )
                     return _v2_error("storage_protocol_error")
-                return payload if isinstance(payload, dict) else _v2_error("storage_protocol_error")
+                if not isinstance(payload, dict):
+                    _notify_v2_protocol_failure(
+                        protocol_failure_observer, "rest_response_shape"
+                    )
+                    return _v2_error("storage_protocol_error")
+                return payload
         except (HTTPError, URLError, TimeoutError, OSError):
             return _v2_error("storage_unavailable")
 
 
-    def _v2_command(command: list, command_transport=None) -> dict:
+    def _v2_command(
+        command: list,
+        command_transport=None,
+        *,
+        protocol_failure_observer=None,
+    ) -> dict:
         try:
             if command_transport is not None:
                 payload = command_transport(command)
@@ -975,10 +1072,21 @@ else:
                 config = _resolve_durable_store_config()
                 if not config:
                     return _v2_error("storage_unavailable")
-                payload = _perform_v2_rest_command(config, command)
+                payload = (
+                    _perform_v2_rest_command(config, command)
+                    if protocol_failure_observer is None
+                    else _perform_v2_rest_command(
+                        config,
+                        command,
+                        protocol_failure_observer=protocol_failure_observer,
+                    )
+                )
         except Exception:
             return _v2_error("storage_unavailable")
         if type(payload) is not dict:
+            _notify_v2_protocol_failure(
+                protocol_failure_observer, "command_payload_shape"
+            )
             return _v2_error("storage_protocol_error")
         fields = set(payload)
         if fields == {"status", "error"}:
@@ -993,14 +1101,21 @@ else:
                 }
             ):
                 return _v2_error(error["code"])
+            _notify_v2_protocol_failure(
+                protocol_failure_observer, "command_error_envelope"
+            )
             return _v2_error("storage_protocol_error")
         if fields == {"error"}:
-            return (
-                _v2_error("storage_unavailable")
-                if type(payload["error"]) is str and payload["error"]
-                else _v2_error("storage_protocol_error")
+            if type(payload["error"]) is str and payload["error"]:
+                return _v2_error("storage_unavailable")
+            _notify_v2_protocol_failure(
+                protocol_failure_observer, "command_error_envelope"
             )
+            return _v2_error("storage_protocol_error")
         if fields != {"result"}:
+            _notify_v2_protocol_failure(
+                protocol_failure_observer, "command_result_envelope"
+            )
             return _v2_error("storage_protocol_error")
         return {"status": "ok", "result": payload["result"]}
 
@@ -1011,8 +1126,17 @@ else:
         *,
         response_shapes: dict[str, set[str]],
         exchange: bool = False,
+        protocol_failure_observer=None,
     ) -> dict:
-        result = _v2_command(command, command_transport)
+        result = (
+            _v2_command(command, command_transport)
+            if protocol_failure_observer is None
+            else _v2_command(
+                command,
+                command_transport,
+                protocol_failure_observer=protocol_failure_observer,
+            )
+        )
         if result["status"] != "ok":
             result_code = (result.get("error") or {}).get("code")
             code = (
@@ -1026,17 +1150,26 @@ else:
             try:
                 value = _strict_json_loads(value)
             except (ValueError, RecursionError):
+                _notify_v2_protocol_failure(
+                    protocol_failure_observer, "eval_json_decode"
+                )
                 return {
                     "status": "unavailable",
                     "error": {"code": "storage_protocol_error"},
                 }
         if type(value) is not dict or type(value.get("status")) is not str:
+            _notify_v2_protocol_failure(
+                protocol_failure_observer, "eval_result_shape"
+            )
             return {
                 "status": "unavailable",
                 "error": {"code": "storage_protocol_error"},
             }
         expected_fields = response_shapes.get(value["status"])
         if expected_fields is None or set(value) != {"status", *expected_fields}:
+            _notify_v2_protocol_failure(
+                protocol_failure_observer, "eval_status_shape"
+            )
             return {"status": "unavailable", "error": {"code": "storage_protocol_error"}}
         return {
             "status": value["status"],
@@ -2036,6 +2169,9 @@ else:
         keys = list(required_keys)
         if has_previous:
             keys.extend((previous_source_key, previous_identity_key))
+        protocol_failure_observer = (
+            _new_atomic_guest_store_protocol_failure_observer()
+        )
         result = _v2_eval(
             [
                 "EVAL", _CREATE_V2_THREAD_WITH_GUEST_LUA, len(keys), *keys,
@@ -2050,6 +2186,7 @@ else:
                 "conflict": set(), "source_pointer_conflict": set(),
                 "malformed": set(),
             },
+            protocol_failure_observer=protocol_failure_observer,
         )
         if result.get("status") == "created":
             return _V2ThreadInviteCreateResult(thread, invite, True, True)
@@ -2061,21 +2198,27 @@ else:
                 command_transport=command_transport,
             )
             existing_thread = loaded.get("record") if loaded.get("status") == "ok" else None
+            if build_v2_thread_key(existing_id) is None:
+                protocol_failure_observer("existing_id")
+                return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
             if (
-                build_v2_thread_key(existing_id) is None
-                or not isinstance(existing_thread, dict)
+                not isinstance(existing_thread, dict)
                 or existing_thread.get("collaborationId") != existing_id
             ):
+                protocol_failure_observer("existing_thread_reload")
                 return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
             converged_invite = normalize_v2_invite_record(
                 {**invite, "collaborationId": existing_id}
             )
             if converged_invite is None:
+                protocol_failure_observer("existing_invite_normalization")
                 return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
             invitation_result = _create_v2_invite(
                 converged_invite, now=now, command_transport=command_transport
             )
             if not isinstance(invitation_result, _V2RecordResult):
+                if _is_exact_v2_storage_protocol_failure(invitation_result):
+                    protocol_failure_observer("existing_invite_create")
                 return invitation_result
             return _V2ThreadInviteCreateResult(
                 existing_thread,
@@ -2091,6 +2234,7 @@ else:
                 "error": {"code": "source_changed"},
             }
         if result.get("status") == "malformed":
+            protocol_failure_observer("lua_malformed")
             return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
         return result
 

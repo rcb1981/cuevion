@@ -5,7 +5,7 @@ import os
 import base64
 import binascii
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from . import redis_store
 from .models import encode_v2_wire_record, hash_v2_secret
@@ -19,6 +19,7 @@ from .redis_store import (
     build_v2_thread_key,
     build_v2_thread_invite_key,
     _create_v2_invite as _storage_create_v2_invite,
+    _create_v2_thread_with_guest as _storage_create_v2_thread_with_guest,
     _create_v2_thread as create_v2_thread,
     _load_v2_invite_by_token as _storage_load_v2_invite_by_token,
     _load_v2_thread as load_v2_thread,
@@ -244,6 +245,38 @@ class CollaborationV2RedisStoreTests(unittest.TestCase):
         else:
             os.environ["CUEVION_COLLAB_INDEX_HMAC_KEY_PREVIOUS"] = self.previous_rotation_hmac
 
+    def assert_atomic_guest_store_event(self, logger: Mock, stage: str) -> str:
+        self.assertEqual(logger.call_count, 1)
+        line = logger.call_args.args[0]
+        self.assertEqual(
+            json.loads(line),
+            {
+                "event": "cuevion_collaboration_atomic_guest_store_failure",
+                "stage": stage,
+                "internalSafeCode": "storage_protocol_error",
+            },
+        )
+        self.assertLessEqual(len(line.encode("utf-8")), 192)
+        return line
+
+    def run_atomic_guest_store(self, transport, *, logger_side_effect=None):
+        commands = []
+
+        def observed_transport(command):
+            commands.append(command)
+            return transport(command)
+
+        logger = Mock(side_effect=logger_side_effect)
+        invite = invite_record()
+        with patch("builtins.print", logger):
+            result = _storage_create_v2_thread_with_guest(
+                thread_record(),
+                invite,
+                now=invite["createdAt"],
+                command_transport=observed_transport,
+            )
+        return result, commands, logger
+
     def test_indexes_hash_owner_invitee_source_and_bearer_values(self):
         source_key = build_v2_source_thread_key(
             "owner@example.com", "mailbox-1", {"provider": "google", "providerMessageId": "gmail-1"}
@@ -446,6 +479,568 @@ class CollaborationV2RedisStoreTests(unittest.TestCase):
         )
         self.assertEqual(result, {"status": "unchanged"})
         self.assertEqual(commands, [])
+
+    def test_atomic_guest_store_stage_allowlist_and_output_are_bounded(self):
+        expected_stages = {
+            "rest_empty_body",
+            "rest_json_decode",
+            "rest_response_shape",
+            "command_payload_shape",
+            "command_error_envelope",
+            "command_result_envelope",
+            "eval_json_decode",
+            "eval_result_shape",
+            "eval_status_shape",
+            "lua_malformed",
+            "existing_id",
+            "existing_thread_reload",
+            "existing_invite_normalization",
+            "existing_invite_create",
+        }
+        self.assertEqual(
+            redis_store._ATOMIC_GUEST_STORE_FAILURE_STAGES,
+            expected_stages,
+        )
+        for stage in expected_stages:
+            line = json.dumps(
+                {
+                    "event": "cuevion_collaboration_atomic_guest_store_failure",
+                    "stage": stage,
+                    "internalSafeCode": "storage_protocol_error",
+                },
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            self.assertLessEqual(len(line.encode("utf-8")), 192)
+
+    def test_atomic_guest_store_rest_protocol_stages_are_exact_and_secret_free(self):
+        class Response:
+            def __init__(self, raw: bytes):
+                self.raw = raw
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return self.raw
+
+        rest_url = "https://PrivateRestHostMarker.invalid"
+        rest_token = "PrivateRestTokenMarker"
+        command_secret = "PrivateRedisCommandMarker"
+        for stage, raw in (
+            ("rest_empty_body", b""),
+            ("rest_json_decode", b'{"PrivateResponseBodyMarker":'),
+            ("rest_response_shape", b'["PrivateResponseBodyMarker"]'),
+        ):
+            with self.subTest(stage=stage):
+                logger = Mock()
+                observer = (
+                    redis_store._new_atomic_guest_store_protocol_failure_observer()
+                )
+                with patch.object(
+                    redis_store,
+                    "urlopen",
+                    return_value=Response(raw),
+                ) as request, patch("builtins.print", logger):
+                    result = _perform_v2_rest_command(
+                        {"rest_url": rest_url, "rest_token": rest_token},
+                        ["GET", command_secret],
+                        protocol_failure_observer=observer,
+                    )
+                self.assertEqual(
+                    result,
+                    {
+                        "status": "unavailable",
+                        "error": {"code": "storage_protocol_error"},
+                    },
+                )
+                request.assert_called_once()
+                line = self.assert_atomic_guest_store_event(logger, stage)
+                for private_value in (
+                    rest_url,
+                    rest_token,
+                    command_secret,
+                    "PrivateResponseBodyMarker",
+                    "Authorization",
+                ):
+                    self.assertNotIn(private_value, line)
+
+    def test_atomic_guest_store_command_protocol_stages_are_exact(self):
+        cases = (
+            (
+                "command_payload_shape",
+                ["PrivatePayloadValue"],
+            ),
+            (
+                "command_error_envelope",
+                {
+                    "status": "unavailable",
+                    "error": {
+                        "code": "storage_unavailable",
+                        "private": "PrivateErrorEnvelopeValue",
+                    },
+                },
+            ),
+            (
+                "command_result_envelope",
+                {"result": None, "private": "PrivateResultEnvelopeValue"},
+            ),
+        )
+        for stage, payload in cases:
+            with self.subTest(stage=stage):
+                logger = Mock()
+                observer = (
+                    redis_store._new_atomic_guest_store_protocol_failure_observer()
+                )
+                with patch("builtins.print", logger):
+                    result = _v2_command(
+                        ["GET", "PrivateCommandKey"],
+                        command_transport=lambda _command, value=payload: value,
+                        protocol_failure_observer=observer,
+                    )
+                self.assertEqual(
+                    result,
+                    {
+                        "status": "unavailable",
+                        "error": {"code": "storage_protocol_error"},
+                    },
+                )
+                line = self.assert_atomic_guest_store_event(logger, stage)
+                for private_value in (
+                    "PrivatePayloadValue",
+                    "PrivateErrorEnvelopeValue",
+                    "PrivateResultEnvelopeValue",
+                    "PrivateCommandKey",
+                ):
+                    self.assertNotIn(private_value, line)
+
+    def test_atomic_guest_store_eval_protocol_stages_are_exact(self):
+        cases = (
+            ("eval_json_decode", "PrivateInvalidEvalJson{"),
+            ("eval_result_shape", json.dumps(["PrivateEvalListValue"])),
+            (
+                "eval_status_shape",
+                json.dumps({"status": "PrivateUnknownEvalStatus"}),
+            ),
+        )
+        for stage, eval_result in cases:
+            with self.subTest(stage=stage):
+                logger = Mock()
+                observer = (
+                    redis_store._new_atomic_guest_store_protocol_failure_observer()
+                )
+                with patch("builtins.print", logger):
+                    result = _v2_eval(
+                        ["EVAL", "PrivateLuaValue", 0],
+                        command_transport=lambda _command, value=eval_result: {
+                            "result": value
+                        },
+                        response_shapes={"created": set()},
+                        protocol_failure_observer=observer,
+                    )
+                self.assertEqual(
+                    result,
+                    {
+                        "status": "unavailable",
+                        "error": {"code": "storage_protocol_error"},
+                    },
+                )
+                line = self.assert_atomic_guest_store_event(logger, stage)
+                for private_value in (
+                    "PrivateInvalidEvalJson",
+                    "PrivateEvalListValue",
+                    "PrivateUnknownEvalStatus",
+                    "PrivateLuaValue",
+                ):
+                    self.assertNotIn(private_value, line)
+
+    def test_atomic_guest_store_lua_malformed_is_accepted_then_mapped(self):
+        result, commands, logger = self.run_atomic_guest_store(
+            lambda _command: {"result": json.dumps({"status": "malformed"})}
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "status": "malformed",
+                "error": {"code": "storage_protocol_error"},
+            },
+        )
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0][0], "EVAL")
+        self.assert_atomic_guest_store_event(logger, "lua_malformed")
+
+    def test_atomic_guest_store_existing_convergence_stages_are_distinct(self):
+        calls = 0
+
+        def invalid_id_transport(_command):
+            nonlocal calls
+            calls += 1
+            return {
+                "result": json.dumps(
+                    {
+                        "status": "existing",
+                        "collaborationId": "invalid-existing-id",
+                    }
+                    if calls == 1
+                    else {"status": "missing"}
+                )
+            }
+
+        result, commands, logger = self.run_atomic_guest_store(
+            invalid_id_transport
+        )
+        self.assertEqual(result["error"], {"code": "storage_protocol_error"})
+        self.assertEqual(len(commands), 2)
+        self.assert_atomic_guest_store_event(logger, "existing_id")
+
+        calls = 0
+
+        def reload_failure_transport(_command):
+            nonlocal calls
+            calls += 1
+            return {
+                "result": json.dumps(
+                    {
+                        "status": "existing",
+                        "collaborationId": "C" * 22,
+                    }
+                    if calls == 1
+                    else {"status": "missing"}
+                )
+            }
+
+        result, commands, logger = self.run_atomic_guest_store(
+            reload_failure_transport
+        )
+        self.assertEqual(result["error"], {"code": "storage_protocol_error"})
+        self.assertEqual(len(commands), 2)
+        self.assert_atomic_guest_store_event(logger, "existing_thread_reload")
+
+        existing_thread = {**thread_record(), "collaborationId": "C" * 22}
+
+        def loaded_existing_transport(command):
+            if command[0] == "GET":
+                return {"result": wire_json(existing_thread, "thread")}
+            if command[1] == redis_store._CREATE_V2_THREAD_WITH_GUEST_LUA:
+                return {
+                    "result": json.dumps(
+                        {
+                            "status": "existing",
+                            "collaborationId": existing_thread["collaborationId"],
+                        }
+                    )
+                }
+            return {
+                "result": json.dumps(
+                    {
+                        "status": "found",
+                        "collaborationId": existing_thread["collaborationId"],
+                    }
+                )
+            }
+
+        normalize_invite = redis_store.normalize_v2_invite_record
+        normalize_calls = 0
+
+        def fail_converged_invite(value):
+            nonlocal normalize_calls
+            normalize_calls += 1
+            return None if normalize_calls == 2 else normalize_invite(value)
+
+        with patch.object(
+            redis_store,
+            "normalize_v2_invite_record",
+            side_effect=fail_converged_invite,
+        ):
+            result, commands, logger = self.run_atomic_guest_store(
+                loaded_existing_transport
+            )
+        self.assertEqual(result["error"], {"code": "storage_protocol_error"})
+        self.assertEqual(len(commands), 3)
+        self.assert_atomic_guest_store_event(
+            logger, "existing_invite_normalization"
+        )
+
+        calls = 0
+
+        def invite_create_failure_transport(command):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return {
+                    "result": json.dumps(
+                        {
+                            "status": "existing",
+                            "collaborationId": existing_thread["collaborationId"],
+                        }
+                    )
+                }
+            if calls == 2:
+                return {
+                    "result": json.dumps(
+                        {
+                            "status": "found",
+                            "collaborationId": existing_thread["collaborationId"],
+                        }
+                    )
+                }
+            if calls == 3:
+                return {"result": wire_json(existing_thread, "thread")}
+            return None
+
+        result, commands, logger = self.run_atomic_guest_store(
+            invite_create_failure_transport
+        )
+        self.assertEqual(result["error"], {"code": "storage_protocol_error"})
+        self.assertEqual(len(commands), 4)
+        self.assert_atomic_guest_store_event(logger, "existing_invite_create")
+
+    def test_atomic_guest_store_created_and_existing_success_emit_no_event(self):
+        result, commands, logger = self.run_atomic_guest_store(
+            lambda _command: {"result": json.dumps({"status": "created"})}
+        )
+        self.assertIs(type(result), redis_store._V2ThreadInviteCreateResult)
+        self.assertTrue(result.thread_created)
+        self.assertTrue(result.invite_created)
+        self.assertEqual(len(commands), 1)
+        thread = thread_record()
+        invite = invite_record()
+        current_hmac, previous_hmac = resolve_v2_index_hmac_keys()
+        self.assertIsNone(previous_hmac)
+        expected_keys = [
+            build_v2_thread_key(thread["collaborationId"]),
+            build_v2_source_thread_key(
+                thread["ownerEmail"],
+                thread["mailboxId"],
+                thread["sourceRef"],
+                hmac_key=current_hmac,
+            ),
+            build_v2_invite_key(invite["inviteId"]),
+            build_v2_invite_token_key(invite["tokenHash"]),
+            build_v2_thread_invite_key(
+                invite["ownerEmail"],
+                invite["collaborationId"],
+                invite.get("invitedEmail"),
+                hmac_key=current_hmac,
+            ),
+            redis_store.build_v2_external_guest_index_key(
+                thread["collaborationId"]
+            ),
+        ]
+        self.assertEqual(
+            commands[0],
+            [
+                "EVAL",
+                redis_store._CREATE_V2_THREAD_WITH_GUEST_LUA,
+                len(expected_keys),
+                *expected_keys,
+                _v2_wire_json(thread, "thread"),
+                _v2_wire_json(invite, "invite"),
+                thread["collaborationId"],
+                invite["inviteId"],
+                str(invite["expiresAt"] - invite["createdAt"]),
+                str(invite["createdAt"]),
+                str(redis_store.V2_THREAD_RETENTION_SECONDS),
+                "0",
+                redis_store.V2_THREAD_KEY_PREFIX,
+                invite["tokenHash"],
+            ],
+        )
+        logger.assert_not_called()
+
+        existing_thread = {**thread_record(), "collaborationId": "C" * 22}
+        calls = 0
+
+        def existing_success_transport(command):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                value = {
+                    "status": "existing",
+                    "collaborationId": existing_thread["collaborationId"],
+                }
+            elif calls == 2:
+                value = {
+                    "status": "found",
+                    "collaborationId": existing_thread["collaborationId"],
+                }
+            elif calls == 3:
+                return {"result": wire_json(existing_thread, "thread")}
+            elif calls == 4:
+                return {"result": None}
+            else:
+                value = {"status": "created"}
+            return {"result": json.dumps(value)}
+
+        result, commands, logger = self.run_atomic_guest_store(
+            existing_success_transport
+        )
+        self.assertIs(type(result), redis_store._V2ThreadInviteCreateResult)
+        self.assertFalse(result.thread_created)
+        self.assertTrue(result.invite_created)
+        self.assertEqual(len(commands), 5)
+        logger.assert_not_called()
+
+    def test_atomic_guest_store_other_failures_emit_no_event(self):
+        result, commands, logger = self.run_atomic_guest_store(
+            lambda _command: {"error": "PrivateRedisUnavailableMarker"}
+        )
+        self.assertEqual(result["error"], {"code": "storage_unavailable"})
+        self.assertEqual(len(commands), 1)
+        logger.assert_not_called()
+
+        invite = invite_record()
+        commands = []
+        logger = Mock()
+        with patch.object(
+            redis_store,
+            "resolve_v2_index_hmac_keys",
+            return_value=None,
+        ), patch("builtins.print", logger):
+            result = _storage_create_v2_thread_with_guest(
+                thread_record(),
+                invite,
+                now=invite["createdAt"],
+                command_transport=lambda command: commands.append(command),
+            )
+        self.assertEqual(result["error"], {"code": "index_hmac_unavailable"})
+        self.assertEqual(commands, [])
+        logger.assert_not_called()
+
+        logger = Mock()
+        with patch("builtins.print", logger):
+            result = _storage_create_v2_thread_with_guest(
+                thread_record(),
+                invite,
+                now="invalid",
+                command_transport=lambda _command: self.fail(
+                    "invalid input must not dispatch Redis"
+                ),
+            )
+        self.assertEqual(result["error"], {"code": "invalid_request"})
+        logger.assert_not_called()
+
+        expired_invite = {**invite, "expiresAt": invite["createdAt"]}
+        logger = Mock()
+        with patch.object(
+            redis_store,
+            "normalize_v2_invite_record",
+            return_value=expired_invite,
+        ), patch.object(
+            redis_store,
+            "_v2_wire_json",
+            return_value="PrivateWireMarker",
+        ), patch("builtins.print", logger):
+            result = _storage_create_v2_thread_with_guest(
+                thread_record(),
+                invite,
+                now=invite["createdAt"],
+                command_transport=lambda _command: self.fail(
+                    "expired input must not dispatch Redis"
+                ),
+            )
+        self.assertEqual(result["error"], {"code": "invite_expired"})
+        logger.assert_not_called()
+
+        for status, code in (
+            ("conflict", "invalid_request"),
+            ("source_pointer_conflict", "source_changed"),
+        ):
+            with self.subTest(status=status):
+                result, commands, logger = self.run_atomic_guest_store(
+                    lambda _command, value=status: {
+                        "result": json.dumps({"status": value})
+                    }
+                )
+            self.assertEqual(result["error"], {"code": code})
+            self.assertEqual(len(commands), 1)
+            logger.assert_not_called()
+
+    def test_atomic_guest_store_logger_failure_is_behavior_neutral(self):
+        result, commands, logger = self.run_atomic_guest_store(
+            lambda _command: {"result": "PrivateInvalidEvalJson{"},
+            logger_side_effect=RuntimeError("PrivateLoggerExceptionMarker"),
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "status": "unavailable",
+                "error": {"code": "storage_protocol_error"},
+            },
+        )
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(logger.call_count, 1)
+
+    def test_atomic_guest_store_event_contains_no_request_or_storage_secrets(self):
+        result, commands, logger = self.run_atomic_guest_store(
+            lambda _command: {"result": json.dumps({"status": "malformed"})}
+        )
+        self.assertEqual(result["error"], {"code": "storage_protocol_error"})
+        line = self.assert_atomic_guest_store_event(logger, "lua_malformed")
+        self.assertEqual(
+            set(json.loads(line)),
+            {"event", "stage", "internalSafeCode"},
+        )
+        thread = thread_record()
+        invite = invite_record()
+        for field in (
+            "ownerEmail",
+            "invitedEmail",
+            "workspaceId",
+            "mailboxId",
+            "collaborationId",
+            "inviteId",
+            "sourceRef",
+            "providerMessageId",
+            "imapUid",
+            "uidValidity",
+            "threadKey",
+            "sourceKey",
+            "inviteKey",
+            "tokenKey",
+            "identityKey",
+            "externalGuestIndexKey",
+            "token",
+            "tokenHash",
+            "threadRecord",
+            "inviteRecord",
+            "wireJson",
+            "luaScript",
+            "restUrl",
+            "restToken",
+            "Authorization",
+            "requestBody",
+            "responseBody",
+            "redisResult",
+            "exception",
+            "traceback",
+        ):
+            self.assertNotIn(json.dumps(field), line)
+        command = commands[0]
+        private_values = (
+            thread["ownerEmail"],
+            invite["invitedEmail"],
+            thread["workspaceId"],
+            thread["mailboxId"],
+            thread["collaborationId"],
+            invite["inviteId"],
+            thread["sourceRef"]["providerMessageId"],
+            invite["tokenHash"],
+            command[1],
+            command[3],
+            command[4],
+            command[-1],
+            "PrivateLoggerExceptionMarker",
+        )
+        for private_value in private_values:
+            self.assertNotIn(private_value, line)
 
     def test_strict_response_decoder_rejects_duplicate_keys_at_every_level(self):
         inner_responses = {
