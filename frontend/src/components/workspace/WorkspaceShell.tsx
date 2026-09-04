@@ -212,6 +212,7 @@ import {
 import {
   ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
   ARCHIVE_REFRESH_ERROR_MESSAGE,
+  createActiveMailboxPollingController,
   createCustomImapInboxAuthority,
   createGmailInboxAuthority,
   createGmailUnreadIntentAuthority,
@@ -46989,17 +46990,35 @@ export function WorkspaceShell({
       return;
     }
 
-    const intervalId = window.setInterval(() => {
-      void refreshMailboxById(activeMailbox.id, { reason: "interval" });
-    }, ACTIVE_MAILBOX_AUTO_REFRESH_INTERVAL_MS);
+    if (typeof document === "undefined" || typeof window === "undefined") {
+      return;
+    }
 
-    return () => window.clearInterval(intervalId);
+    const pollingController = createActiveMailboxPollingController({
+      intervalMs: ACTIVE_MAILBOX_AUTO_REFRESH_INTERVAL_MS,
+      clock: {
+        now: () => window.performance.now(),
+        isVisible: () => document.visibilityState === "visible",
+        setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+        clearTimer: (timerHandle) => window.clearTimeout(timerHandle),
+        addVisibilityListener: (listener) =>
+          document.addEventListener("visibilitychange", listener),
+        removeVisibilityListener: (listener) =>
+          document.removeEventListener("visibilitychange", listener),
+      },
+      isRefreshInFlight: () =>
+        syncingMailboxIdsRef.current.has(activeMailbox.id),
+      refresh: () => {
+        void refreshMailboxById(activeMailbox.id, { reason: "interval" });
+      },
+    });
+
+    return pollingController.stop;
   }, [
     activeMailbox,
     hasAuthenticatedMemberAuthority,
     isMobileWorkspaceViewport,
     savedManagedInboxes,
-    syncingMailboxId,
   ]);
   const workspaceShellPaddingClass = usesOrganizerWorkspaceLayout
     ? "p-0"

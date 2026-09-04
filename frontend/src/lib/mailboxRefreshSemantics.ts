@@ -17,6 +17,19 @@ export type MailboxRefreshPlan = {
   archiveErrorScope: "background" | "folder" | null;
 };
 
+export type ActiveMailboxPollingController = {
+  stop: () => void;
+};
+
+export type ActiveMailboxPollingClock<TimerHandle> = {
+  now: () => number;
+  isVisible: () => boolean;
+  setTimer: (callback: () => void, delayMs: number) => TimerHandle;
+  clearTimer: (timerHandle: TimerHandle) => void;
+  addVisibilityListener: (listener: () => void) => void;
+  removeVisibilityListener: (listener: () => void) => void;
+};
+
 export type GmailArchiveReconciliationCoordinator<MailboxId extends string> = {
   request: (mailboxId: MailboxId) => void;
   drain: (mailboxId: MailboxId) => void;
@@ -661,6 +674,68 @@ export const ARCHIVE_REFRESH_ERROR_MESSAGE =
   "Archive could not be refreshed safely. Existing Archive messages were kept.";
 export const ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE =
   "Archive is not available for this connected mailbox.";
+
+export function createActiveMailboxPollingController<TimerHandle>({
+  intervalMs,
+  clock,
+  isRefreshInFlight,
+  refresh,
+}: {
+  intervalMs: number;
+  clock: ActiveMailboxPollingClock<TimerHandle>;
+  isRefreshInFlight: () => boolean;
+  refresh: () => void;
+}): ActiveMailboxPollingController {
+  let stopped = false;
+  let timerHandle: TimerHandle | null = null;
+  let nextDeadlineMs = clock.now() + intervalMs;
+
+  const clearScheduledTimer = () => {
+    if (timerHandle === null) {
+      return;
+    }
+    clock.clearTimer(timerHandle);
+    timerHandle = null;
+  };
+
+  const applyPollingPolicy = () => {
+    clearScheduledTimer();
+    if (stopped || !clock.isVisible()) {
+      return;
+    }
+
+    const nowMs = clock.now();
+    if (nowMs >= nextDeadlineMs) {
+      if (!isRefreshInFlight()) {
+        refresh();
+      }
+      nextDeadlineMs = nowMs + intervalMs;
+    }
+
+    timerHandle = clock.setTimer(
+      applyPollingPolicy,
+      Math.max(0, nextDeadlineMs - nowMs),
+    );
+  };
+
+  const handleVisibilityChange = () => {
+    applyPollingPolicy();
+  };
+
+  clock.addVisibilityListener(handleVisibilityChange);
+  applyPollingPolicy();
+
+  return {
+    stop: () => {
+      if (stopped) {
+        return;
+      }
+      stopped = true;
+      clearScheduledTimer();
+      clock.removeVisibilityListener(handleVisibilityChange);
+    },
+  };
+}
 
 export function resolveMailboxRefreshPlan({
   reason,
