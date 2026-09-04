@@ -708,8 +708,12 @@ else:
     _ATOMIC_GUEST_INVITE_INVALID_EVENT = (
         "cuevion_collaboration_atomic_guest_invite_invalid"
     )
+    _ATOMIC_GUEST_INVITE_KEY_SHAPE_EVENT = (
+        "cuevion_collaboration_atomic_guest_invite_key_shape"
+    )
     _ATOMIC_GUEST_LUA_MALFORMED_EVENT_MAX_BYTES = 128
     _ATOMIC_GUEST_INVITE_INVALID_EVENT_MAX_BYTES = 128
+    _ATOMIC_GUEST_INVITE_KEY_SHAPE_EVENT_MAX_BYTES = 192
     _ATOMIC_GUEST_LUA_MALFORMED_PREDICATES = frozenset(
         {
             "argv_shape",
@@ -764,6 +768,26 @@ else:
             "status_unknown",
         }
     )
+    _ATOMIC_GUEST_INVITE_KEY_SHAPE_BOUNDS = {
+        "key_count_low": "key_count_low",
+        "key_count_high": "key_count_high",
+        "top_level_non_table": "top_level_non_table",
+    }
+    _ATOMIC_GUEST_INVITE_KEY_SHAPE_DECODED_SHAPES = {
+        "nullable_all_missing": "nullable_all_missing",
+        "nullable_some_missing": "nullable_some_missing",
+        "nonnullable_missing": "nonnullable_missing",
+        "mixed_missing": "mixed_missing",
+        "unexpected_key": "unexpected_key",
+        "unclassified": "unclassified",
+    }
+    _ATOMIC_GUEST_INVITE_KEY_SHAPE_WIRE_SHAPES = {
+        "complete_with_nullables": "complete_with_nullables",
+        "nullable_missing": "nullable_missing",
+        "nonnullable_missing": "nonnullable_missing",
+        "unexpected_key": "unexpected_key",
+        "unclassified": "unclassified",
+    }
     _ATOMIC_GUEST_STORE_FAILURE_STAGES = frozenset(
         {
             "rest_empty_body",
@@ -1096,6 +1120,62 @@ else:
                 if (
                     len(serialized.encode("utf-8"))
                     > _ATOMIC_GUEST_INVITE_INVALID_EVENT_MAX_BYTES
+                ):
+                    return
+                emitted = True
+                print(serialized, flush=True)
+            except Exception:
+                pass
+
+        return observe
+
+
+    def _new_atomic_guest_invite_key_shape_observer():
+        emitted = False
+
+        def observe(metadata: object) -> None:
+            nonlocal emitted
+            if (
+                emitted
+                or type(metadata) is not dict
+                or set(metadata) != {"bound", "decodedShape", "wireShape"}
+            ):
+                return
+            raw_bound = metadata.get("bound")
+            raw_decoded_shape = metadata.get("decodedShape")
+            raw_wire_shape = metadata.get("wireShape")
+            if (
+                type(raw_bound) is not str
+                or type(raw_decoded_shape) is not str
+                or type(raw_wire_shape) is not str
+            ):
+                return
+            bound = _ATOMIC_GUEST_INVITE_KEY_SHAPE_BOUNDS.get(raw_bound)
+            decoded_shape = _ATOMIC_GUEST_INVITE_KEY_SHAPE_DECODED_SHAPES.get(
+                raw_decoded_shape
+            )
+            wire_shape = _ATOMIC_GUEST_INVITE_KEY_SHAPE_WIRE_SHAPES.get(
+                raw_wire_shape
+            )
+            if bound is None or decoded_shape is None or wire_shape is None:
+                return
+            try:
+                event = {
+                    "event": _ATOMIC_GUEST_INVITE_KEY_SHAPE_EVENT,
+                    "bound": bound,
+                    "decodedShape": decoded_shape,
+                    "wireShape": wire_shape,
+                }
+                serialized = json.dumps(
+                    event,
+                    allow_nan=False,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                if (
+                    len(serialized.encode("utf-8"))
+                    > _ATOMIC_GUEST_INVITE_KEY_SHAPE_EVENT_MAX_BYTES
                 ):
                     return
                 emitted = True
@@ -2184,7 +2264,105 @@ else:
         return result
 
 
-    _CREATE_V2_THREAD_WITH_GUEST_LUA = _V2_LUA_COMMON + r"""
+    _V2_INVITE_KEY_SHAPE_DIAGNOSTIC_LUA = r"""
+    local INVITE_SHAPE_NONNULLABLE_KEYS = {
+      v=true,inviteId=true,tokenHash=true,ownerEmail=true,workspaceId=true,mailboxId=true,
+      collaborationId=true,identityAssurance=true,allowedActions=true,visibility=true,
+      createdBy=true,createdAt=true,expiresAt=true,status=true,exchangeCount=true
+    }
+    local INVITE_SHAPE_NULLABLE_KEYS = {
+      exchangedAt=true,revokedAt=true,revokedBy=true
+    }
+    local INVITE_SHAPE_ALLOWED_KEYS = {
+      v=true,inviteId=true,tokenHash=true,ownerEmail=true,workspaceId=true,mailboxId=true,
+      collaborationId=true,invitedEmail=true,identityAssurance=true,allowedActions=true,
+      visibility=true,createdBy=true,createdAt=true,expiresAt=true,status=true,
+      exchangedAt=true,exchangeCount=true,revokedAt=true,revokedBy=true,
+      activeSessionHash=true
+    }
+    local function rawInviteShape(raw)
+      if type(raw) ~= 'string' or not rawIsValidUtf8(raw) then return 'unclassified' end
+      local cursor = skipJsonWhitespace(raw, 1)
+      if string.byte(raw, cursor) ~= 123 then return 'unclassified' end
+      cursor = skipJsonWhitespace(raw, cursor + 1)
+      local seen = {}
+      local closed = false
+      if string.byte(raw, cursor) == 125 then
+        cursor = skipJsonWhitespace(raw, cursor + 1)
+        closed = true
+      else
+        while cursor <= #raw do
+          local nextCursor, key = parseJsonString(raw, cursor)
+          if not nextCursor or seen[key] then return 'unclassified' end
+          seen[key] = true
+          cursor = skipJsonWhitespace(raw, nextCursor)
+          if string.byte(raw, cursor) ~= 58 then return 'unclassified' end
+          cursor = parseJsonValue(raw, cursor + 1, 1)
+          if not cursor then return 'unclassified' end
+          cursor = skipJsonWhitespace(raw, cursor)
+          local byte = string.byte(raw, cursor)
+          if byte == 125 then
+            cursor = skipJsonWhitespace(raw, cursor + 1)
+            closed = true
+            break
+          end
+          if byte ~= 44 then return 'unclassified' end
+          cursor = skipJsonWhitespace(raw, cursor + 1)
+        end
+      end
+      if not closed or cursor ~= #raw + 1 then return 'unclassified' end
+      for key, _ in pairs(seen) do
+        if not INVITE_SHAPE_ALLOWED_KEYS[key] then return 'unexpected_key' end
+      end
+      for key, _ in pairs(INVITE_SHAPE_NONNULLABLE_KEYS) do
+        if not seen[key] then return 'nonnullable_missing' end
+      end
+      for key, _ in pairs(INVITE_SHAPE_NULLABLE_KEYS) do
+        if not seen[key] then return 'nullable_missing' end
+      end
+      return 'complete_with_nullables'
+    end
+    local function decodedInviteKeyShape(invite)
+      if type(invite) ~= 'table' then
+        return 'top_level_non_table', 'unclassified'
+      end
+      local count = keyCount(invite)
+      local bound = nil
+      if count < 18 then bound = 'key_count_low'
+      elseif count > 20 then bound = 'key_count_high'
+      else return nil, nil end
+      for key, _ in pairs(invite) do
+        if not INVITE_SHAPE_ALLOWED_KEYS[key] then
+          return bound, 'unexpected_key'
+        end
+      end
+      local nullableMissing = 0
+      local nonnullableMissing = false
+      for key, _ in pairs(INVITE_SHAPE_NULLABLE_KEYS) do
+        if invite[key] == nil then nullableMissing = nullableMissing + 1 end
+      end
+      for key, _ in pairs(INVITE_SHAPE_NONNULLABLE_KEYS) do
+        if invite[key] == nil then nonnullableMissing = true end
+      end
+      if nullableMissing == 3 and not nonnullableMissing then
+        return bound, 'nullable_all_missing'
+      end
+      if nullableMissing > 0 and not nonnullableMissing then
+        return bound, 'nullable_some_missing'
+      end
+      if nullableMissing == 0 and nonnullableMissing then
+        return bound, 'nonnullable_missing'
+      end
+      if nullableMissing > 0 and nonnullableMissing then
+        return bound, 'mixed_missing'
+      end
+      return bound, 'unclassified'
+    end
+    """
+
+
+    _CREATE_V2_THREAD_WITH_GUEST_LUA = (
+        _V2_LUA_COMMON + _V2_INVITE_KEY_SHAPE_DIAGNOSTIC_LUA + r"""
     if #ARGV[1] > 262144 or #ARGV[2] > 16384
       or not positiveInteger(ARGV[5]) or not timestampSeconds(ARGV[6])
       or not positiveInteger(ARGV[7]) or (ARGV[8] ~= '0' and ARGV[8] ~= '1') then
@@ -2194,6 +2372,7 @@ else:
     if #KEYS ~= (hasPrevious and 8 or 6) then
       return cjson.encode({status='malformed', predicate='key_count'})
     end
+    local wireShapeOk, proposedInviteWireShape = pcall(rawInviteShape, ARGV[2])
     local threadOk, proposedThread = decodeWire(ARGV[1])
     local inviteOk, proposedInvite = decodeWire(ARGV[2])
     local now = integerValue(ARGV[6])
@@ -2204,6 +2383,15 @@ else:
     if not inviteOk then return cjson.encode({status='malformed', predicate='invite_decode'}) end
     local inviteIsValid, inviteSubpredicate = inviteValid(proposedInvite)
     if not inviteIsValid then
+      if inviteSubpredicate == 'key_count' then
+        local diagnosticOk, bound, decodedShape = pcall(decodedInviteKeyShape, proposedInvite)
+        if wireShapeOk and diagnosticOk and bound and decodedShape then
+          return cjson.encode({
+            status='malformed',predicate='invite_valid',subpredicate=inviteSubpredicate,
+            keyShape={bound=bound,decodedShape=decodedShape,wireShape=proposedInviteWireShape}
+          })
+        end
+      end
       return cjson.encode({status='malformed', predicate='invite_valid', subpredicate=inviteSubpredicate})
     end
     if proposedInvite.status ~= 'active' then return cjson.encode({status='malformed', predicate='invite_status'}) end
@@ -2264,7 +2452,8 @@ else:
       redis.call('DEL', KEYS[8])
     end
     return cjson.encode({status='created'})
-    """.strip()
+    """
+    ).strip()
 
 
     def _create_v2_thread_with_guest(
@@ -2353,6 +2542,7 @@ else:
         )
         lua_malformed_observer = _new_atomic_guest_lua_malformed_observer()
         invite_invalid_observer = _new_atomic_guest_invite_invalid_observer()
+        invite_key_shape_observer = _new_atomic_guest_invite_key_shape_observer()
         result = _v2_eval(
             [
                 "EVAL", _CREATE_V2_THREAD_WITH_GUEST_LUA, len(keys), *keys,
@@ -2367,7 +2557,7 @@ else:
                 "conflict": set(), "source_pointer_conflict": set(),
                 "malformed": {"predicate"},
             },
-            optional_response_fields={"malformed": {"subpredicate"}},
+            optional_response_fields={"malformed": {"subpredicate", "keyShape"}},
             protocol_failure_observer=protocol_failure_observer,
         )
         if result.get("status") == "created":
@@ -2419,7 +2609,10 @@ else:
             protocol_failure_observer("lua_malformed")
             lua_malformed_observer(result.get("predicate"))
             if result.get("predicate") == "invite_valid":
-                invite_invalid_observer(result.get("subpredicate"))
+                subpredicate = result.get("subpredicate")
+                invite_invalid_observer(subpredicate)
+                if subpredicate == "key_count":
+                    invite_key_shape_observer(result.get("keyShape"))
             return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
         return result
 

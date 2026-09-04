@@ -628,6 +628,120 @@ class CollaborationV2RedisStoreTests(unittest.TestCase):
                     observer(rejected)
                 logger.assert_not_called()
 
+    def test_atomic_guest_invite_key_shape_observer_is_closed_bounded_and_private(self):
+        expected_bounds = {
+            "key_count_low",
+            "key_count_high",
+            "top_level_non_table",
+        }
+        expected_decoded_shapes = {
+            "nullable_all_missing",
+            "nullable_some_missing",
+            "nonnullable_missing",
+            "mixed_missing",
+            "unexpected_key",
+            "unclassified",
+        }
+        expected_wire_shapes = {
+            "complete_with_nullables",
+            "nullable_missing",
+            "nonnullable_missing",
+            "unexpected_key",
+            "unclassified",
+        }
+        self.assertEqual(
+            set(redis_store._ATOMIC_GUEST_INVITE_KEY_SHAPE_BOUNDS),
+            expected_bounds,
+        )
+        self.assertEqual(
+            set(redis_store._ATOMIC_GUEST_INVITE_KEY_SHAPE_DECODED_SHAPES),
+            expected_decoded_shapes,
+        )
+        self.assertEqual(
+            set(redis_store._ATOMIC_GUEST_INVITE_KEY_SHAPE_WIRE_SHAPES),
+            expected_wire_shapes,
+        )
+        self.assertEqual(
+            redis_store._ATOMIC_GUEST_INVITE_KEY_SHAPE_EVENT_MAX_BYTES,
+            192,
+        )
+
+        event_sizes = []
+        for bound in expected_bounds:
+            for decoded_shape in expected_decoded_shapes:
+                for wire_shape in expected_wire_shapes:
+                    with self.subTest(
+                        bound=bound,
+                        decoded_shape=decoded_shape,
+                        wire_shape=wire_shape,
+                    ):
+                        observer = (
+                            redis_store._new_atomic_guest_invite_key_shape_observer()
+                        )
+                        logger = Mock()
+                        metadata = {
+                            "bound": bound,
+                            "decodedShape": decoded_shape,
+                            "wireShape": wire_shape,
+                        }
+                        with patch("builtins.print", logger):
+                            observer(metadata)
+                            observer(metadata)
+                        self.assertEqual(logger.call_count, 1)
+                        line = logger.call_args.args[0]
+                        self.assertEqual(
+                            json.loads(line),
+                            {
+                                "event": "cuevion_collaboration_atomic_guest_invite_key_shape",
+                                **metadata,
+                            },
+                        )
+                        self.assertEqual(
+                            set(json.loads(line)),
+                            {"event", "bound", "decodedShape", "wireShape"},
+                        )
+                        event_sizes.append(len(line.encode("utf-8")))
+        self.assertEqual(max(event_sizes), 170)
+        self.assertLessEqual(
+            max(event_sizes),
+            redis_store._ATOMIC_GUEST_INVITE_KEY_SHAPE_EVENT_MAX_BYTES,
+        )
+
+        class DynamicString(str):
+            pass
+
+        canonical = {
+            "bound": "key_count_low",
+            "decodedShape": "nullable_all_missing",
+            "wireShape": "complete_with_nullables",
+        }
+        rejected = (
+            None,
+            [],
+            {},
+            {"bound": "key_count_low"},
+            {**canonical, "private": "owner@example.com"},
+            {**canonical, "bound": None},
+            {**canonical, "bound": True},
+            {**canonical, "bound": "owner@example.com"},
+            {**canonical, "bound": DynamicString("key_count_low")},
+            {**canonical, "decodedShape": ["nullable_all_missing"]},
+            {**canonical, "decodedShape": "owner@example.com"},
+            {**canonical, "wireShape": {"value": "unclassified"}},
+            {**canonical, "wireShape": "owner@example.com"},
+        )
+        for metadata in rejected:
+            with self.subTest(rejected=metadata):
+                observer = redis_store._new_atomic_guest_invite_key_shape_observer()
+                logger = Mock()
+                with patch("builtins.print", logger):
+                    observer(metadata)
+                logger.assert_not_called()
+
+        observer = redis_store._new_atomic_guest_invite_key_shape_observer()
+        with patch("builtins.print", side_effect=RuntimeError("logger failed")):
+            observer(canonical)
+
     def test_atomic_guest_store_rest_protocol_stages_are_exact_and_secret_free(self):
         class Response:
             def __init__(self, raw: bytes):
@@ -814,6 +928,143 @@ class CollaborationV2RedisStoreTests(unittest.TestCase):
                 self.assertEqual(len(commands), 1)
                 self.assertEqual(commands[0][0], "EVAL")
                 self.assert_atomic_guest_lua_malformed_events(logger, predicate)
+
+    def test_atomic_guest_invite_key_shape_metadata_is_strict_and_trigger_gated(self):
+        metadata = {
+            "bound": "key_count_low",
+            "decodedShape": "nullable_all_missing",
+            "wireShape": "complete_with_nullables",
+        }
+
+        result, commands, logger = self.run_atomic_guest_store(
+            lambda _command: {
+                "result": json.dumps(
+                    {
+                        "status": "malformed",
+                        "predicate": "invite_valid",
+                        "subpredicate": "key_count",
+                        "keyShape": metadata,
+                    }
+                )
+            }
+        )
+        self.assertEqual(
+            result,
+            {"status": "malformed", "error": {"code": "storage_protocol_error"}},
+        )
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(
+            [json.loads(call.args[0]) for call in logger.call_args_list],
+            [
+                {
+                    "event": "cuevion_collaboration_atomic_guest_store_failure",
+                    "stage": "lua_malformed",
+                    "internalSafeCode": "storage_protocol_error",
+                },
+                {
+                    "event": "cuevion_collaboration_atomic_guest_lua_malformed",
+                    "predicate": "invite_valid",
+                },
+                {
+                    "event": "cuevion_collaboration_atomic_guest_invite_invalid",
+                    "subpredicate": "key_count",
+                },
+                {
+                    "event": "cuevion_collaboration_atomic_guest_invite_key_shape",
+                    **metadata,
+                },
+            ],
+        )
+
+        missing = object()
+        invalid_metadata = (
+            missing,
+            None,
+            [],
+            "owner@example.com",
+            {},
+            {"bound": "key_count_low"},
+            {**metadata, "private": "owner@example.com"},
+            {**metadata, "bound": 7},
+            {**metadata, "bound": "owner@example.com"},
+            {**metadata, "decodedShape": None},
+            {**metadata, "decodedShape": "owner@example.com"},
+            {**metadata, "wireShape": ["complete_with_nullables"]},
+            {**metadata, "wireShape": "owner@example.com"},
+        )
+        for key_shape in invalid_metadata:
+            with self.subTest(key_shape=key_shape):
+                malformed_response = {
+                    "status": "malformed",
+                    "predicate": "invite_valid",
+                    "subpredicate": "key_count",
+                }
+                if key_shape is not missing:
+                    malformed_response["keyShape"] = key_shape
+                result, _commands, logger = self.run_atomic_guest_store(
+                    lambda _command, value=malformed_response: {
+                        "result": json.dumps(value)
+                    }
+                )
+                self.assertEqual(
+                    result,
+                    {
+                        "status": "malformed",
+                        "error": {"code": "storage_protocol_error"},
+                    },
+                )
+                events = [json.loads(call.args[0]) for call in logger.call_args_list]
+                self.assertEqual(
+                    events,
+                    [
+                        {
+                            "event": "cuevion_collaboration_atomic_guest_store_failure",
+                            "stage": "lua_malformed",
+                            "internalSafeCode": "storage_protocol_error",
+                        },
+                        {
+                            "event": "cuevion_collaboration_atomic_guest_lua_malformed",
+                            "predicate": "invite_valid",
+                        },
+                        {
+                            "event": "cuevion_collaboration_atomic_guest_invite_invalid",
+                            "subpredicate": "key_count",
+                        },
+                    ],
+                )
+                self.assertNotIn("owner@example.com", repr(logger.call_args_list))
+
+        non_key_count = (
+            ("invite_valid", "visibility", 3),
+            ("thread_valid", "key_count", 2),
+        )
+        for predicate, subpredicate, expected_event_count in non_key_count:
+            with self.subTest(predicate=predicate, subpredicate=subpredicate):
+                result, _commands, logger = self.run_atomic_guest_store(
+                    lambda _command, predicate=predicate, subpredicate=subpredicate: {
+                        "result": json.dumps(
+                            {
+                                "status": "malformed",
+                                "predicate": predicate,
+                                "subpredicate": subpredicate,
+                                "keyShape": metadata,
+                            }
+                        )
+                    }
+                )
+                self.assertEqual(
+                    result,
+                    {
+                        "status": "malformed",
+                        "error": {"code": "storage_protocol_error"},
+                    },
+                )
+                events = [json.loads(call.args[0]) for call in logger.call_args_list]
+                self.assertEqual(len(events), expected_event_count)
+                self.assertNotIn(
+                    "cuevion_collaboration_atomic_guest_invite_key_shape",
+                    {event["event"] for event in events},
+                )
 
     def test_atomic_guest_store_rejects_non_allowlisted_predicate_from_d5(self):
         private_marker = "PrivateArbitraryPredicateMarker"
