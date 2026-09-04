@@ -527,12 +527,25 @@ export function createGmailInboxAuthority(): GmailInboxAuthority {
   return {
     captureGeneration: readGeneration,
     confirmArchive: (mailboxId, providerMessageId) => {
-      const nextGeneration = readGeneration(mailboxId) + 1;
+      const currentGeneration = readGeneration(mailboxId);
+      if (
+        !isExactAuthorityIdentifier(mailboxId) ||
+        !isExactAuthorityIdentifier(providerMessageId)
+      ) {
+        return currentGeneration;
+      }
+
+      const currentFence = readFence(mailboxId);
+      if (currentFence?.has(providerMessageId)) {
+        return currentGeneration;
+      }
+
+      const nextGeneration = currentGeneration + 1;
       generationByMailbox.set(mailboxId, nextGeneration);
 
-      const currentFence = readFence(mailboxId) ?? new Set<string>();
-      currentFence.add(providerMessageId);
-      recentlyArchivedByMailbox.set(mailboxId, currentFence);
+      const nextFence = currentFence ?? new Set<string>();
+      nextFence.add(providerMessageId);
+      recentlyArchivedByMailbox.set(mailboxId, nextFence);
 
       return nextGeneration;
     },

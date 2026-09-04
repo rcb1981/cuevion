@@ -527,6 +527,239 @@ assert.equal(
   false,
 );
 
+const idempotentGmailInboxAuthority = createGmailInboxAuthority();
+const idempotentMailboxId = "mailbox-idempotent";
+const idempotentProviderMessageId = "provider-idempotent-x";
+const generationBeforeFirstArchive =
+  idempotentGmailInboxAuthority.captureGeneration(idempotentMailboxId);
+assert.equal(generationBeforeFirstArchive, 0);
+assert.equal(
+  idempotentGmailInboxAuthority.confirmArchive(
+    idempotentMailboxId,
+    idempotentProviderMessageId,
+  ),
+  1,
+);
+const generationAfterFirstArchive =
+  idempotentGmailInboxAuthority.captureGeneration(idempotentMailboxId);
+assert.equal(
+  idempotentGmailInboxAuthority.confirmArchive(
+    idempotentMailboxId,
+    idempotentProviderMessageId,
+  ),
+  generationAfterFirstArchive,
+);
+assert.equal(
+  idempotentGmailInboxAuthority.isCurrentGeneration(
+    idempotentMailboxId,
+    generationAfterFirstArchive,
+  ),
+  true,
+);
+assert.equal(
+  idempotentGmailInboxAuthority.isRecentlyArchived(
+    idempotentMailboxId,
+    idempotentProviderMessageId,
+  ),
+  true,
+);
+assert.equal(
+  idempotentGmailInboxAuthority.confirmArchive(
+    idempotentMailboxId,
+    "provider-idempotent-y",
+  ),
+  generationAfterFirstArchive + 1,
+);
+assert.equal(
+  idempotentGmailInboxAuthority.isCurrentGeneration(
+    idempotentMailboxId,
+    generationAfterFirstArchive,
+  ),
+  false,
+);
+assert.equal(
+  idempotentGmailInboxAuthority.confirmArchive(
+    "mailbox-idempotent-other",
+    idempotentProviderMessageId,
+  ),
+  1,
+);
+assert.equal(
+  idempotentGmailInboxAuthority.captureGeneration(idempotentMailboxId),
+  2,
+);
+
+const invalidConfirmationGeneration =
+  idempotentGmailInboxAuthority.captureGeneration("mailbox-invalid-input");
+for (const invalidProviderMessageId of ["", " provider-padded "]) {
+  assert.equal(
+    idempotentGmailInboxAuthority.confirmArchive(
+      "mailbox-invalid-input",
+      invalidProviderMessageId,
+    ),
+    invalidConfirmationGeneration,
+  );
+  assert.equal(
+    idempotentGmailInboxAuthority.isRecentlyArchived(
+      "mailbox-invalid-input",
+      invalidProviderMessageId,
+    ),
+    false,
+  );
+}
+assert.equal(
+  idempotentGmailInboxAuthority.confirmArchive(
+    " mailbox-invalid-input ",
+    "provider-valid",
+  ),
+  0,
+);
+
+const reentryAuthority = createGmailInboxAuthority();
+const reentryMailboxId = "mailbox-reentry";
+const reentryProviderMessageId = "provider-reentry";
+assert.equal(
+  reentryAuthority.confirmArchive(
+    reentryMailboxId,
+    reentryProviderMessageId,
+  ),
+  1,
+);
+assert.equal(
+  reentryAuthority.confirmArchive(
+    reentryMailboxId,
+    reentryProviderMessageId,
+  ),
+  1,
+);
+const reentryGeneration =
+  reentryAuthority.captureGeneration(reentryMailboxId);
+const exactReentry = reentryAuthority.resolveFetchResponse({
+  mailboxId: reentryMailboxId,
+  generationAtFetchStart: reentryGeneration,
+  messages: [
+    {
+      serverMailboxId: reentryMailboxId,
+      providerFolder: "Inbox",
+      providerMessageId: reentryProviderMessageId,
+      labelIds: ["INBOX"],
+    },
+  ],
+});
+assert.equal(exactReentry.stale, false);
+assert.deepEqual(exactReentry.provenReentryProviderMessageIds, [
+  reentryProviderMessageId,
+]);
+assert.equal(
+  reentryAuthority.isRecentlyArchived(
+    reentryMailboxId,
+    reentryProviderMessageId,
+  ),
+  false,
+);
+assert.equal(
+  reentryAuthority.confirmArchive(
+    reentryMailboxId,
+    reentryProviderMessageId,
+  ),
+  reentryGeneration + 1,
+);
+
+const trashSnapshotAuthority = createGmailInboxAuthority();
+const trashSnapshotMailboxId = "mailbox-trash-snapshot";
+const stableTrashProviderMessageIds = ["trash-x", "trash-y", "trash-z"];
+assert.deepEqual(
+  stableTrashProviderMessageIds.map((providerMessageId) =>
+    trashSnapshotAuthority.confirmArchive(
+      trashSnapshotMailboxId,
+      providerMessageId,
+    ),
+  ),
+  [1, 2, 3],
+);
+const stableTrashGeneration =
+  trashSnapshotAuthority.captureGeneration(trashSnapshotMailboxId);
+assert.deepEqual(
+  stableTrashProviderMessageIds.map((providerMessageId) =>
+    trashSnapshotAuthority.confirmArchive(
+      trashSnapshotMailboxId,
+      providerMessageId,
+    ),
+  ),
+  [stableTrashGeneration, stableTrashGeneration, stableTrashGeneration],
+);
+assert.deepEqual(
+  ["trash-z", "trash-x", "trash-y"].map((providerMessageId) =>
+    trashSnapshotAuthority.confirmArchive(
+      trashSnapshotMailboxId,
+      providerMessageId,
+    ),
+  ),
+  [stableTrashGeneration, stableTrashGeneration, stableTrashGeneration],
+);
+assert.equal(
+  trashSnapshotAuthority.isCurrentGeneration(
+    trashSnapshotMailboxId,
+    stableTrashGeneration,
+  ),
+  true,
+);
+assert.deepEqual(
+  [...stableTrashProviderMessageIds, "trash-q"].map((providerMessageId) =>
+    trashSnapshotAuthority.confirmArchive(
+      trashSnapshotMailboxId,
+      providerMessageId,
+    ),
+  ),
+  [
+    stableTrashGeneration,
+    stableTrashGeneration,
+    stableTrashGeneration,
+    stableTrashGeneration + 1,
+  ],
+);
+
+const archiveAcknowledgementAuthority = createGmailInboxAuthority();
+const mutationGeneration =
+  archiveAcknowledgementAuthority.captureGeneration("mailbox-mutation");
+assert.equal(
+  archiveAcknowledgementAuthority.confirmArchive(
+    "mailbox-mutation",
+    "provider-mutation",
+  ),
+  mutationGeneration + 1,
+);
+const confirmedMutationGeneration =
+  archiveAcknowledgementAuthority.captureGeneration("mailbox-mutation");
+assert.equal(
+  archiveAcknowledgementAuthority.confirmArchive(
+    "mailbox-mutation",
+    "provider-mutation",
+  ),
+  confirmedMutationGeneration,
+);
+assert.equal(
+  archiveAcknowledgementAuthority.isCurrentGeneration(
+    "mailbox-mutation",
+    confirmedMutationGeneration,
+  ),
+  true,
+);
+assert.equal(
+  archiveAcknowledgementAuthority.confirmArchive(
+    "mailbox-mutation",
+    "provider-new-mutation",
+  ),
+  confirmedMutationGeneration + 1,
+);
+assert.equal(
+  archiveAcknowledgementAuthority.isCurrentGeneration(
+    "mailbox-mutation",
+    confirmedMutationGeneration,
+  ),
+  false,
+);
+
 assert.equal(
   shouldApplyProviderArchiveResponse({
     requestConnectionKey: "connection-1",
