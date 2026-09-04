@@ -705,7 +705,11 @@ else:
     _ATOMIC_GUEST_LUA_MALFORMED_EVENT = (
         "cuevion_collaboration_atomic_guest_lua_malformed"
     )
+    _ATOMIC_GUEST_INVITE_INVALID_EVENT = (
+        "cuevion_collaboration_atomic_guest_invite_invalid"
+    )
     _ATOMIC_GUEST_LUA_MALFORMED_EVENT_MAX_BYTES = 128
+    _ATOMIC_GUEST_INVITE_INVALID_EVENT_MAX_BYTES = 128
     _ATOMIC_GUEST_LUA_MALFORMED_PREDICATES = frozenset(
         {
             "argv_shape",
@@ -725,6 +729,39 @@ else:
             "invite_workspace_binding",
             "invite_mailbox_binding",
             "invite_collaboration_binding",
+        }
+    )
+    _ATOMIC_GUEST_INVITE_INVALID_SUBPREDICATES = frozenset(
+        {
+            "key_count",
+            "schema_version",
+            "invite_id",
+            "token_hash",
+            "owner_email",
+            "workspace_id",
+            "mailbox_id",
+            "collaboration_id",
+            "identity_assurance",
+            "allowed_actions",
+            "visibility",
+            "created_by_shape",
+            "created_by_owner",
+            "created_by_display",
+            "created_at",
+            "expires_at",
+            "lifetime",
+            "exchange_count",
+            "invited_email",
+            "allowed_keys",
+            "exchanged_at",
+            "revoked_at",
+            "revoked_by",
+            "active_session_hash",
+            "status_active",
+            "status_exchanged",
+            "status_revoked",
+            "status_expired",
+            "status_unknown",
         }
     )
     _ATOMIC_GUEST_STORE_FAILURE_STAGES = frozenset(
@@ -1033,6 +1070,42 @@ else:
         return observe
 
 
+    def _new_atomic_guest_invite_invalid_observer():
+        emitted = False
+
+        def observe(subpredicate: str) -> None:
+            nonlocal emitted
+            if (
+                emitted
+                or type(subpredicate) is not str
+                or subpredicate not in _ATOMIC_GUEST_INVITE_INVALID_SUBPREDICATES
+            ):
+                return
+            try:
+                event = {
+                    "event": _ATOMIC_GUEST_INVITE_INVALID_EVENT,
+                    "subpredicate": subpredicate,
+                }
+                serialized = json.dumps(
+                    event,
+                    allow_nan=False,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                if (
+                    len(serialized.encode("utf-8"))
+                    > _ATOMIC_GUEST_INVITE_INVALID_EVENT_MAX_BYTES
+                ):
+                    return
+                emitted = True
+                print(serialized, flush=True)
+            except Exception:
+                pass
+
+        return observe
+
+
     def _notify_v2_protocol_failure(observer, stage: str) -> None:
         if observer is None:
             return
@@ -1186,6 +1259,7 @@ else:
         command_transport=None,
         *,
         response_shapes: dict[str, set[str]],
+        optional_response_fields: dict[str, set[str]] | None = None,
         exchange: bool = False,
         protocol_failure_observer=None,
     ) -> dict:
@@ -1227,14 +1301,24 @@ else:
                 "error": {"code": "storage_protocol_error"},
             }
         expected_fields = response_shapes.get(value["status"])
-        if expected_fields is None or set(value) != {"status", *expected_fields}:
+        optional_fields = (
+            optional_response_fields.get(value["status"], set())
+            if optional_response_fields is not None
+            else set()
+        )
+        actual_fields = set(value) - {"status"}
+        if (
+            expected_fields is None
+            or not expected_fields <= actual_fields
+            or not actual_fields <= expected_fields | optional_fields
+        ):
             _notify_v2_protocol_failure(
                 protocol_failure_observer, "eval_status_shape"
             )
             return {"status": "unavailable", "error": {"code": "storage_protocol_error"}}
         return {
             "status": value["status"],
-            **{field: value[field] for field in sorted(expected_fields)},
+            **{field: value[field] for field in sorted(actual_fields)},
         }
 
 
@@ -1829,55 +1913,83 @@ else:
         and updatedAt >= createdAt
     end
     local function inviteValid(invite)
-      if type(invite) ~= 'table' then return false end
+      if type(invite) ~= 'table' then return false, 'key_count' end
       local count = keyCount(invite)
       local createdAt = integerValue(invite.createdAt)
       local expiresAt = integerValue(invite.expiresAt)
-      if count < 18 or count > 20 or invite.v ~= '2' or not exactInteger(invite.v)
-        or not opaqueId(invite.inviteId) or type(invite.tokenHash) ~= 'string'
-        or #invite.tokenHash ~= 64 or string.match(invite.tokenHash, '^[0-9a-f]+$') == nil
-        or not canonicalEmail(invite.ownerEmail) or not canonicalWorkspaceId(invite.workspaceId)
-        or not mailboxId(invite.mailboxId) or not opaqueId(invite.collaborationId)
-        or invite.identityAssurance ~= 'link_possession'
-        or not denseStringArray(invite.allowedActions, 'read', 'reply')
-        or invite.visibility ~= 'shared_only' or type(invite.createdBy) ~= 'table'
-        or keyCount(invite.createdBy) ~= 2 or invite.createdBy.ownerEmail ~= invite.ownerEmail
-        or not displayString(invite.createdBy.displayName, 256, false)
-        or not timestampSeconds(invite.createdAt) or not timestampSeconds(invite.expiresAt)
-        or createdAt >= expiresAt or expiresAt - createdAt > 86400
-        or not exactInteger(invite.exchangeCount) or (invite.invitedEmail ~= nil and not canonicalEmail(invite.invitedEmail)) then return false end
+      if count < 18 or count > 20 then return false, 'key_count' end
+      if invite.v ~= '2' or not exactInteger(invite.v) then return false, 'schema_version' end
+      if not opaqueId(invite.inviteId) then return false, 'invite_id' end
+      if type(invite.tokenHash) ~= 'string' or #invite.tokenHash ~= 64
+        or string.match(invite.tokenHash, '^[0-9a-f]+$') == nil then return false, 'token_hash' end
+      if not canonicalEmail(invite.ownerEmail) then return false, 'owner_email' end
+      if not canonicalWorkspaceId(invite.workspaceId) then return false, 'workspace_id' end
+      if not mailboxId(invite.mailboxId) then return false, 'mailbox_id' end
+      if not opaqueId(invite.collaborationId) then return false, 'collaboration_id' end
+      if invite.identityAssurance ~= 'link_possession' then return false, 'identity_assurance' end
+      if not denseStringArray(invite.allowedActions, 'read', 'reply') then return false, 'allowed_actions' end
+      if invite.visibility ~= 'shared_only' then return false, 'visibility' end
+      if type(invite.createdBy) ~= 'table' or keyCount(invite.createdBy) ~= 2 then
+        return false, 'created_by_shape'
+      end
+      if invite.createdBy.ownerEmail ~= invite.ownerEmail then return false, 'created_by_owner' end
+      if not displayString(invite.createdBy.displayName, 256, false) then return false, 'created_by_display' end
+      if not timestampSeconds(invite.createdAt) then return false, 'created_at' end
+      if not timestampSeconds(invite.expiresAt) then return false, 'expires_at' end
+      if createdAt >= expiresAt or expiresAt - createdAt > 86400 then return false, 'lifetime' end
+      if not exactInteger(invite.exchangeCount) then return false, 'exchange_count' end
+      if invite.invitedEmail ~= nil and not canonicalEmail(invite.invitedEmail) then
+        return false, 'invited_email'
+      end
       local allowed = {v=true,inviteId=true,tokenHash=true,ownerEmail=true,workspaceId=true,mailboxId=true,
         collaborationId=true,invitedEmail=true,identityAssurance=true,allowedActions=true,visibility=true,
         createdBy=true,createdAt=true,expiresAt=true,status=true,exchangedAt=true,exchangeCount=true,
         revokedAt=true,revokedBy=true,activeSessionHash=true}
-      for key, _ in pairs(invite) do if not allowed[key] then return false end end
-      if invite.exchangedAt ~= JSON_NULL and not timestampSeconds(invite.exchangedAt) then return false end
-      if invite.revokedAt ~= JSON_NULL and not timestampSeconds(invite.revokedAt) then return false end
+      for key, _ in pairs(invite) do if not allowed[key] then return false, 'allowed_keys' end end
+      if invite.exchangedAt ~= JSON_NULL and not timestampSeconds(invite.exchangedAt) then
+        return false, 'exchanged_at'
+      end
+      if invite.revokedAt ~= JSON_NULL and not timestampSeconds(invite.revokedAt) then
+        return false, 'revoked_at'
+      end
       if invite.revokedBy ~= JSON_NULL and (
         not canonicalEmail(invite.revokedBy) or invite.revokedBy ~= invite.ownerEmail
-      ) then return false end
-      if invite.activeSessionHash ~= nil and (type(invite.activeSessionHash) ~= 'string' or #invite.activeSessionHash ~= 64 or string.match(invite.activeSessionHash, '^[0-9a-f]+$') == nil) then return false end
+      ) then return false, 'revoked_by' end
+      if invite.activeSessionHash ~= nil and (type(invite.activeSessionHash) ~= 'string'
+        or #invite.activeSessionHash ~= 64
+        or string.match(invite.activeSessionHash, '^[0-9a-f]+$') == nil) then
+        return false, 'active_session_hash'
+      end
       if invite.status == 'active' then
-        return invite.exchangeCount == '0' and invite.exchangedAt == JSON_NULL and invite.revokedAt == JSON_NULL
-          and invite.revokedBy == JSON_NULL and invite.activeSessionHash == nil
+        if invite.exchangeCount == '0' and invite.exchangedAt == JSON_NULL and invite.revokedAt == JSON_NULL
+          and invite.revokedBy == JSON_NULL and invite.activeSessionHash == nil then return true, nil end
+        return false, 'status_active'
       elseif invite.status == 'exchanged' then
         local exchangedAt = integerValue(invite.exchangedAt)
-        return invite.exchangeCount == '1' and timestampSeconds(invite.exchangedAt)
+        if invite.exchangeCount == '1' and timestampSeconds(invite.exchangedAt)
           and exchangedAt >= createdAt and exchangedAt < expiresAt
-          and invite.revokedAt == JSON_NULL and invite.revokedBy == JSON_NULL and invite.activeSessionHash ~= nil
+          and invite.revokedAt == JSON_NULL and invite.revokedBy == JSON_NULL
+          and invite.activeSessionHash ~= nil then return true, nil end
+        return false, 'status_exchanged'
       elseif invite.status == 'revoked' then
         local revokedAt = integerValue(invite.revokedAt)
         if not timestampSeconds(invite.revokedAt) or revokedAt <= createdAt or revokedAt >= expiresAt
-          or invite.revokedBy ~= invite.ownerEmail then return false end
-        if invite.exchangeCount == '0' then return invite.exchangedAt == JSON_NULL and invite.activeSessionHash == nil end
+          or invite.revokedBy ~= invite.ownerEmail then return false, 'status_revoked' end
+        if invite.exchangeCount == '0' then
+          if invite.exchangedAt == JSON_NULL and invite.activeSessionHash == nil then return true, nil end
+          return false, 'status_revoked'
+        end
         local exchangedAt = integerValue(invite.exchangedAt)
-        return invite.exchangeCount == '1' and timestampSeconds(invite.exchangedAt) and exchangedAt >= createdAt
-          and exchangedAt < revokedAt and exchangedAt < expiresAt and invite.activeSessionHash ~= nil
+        if invite.exchangeCount == '1' and timestampSeconds(invite.exchangedAt)
+          and exchangedAt >= createdAt and exchangedAt < revokedAt
+          and exchangedAt < expiresAt and invite.activeSessionHash ~= nil then return true, nil end
+        return false, 'status_revoked'
       elseif invite.status == 'expired' then
-        return invite.exchangeCount == '0' and invite.exchangedAt == JSON_NULL and invite.revokedAt == JSON_NULL
-          and invite.revokedBy == JSON_NULL and invite.activeSessionHash == nil
+        if invite.exchangeCount == '0' and invite.exchangedAt == JSON_NULL and invite.revokedAt == JSON_NULL
+          and invite.revokedBy == JSON_NULL and invite.activeSessionHash == nil then return true, nil end
+        return false, 'status_expired'
       end
-      return false
+      return false, 'status_unknown'
     end
     local function sessionValid(session)
       if type(session) ~= 'table' then return false end
@@ -2090,7 +2202,10 @@ else:
     if not threadValid(proposedThread) then return cjson.encode({status='malformed', predicate='thread_valid'}) end
     if proposedThread.collaborationId ~= ARGV[3] then return cjson.encode({status='malformed', predicate='thread_id_binding'}) end
     if not inviteOk then return cjson.encode({status='malformed', predicate='invite_decode'}) end
-    if not inviteValid(proposedInvite) then return cjson.encode({status='malformed', predicate='invite_valid'}) end
+    local inviteIsValid, inviteSubpredicate = inviteValid(proposedInvite)
+    if not inviteIsValid then
+      return cjson.encode({status='malformed', predicate='invite_valid', subpredicate=inviteSubpredicate})
+    end
     if proposedInvite.status ~= 'active' then return cjson.encode({status='malformed', predicate='invite_status'}) end
     if proposedInvite.createdAt ~= ARGV[6] then return cjson.encode({status='malformed', predicate='invite_created_at'}) end
     if integerValue(proposedInvite.expiresAt) - now ~= integerValue(ARGV[5]) then return cjson.encode({status='malformed', predicate='invite_ttl'}) end
@@ -2237,6 +2352,7 @@ else:
             _new_atomic_guest_store_protocol_failure_observer()
         )
         lua_malformed_observer = _new_atomic_guest_lua_malformed_observer()
+        invite_invalid_observer = _new_atomic_guest_invite_invalid_observer()
         result = _v2_eval(
             [
                 "EVAL", _CREATE_V2_THREAD_WITH_GUEST_LUA, len(keys), *keys,
@@ -2251,6 +2367,7 @@ else:
                 "conflict": set(), "source_pointer_conflict": set(),
                 "malformed": {"predicate"},
             },
+            optional_response_fields={"malformed": {"subpredicate"}},
             protocol_failure_observer=protocol_failure_observer,
         )
         if result.get("status") == "created":
@@ -2301,6 +2418,8 @@ else:
         if result.get("status") == "malformed":
             protocol_failure_observer("lua_malformed")
             lua_malformed_observer(result.get("predicate"))
+            if result.get("predicate") == "invite_valid":
+                invite_invalid_observer(result.get("subpredicate"))
             return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
         return result
 
