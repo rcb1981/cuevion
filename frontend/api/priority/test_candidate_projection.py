@@ -4,6 +4,7 @@ import json
 import base64
 import importlib
 import unittest
+from dataclasses import replace
 from email.message import Message
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -31,7 +32,7 @@ from .candidate_reference_reconciliation import (
 )
 from .candidate_store import PriorityCandidateScope, PriorityCandidateStore
 from .store import PriorityWorkflowScope, PriorityWorkflowStore
-from .test_candidate_store import MemoryRedis, SECRET
+from .test_candidate_store import MemoryRedis, SECRET, ready_routing
 from .test_candidate_recovery import FakeRecoveryStore
 from .test_workflow_store import WorkflowMemoryRedis
 
@@ -149,6 +150,28 @@ class ScopedFakeRecoveryStore(FakeRecoveryStore):
             for claim in self.claims
             if claim.record.scope.mailbox_scope == mailbox_scope
         )[:limit]
+
+
+class BatchReplayMemoryRedis(MemoryRedis):
+    def __init__(self, *, current_ms: int) -> None:
+        super().__init__(current_ms=current_ms)
+        self.before_batch_commit = None
+        self.batch_results: list[tuple[object, ...]] = []
+
+    def __call__(self, command: list[object]) -> dict[str, object]:
+        is_batch = (
+            command[0] == "EVAL"
+            and command[1]
+            == candidate_store_module._BATCH_CONFIRM_UNCHANGED_SCRIPT
+        )
+        if is_batch and self.before_batch_commit is not None:
+            callback = self.before_batch_commit
+            self.before_batch_commit = None
+            callback()
+        response = super().__call__(command)
+        if is_batch and type(response.get("result")) is list:
+            self.batch_results.append(tuple(response["result"]))
+        return response
 
 
 class CandidateProjectionTests(unittest.TestCase):
@@ -670,6 +693,477 @@ class CandidatePopulationTests(unittest.TestCase):
             SECRET,
         ):
             self.assertNotIn(sensitive, output)
+
+
+class GoogleBatchReplayTests(unittest.TestCase):
+    def setUp(self):
+        self.workflow_redis = WorkflowMemoryRedis()
+        self.redis = BatchReplayMemoryRedis(
+            current_ms=self.workflow_redis.clock_ms,
+        )
+        self.store = PriorityCandidateStore(self.redis, hmac_secret=SECRET)
+        self.workflow_store = PriorityWorkflowStore(
+            self.workflow_redis,
+            hmac_secret=SECRET,
+        )
+        self.authority = gmail_authority()
+
+    @staticmethod
+    def _sources(count: int) -> list[dict]:
+        return [
+            gmail_source(
+                providerMessageId=f"batch-message-{index}",
+                providerThreadId=f"batch-thread-{index}",
+                snippet=f"provider snippet {index}",
+            )
+            for index in range(count)
+        ]
+
+    def _seed(
+        self,
+        sources: list[dict],
+    ) -> tuple[
+        tuple[PriorityCandidateScope, ...],
+        tuple[candidate_store_module.PriorityCandidateRecord, ...],
+    ]:
+        scopes = []
+        records = []
+        for source in sources:
+            scope, projected = project_priority_candidate(self.authority, source)
+            routed = replace(
+                projected,
+                routing_state="ready",
+                routing=ready_routing(),
+            )
+            scopes.append(scope)
+            records.append(
+                self.store.upsert_confirmed(
+                    scope,
+                    routed,
+                    expected_version=0,
+                )
+            )
+        return tuple(scopes), tuple(records)
+
+    def _reset_traces(self) -> None:
+        self.redis.commands.clear()
+        self.redis.batch_results.clear()
+        self.workflow_redis.commands.clear()
+
+    def _batch_commands(self) -> tuple[list[object], ...]:
+        return tuple(
+            command
+            for command in self.redis.commands
+            if command[0] == "EVAL"
+            and command[1]
+            == candidate_store_module._BATCH_CONFIRM_UNCHANGED_SCRIPT
+        )
+
+    def _script_commands(self, script: str) -> tuple[list[object], ...]:
+        return tuple(
+            command
+            for command in self.redis.commands
+            if command[0] == "EVAL" and command[1] == script
+        )
+
+    def _batch_statuses(self) -> tuple[object, ...]:
+        return tuple(
+            status
+            for result in self.redis.batch_results
+            for status in result[1:]
+        )
+
+    @staticmethod
+    def _invalid_sources() -> list[dict]:
+        return [
+            gmail_source(
+                providerMessageId="",
+                providerThreadId="invalid-identity-thread",
+            ),
+            gmail_source(
+                providerMessageId="invalid-timestamp",
+                providerThreadId="invalid-timestamp-thread",
+                providerTimestampMillis=None,
+                rfcDate=None,
+            ),
+            gmail_source(
+                providerMessageId="invalid-conversation",
+                providerThreadId="",
+            ),
+            gmail_source(
+                providerMessageId="invalid-subject",
+                providerThreadId="invalid-subject-thread",
+                subject="invalid\rsubject",
+            ),
+            gmail_source(
+                providerMessageId="invalid-address",
+                providerThreadId="invalid-address-thread",
+                senderAddress="",
+            ),
+            gmail_source(
+                providerMessageId="invalid-unread",
+                providerThreadId="invalid-unread-thread",
+                unread=1,
+            ),
+        ]
+
+    def _assert_no_broad_or_fast_row_slow_commands(
+        self,
+        commands: tuple[list[object], ...],
+    ) -> None:
+        self.assertFalse(
+            any(command[0] in {"GET", "SCAN", "KEYS"} for command in commands)
+        )
+        self.assertFalse(
+            any(
+                command[0] == "EVAL"
+                and command[1]
+                in {
+                    candidate_store_module._READ_ONE_SCRIPT,
+                    candidate_store_module._PREPARE_CONFIRMED_SCRIPT,
+                    candidate_store_module._UPSERT_CONFIRMED_SCRIPT,
+                }
+                for command in commands
+            )
+        )
+
+    def test_stable_fifty_replay_batches_forty_four_and_skips_six_invalid(
+        self,
+    ) -> None:
+        stable_sources = self._sources(44)
+        scopes, before = self._seed(stable_sources)
+        self.redis.advance(5)
+        replay_time = self.redis.current_ms
+        self._reset_traces()
+
+        report = populate_priority_candidates(
+            self.authority,
+            [*stable_sources, *self._invalid_sources()],
+            store=self.store,
+            workflow_store=self.workflow_store,
+        )
+
+        self.assertEqual(
+            (
+                report.attempted,
+                report.processed,
+                report.written,
+                report.skipped,
+                report.incomplete,
+                report.reason_counts,
+            ),
+            (
+                50,
+                50,
+                44,
+                6,
+                True,
+                (
+                    ("candidate_conversation_invalid", 1),
+                    ("candidate_identity_invalid", 1),
+                    ("candidate_render_invalid", 3),
+                    ("candidate_timestamp_invalid", 1),
+                ),
+            ),
+        )
+        replay_commands = tuple(self.redis.commands)
+        self._assert_no_broad_or_fast_row_slow_commands(replay_commands)
+        self.assertFalse(
+            any(
+                command[0] in {"SCAN", "KEYS"}
+                for command in self.workflow_redis.commands
+            )
+        )
+        self.assertFalse(
+            any(command[0] == "EVAL" for command in self.workflow_redis.commands)
+        )
+        batch_commands = self._batch_commands()
+        self.assertTrue(batch_commands)
+        self.assertEqual(
+            sum(int(command[2]) // 8 for command in batch_commands),
+            44,
+        )
+        self.assertTrue(
+            all(
+                1
+                <= int(command[2]) // 8
+                <= candidate_store_module.CANDIDATE_CONFIRMATION_COMMIT_CHUNK_SIZE
+                for command in batch_commands
+            )
+        )
+        self.assertEqual(self._batch_statuses(), (1,) * 44)
+
+        for index, (scope, previous, source) in enumerate(
+            zip(scopes, before, stable_sources, strict=True)
+        ):
+            current = self.store.read_candidate(scope)
+            assert current is not None
+            _scope, provider_snapshot = project_priority_candidate(
+                self.authority,
+                source,
+            )
+            self.assertEqual(current.version, previous.version + 1)
+            self.assertEqual(
+                (
+                    current.provider_observed_at,
+                    current.provider_validated_at,
+                    current.updated_at,
+                    current.base_expires_at,
+                    current.absolute_expires_at,
+                ),
+                (
+                    replay_time,
+                    replay_time,
+                    replay_time,
+                    replay_time
+                    + candidate_store_module.CANDIDATE_BASE_TTL_SECONDS * 1_000,
+                    replay_time
+                    + candidate_store_module.CANDIDATE_ABSOLUTE_TTL_SECONDS
+                    * 1_000,
+                ),
+            )
+            self.assertEqual(current.state, "provider_confirmed")
+            self.assertEqual(current.snapshot.routing_state, "ready")
+            self.assertEqual(current.snapshot.routing, ready_routing())
+            self.assertEqual(
+                replace(
+                    current.snapshot,
+                    routing_state="unresolved",
+                    routing=None,
+                ),
+                provider_snapshot,
+            )
+            keys = self.store._scope_keys(scope)
+            for index_name in (
+                "mailbox_index",
+                "user_index",
+                "namespace_index",
+            ):
+                self.assertEqual(
+                    self.redis.sorted_sets[keys[index_name]][keys["member"]],
+                    current.logical_expires_at(),
+                    msg=f"row {index} {index_name}",
+                )
+
+    def _assert_mixed_replay(self, exceptional_kind: str) -> None:
+        sources = self._sources(44)
+        scopes, before = self._seed(sources)
+        exceptional_index = 43
+        exceptional_scope = scopes[exceptional_index]
+        exceptional_keys = self.store._scope_keys(exceptional_scope)
+        concurrent_candidate = None
+        concurrent_workflow = None
+
+        if exceptional_kind == "provider_changed":
+            sources[exceptional_index] = {
+                **sources[exceptional_index],
+                "snippet": "provider changed snippet",
+            }
+        elif exceptional_kind == "missing":
+            self.redis.values.pop(exceptional_keys["record"])
+            self.redis.expires_at.pop(exceptional_keys["record"], None)
+            for index_name in (
+                "mailbox_index",
+                "user_index",
+                "namespace_index",
+            ):
+                self.redis.sorted_sets[exceptional_keys[index_name]].pop(
+                    exceptional_keys["member"]
+                )
+
+        self.redis.advance(5)
+        self._reset_traces()
+
+        if exceptional_kind == "candidate_cas":
+            def mutate_candidate():
+                nonlocal concurrent_candidate
+                concurrent_candidate = self.store.set_positive_reference(
+                    exceptional_scope,
+                    reference_kind="semantic_promotion",
+                    remaining_lifetime_seconds=60 * 60,
+                    expected_version=before[exceptional_index].version,
+                )
+
+            self.redis.before_batch_commit = mutate_candidate
+        elif exceptional_kind == "workflow_changed":
+            def mutate_workflow():
+                nonlocal concurrent_workflow
+                workflow_scope = PriorityWorkflowScope(
+                    workspace_id=exceptional_scope.workspace_id,
+                    user_id=exceptional_scope.user_id,
+                    mailbox_id=exceptional_scope.mailbox_id,
+                    identity=exceptional_scope.identity,
+                )
+                concurrent_workflow = self.workflow_store.write_field(
+                    workflow_scope,
+                    field="manualPriority",
+                    value="priority",
+                )
+                workflow_key = self.workflow_store._key(workflow_scope)
+                self.redis.values[workflow_key] = self.workflow_redis.values[
+                    workflow_key
+                ]
+
+            self.redis.before_batch_commit = mutate_workflow
+
+        report = populate_priority_candidates(
+            self.authority,
+            sources,
+            store=self.store,
+            workflow_store=self.workflow_store,
+        )
+
+        self.assertEqual(
+            (
+                report.attempted,
+                report.processed,
+                report.written,
+                report.skipped,
+                report.incomplete,
+                report.reason_counts,
+            ),
+            (44, 44, 44, 0, False, ()),
+        )
+        commands = tuple(self.redis.commands)
+        self.assertFalse(
+            any(command[0] in {"SCAN", "KEYS"} for command in commands)
+        )
+        direct_gets = tuple(
+            command for command in commands if command[0] == "GET"
+        )
+        self.assertTrue(direct_gets)
+        self.assertTrue(
+            all(command[1] == exceptional_keys["record"] for command in direct_gets)
+        )
+        batch_commands = self._batch_commands()
+        expected_batch_rows = (
+            43
+            if exceptional_kind in {"provider_changed", "missing"}
+            else 44
+        )
+        self.assertEqual(
+            sum(int(command[2]) // 8 for command in batch_commands),
+            expected_batch_rows,
+        )
+        self.assertTrue(
+            all(int(command[2]) // 8 <= 4 for command in batch_commands)
+        )
+        statuses = self._batch_statuses()
+        self.assertEqual(len(statuses), expected_batch_rows)
+        self.assertEqual(sum(statuses), 43)
+
+        prepares = self._script_commands(
+            candidate_store_module._PREPARE_CONFIRMED_SCRIPT
+        )
+        commits = self._script_commands(
+            candidate_store_module._UPSERT_CONFIRMED_SCRIPT
+        )
+        reads = self._script_commands(candidate_store_module._READ_ONE_SCRIPT)
+        self.assertEqual(len(prepares), 1)
+        self.assertEqual(len(commits), 1)
+        self.assertTrue(reads)
+        self.assertTrue(
+            all(command[3] == exceptional_keys["record"] for command in reads)
+        )
+        self.assertEqual(commits[0][3], exceptional_keys["record"])
+
+        for scope, previous in zip(
+            scopes[:exceptional_index],
+            before[:exceptional_index],
+            strict=True,
+        ):
+            current = self.store.read_candidate(scope)
+            assert current is not None
+            self.assertEqual(current.version, previous.version + 1)
+            self.assertEqual(current.snapshot.routing_state, "ready")
+
+        exceptional = self.store.read_candidate(exceptional_scope)
+        assert exceptional is not None
+        if exceptional_kind == "provider_changed":
+            self.assertEqual(exceptional.version, before[-1].version + 1)
+            self.assertEqual(exceptional.snapshot.routing_state, "unresolved")
+            self.assertEqual(
+                exceptional.snapshot.render.snippet,
+                "provider changed snippet",
+            )
+        elif exceptional_kind == "missing":
+            self.assertEqual(exceptional.version, 1)
+            self.assertEqual(exceptional.snapshot.routing_state, "unresolved")
+        elif exceptional_kind == "candidate_cas":
+            assert concurrent_candidate is not None
+            self.assertEqual(exceptional.version, concurrent_candidate.version + 1)
+            self.assertEqual(exceptional.snapshot.routing_state, "ready")
+            self.assertEqual(
+                exceptional.positive_reference_expires_at("semantic_promotion"),
+                concurrent_candidate.positive_reference_expires_at(
+                    "semantic_promotion"
+                ),
+            )
+        else:
+            assert concurrent_workflow is not None
+            self.assertEqual(exceptional.snapshot.routing_state, "ready")
+            self.assertEqual(
+                exceptional.positive_reference_expires_at("manual_priority"),
+                concurrent_workflow.manual_expires_at,
+            )
+            self.assertEqual(
+                len(
+                    self._script_commands(
+                        candidate_store_module._PREPARE_WORKFLOW_REFERENCES_SCRIPT
+                    )
+                ),
+                1,
+            )
+            self.assertEqual(
+                len(
+                    self._script_commands(
+                        candidate_store_module._RECONCILE_WORKFLOW_REFERENCES_SCRIPT
+                    )
+                ),
+                1,
+            )
+
+    def test_mixed_provider_changed_only_exceptional_row_is_slow(self) -> None:
+        self._assert_mixed_replay("provider_changed")
+
+    def test_mixed_missing_only_exceptional_row_is_slow(self) -> None:
+        self._assert_mixed_replay("missing")
+
+    def test_mixed_candidate_cas_only_exceptional_row_is_slow(self) -> None:
+        self._assert_mixed_replay("candidate_cas")
+
+    def test_mixed_workflow_changed_only_exceptional_row_is_slow(self) -> None:
+        self._assert_mixed_replay("workflow_changed")
+
+    def test_custom_imap_population_remains_on_the_slow_path(self) -> None:
+        sources = [
+            imap_source(),
+            imap_source(
+                imapUid="124",
+                conversationId="imap:rfc:mailbox-1:second%40example.test",
+                rfcRootMessageId="second@example.test",
+                rfcMessageId="second-message@example.test",
+            ),
+        ]
+        report = populate_priority_candidates(
+            imap_authority(),
+            sources,
+            store=self.store,
+            workflow_store=self.workflow_store,
+        )
+        self.assertEqual(
+            (report.attempted, report.processed, report.written),
+            (2, 2, 2),
+        )
+        self.assertFalse(self._batch_commands())
+        self.assertEqual(
+            len(
+                self._script_commands(
+                    candidate_store_module._PREPARE_CONFIRMED_SCRIPT
+                )
+            ),
+            2,
+        )
 
 
 class GmailExactRecoveryDrainTests(unittest.TestCase):

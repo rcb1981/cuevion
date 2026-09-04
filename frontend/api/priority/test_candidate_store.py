@@ -58,7 +58,15 @@ class MemoryRedis:
         for key, expires_at in list(self.expires_at.items()):
             if expires_at <= self.current_ms:
                 self.values.pop(key, None)
+                self.sorted_sets.pop(key, None)
                 self.expires_at.pop(key, None)
+
+    def _key_type(self, key: object) -> str:
+        if key in self.values:
+            return "string"
+        if key in self.sorted_sets:
+            return "zset"
+        return "none"
 
     def __call__(self, command: list[object]) -> dict[str, object]:
         self._expire()
@@ -68,6 +76,31 @@ class MemoryRedis:
             return {"result": self.values.get(command[1])}
         if operation == "MGET":
             return {"result": [self.values.get(key) for key in command[1:]]}
+        if operation == "EXISTS":
+            return {
+                "result": sum(
+                    self._key_type(key) != "none" for key in command[1:]
+                )
+            }
+        if operation == "TYPE":
+            return {"result": self._key_type(command[1])}
+        if operation == "TIME":
+            return {
+                "result": [
+                    str(self.current_ms // 1_000),
+                    str((self.current_ms % 1_000) * 1_000),
+                ]
+            }
+        if operation == "ZMSCORE":
+            if command[1] in self.values:
+                raise AssertionError("wrong type for candidate-store ZMSCORE")
+            members = self.sorted_sets.get(command[1], {})
+            return {
+                "result": [
+                    None if member not in members else str(members[member])
+                    for member in command[2:]
+                ]
+            }
         if operation != "EVAL":
             raise AssertionError("unexpected candidate-store command")
         script = command[1]
@@ -94,6 +127,8 @@ class MemoryRedis:
             return {"result": self._remove(keys, args)}
         if script == candidate_module._INVALIDATE_IMAP_NAMESPACE_SCRIPT:
             return {"result": self._invalidate_namespace(keys, args)}
+        if script == candidate_module._BATCH_CONFIRM_UNCHANGED_SCRIPT:
+            return {"result": self._batch_confirm_unchanged(keys, args)}
         if script == candidate_module._CLEAR_INCOMPLETE_SCRIPT:
             value = self.values.get(keys[0])
             if value is None:
@@ -103,6 +138,205 @@ class MemoryRedis:
             self.values.pop(keys[0], None)
             return {"result": 1}
         raise AssertionError("unexpected candidate-store script")
+
+    def _batch_confirm_unchanged(
+        self,
+        keys: list[object],
+        args: list[object],
+    ) -> object:
+        structural = (
+            args[8]
+            if len(args) > 8
+            else candidate_module._BATCH_CONFIRMATION_STRUCTURAL_INVALID_SENTINEL
+        )
+        try:
+            count = int(args[0])
+            observed_at = int(args[1])
+            maximum_bytes = int(args[2])
+            maximum = int(args[3])
+            base_seconds = int(args[4])
+            absolute_seconds = int(args[5])
+            index_ttl = int(args[6])
+            incomplete_value = args[7]
+            refresh_indexes = args[9]
+        except (IndexError, TypeError, ValueError):
+            return structural
+        if (
+            not 1 <= count <= candidate_module.CANDIDATE_CONFIRMATION_COMMIT_CHUNK_SIZE
+            or len(keys) != count * 8
+            or len(args) != 10 + count * 12
+            or observed_at < 0
+            or maximum_bytes < 1
+            or maximum < 0
+            or base_seconds < 1
+            or absolute_seconds < base_seconds
+            or index_ttl < 1
+            or incomplete_value != candidate_module._INCOMPLETE_VALUE
+            or refresh_indexes not in {0, 1}
+        ):
+            return structural
+
+        statuses = [True] * count
+        prepared_values: list[str | None] = [None] * count
+        logical_expiries = [0] * count
+        for index in range(count):
+            offset = 10 + index * 12
+            expected_digest = args[offset]
+            expected_length = args[offset + 1]
+            prepared = args[offset + 2]
+            expected_expiry = args[offset + 4]
+            expected_version = args[offset + 5]
+            increment = args[offset + 6]
+            expected_workflow = args[offset + 7]
+            marker_values = args[offset + 8 : offset + 11]
+            workflow_deadline = args[offset + 11]
+
+            current = self.values.get(keys[index])
+            if (
+                type(current) is not str
+                or type(expected_digest) is not str
+                or type(expected_length) is not int
+                or len(current.encode("utf-8")) != expected_length
+                or hashlib.sha1(
+                    current.encode("utf-8"),
+                    usedforsecurity=False,
+                ).hexdigest()
+                != expected_digest
+            ):
+                statuses[index] = False
+
+            workflow_key = keys[count + index]
+            if expected_workflow == "":
+                if self._key_type(workflow_key) != "none":
+                    statuses[index] = False
+            elif self.values.get(workflow_key) != expected_workflow:
+                statuses[index] = False
+
+            marker_start = 2 * count + index * 3
+            for marker_key, expected_marker in zip(
+                keys[marker_start : marker_start + 3],
+                marker_values,
+                strict=True,
+            ):
+                if expected_marker == "":
+                    if self._key_type(marker_key) != "none":
+                        return structural
+                elif (
+                    expected_marker != incomplete_value
+                    or self.values.get(marker_key) != expected_marker
+                ):
+                    return structural
+
+            if not statuses[index]:
+                continue
+            if self.current_ms < observed_at or self.current_ms > maximum:
+                return structural
+            try:
+                old_payload = json.loads(current)
+                next_payload = json.loads(prepared)
+            except Exception:
+                return structural
+            if (
+                type(old_payload) is not dict
+                or type(next_payload) is not dict
+                or type(expected_expiry) is not int
+                or type(expected_version) is not int
+                or increment not in {1, 2}
+                or type(workflow_deadline) is not int
+                or workflow_deadline < 0
+                or workflow_deadline > maximum
+                or old_payload.get("version") != expected_version
+                or next_payload.get("version") != expected_version + increment
+                or next_payload.get("scopeDigest")
+                != old_payload.get("scopeDigest")
+                or next_payload.get("identityDigest")
+                != old_payload.get("identityDigest")
+                or next_payload.get("providerObservedAt") != observed_at
+                or next_payload.get("providerValidatedAt") != observed_at
+                or next_payload.get("updatedAt") != observed_at
+                or next_payload.get("baseExpiresAt")
+                != observed_at + base_seconds * 1_000
+                or next_payload.get("absoluteExpiresAt")
+                != observed_at + absolute_seconds * 1_000
+                or next_payload.get("graceExpiresAt") != 0
+                or next_payload.get("state") != "provider_confirmed"
+                or len(prepared.encode("utf-8")) > maximum_bytes
+                or (increment == 1 and expected_workflow != "")
+                or (increment == 2 and expected_workflow == "")
+            ):
+                return structural
+            if (
+                expected_expiry <= self.current_ms
+                or (
+                    workflow_deadline > 0
+                    and self.current_ms >= workflow_deadline
+                )
+            ):
+                statuses[index] = False
+                continue
+            references = next_payload.get("positiveReferences")
+            if (
+                type(references) is not dict
+                or set(references) != set(candidate_module._POSITIVE_REFERENCE_KINDS)
+                or any(
+                    type(expires_at) is not int
+                    or expires_at < 0
+                    or expires_at > next_payload["absoluteExpiresAt"]
+                    for expires_at in references.values()
+                )
+            ):
+                return structural
+            logical_expiry = min(
+                max(
+                    next_payload["baseExpiresAt"],
+                    max(references.values()),
+                ),
+                next_payload["absoluteExpiresAt"],
+            )
+            if logical_expiry <= self.current_ms:
+                statuses[index] = False
+                continue
+            if increment == 2:
+                next_payload["updatedAt"] = self.current_ms
+                prepared = self._encode(next_payload)
+            if len(prepared.encode("utf-8")) > maximum_bytes:
+                return structural
+            prepared_values[index] = prepared
+            logical_expiries[index] = logical_expiry
+
+        for index, status in enumerate(statuses):
+            if not status:
+                continue
+            offset = 10 + index * 12
+            member = args[offset + 3]
+            expected_expiry = args[offset + 4]
+            index_start = 5 * count + index * 3
+            for index_key in keys[index_start : index_start + 3]:
+                score = self.sorted_sets.get(index_key, {}).get(member)
+                if score != expected_expiry:
+                    statuses[index] = False
+                    break
+
+        for index, status in enumerate(statuses):
+            if not status:
+                continue
+            offset = 10 + index * 12
+            member = args[offset + 3]
+            prepared = prepared_values[index]
+            assert prepared is not None
+            expiry = logical_expiries[index]
+            record_key = keys[index]
+            self.values[record_key] = prepared
+            ttl_seconds = (expiry - self.current_ms + 999) // 1_000
+            self.expires_at[record_key] = self.current_ms + ttl_seconds * 1_000
+            index_start = 5 * count + index * 3
+            for index_key in keys[index_start : index_start + 3]:
+                self.sorted_sets.setdefault(index_key, {})[member] = expiry
+                if refresh_indexes == 1:
+                    self.expires_at[index_key] = (
+                        self.current_ms + index_ttl * 1_000
+                    )
+        return [self.current_ms, *(1 if status else 0 for status in statuses)]
 
     @staticmethod
     def _encode(payload: dict[str, object]) -> str:
@@ -2334,6 +2568,372 @@ class CustomImapV2CandidateStoreFoundationTests(unittest.TestCase):
             legacy_record,
             legacy.read_mailbox_page(isolated_scope.mailbox_scope()).records,
         )
+
+
+class CandidateBatchConfirmationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.redis = MemoryRedis()
+        self.store = PriorityCandidateStore(self.redis, hmac_secret=SECRET)
+
+    @staticmethod
+    def _scopes(
+        count: int,
+        *,
+        mailbox_id: str = "mailbox-a",
+    ) -> tuple[PriorityCandidateScope, ...]:
+        return tuple(
+            google_scope(
+                mailbox_id=mailbox_id,
+                message_id=f"batch-message-{index}",
+            )
+            for index in range(count)
+        )
+
+    def _seed_records(
+        self,
+        scopes: tuple[PriorityCandidateScope, ...],
+        *,
+        references: bool = False,
+    ) -> tuple[candidate_module.PriorityCandidateRecord, ...]:
+        records = []
+        for index, scope in enumerate(scopes):
+            intended = snapshot(
+                routing_state="ready",
+                routing=ready_routing(),
+                snippet=f"batch snippet {index}",
+            )
+            record = self.store.upsert_confirmed(
+                scope,
+                intended,
+                expected_version=0,
+            )
+            if references:
+                for reference_index, kind in enumerate(
+                    candidate_module._POSITIVE_REFERENCE_KINDS,
+                    start=1,
+                ):
+                    updated = self.store.set_positive_reference(
+                        scope,
+                        reference_kind=kind,
+                        remaining_lifetime_seconds=(reference_index + 1)
+                        * DAY_SECONDS,
+                        expected_version=record.version,
+                    )
+                    assert updated is not None
+                    record = updated
+            records.append(record)
+        return tuple(records)
+
+    @staticmethod
+    def _workflow_key(scope: PriorityCandidateScope) -> str:
+        from .store import PriorityWorkflowScope, derive_workflow_scope_digest
+
+        workflow_scope = PriorityWorkflowScope(
+            workspace_id=scope.workspace_id,
+            user_id=scope.user_id,
+            mailbox_id=scope.mailbox_id,
+            identity=scope.identity,
+        )
+        return (
+            "cuevion:priority:workflow:v1:record:"
+            + derive_workflow_scope_digest(SECRET, workflow_scope)
+        )
+
+    def _confirmations(
+        self,
+        preflight: candidate_module.PriorityCandidateConfirmationPreflight,
+        *,
+        persisted_indexes: tuple[int, ...] = (),
+    ) -> tuple[candidate_module.PriorityCandidateUnchangedConfirmation, ...]:
+        confirmations = []
+        for index, evidence in enumerate(preflight.evidence):
+            workflow_key = self._workflow_key(evidence.scope)
+            workflow_raw = None
+            workflow_valid_until = 0
+            if index in persisted_indexes:
+                workflow_raw = self._encode_workflow(index)
+                workflow_valid_until = preflight.observed_at + DAY_SECONDS * 1_000
+                self.redis.values[workflow_key] = workflow_raw
+            confirmations.append(
+                candidate_module.PriorityCandidateUnchangedConfirmation(
+                    evidence=evidence,
+                    workflow_key=workflow_key,
+                    workflow_raw=workflow_raw,
+                    workflow_persisted=workflow_raw is not None,
+                    workflow_valid_until=workflow_valid_until,
+                )
+            )
+        return tuple(confirmations)
+
+    @staticmethod
+    def _encode_workflow(index: int) -> str:
+        return json.dumps(
+            {"opaqueWorkflowVersion": index + 1},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+    def test_preflight_maximum_duplicate_and_cross_mailbox_fail_before_io(
+        self,
+    ) -> None:
+        accepted_redis = MemoryRedis()
+        accepted_store = PriorityCandidateStore(
+            accepted_redis,
+            hmac_secret=SECRET,
+        )
+        accepted = accepted_store.preflight_unchanged_confirmations(
+            self._scopes(candidate_module.CANDIDATE_CONFIRMATION_MAX_BATCH_SIZE)
+        )
+        self.assertEqual(
+            len(accepted.evidence),
+            candidate_module.CANDIDATE_CONFIRMATION_MAX_BATCH_SIZE,
+        )
+        self.assertTrue(accepted_redis.commands)
+
+        empty_redis = MemoryRedis()
+        empty = PriorityCandidateStore(
+            empty_redis,
+            hmac_secret=SECRET,
+        ).preflight_unchanged_confirmations(())
+        self.assertEqual((empty.observed_at, empty.evidence), (0, ()))
+        self.assertEqual(empty_redis.commands, [])
+
+        duplicate = self._scopes(1)[0]
+        invalid_batches = (
+            self._scopes(
+                candidate_module.CANDIDATE_CONFIRMATION_MAX_BATCH_SIZE + 1
+            ),
+            (duplicate, duplicate),
+            (
+                duplicate,
+                google_scope(
+                    mailbox_id="mailbox-b",
+                    message_id="cross-mailbox",
+                ),
+            ),
+        )
+        for scopes in invalid_batches:
+            with self.subTest(size=len(scopes)):
+                redis = MemoryRedis()
+                store = PriorityCandidateStore(redis, hmac_secret=SECRET)
+                with self.assertRaises(ValueError):
+                    store.preflight_unchanged_confirmations(scopes)
+                self.assertEqual(redis.commands, [])
+
+    def test_preflight_captures_exact_time_record_marker_and_index_evidence(
+        self,
+    ) -> None:
+        scopes = self._scopes(3)
+        records = self._seed_records(scopes)
+        keys = tuple(self.store._scope_keys(scope) for scope in scopes)
+        expected_raw = tuple(
+            self.redis.values[item["record"]] for item in keys
+        )
+        self.redis.values[keys[0]["mailbox_incomplete"]] = (
+            candidate_module._INCOMPLETE_VALUE
+        )
+        self.redis.values[keys[0]["user_incomplete"]] = (
+            candidate_module._INCOMPLETE_VALUE
+        )
+        self.redis.sorted_sets[keys[1]["mailbox_index"]].pop(
+            keys[1]["member"]
+        )
+        self.redis.values.pop(keys[2]["record"])
+        self.redis.sorted_sets[keys[2]["record"]] = {"wrong-type": 1}
+        self.redis.advance(7)
+        self.redis.commands.clear()
+
+        preflight = self.store.preflight_unchanged_confirmations(scopes)
+
+        self.assertEqual(preflight.observed_at, self.redis.current_ms)
+        self.assertEqual(
+            preflight.evidence[0],
+            candidate_module.PriorityCandidateConfirmationEvidence(
+                scope=scopes[0],
+                raw=expected_raw[0],
+                record=records[0],
+                marker_values=(
+                    candidate_module._INCOMPLETE_VALUE,
+                    candidate_module._INCOMPLETE_VALUE,
+                    None,
+                ),
+                storage_valid=True,
+                indexes_valid=True,
+            ),
+        )
+        self.assertEqual(preflight.evidence[1].raw, expected_raw[1])
+        self.assertEqual(preflight.evidence[1].record, records[1])
+        self.assertTrue(preflight.evidence[1].storage_valid)
+        self.assertFalse(preflight.evidence[1].indexes_valid)
+        self.assertIsNone(preflight.evidence[2].raw)
+        self.assertIsNone(preflight.evidence[2].record)
+        self.assertFalse(preflight.evidence[2].storage_valid)
+        self.assertFalse(preflight.evidence[2].indexes_valid)
+        self.assertEqual(
+            preflight.evidence[2].marker_values,
+            (candidate_module._INCOMPLETE_VALUE,) * 2 + (None,),
+        )
+        operations = [command[0] for command in self.redis.commands]
+        self.assertEqual(operations.count("TIME"), 1)
+        self.assertIn("EXISTS", operations)
+        self.assertIn("TYPE", operations)
+        self.assertEqual(operations.count("ZMSCORE"), 3)
+        self.assertNotIn("SCAN", operations)
+
+    def test_four_row_confirmation_preserves_routing_references_and_parity(
+        self,
+    ) -> None:
+        scopes = self._scopes(4)
+        before = self._seed_records(scopes, references=True)
+        self.redis.advance(5)
+        self.redis.commands.clear()
+        preflight = self.store.preflight_unchanged_confirmations(scopes)
+        confirmations = self._confirmations(
+            preflight,
+            persisted_indexes=(2, 3),
+        )
+        self.redis.advance(1)
+        commit_time = self.redis.current_ms
+
+        committed = self.store.confirm_unchanged_batch(
+            preflight,
+            confirmations,
+        )
+
+        self.assertTrue(all(record is not None for record in committed))
+        for index, (previous, current) in enumerate(
+            zip(before, committed, strict=True)
+        ):
+            assert current is not None
+            self.assertEqual(current.snapshot, previous.snapshot)
+            self.assertEqual(current.snapshot.routing_state, "ready")
+            self.assertEqual(current.snapshot.routing, ready_routing())
+            self.assertEqual(
+                current.positive_references,
+                previous.positive_references,
+            )
+            self.assertEqual(
+                {reference.kind for reference in current.positive_references},
+                set(candidate_module._POSITIVE_REFERENCE_KINDS),
+            )
+            self.assertTrue(
+                all(
+                    reference.expires_at > preflight.observed_at
+                    for reference in current.positive_references
+                )
+            )
+            increment = 2 if index >= 2 else 1
+            self.assertEqual(current.version, previous.version + increment)
+            self.assertEqual(
+                (
+                    current.provider_observed_at,
+                    current.provider_validated_at,
+                    current.base_expires_at,
+                    current.absolute_expires_at,
+                    current.grace_expires_at,
+                    current.state,
+                ),
+                (
+                    preflight.observed_at,
+                    preflight.observed_at,
+                    preflight.observed_at
+                    + CANDIDATE_BASE_TTL_SECONDS * 1_000,
+                    preflight.observed_at
+                    + CANDIDATE_ABSOLUTE_TTL_SECONDS * 1_000,
+                    0,
+                    "provider_confirmed",
+                ),
+            )
+            self.assertEqual(
+                current.updated_at,
+                commit_time if index >= 2 else preflight.observed_at,
+            )
+            item_keys = self.store._scope_keys(scopes[index])
+            for index_name in (
+                "mailbox_index",
+                "user_index",
+                "namespace_index",
+            ):
+                self.assertEqual(
+                    self.redis.sorted_sets[item_keys[index_name]][
+                        item_keys["member"]
+                    ],
+                    current.logical_expires_at(),
+                )
+        commit_commands = [
+            command
+            for command in self.redis.commands
+            if command[0] == "EVAL"
+            and command[1] == candidate_module._BATCH_CONFIRM_UNCHANGED_SCRIPT
+        ]
+        self.assertTrue(commit_commands)
+        self.assertTrue(
+            all(
+                candidate_module._redis_request_size(command)
+                <= candidate_module.CANDIDATE_CONFIRMATION_MAX_REQUEST_BYTES
+                for command in commit_commands
+            )
+        )
+
+    def test_candidate_workflow_and_index_conflicts_are_row_local(self) -> None:
+        scopes = self._scopes(4)
+        before = self._seed_records(scopes)
+        keys = tuple(self.store._scope_keys(scope) for scope in scopes)
+        raw_before = tuple(self.redis.values[item["record"]] for item in keys)
+        self.redis.advance(1)
+        preflight = self.store.preflight_unchanged_confirmations(scopes)
+        confirmations = self._confirmations(preflight, persisted_indexes=(1,))
+
+        self.redis.values[keys[0]["record"]] = raw_before[0] + " "
+        self.redis.values[confirmations[1].workflow_key] = (
+            "different-workflow-version"
+        )
+        self.redis.sorted_sets[keys[2]["mailbox_index"]][keys[2]["member"]] += 1
+
+        committed = self.store.confirm_unchanged_batch(
+            preflight,
+            confirmations,
+        )
+
+        self.assertEqual(committed[:3], (None, None, None))
+        self.assertIsNotNone(committed[3])
+        self.assertEqual(self.redis.values[keys[0]["record"]], raw_before[0] + " ")
+        self.assertEqual(self.redis.values[keys[1]["record"]], raw_before[1])
+        self.assertEqual(self.redis.values[keys[2]["record"]], raw_before[2])
+        successful = committed[3]
+        assert successful is not None
+        self.assertEqual(successful.version, before[3].version + 1)
+        self.assertEqual(successful.snapshot, before[3].snapshot)
+        self.assertNotEqual(self.redis.values[keys[3]["record"]], raw_before[3])
+        self.assertEqual(
+            self.redis.sorted_sets[keys[2]["mailbox_index"]][keys[2]["member"]],
+            before[2].logical_expires_at() + 1,
+        )
+
+    def test_marker_structure_change_aborts_chunk_without_overwrite(self) -> None:
+        scopes = self._scopes(4)
+        self._seed_records(scopes)
+        keys = tuple(self.store._scope_keys(scope) for scope in scopes)
+        raw_before = tuple(self.redis.values[item["record"]] for item in keys)
+        indexes_before = {
+            key: dict(values) for key, values in self.redis.sorted_sets.items()
+        }
+        self.redis.advance(1)
+        preflight = self.store.preflight_unchanged_confirmations(scopes)
+        confirmations = self._confirmations(preflight)
+        self.redis.values[keys[0]["mailbox_incomplete"]] = "corrupt-marker"
+
+        committed = self.store.confirm_unchanged_batch(
+            preflight,
+            confirmations,
+        )
+
+        self.assertEqual(committed, (None, None, None, None))
+        self.assertEqual(
+            tuple(self.redis.values[item["record"]] for item in keys),
+            raw_before,
+        )
+        self.assertEqual(self.redis.sorted_sets, indexes_before)
 
 
 class CandidateDormancyTests(unittest.TestCase):

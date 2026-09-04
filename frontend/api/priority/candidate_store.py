@@ -32,6 +32,14 @@ CANDIDATE_MAX_USER_RECORDS = 2_048
 CANDIDATE_MAX_PAGE_RECORDS = 100
 CANDIDATE_MAX_PAGE_OFFSET = CANDIDATE_MAX_USER_RECORDS
 CANDIDATE_MAX_SAFE_INTEGER = 9_007_199_254_740_991
+CANDIDATE_CONFIRMATION_MAX_BATCH_SIZE = 100
+CANDIDATE_CONFIRMATION_COMMIT_CHUNK_SIZE = 4
+# Leave explicit framing headroom below the 16 KiB transport hard limit.  The
+# packer measures every actual key, serialized record, workflow proof, and
+# numeric value before a chunk is sent, so larger legal rows automatically use
+# fewer than four slots.
+CANDIDATE_CONFIRMATION_MAX_REQUEST_BYTES = 16_000
+CANDIDATE_CONFIRMATION_MAX_RESPONSE_BYTES = 32_768
 
 POSITIVE_REFERENCE_MAX_SECONDS = {
     "manual_priority": CANDIDATE_ABSOLUTE_TTL_SECONDS,
@@ -93,6 +101,9 @@ _COMMIT_INDEX_INVALID_SENTINEL = (
 )
 _COMMIT_EXPIRY_INVALID_SENTINEL = (
     "__cuevion_priority_candidate_commit_expiry_invalid__"
+)
+_BATCH_CONFIRMATION_STRUCTURAL_INVALID_SENTINEL = (
+    "__cuevion_priority_candidate_batch_confirmation_structural_invalid__"
 )
 
 PriorityCandidateRoutingState = Literal["unresolved", "ready"]
@@ -634,6 +645,33 @@ class PriorityCandidateRecord:
         if current >= self.logical_expires_at():
             return "expired"
         return self.state
+
+
+@dataclass(frozen=True, slots=True)
+class PriorityCandidateConfirmationEvidence:
+    """Exact, bounded evidence captured before an unchanged confirmation."""
+
+    scope: PriorityCandidateScope
+    raw: str | None
+    record: PriorityCandidateRecord | None
+    marker_values: tuple[str | None, str | None, str | None]
+    storage_valid: bool
+    indexes_valid: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PriorityCandidateConfirmationPreflight:
+    observed_at: int
+    evidence: tuple[PriorityCandidateConfirmationEvidence, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PriorityCandidateUnchangedConfirmation:
+    evidence: PriorityCandidateConfirmationEvidence
+    workflow_key: str
+    workflow_raw: str | None
+    workflow_persisted: bool
+    workflow_valid_until: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1760,6 +1798,111 @@ if value~=ARGV[1] then return -1 end
 return redis.call('DEL',KEYS[1])
 """
 
+_BATCH_CONFIRM_UNCHANGED_SCRIPT = r"""
+local n=tonumber(ARGV[1]);local observed=tonumber(ARGV[2]);local maxBytes=tonumber(ARGV[3])
+local maximum=tonumber(ARGV[4]);local baseSeconds=tonumber(ARGV[5])
+local absoluteSeconds=tonumber(ARGV[6]);local indexTtl=tonumber(ARGV[7])
+if not n or n<1 or n>4 or n%1~=0 or #KEYS~=n*8 or #ARGV~=10+n*12 or
+ not observed or observed<0 or observed%1~=0 or not maximum or maximum<0 or
+ not maxBytes or maxBytes<1 or not baseSeconds or baseSeconds<1 or
+ not absoluteSeconds or absoluteSeconds<baseSeconds or not indexTtl or indexTtl<1 then
+ return ARGV[9]
+end
+local stride=12;local query={};for i=1,n do query[#query+1]=KEYS[i] end
+local absent={};local absentKeys={};local present={};local presentExpected={};local presentKind={}
+local function addEvidence(key,expected,kind,row)
+ if expected=='' then absent[#absent+1]={key=key,kind=kind,row=row};absentKeys[#absentKeys+1]=key
+ else present[#present+1]=key;presentExpected[#presentExpected+1]=expected
+  presentKind[#presentKind+1]={kind=kind,row=row} end
+end
+for i=1,n do local a=10+(i-1)*stride
+ addEvidence(KEYS[n+i],ARGV[a+8],'workflow',i)
+ for j=1,3 do addEvidence(KEYS[2*n+(i-1)*3+j],ARGV[a+8+j],'marker',i) end
+end
+for _,key in ipairs(present) do query[#query+1]=key end
+local values=redis.call('MGET',unpack(query));local okRows={};local prepared={}
+for i=1,n do okRows[i]=true;local a=10+(i-1)*stride;local value=values[i]
+ if not value or string.len(value)~=tonumber(ARGV[a+2]) or redis.sha1hex(value)~=ARGV[a+1] then
+  okRows[i]=false
+ end
+end
+for i=1,#present do local value=values[n+i];local meta=presentKind[i]
+ if meta.kind=='marker' then
+  if value~=presentExpected[i] or value~=ARGV[8] then return ARGV[9] end
+ elseif value~=presentExpected[i] then okRows[meta.row]=false end
+end
+if #absent>0 and redis.call('EXISTS',unpack(absentKeys))>0 then
+ for _,item in ipairs(absent) do if redis.call('EXISTS',item.key)>0 then
+  if item.kind=='marker' then return ARGV[9] else okRows[item.row]=false end
+ end end
+end
+local clock=redis.call('TIME');local seconds=tonumber(clock[1]);local micros=tonumber(clock[2])
+if not seconds or not micros then return ARGV[9] end
+local now=seconds*1000+math.floor(micros/1000);if now<observed or now>maximum then return ARGV[9] end
+local kinds={'manual_priority','waiting','returned_reply','semantic_promotion',
+ 'collaboration_priority','assigned_review'};local kindSet={}
+for _,kind in ipairs(kinds) do kindSet[kind]=true end
+local expiries={};local encoded={}
+for i=1,n do if okRows[i] then local a=10+(i-1)*stride;local current=values[i]
+ local oldOk,old=pcall(cjson.decode,current);local newOk,next=pcall(cjson.decode,ARGV[a+3])
+ local oldVersion=tonumber(ARGV[a+6]);local increment=tonumber(ARGV[a+7])
+ local oldExpiry=tonumber(ARGV[a+5]);local deadline=tonumber(ARGV[a+12])
+ if not oldOk or not newOk or type(old)~='table' or type(next)~='table' or
+  not oldVersion or not increment or (increment~=1 and increment~=2) or
+  not oldExpiry or not deadline or deadline<0 or deadline%1~=0 or
+  old['version']~=oldVersion or next['version']~=oldVersion+increment or
+  next['scopeDigest']~=old['scopeDigest'] or next['identityDigest']~=old['identityDigest'] or
+  next['providerObservedAt']~=observed or next['providerValidatedAt']~=observed or
+  next['updatedAt']~=observed or next['baseExpiresAt']~=observed+baseSeconds*1000 or
+  next['absoluteExpiresAt']~=observed+absoluteSeconds*1000 or
+  next['graceExpiresAt']~=0 or next['state']~='provider_confirmed' or
+  string.len(ARGV[a+3])>maxBytes or
+  (increment==1 and ARGV[a+8]~='') or (increment==2 and ARGV[a+8]=='') or
+  deadline>maximum then return ARGV[9] end
+ if oldExpiry<=now or (deadline>0 and now>=deadline) then okRows[i]=false else
+ local references=next['positiveReferences'];local count=0;local positive=0
+ if type(references)~='table' then return ARGV[9] end
+ for kind,expires in pairs(references) do
+  if not kindSet[kind] or type(expires)~='number' or expires<0 or expires%1~=0 or
+   expires>next['absoluteExpiresAt'] then return ARGV[9] end
+  count=count+1;if expires>positive then positive=expires end
+ end
+ if count~=#kinds then return ARGV[9] end
+ local expires=math.max(next['baseExpiresAt'],positive)
+ if expires>next['absoluteExpiresAt'] then expires=next['absoluteExpiresAt'] end
+ if expires<=now then okRows[i]=false else
+  if increment==2 then next['updatedAt']=now;encoded[i]=cjson.encode(next)
+  else encoded[i]=ARGV[a+3] end
+  if string.len(encoded[i])>maxBytes then return ARGV[9] end;expiries[i]=expires
+ end end
+end end
+local groups={}
+for i=1,n do if okRows[i] then local a=10+(i-1)*stride
+ for j=1,3 do local position=5*n+(i-1)*3+j;local key=KEYS[position]
+  local group=groups[key];if not group then group={position=position,members={},rows={}};groups[key]=group end
+  group.members[#group.members+1]=ARGV[a+4];group.rows[#group.rows+1]=i
+ end
+end end
+for _,group in pairs(groups) do local scores=redis.call('ZMSCORE',KEYS[group.position],unpack(group.members))
+ for j,row in ipairs(group.rows) do local a=10+(row-1)*stride;local score=scores[j]
+  if not score or tonumber(score)~=tonumber(ARGV[a+5]) then okRows[row]=false end
+ end
+end
+local writeGroups={}
+for i=1,n do if okRows[i] then local a=10+(i-1)*stride
+ local ttl=math.ceil((expiries[i]-now)/1000);if ttl<1 then return ARGV[9] end
+ redis.call('SET',KEYS[i],encoded[i],'EX',ttl)
+ for j=1,3 do local position=5*n+(i-1)*3+j;local key=KEYS[position]
+  local group=writeGroups[key];if not group then group={position=position,values={}};writeGroups[key]=group end
+  group.values[#group.values+1]=expiries[i];group.values[#group.values+1]=ARGV[a+4]
+ end
+end end
+for _,group in pairs(writeGroups) do redis.call('ZADD',KEYS[group.position],unpack(group.values))
+ if ARGV[10]=='1' then redis.call('EXPIRE',KEYS[group.position],indexTtl) end
+end
+local result={now};for i=1,n do result[#result+1]=okRows[i] and 1 or 0 end;return result
+"""
+
 
 def _safe_redis_integer(value: object) -> int | None:
     if type(value) is int:
@@ -1774,6 +1917,85 @@ def _safe_redis_integer(value: object) -> int | None:
     else:
         return None
     return parsed if 0 <= parsed <= CANDIDATE_MAX_SAFE_INTEGER else None
+
+
+def _redis_transport_bytes(value: object) -> bytes:
+    if type(value) is bytes:
+        return value
+    return str(value).encode("utf-8", errors="strict")
+
+
+def _redis_request_size(command: list[object]) -> int:
+    size = 1 + len(str(len(command))) + 2
+    for value in command:
+        encoded = _redis_transport_bytes(value)
+        size += 1 + len(str(len(encoded))) + 2 + len(encoded) + 2
+    return size
+
+
+def _mget_response_size(maximum_value_bytes: tuple[int, ...]) -> int:
+    size = 1 + len(str(len(maximum_value_bytes))) + 2
+    for maximum in maximum_value_bytes:
+        size += 1 + len(str(maximum)) + 2 + maximum + 2
+    return size
+
+
+def _bounded_mget_groups(
+    items: tuple[tuple[str, int], ...],
+) -> tuple[tuple[tuple[str, int], ...], ...]:
+    groups: list[tuple[tuple[str, int], ...]] = []
+    current: list[tuple[str, int]] = []
+    for item in items:
+        proposed = (*current, item)
+        command = ["MGET", *(key for key, _maximum in proposed)]
+        if current and (
+            _redis_request_size(command) > CANDIDATE_CONFIRMATION_MAX_REQUEST_BYTES
+            or _mget_response_size(
+                tuple(maximum for _key, maximum in proposed)
+            )
+            > CANDIDATE_CONFIRMATION_MAX_RESPONSE_BYTES
+        ):
+            groups.append(tuple(current))
+            current = [item]
+        else:
+            current.append(item)
+    if current:
+        groups.append(tuple(current))
+    if any(
+        _redis_request_size(["MGET", *(key for key, _maximum in group)])
+        > CANDIDATE_CONFIRMATION_MAX_REQUEST_BYTES
+        or _mget_response_size(tuple(maximum for _key, maximum in group))
+        > CANDIDATE_CONFIRMATION_MAX_RESPONSE_BYTES
+        for group in groups
+    ):
+        raise CandidateStoreUnavailable("store_read_result_invalid")
+    return tuple(groups)
+
+
+def _bounded_key_groups(
+    operation: str,
+    keys: tuple[str, ...],
+) -> tuple[tuple[str, ...], ...]:
+    groups: list[tuple[str, ...]] = []
+    current: list[str] = []
+    for key in keys:
+        proposed = (*current, key)
+        if current and _redis_request_size([operation, *proposed]) > (
+            CANDIDATE_CONFIRMATION_MAX_REQUEST_BYTES
+        ):
+            groups.append(tuple(current))
+            current = [key]
+        else:
+            current.append(key)
+    if current:
+        groups.append(tuple(current))
+    if any(
+        _redis_request_size([operation, *group])
+        > CANDIDATE_CONFIRMATION_MAX_REQUEST_BYTES
+        for group in groups
+    ):
+        raise CandidateStoreUnavailable("store_read_result_invalid")
+    return tuple(groups)
 
 
 class PriorityCandidateStore:
@@ -1944,6 +2166,477 @@ class PriorityCandidateStore:
         except Exception:
             raise CandidateStoreUnavailable(failure_stage) from None
         return record
+
+    def preflight_unchanged_confirmations(
+        self,
+        scopes: tuple[PriorityCandidateScope, ...],
+    ) -> PriorityCandidateConfirmationPreflight:
+        """Read bounded exact evidence for one Google current-window batch."""
+
+        if (
+            type(scopes) is not tuple
+            or len(scopes) > CANDIDATE_CONFIRMATION_MAX_BATCH_SIZE
+            or any(not isinstance(scope, PriorityCandidateScope) for scope in scopes)
+        ):
+            raise ValueError("invalid Priority candidate confirmation batch")
+        if not scopes:
+            return PriorityCandidateConfirmationPreflight(0, ())
+        if (
+            self._storage_namespace != _LEGACY_STORE_NAMESPACE
+            or any(scope.provider != "google" for scope in scopes)
+            or any(scope.mailbox_scope() != scopes[0].mailbox_scope() for scope in scopes)
+        ):
+            raise ValueError("invalid Priority candidate confirmation batch")
+        try:
+            canonical_scopes = tuple(scope.canonical_bytes() for scope in scopes)
+        except Exception:
+            raise ValueError("invalid Priority candidate confirmation batch") from None
+        if len(set(canonical_scopes)) != len(canonical_scopes):
+            raise ValueError("invalid Priority candidate confirmation batch")
+
+        scope_keys = tuple(self._scope_keys(scope) for scope in scopes)
+        marker_keys = tuple(
+            dict.fromkeys(
+                key
+                for keys in scope_keys
+                for key in (
+                    keys["mailbox_incomplete"],
+                    keys["user_incomplete"],
+                    keys["namespace_invalid"],
+                )
+            )
+        )
+        read_items = tuple(
+            (keys["record"], CANDIDATE_MAX_SERIALIZED_RECORD_BYTES)
+            for keys in scope_keys
+        ) + tuple((key, len(_INCOMPLETE_VALUE)) for key in marker_keys)
+        values_by_key: dict[str, object] = {}
+        for group in _bounded_mget_groups(read_items):
+            result = self._command(
+                ["MGET", *(key for key, _maximum in group)],
+                transport_stage="store_read_transport",
+                result_stage="store_read_result_invalid",
+            )
+            if type(result) is not list or len(result) != len(group):
+                raise CandidateStoreUnavailable("store_read_result_invalid")
+            for (key, _maximum), value in zip(group, result, strict=True):
+                if value is not None and type(value) is not str:
+                    raise CandidateStoreUnavailable("store_read_result_invalid")
+                values_by_key[key] = value
+
+        missing_keys = tuple(
+            key for key, value in values_by_key.items() if value is None
+        )
+        invalid_type_keys: set[str] = set()
+        for group in _bounded_key_groups("EXISTS", missing_keys):
+            exists = self._command(
+                ["EXISTS", *group],
+                transport_stage="store_read_transport",
+                result_stage="store_read_result_invalid",
+            )
+            parsed_exists = _safe_redis_integer(exists)
+            if parsed_exists is None or parsed_exists > len(group):
+                raise CandidateStoreUnavailable("store_read_result_invalid")
+            if parsed_exists:
+                for key in group:
+                    key_type = self._command(
+                        ["TYPE", key],
+                        transport_stage="store_read_transport",
+                        result_stage="store_read_result_invalid",
+                    )
+                    if type(key_type) is dict and set(key_type) == {"ok"}:
+                        key_type = key_type["ok"]
+                    if type(key_type) is not str:
+                        raise CandidateStoreUnavailable("store_read_result_invalid")
+                    if key_type != "none":
+                        invalid_type_keys.add(key)
+
+        clock = self._command(
+            ["TIME"],
+            transport_stage="store_read_transport",
+            result_stage="store_read_result_invalid",
+        )
+        if type(clock) is not list or len(clock) != 2:
+            raise CandidateStoreUnavailable("store_read_result_invalid")
+        seconds = _safe_redis_integer(clock[0])
+        micros = _safe_redis_integer(clock[1])
+        if seconds is None or micros is None or micros > 999_999:
+            raise CandidateStoreUnavailable("store_read_result_invalid")
+        observed_at = seconds * 1_000 + micros // 1_000
+        if observed_at > CANDIDATE_MAX_SAFE_INTEGER:
+            raise CandidateStoreUnavailable("store_read_result_invalid")
+
+        records: list[PriorityCandidateRecord | None] = []
+        storage_validity: list[bool] = []
+        for scope, keys in zip(scopes, scope_keys, strict=True):
+            raw = values_by_key[keys["record"]]
+            storage_valid = keys["record"] not in invalid_type_keys
+            record = None
+            if raw is not None and storage_valid:
+                record = _decode_candidate_record(
+                    raw,
+                    secret=self._hmac_secret,
+                    expected_mailbox_scope=scope.mailbox_scope(),
+                    expected_member_digest=keys["member"],
+                )
+                storage_valid = record is not None and record.scope == scope
+                if storage_valid:
+                    try:
+                        assert record is not None
+                        self._validate_snapshot_policy(record.scope, record.snapshot)
+                    except Exception:
+                        storage_valid = False
+                        record = None
+            records.append(record)
+            storage_validity.append(storage_valid)
+
+        score_validity = [False] * len(scopes)
+        valid_record_indexes = [
+            index
+            for index, (record, valid) in enumerate(
+                zip(records, storage_validity, strict=True)
+            )
+            if valid and record is not None
+        ]
+        for index_name in ("mailbox_index", "user_index", "namespace_index"):
+            groups: dict[str, list[int]] = {}
+            for index in valid_record_indexes:
+                groups.setdefault(scope_keys[index][index_name], []).append(index)
+            for key, indexes in groups.items():
+                command = [
+                    "ZMSCORE",
+                    key,
+                    *(scope_keys[index]["member"] for index in indexes),
+                ]
+                if _redis_request_size(command) > CANDIDATE_CONFIRMATION_MAX_REQUEST_BYTES:
+                    raise CandidateStoreUnavailable("store_read_result_invalid")
+                result = self._command(
+                    command,
+                    transport_stage="store_read_transport",
+                    result_stage="store_read_result_invalid",
+                )
+                if type(result) is not list or len(result) != len(indexes):
+                    raise CandidateStoreUnavailable("store_read_result_invalid")
+                for index, value in zip(indexes, result, strict=True):
+                    parsed = _safe_redis_integer(value)
+                    record = records[index]
+                    assert record is not None
+                    matches = parsed == record.logical_expires_at()
+                    score_validity[index] = (
+                        matches if index_name == "mailbox_index" else score_validity[index] and matches
+                    )
+
+        evidence: list[PriorityCandidateConfirmationEvidence] = []
+        for index, (scope, keys, record) in enumerate(
+            zip(scopes, scope_keys, records, strict=True)
+        ):
+            markers = (
+                values_by_key[keys["mailbox_incomplete"]],
+                values_by_key[keys["user_incomplete"]],
+                values_by_key[keys["namespace_invalid"]],
+            )
+            marker_valid = all(
+                key not in invalid_type_keys
+                and value in {None, _INCOMPLETE_VALUE}
+                for key, value in zip(
+                    (
+                        keys["mailbox_incomplete"],
+                        keys["user_incomplete"],
+                        keys["namespace_invalid"],
+                    ),
+                    markers,
+                    strict=True,
+                )
+            )
+            evidence.append(
+                PriorityCandidateConfirmationEvidence(
+                    scope=scope,
+                    raw=values_by_key[keys["record"]],
+                    record=record,
+                    marker_values=markers,
+                    storage_valid=storage_validity[index] and marker_valid,
+                    indexes_valid=score_validity[index],
+                )
+            )
+        return PriorityCandidateConfirmationPreflight(
+            observed_at=observed_at,
+            evidence=tuple(evidence),
+        )
+
+    def _prepare_unchanged_confirmation(
+        self,
+        confirmation: PriorityCandidateUnchangedConfirmation,
+        *,
+        observed_at: int,
+    ) -> tuple[str, PriorityCandidateRecord, dict[str, str], int]:
+        if not isinstance(confirmation, PriorityCandidateUnchangedConfirmation):
+            raise ValueError("invalid Priority candidate unchanged confirmation")
+        evidence = confirmation.evidence
+        record = evidence.record
+        if (
+            not isinstance(evidence, PriorityCandidateConfirmationEvidence)
+            or record is None
+            or evidence.raw is None
+            or not evidence.storage_valid
+            or not evidence.indexes_valid
+            or type(evidence.marker_values) is not tuple
+            or len(evidence.marker_values) != 3
+            or evidence.marker_values[2] is not None
+            or any(value not in {None, _INCOMPLETE_VALUE} for value in evidence.marker_values)
+            or record.state != "provider_confirmed"
+            or record.authority_state_at(observed_at) != "provider_confirmed"
+            or confirmation.workflow_persisted != (confirmation.workflow_raw is not None)
+            or (
+                confirmation.workflow_raw is not None
+                and (
+                    type(confirmation.workflow_raw) is not str
+                    or not confirmation.workflow_raw
+                )
+            )
+            or type(confirmation.workflow_valid_until) is not int
+            or not 0 <= confirmation.workflow_valid_until <= CANDIDATE_MAX_SAFE_INTEGER
+        ):
+            raise ValueError("invalid Priority candidate unchanged confirmation")
+        try:
+            from .store import PriorityWorkflowScope, derive_workflow_scope_digest
+
+            workflow_scope = PriorityWorkflowScope(
+                workspace_id=record.scope.workspace_id,
+                user_id=record.scope.user_id,
+                mailbox_id=record.scope.mailbox_id,
+                identity=record.scope.identity,
+            )
+            expected_workflow_key = (
+                "cuevion:priority:workflow:v1:record:"
+                + derive_workflow_scope_digest(self._hmac_secret, workflow_scope)
+            )
+        except Exception:
+            raise ValueError("invalid Priority candidate unchanged confirmation") from None
+        if confirmation.workflow_key != expected_workflow_key:
+            raise ValueError("invalid Priority candidate unchanged confirmation")
+        base = observed_at + CANDIDATE_BASE_TTL_SECONDS * 1_000
+        absolute = observed_at + CANDIDATE_ABSOLUTE_TTL_SECONDS * 1_000
+        increment = 2 if confirmation.workflow_persisted else 1
+        if absolute > CANDIDATE_MAX_SAFE_INTEGER or record.version + increment > CANDIDATE_MAX_SAFE_INTEGER:
+            raise CandidateStoreUnavailable("store_prepare_temporal_invalid")
+        try:
+            references = tuple(
+                PriorityCandidatePositiveReference(
+                    kind=reference.kind,
+                    expires_at=(
+                        0
+                        if reference.expires_at <= observed_at
+                        else min(reference.expires_at, absolute)
+                    ),
+                )
+                for reference in record.positive_references
+            )
+            prepared_record = PriorityCandidateRecord(
+                scope=record.scope,
+                snapshot=record.snapshot,
+                provider_observed_at=observed_at,
+                provider_validated_at=observed_at,
+                base_expires_at=base,
+                absolute_expires_at=absolute,
+                grace_expires_at=0,
+                positive_references=references,
+                state="provider_confirmed",
+                version=record.version + increment,
+                updated_at=observed_at,
+            )
+            prepared = _encode_wire(
+                _record_to_wire(self._hmac_secret, prepared_record)
+            )
+            if self._decode_exact(
+                prepared,
+                record.scope,
+                failure_stage="store_prepare_canonical_invalid",
+            ) != prepared_record:
+                raise ValueError
+        except _CandidateRecordSizeExceeded:
+            raise CandidateStoreUnavailable("store_prepare_size_invalid") from None
+        except CandidateStoreUnavailable:
+            raise
+        except Exception:
+            raise CandidateStoreUnavailable("store_prepare_canonical_invalid") from None
+        return prepared, prepared_record, self._scope_keys(record.scope), increment
+
+    def confirm_unchanged_batch(
+        self,
+        preflight: PriorityCandidateConfirmationPreflight,
+        confirmations: tuple[PriorityCandidateUnchangedConfirmation, ...],
+    ) -> tuple[PriorityCandidateRecord | None, ...]:
+        """Commit independent unchanged rows in bounded, conflict-safe chunks."""
+
+        if (
+            not isinstance(preflight, PriorityCandidateConfirmationPreflight)
+            or type(confirmations) is not tuple
+            or not 1 <= len(confirmations) <= CANDIDATE_CONFIRMATION_MAX_BATCH_SIZE
+            or type(preflight.observed_at) is not int
+            or not 0 <= preflight.observed_at <= CANDIDATE_MAX_SAFE_INTEGER
+            or any(
+                not isinstance(item, PriorityCandidateUnchangedConfirmation)
+                for item in confirmations
+            )
+        ):
+            raise ValueError("invalid Priority candidate confirmation batch")
+        try:
+            confirmation_scopes = tuple(
+                item.evidence.scope.canonical_bytes() for item in confirmations
+            )
+        except Exception:
+            raise ValueError("invalid Priority candidate confirmation batch") from None
+        if (
+            len(set(confirmation_scopes)) != len(confirmations)
+            or any(item.evidence not in preflight.evidence for item in confirmations)
+        ):
+            raise ValueError("invalid Priority candidate confirmation batch")
+        prepared_rows = tuple(
+            (
+                confirmation,
+                *self._prepare_unchanged_confirmation(
+                    confirmation,
+                    observed_at=preflight.observed_at,
+                ),
+            )
+            for confirmation in confirmations
+        )
+
+        def command_for(rows, *, refresh_indexes: bool):
+            count = len(rows)
+            keys: list[object] = []
+            keys.extend(keys_for_scope["record"] for _item, _raw, _record, keys_for_scope, _inc in rows)
+            keys.extend(item.workflow_key for item, _raw, _record, _keys, _inc in rows)
+            for _item, _raw, _record, keys_for_scope, _inc in rows:
+                keys.extend(
+                    (
+                        keys_for_scope["mailbox_incomplete"],
+                        keys_for_scope["user_incomplete"],
+                        keys_for_scope["namespace_invalid"],
+                    )
+                )
+            for _item, _raw, _record, keys_for_scope, _inc in rows:
+                keys.extend(
+                    (
+                        keys_for_scope["mailbox_index"],
+                        keys_for_scope["user_index"],
+                        keys_for_scope["namespace_index"],
+                    )
+                )
+            arguments: list[object] = [
+                count,
+                preflight.observed_at,
+                CANDIDATE_MAX_SERIALIZED_RECORD_BYTES,
+                CANDIDATE_MAX_SAFE_INTEGER,
+                CANDIDATE_BASE_TTL_SECONDS,
+                CANDIDATE_ABSOLUTE_TTL_SECONDS,
+                CANDIDATE_INDEX_TTL_SECONDS,
+                _INCOMPLETE_VALUE,
+                _BATCH_CONFIRMATION_STRUCTURAL_INVALID_SENTINEL,
+                1 if refresh_indexes else 0,
+            ]
+            for item, prepared, prepared_record, keys_for_scope, increment in rows:
+                assert item.evidence.raw is not None
+                expected_raw = item.evidence.raw
+                arguments.extend(
+                    (
+                        hashlib.sha1(
+                            expected_raw.encode("utf-8"),
+                            usedforsecurity=False,
+                        ).hexdigest(),
+                        len(expected_raw.encode("utf-8")),
+                        prepared,
+                        keys_for_scope["member"],
+                        item.evidence.record.logical_expires_at(),
+                        item.evidence.record.version,
+                        increment,
+                        item.workflow_raw or "",
+                        *(value or "" for value in item.evidence.marker_values),
+                        item.workflow_valid_until,
+                    )
+                )
+            return ["EVAL", _BATCH_CONFIRM_UNCHANGED_SCRIPT, len(keys), *keys, *arguments]
+
+        chunks: list[tuple] = []
+        pending: list[tuple] = []
+        for row in prepared_rows:
+            proposed = (*pending, row)
+            proposed_command = command_for(proposed, refresh_indexes=False)
+            if pending and (
+                len(proposed) > CANDIDATE_CONFIRMATION_COMMIT_CHUNK_SIZE
+                or _redis_request_size(proposed_command)
+                > CANDIDATE_CONFIRMATION_MAX_REQUEST_BYTES
+            ):
+                chunks.append(tuple(pending))
+                pending = [row]
+            else:
+                pending.append(row)
+        if pending:
+            chunks.append(tuple(pending))
+        if any(
+            _redis_request_size(
+                command_for(chunk, refresh_indexes=index == len(chunks) - 1)
+            )
+            > CANDIDATE_CONFIRMATION_MAX_REQUEST_BYTES
+            for index, chunk in enumerate(chunks)
+        ):
+            raise CandidateStoreUnavailable("store_prepare_size_invalid")
+
+        committed: list[PriorityCandidateRecord | None] = [None] * len(confirmations)
+        row_offset = 0
+        indexes_refreshed = False
+        for chunk in chunks:
+            command = command_for(
+                chunk,
+                refresh_indexes=not indexes_refreshed,
+            )
+            try:
+                result = self._command(
+                    command,
+                    transport_stage="store_upsert_transport",
+                    result_stage="store_upsert_result_invalid",
+                )
+            except CandidateStoreUnavailable:
+                result = None
+            if result == _BATCH_CONFIRMATION_STRUCTURAL_INVALID_SENTINEL:
+                row_offset += len(chunk)
+                continue
+            if type(result) is list and len(result) == len(chunk) + 1:
+                commit_time = _safe_redis_integer(result[0])
+                statuses = tuple(_safe_redis_integer(value) for value in result[1:])
+                if commit_time is not None and all(status in {0, 1} for status in statuses):
+                    if any(status == 1 for status in statuses):
+                        indexes_refreshed = True
+                    for local_index, (status, row) in enumerate(
+                        zip(statuses, chunk, strict=True)
+                    ):
+                        if status == 1:
+                            _item, _prepared, prepared_record, _keys, increment = row
+                            committed[row_offset + local_index] = (
+                                replace(prepared_record, updated_at=commit_time)
+                                if increment == 2
+                                else prepared_record
+                            )
+                    row_offset += len(chunk)
+                    continue
+
+            # A lost acknowledgement is reconciled once per bounded chunk.
+            for local_index, row in enumerate(chunk):
+                item, _prepared, prepared_record, _keys, increment = row
+                try:
+                    current = self.read_candidate(item.evidence.scope)
+                except Exception:
+                    current = None
+                if current is None:
+                    continue
+                comparable_current = replace(
+                    current,
+                    updated_at=prepared_record.updated_at,
+                ) if increment == 2 else current
+                if comparable_current == prepared_record:
+                    committed[row_offset + local_index] = current
+            row_offset += len(chunk)
+        return tuple(committed)
 
     def _prepare_confirmed(
         self,

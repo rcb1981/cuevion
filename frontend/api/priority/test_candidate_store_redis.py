@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import json
+import re
 import shutil
 import socket
 import subprocess
@@ -19,6 +20,7 @@ from .candidate_store import (
     CandidateVersionConflict,
     PriorityCandidateStore,
 )
+from .store import PriorityWorkflowScope, PriorityWorkflowStore
 from .test_candidate_projection import (
     gmail_authority,
     gmail_source,
@@ -33,6 +35,42 @@ from .test_candidate_store import (
     ready_routing,
     snapshot,
 )
+
+
+def _parsed_resp_size(value: object) -> int:
+    """Conservative RESP2 size for a redis-cli --json parsed response."""
+
+    if value is None:
+        return len(b"$-1\r\n")
+    if type(value) is bool:
+        value = int(value)
+    if type(value) is int:
+        return len(f":{value}\r\n".encode("ascii"))
+    if type(value) is float:
+        value = str(value)
+    if type(value) is str:
+        encoded = value.encode("utf-8", errors="strict")
+        return len(f"${len(encoded)}\r\n".encode("ascii")) + len(encoded) + 2
+    if type(value) is list:
+        return len(f"*{len(value)}\r\n".encode("ascii")) + sum(
+            _parsed_resp_size(item) for item in value
+        )
+    raise AssertionError("unexpected parsed Redis response type")
+
+
+def _commandstats_calls(payload: object) -> dict[str, int]:
+    if type(payload) is not str:
+        raise AssertionError("invalid Redis commandstats response")
+    result: dict[str, int] = {}
+    for line in payload.splitlines():
+        if not line.startswith("cmdstat_"):
+            continue
+        name, values = line.split(":", 1)
+        matched = re.search(r"(?:^|,)calls=([0-9]+)(?:,|$)", values)
+        if matched is None:
+            raise AssertionError("invalid Redis commandstats entry")
+        result[name.removeprefix("cmdstat_")] = int(matched.group(1))
+    return result
 
 
 @unittest.skipUnless(
@@ -107,6 +145,135 @@ class CandidateRealRedisTests(unittest.TestCase):
             check=True,
         )
         return {"result": json.loads(completed.stdout)}
+
+    def _measured_stores(self):
+        commands: list[list[object]] = []
+        request_sizes: list[int] = []
+        response_sizes: list[int] = []
+
+        def measured(command: list[object]) -> dict[str, object]:
+            result = self._transport(command)
+            commands.append(list(command))
+            request_sizes.append(candidate_module._redis_request_size(command))
+            response_sizes.append(_parsed_resp_size(result["result"]))
+            return result
+
+        return (
+            PriorityCandidateStore(measured, hmac_secret=SECRET),
+            PriorityWorkflowStore(measured, hmac_secret=SECRET),
+            commands,
+            request_sizes,
+            response_sizes,
+        )
+
+    def _commandstats_since_reset(self) -> tuple[int, dict[str, int]]:
+        completed = subprocess.run(
+            ["redis-cli", "-p", str(self._port), "INFO", "commandstats"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        calls = _commandstats_calls(completed.stdout)
+        measurement_and_transport = {
+            "info",
+            "hello",
+            "config",
+            "config|resetstat",
+        }
+        measured = sum(
+            count
+            for name, count in calls.items()
+            if name not in measurement_and_transport
+        )
+        return measured, calls
+
+    def _establish_unchanged_gmail_fixture(self):
+        authority = gmail_authority()
+        valid_sources = [
+            gmail_source(
+                providerMessageId=f"batch-message-{index}",
+                providerThreadId=f"batch-thread-{index}",
+            )
+            for index in range(44)
+        ]
+        invalid_sources = [
+            gmail_source(providerMessageId=""),
+            gmail_source(providerThreadId=""),
+            gmail_source(providerTimestampMillis=None, rfcDate=None),
+            gmail_source(subject="invalid\rsubject"),
+            gmail_source(senderAddress="not-an-address"),
+            gmail_source(labels=["INBOX", "SPAM"]),
+        ]
+        scopes = []
+        snapshots = []
+        records = []
+        for source in valid_sources:
+            scope, intended = project_priority_candidate(authority, source)
+            scopes.append(scope)
+            snapshots.append(intended)
+            records.append(
+                self.store.upsert_confirmed(
+                    scope,
+                    intended,
+                    expected_version=0,
+                )
+            )
+
+        ready_snapshot = replace(
+            snapshots[0],
+            routing_state="ready",
+            routing=ready_routing(),
+        )
+        records[0] = self.store.upsert_confirmed(
+            scopes[0],
+            ready_snapshot,
+            expected_version=records[0].version,
+        )
+        referenced = self.store.set_positive_reference(
+            scopes[0],
+            reference_kind="waiting",
+            remaining_lifetime_seconds=2 * 24 * 60 * 60,
+            expected_version=records[0].version,
+        )
+        assert referenced is not None
+        records[0] = referenced
+        return (
+            authority,
+            [*valid_sources, *invalid_sources],
+            tuple(scopes),
+            tuple(records),
+        )
+
+    @staticmethod
+    def _workflow_scope(scope) -> PriorityWorkflowScope:
+        return PriorityWorkflowScope(
+            workspace_id=scope.workspace_id,
+            user_id=scope.user_id,
+            mailbox_id=scope.mailbox_id,
+            identity=scope.identity,
+        )
+
+    def _missing_workflow_confirmations(self, store, workflow_store, scopes):
+        preflight = store.preflight_unchanged_confirmations(tuple(scopes))
+        workflow_evidence = workflow_store.read_confirmation_evidence(
+            tuple(self._workflow_scope(scope) for scope in scopes),
+            observed_at=preflight.observed_at,
+        )
+        confirmations = tuple(
+            candidate_module.PriorityCandidateUnchangedConfirmation(
+                evidence=candidate_evidence,
+                workflow_key=current_workflow.key,
+                workflow_raw=None,
+                workflow_persisted=False,
+                workflow_valid_until=0,
+            )
+            for candidate_evidence, current_workflow in zip(
+                preflight.evidence,
+                workflow_evidence,
+                strict=True,
+            )
+        )
+        return preflight, workflow_evidence, confirmations
 
     def _v2_store(self) -> PriorityCandidateStore:
         return PriorityCandidateStore(
@@ -196,6 +363,299 @@ class CandidateRealRedisTests(unittest.TestCase):
         self.assertEqual(repeated.snapshot, intended)
         self.assertEqual(self.store.read_candidate(scope), repeated)
         return scope, intended, json.loads(prepared)
+
+    def test_gmail_unchanged_batch_acceptance_command_and_transport_bounds(
+        self,
+    ) -> None:
+        authority, sources, scopes, previous = (
+            self._establish_unchanged_gmail_fixture()
+        )
+        mailbox_keys = self.store._scope_keys(scopes[0])
+        for scope in scopes[1:]:
+            keys = self.store._scope_keys(scope)
+            self.assertEqual(keys["mailbox_index"], mailbox_keys["mailbox_index"])
+            self.assertEqual(keys["user_index"], mailbox_keys["user_index"])
+            self.assertEqual(keys["namespace_index"], mailbox_keys["namespace_index"])
+
+        store, workflow_store, commands, request_sizes, response_sizes = (
+            self._measured_stores()
+        )
+        self._transport(["CONFIG", "RESETSTAT"])
+        before = int(time.time() * 1_000)
+        report = populate_priority_candidates(
+            authority,
+            sources,
+            store=store,
+            workflow_store=workflow_store,
+        )
+        after = int(time.time() * 1_000)
+        command_count, commandstats = self._commandstats_since_reset()
+
+        self.assertEqual(
+            (
+                report.attempted,
+                report.processed,
+                report.written,
+                report.skipped,
+            ),
+            (50, 50, 44, 6),
+        )
+        self.assertLessEqual(command_count, 202)
+        self.assertTrue(request_sizes)
+        self.assertTrue(response_sizes)
+        self.assertLessEqual(
+            max(request_sizes),
+            candidate_module.CANDIDATE_CONFIRMATION_MAX_REQUEST_BYTES,
+        )
+        self.assertLessEqual(
+            max(response_sizes),
+            candidate_module.CANDIDATE_CONFIRMATION_MAX_RESPONSE_BYTES,
+        )
+        self.assertFalse(any(command[0] in {"SCAN", "KEYS"} for command in commands))
+        self.assertEqual(commandstats.get("scan", 0), 0)
+        self.assertEqual(commandstats.get("keys", 0), 0)
+
+        refreshed = tuple(self.store.read_candidate(scope) for scope in scopes)
+        self.assertTrue(all(record is not None for record in refreshed))
+        observed_at = refreshed[0].provider_observed_at
+        self.assertLessEqual(before, observed_at)
+        self.assertLessEqual(observed_at, after)
+        self.assertEqual(
+            {record.provider_observed_at for record in refreshed},
+            {observed_at},
+        )
+        for old, record in zip(previous, refreshed, strict=True):
+            assert record is not None
+            self.assertEqual(record.version, old.version + 1)
+            self.assertEqual(record.provider_validated_at, observed_at)
+            self.assertEqual(record.updated_at, observed_at)
+            self.assertEqual(
+                record.base_expires_at,
+                observed_at
+                + candidate_module.CANDIDATE_BASE_TTL_SECONDS * 1_000,
+            )
+            self.assertEqual(
+                record.absolute_expires_at,
+                observed_at
+                + candidate_module.CANDIDATE_ABSOLUTE_TTL_SECONDS * 1_000,
+            )
+            self.assertEqual(record.state, "provider_confirmed")
+            self.assertEqual(record.grace_expires_at, 0)
+            keys = self.store._scope_keys(record.scope)
+            scores = tuple(
+                int(self._transport(["ZSCORE", keys[name], keys["member"]])["result"])
+                for name in ("mailbox_index", "user_index", "namespace_index")
+            )
+            self.assertEqual(scores, (record.logical_expires_at(),) * 3)
+
+        self.assertEqual(refreshed[0].snapshot.routing_state, "ready")
+        self.assertEqual(refreshed[0].snapshot.routing, ready_routing())
+        self.assertEqual(
+            refreshed[0].positive_reference_expires_at("waiting"),
+            previous[0].positive_reference_expires_at("waiting"),
+        )
+        record_keys = self.store._scope_keys(scopes[0])
+        record_ttl = self._transport(["PTTL", record_keys["record"]])["result"]
+        now = int(time.time() * 1_000)
+        self.assertGreater(
+            record_ttl,
+            refreshed[0].logical_expires_at() - now - 2_000,
+        )
+        self.assertLessEqual(
+            record_ttl,
+            refreshed[0].logical_expires_at() - now + 2_000,
+        )
+        for name in ("mailbox_index", "user_index", "namespace_index"):
+            self.assertGreater(
+                self._transport(["TTL", record_keys[name]])["result"],
+                candidate_module.CANDIDATE_INDEX_TTL_SECONDS - 5,
+            )
+
+        self._transport(["FLUSHDB"])
+        authority, sources, _scopes, _previous = (
+            self._establish_unchanged_gmail_fixture()
+        )
+        slow_store, slow_workflow, _commands, _requests, _responses = (
+            self._measured_stores()
+        )
+        self._transport(["CONFIG", "RESETSTAT"])
+        with patch.object(
+            PriorityCandidateStore,
+            "preflight_unchanged_confirmations",
+            side_effect=CandidateStoreUnavailable("store_read_transport"),
+        ):
+            slow_report = populate_priority_candidates(
+                authority,
+                sources,
+                store=slow_store,
+                workflow_store=slow_workflow,
+            )
+        slow_command_count, _slow_commandstats = self._commandstats_since_reset()
+        self.assertEqual(slow_report.written, 44)
+        self.assertEqual(slow_command_count, 2_024)
+
+    def test_unchanged_batch_candidate_cas_conflict_is_row_local(self) -> None:
+        workflow_store = PriorityWorkflowStore(
+            self._transport,
+            hmac_secret=SECRET,
+        )
+        projected = tuple(
+            project_priority_candidate(
+                gmail_authority(),
+                gmail_source(
+                    providerMessageId=f"candidate-cas-{index}",
+                    providerThreadId=f"candidate-cas-thread-{index}",
+                ),
+            )
+            for index in range(2)
+        )
+        for scope, intended in projected:
+            self.store.upsert_confirmed(scope, intended, expected_version=0)
+        scopes = tuple(scope for scope, _snapshot in projected)
+        preflight, _workflow_evidence, confirmations = (
+            self._missing_workflow_confirmations(
+                self.store,
+                workflow_store,
+                scopes,
+            )
+        )
+
+        mutated = self.store.upsert_confirmed(
+            projected[0][0],
+            projected[0][1],
+            expected_version=1,
+        )
+        committed = self.store.confirm_unchanged_batch(
+            preflight,
+            confirmations,
+        )
+        self.assertIsNone(committed[0])
+        self.assertIsNotNone(committed[1])
+        self.assertEqual(self.store.read_candidate(scopes[0]), mutated)
+        self.assertEqual(committed[1].version, 2)
+        self.assertEqual(self.store.read_candidate(scopes[1]), committed[1])
+
+    def test_unchanged_batch_workflow_raw_or_missing_cas(self) -> None:
+        workflow_store = PriorityWorkflowStore(
+            self._transport,
+            hmac_secret=SECRET,
+        )
+        scope, intended = project_priority_candidate(
+            gmail_authority(),
+            gmail_source(providerMessageId="workflow-cas-missing-created"),
+        )
+        original = self.store.upsert_confirmed(
+            scope,
+            intended,
+            expected_version=0,
+        )
+        preflight, _evidence, confirmations = self._missing_workflow_confirmations(
+            self.store,
+            workflow_store,
+            (scope,),
+        )
+        workflow_store.write_field(
+            self._workflow_scope(scope),
+            field="manualPriority",
+            value="priority",
+        )
+        self.assertEqual(
+            self.store.confirm_unchanged_batch(preflight, confirmations),
+            (None,),
+        )
+        self.assertEqual(self.store.read_candidate(scope), original)
+
+        self._transport(["FLUSHDB"])
+        scope, intended = project_priority_candidate(
+            gmail_authority(),
+            gmail_source(providerMessageId="workflow-cas-present-changed"),
+        )
+        original = self.store.upsert_confirmed(
+            scope,
+            intended,
+            expected_version=0,
+        )
+        workflow_scope = self._workflow_scope(scope)
+        workflow_store.write_field(
+            workflow_scope,
+            field="manualPriority",
+            value="none",
+        )
+        preflight = self.store.preflight_unchanged_confirmations((scope,))
+        evidence = workflow_store.read_confirmation_evidence(
+            (workflow_scope,),
+            observed_at=preflight.observed_at,
+        )[0]
+        self.assertIsNotNone(evidence.raw)
+        confirmation = candidate_module.PriorityCandidateUnchangedConfirmation(
+            evidence=preflight.evidence[0],
+            workflow_key=evidence.key,
+            workflow_raw=evidence.raw,
+            workflow_persisted=True,
+            workflow_valid_until=0,
+        )
+        workflow_store.write_field(
+            workflow_scope,
+            field="cleared",
+            value="cleared",
+        )
+        self.assertEqual(
+            self.store.confirm_unchanged_batch(preflight, (confirmation,)),
+            (None,),
+        )
+        self.assertEqual(self.store.read_candidate(scope), original)
+
+    def test_unchanged_batch_marker_and_index_conflicts_fail_closed(self) -> None:
+        workflow_store = PriorityWorkflowStore(
+            self._transport,
+            hmac_secret=SECRET,
+        )
+        for conflict_kind in ("namespace_marker", "mailbox_index"):
+            with self.subTest(conflict_kind=conflict_kind):
+                self._transport(["FLUSHDB"])
+                scope, intended = project_priority_candidate(
+                    gmail_authority(),
+                    gmail_source(providerMessageId=f"conflict-{conflict_kind}"),
+                )
+                original = self.store.upsert_confirmed(
+                    scope,
+                    intended,
+                    expected_version=0,
+                )
+                preflight, _evidence, confirmations = (
+                    self._missing_workflow_confirmations(
+                        self.store,
+                        workflow_store,
+                        (scope,),
+                    )
+                )
+                keys = self.store._scope_keys(scope)
+                raw_before = self._transport(["GET", keys["record"]])["result"]
+                if conflict_kind == "namespace_marker":
+                    self._transport(
+                        [
+                            "SET",
+                            keys["namespace_invalid"],
+                            candidate_module._INCOMPLETE_VALUE,
+                        ]
+                    )
+                else:
+                    self._transport(
+                        [
+                            "ZADD",
+                            keys["mailbox_index"],
+                            original.logical_expires_at() + 1,
+                            keys["member"],
+                        ]
+                    )
+                self.assertEqual(
+                    self.store.confirm_unchanged_batch(preflight, confirmations),
+                    (None,),
+                )
+                self.assertEqual(
+                    self._transport(["GET", keys["record"]])["result"],
+                    raw_before,
+                )
 
     def test_exact_gmail_provider_source_prepare_commit_and_repeat(self) -> None:
         source = gmail_source()

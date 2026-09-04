@@ -64,6 +64,8 @@ WORKFLOW_WAITING_TTL_SECONDS = 14 * 24 * 60 * 60
 WORKFLOW_PHYSICAL_TTL_SECONDS = 180 * 24 * 60 * 60
 WORKFLOW_MAX_BATCH_IDENTITIES = 64
 WORKFLOW_REDIS_READ_BATCH_SIZE = 16
+WORKFLOW_CONFIRMATION_MAX_IDENTITIES = 100
+WORKFLOW_CONFIRMATION_MGET_GROUP_SIZE = 15
 WORKFLOW_MAX_SERIALIZED_RECORD_BYTES = 2 * 1_024
 WORKFLOW_MAX_SAFE_INTEGER = 9_007_199_254_740_991
 
@@ -1045,6 +1047,43 @@ class PriorityWorkflowRecord:
         }
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class PriorityWorkflowEvidence:
+    """Exact workflow storage evidence for one candidate confirmation."""
+
+    scope: PriorityWorkflowScope
+    key: str
+    raw: str | None
+    record: PriorityWorkflowRecord | None
+    storage_valid: bool
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.scope, PriorityWorkflowScope)
+            or type(self.key) is not str
+            or not self.key.startswith(f"{_WORKFLOW_KEY_PREFIX}record:")
+            or type(self.raw) not in {str, type(None)}
+            or type(self.storage_valid) is not bool
+            or (
+                self.storage_valid
+                and not isinstance(self.record, PriorityWorkflowRecord)
+            )
+            or (not self.storage_valid and self.record is not None)
+            or (
+                self.storage_valid
+                and self.raw is None
+                and self.record != PriorityWorkflowRecord()
+            )
+            or (
+                self.storage_valid
+                and self.raw is not None
+                and self.record is not None
+                and self.record.version == 0
+            )
+        ):
+            raise ValueError("invalid Priority workflow evidence")
+
+
 def derive_workflow_scope_digest(
     secret: str,
     scope: PriorityWorkflowScope,
@@ -1621,6 +1660,99 @@ class PriorityWorkflowStore:
                     raise WorkflowStoreUnavailable()
                 records.append(decoded.normalized_at(current))
         return tuple(records)
+
+    def read_confirmation_evidence(
+        self,
+        scopes: tuple[PriorityWorkflowScope, ...],
+        *,
+        observed_at: int,
+    ) -> tuple[PriorityWorkflowEvidence, ...]:
+        """Read exact raw-or-missing evidence without choosing a new clock."""
+
+        if (
+            type(scopes) is not tuple
+            or len(scopes) > WORKFLOW_CONFIRMATION_MAX_IDENTITIES
+            or any(not isinstance(scope, PriorityWorkflowScope) for scope in scopes)
+            or type(observed_at) is not int
+            or not 0 <= observed_at <= WORKFLOW_MAX_SAFE_INTEGER
+        ):
+            raise ValueError("invalid Priority workflow confirmation batch")
+
+        canonical_scopes: set[bytes] = set()
+        for scope in scopes:
+            canonical_scope = scope.canonical_bytes()
+            if canonical_scope in canonical_scopes:
+                raise ValueError("invalid Priority workflow confirmation batch")
+            canonical_scopes.add(canonical_scope)
+
+        keys = tuple(self._key(scope) for scope in scopes)
+        raw_values: list[str | None] = []
+        for start in range(0, len(keys), WORKFLOW_CONFIRMATION_MGET_GROUP_SIZE):
+            batch = keys[start : start + WORKFLOW_CONFIRMATION_MGET_GROUP_SIZE]
+            values = self._command(["MGET", *batch])
+            if (
+                type(values) is not list
+                or len(values) != len(batch)
+                or any(type(value) not in {str, type(None)} for value in values)
+            ):
+                raise WorkflowStoreUnavailable()
+            raw_values.extend(values)
+
+        nil_keys = tuple(
+            key for key, raw in zip(keys, raw_values, strict=True) if raw is None
+        )
+        nil_storage_valid: dict[str, bool] = {}
+        if nil_keys:
+            existing = _workflow_safe_integer(
+                self._command(["EXISTS", *nil_keys]),
+                minimum=0,
+            )
+            if existing is None or existing > len(nil_keys):
+                raise WorkflowStoreUnavailable()
+            if existing == 0:
+                nil_storage_valid.update((key, True) for key in nil_keys)
+            else:
+                for key in nil_keys:
+                    key_type = self._command(["TYPE", key])
+                    if type(key_type) is not str or not key_type:
+                        raise WorkflowStoreUnavailable()
+                    nil_storage_valid[key] = key_type == "none"
+
+        evidence: list[PriorityWorkflowEvidence] = []
+        for scope, key, raw in zip(scopes, keys, raw_values, strict=True):
+            if raw is None:
+                storage_valid = nil_storage_valid[key]
+                evidence.append(
+                    PriorityWorkflowEvidence(
+                        scope=scope,
+                        key=key,
+                        raw=None,
+                        record=(PriorityWorkflowRecord() if storage_valid else None),
+                        storage_valid=storage_valid,
+                    )
+                )
+                continue
+
+            scope_digest, identity_digest = self._digests(scope)
+            decoded = _decode_workflow_record(
+                raw,
+                expected_scope_digest=scope_digest,
+                expected_identity_digest=identity_digest,
+            )
+            evidence.append(
+                PriorityWorkflowEvidence(
+                    scope=scope,
+                    key=key,
+                    raw=raw,
+                    record=(
+                        decoded.normalized_at(observed_at)
+                        if decoded is not None
+                        else None
+                    ),
+                    storage_valid=decoded is not None,
+                )
+            )
+        return tuple(evidence)
 
     def write_field(
         self,

@@ -6,8 +6,11 @@ import unittest
 from . import store as store_module
 from .authority import PriorityMessageIdentity
 from .store import (
+    WORKFLOW_CONFIRMATION_MAX_IDENTITIES,
+    WORKFLOW_CONFIRMATION_MGET_GROUP_SIZE,
     WORKFLOW_CLEARED_TTL_SECONDS,
     WORKFLOW_MANUAL_TTL_SECONDS,
+    WORKFLOW_MAX_SAFE_INTEGER,
     WORKFLOW_PHYSICAL_TTL_SECONDS,
     WORKFLOW_REDIS_READ_BATCH_SIZE,
     WORKFLOW_WAITING_TTL_SECONDS,
@@ -25,6 +28,7 @@ class WorkflowMemoryRedis:
         self.values: dict[str, str] = {}
         self.expirations: dict[str, int] = {}
         self.physical_expires_at: dict[str, int] = {}
+        self.wrong_types: dict[str, str] = {}
         self.commands: list[list[object]] = []
         self.clock_ms = 1_700_000_000_000
         self.unavailable = False
@@ -33,6 +37,31 @@ class WorkflowMemoryRedis:
         if self.unavailable:
             raise OSError("fixed unavailable")
         self.commands.append(list(command))
+        if command[0] == "MGET":
+            return {
+                "result": [
+                    None if key in self.wrong_types else self.values.get(key)
+                    for key in command[1:]
+                ]
+            }
+        if command[0] == "EXISTS":
+            return {
+                "result": sum(
+                    key in self.values or key in self.wrong_types
+                    for key in command[1:]
+                )
+            }
+        if command[0] == "TYPE":
+            key = command[1]
+            return {
+                "result": (
+                    self.wrong_types[key]
+                    if key in self.wrong_types
+                    else "string"
+                    if key in self.values
+                    else "none"
+                )
+            }
         if command[0] != "EVAL":
             raise AssertionError(command)
         key_count = int(command[2])
@@ -193,6 +222,181 @@ class PriorityWorkflowStoreTests(unittest.TestCase):
                 for command in self.redis.commands
             )
         )
+
+    def test_confirmation_evidence_preserves_mixed_rows_and_exact_storage(self):
+        valid_scope = gmail_scope(provider_message_id="evidence-valid")
+        missing_scope = gmail_scope(provider_message_id="evidence-missing")
+        malformed_scope = gmail_scope(provider_message_id="evidence-malformed")
+        wrong_type_scope = gmail_scope(provider_message_id="evidence-wrong-type")
+        valid = self.store.write_field(
+            valid_scope,
+            field="waiting",
+            value="returned_reply",
+        )
+        valid_key = self.store._key(valid_scope)
+        missing_key = self.store._key(missing_scope)
+        malformed_key = self.store._key(malformed_scope)
+        wrong_type_key = self.store._key(wrong_type_scope)
+        exact_valid_raw = self.redis.values[valid_key]
+        self.redis.values[malformed_key] = "not-json"
+        self.redis.wrong_types[wrong_type_key] = "hash"
+        self.redis.commands.clear()
+
+        observed_at = valid.updated_at
+        evidence = self.store.read_confirmation_evidence(
+            (
+                valid_scope,
+                missing_scope,
+                malformed_scope,
+                wrong_type_scope,
+            ),
+            observed_at=observed_at,
+        )
+
+        self.assertEqual(
+            tuple(item.scope for item in evidence),
+            (
+                valid_scope,
+                missing_scope,
+                malformed_scope,
+                wrong_type_scope,
+            ),
+        )
+        self.assertEqual(
+            tuple(item.key for item in evidence),
+            (valid_key, missing_key, malformed_key, wrong_type_key),
+        )
+        self.assertEqual(evidence[0].raw, exact_valid_raw)
+        self.assertEqual(evidence[0].record, valid)
+        self.assertTrue(evidence[0].storage_valid)
+        self.assertIsNone(evidence[1].raw)
+        self.assertEqual(
+            evidence[1].record,
+            store_module.PriorityWorkflowRecord(),
+        )
+        self.assertTrue(evidence[1].storage_valid)
+        self.assertEqual(evidence[2].raw, "not-json")
+        self.assertIsNone(evidence[2].record)
+        self.assertFalse(evidence[2].storage_valid)
+        self.assertIsNone(evidence[3].raw)
+        self.assertIsNone(evidence[3].record)
+        self.assertFalse(evidence[3].storage_valid)
+        self.assertEqual(
+            [command[0] for command in self.redis.commands],
+            ["MGET", "EXISTS", "TYPE", "TYPE"],
+        )
+        self.assertEqual(
+            self.redis.commands[1],
+            ["EXISTS", missing_key, wrong_type_key],
+        )
+        self.assertEqual(
+            [command[1] for command in self.redis.commands[2:]],
+            [missing_key, wrong_type_key],
+        )
+
+    def test_confirmation_evidence_groups_mget_and_uses_no_server_time(self):
+        scopes = tuple(
+            gmail_scope(provider_message_id=f"confirmation-{index}")
+            for index in range(WORKFLOW_CONFIRMATION_MGET_GROUP_SIZE * 2 + 1)
+        )
+        evidence = self.store.read_confirmation_evidence(
+            scopes,
+            observed_at=1_800_000_000_000,
+        )
+        self.assertEqual(len(evidence), len(scopes))
+        self.assertTrue(all(item.storage_valid for item in evidence))
+        self.assertTrue(all(item.raw is None for item in evidence))
+        self.assertTrue(
+            all(
+                item.record == store_module.PriorityWorkflowRecord()
+                for item in evidence
+            )
+        )
+        self.assertEqual(
+            [command[0] for command in self.redis.commands],
+            ["MGET", "MGET", "MGET", "EXISTS"],
+        )
+        self.assertEqual(
+            [len(command) - 1 for command in self.redis.commands[:3]],
+            [
+                WORKFLOW_CONFIRMATION_MGET_GROUP_SIZE,
+                WORKFLOW_CONFIRMATION_MGET_GROUP_SIZE,
+                1,
+            ],
+        )
+        self.assertEqual(len(self.redis.commands[-1]) - 1, len(scopes))
+        self.assertFalse(any("TIME" in command for command in self.redis.commands))
+
+    def test_confirmation_evidence_normalizes_at_caller_observation(self):
+        scope = gmail_scope(provider_message_id="confirmation-observed-at")
+        written = self.store.write_field(
+            scope,
+            field="waiting",
+            value="returned_reply",
+        )
+        key = self.store._key(scope)
+        exact_raw = self.redis.values[key]
+        self.redis.commands.clear()
+
+        evidence = self.store.read_confirmation_evidence(
+            (scope,),
+            observed_at=written.waiting_expires_at,
+        )[0]
+
+        self.assertEqual(evidence.raw, exact_raw)
+        self.assertTrue(evidence.storage_valid)
+        self.assertEqual(evidence.record.waiting, "absent")
+        self.assertEqual(evidence.record.version, written.version)
+        self.assertEqual([command[0] for command in self.redis.commands], ["MGET"])
+
+    def test_confirmation_evidence_rejects_invalid_batches_before_io(self):
+        scope = gmail_scope(provider_message_id="confirmation-validation")
+        too_many = tuple(
+            gmail_scope(provider_message_id=f"confirmation-overflow-{index}")
+            for index in range(WORKFLOW_CONFIRMATION_MAX_IDENTITIES + 1)
+        )
+        invalid_calls = (
+            lambda: self.store.read_confirmation_evidence(
+                [scope],
+                observed_at=1_700_000_000_000,
+            ),
+            lambda: self.store.read_confirmation_evidence(
+                too_many,
+                observed_at=1_700_000_000_000,
+            ),
+            lambda: self.store.read_confirmation_evidence(
+                (
+                    scope,
+                    gmail_scope(provider_message_id="confirmation-validation"),
+                ),
+                observed_at=1_700_000_000_000,
+            ),
+            lambda: self.store.read_confirmation_evidence(
+                (None,),
+                observed_at=1_700_000_000_000,
+            ),
+            lambda: self.store.read_confirmation_evidence(
+                (scope,),
+                observed_at=-1,
+            ),
+            lambda: self.store.read_confirmation_evidence(
+                (scope,),
+                observed_at=WORKFLOW_MAX_SAFE_INTEGER + 1,
+            ),
+            lambda: self.store.read_confirmation_evidence(
+                (scope,),
+                observed_at=True,
+            ),
+            lambda: self.store.read_confirmation_evidence(
+                (scope,),
+                observed_at=1_700_000_000_000.0,
+            ),
+        )
+        for call in invalid_calls:
+            with self.subTest(call=call):
+                with self.assertRaises(ValueError):
+                    call()
+        self.assertEqual(self.redis.commands, [])
 
     def test_manual_priority_exact_states_round_trip(self):
         scope = gmail_scope()

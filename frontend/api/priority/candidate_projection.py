@@ -17,8 +17,10 @@ from typing import Literal
 
 from .authority import PriorityMessageIdentity, canonical_conversation_id
 from .candidate_store import (
+    CANDIDATE_ABSOLUTE_TTL_SECONDS,
     CANDIDATE_MAX_SNIPPET_BYTES,
     CANDIDATE_STORE_FAILURE_STAGES,
+    POSITIVE_REFERENCE_MAX_SECONDS,
     CandidateCapacityExceeded,
     CandidateNamespaceInvalidated,
     CandidateStoreUnavailable,
@@ -29,14 +31,20 @@ from .candidate_store import (
     PriorityCandidateScope,
     PriorityCandidateSnapshot,
     PriorityCandidateStore,
+    PriorityCandidateUnchangedConfirmation,
     build_runtime_candidate_store,
 )
 from .candidate_reference_reconciliation import (
     RECONCILIATION_FAILURE_RESULTS,
     reconcile_candidate_from_workflow_store,
+    workflow_reference_expiries,
 )
 from .event_reference import resolve_priority_hmac_secret
-from .store import PriorityWorkflowStore, build_runtime_workflow_store
+from .store import (
+    PriorityWorkflowScope,
+    PriorityWorkflowStore,
+    build_runtime_workflow_store,
+)
 
 
 MAX_CURRENT_WINDOW_CANDIDATES = 100
@@ -542,6 +550,17 @@ def project_priority_candidate(
     return _imap_projection(authority, source)
 
 
+def _provider_snapshot_unchanged(
+    existing: PriorityCandidateSnapshot,
+    observed: PriorityCandidateSnapshot,
+) -> bool:
+    return (
+        existing.conversation == observed.conversation
+        and existing.render == observed.render
+        and existing.provider_authority == observed.provider_authority
+    )
+
+
 def _upsert_once(
     store: PriorityCandidateStore,
     scope: PriorityCandidateScope,
@@ -554,14 +573,70 @@ def _upsert_once(
             raise
         store.replace_malformed_confirmed(scope, snapshot)
         return
+    confirmed_snapshot = snapshot
+    if (
+        existing is not None
+        and _provider_snapshot_unchanged(existing.snapshot, snapshot)
+    ):
+        confirmed_snapshot = existing.snapshot
     store.upsert_confirmed(
         scope,
-        snapshot,
+        confirmed_snapshot,
         expected_version=existing.version if existing is not None else 0,
     )
 
 
-def populate_priority_candidates(
+def _log_reconciliation_outcome(outcome: str, *, failed: bool) -> None:
+    log = logger.warning if failed else logger.info
+    log(
+        "Priority candidate workflow reference reconciliation outcome=%s",
+        outcome,
+    )
+
+
+def _write_projected_candidate(
+    store: PriorityCandidateStore,
+    workflow_store: PriorityWorkflowStore | None,
+    scope: PriorityCandidateScope,
+    snapshot: PriorityCandidateSnapshot,
+) -> tuple[bool, str | None, bool]:
+    for attempt in range(2):
+        try:
+            _upsert_once(store, scope, snapshot)
+            break
+        except CandidateVersionConflict:
+            if attempt == 0:
+                continue
+            return False, "version_conflict", False
+        except CandidateCapacityExceeded as error:
+            return (
+                False,
+                "mailbox_capacity"
+                if error.scope_kind == "mailbox"
+                else "user_capacity",
+                False,
+            )
+        except CandidateNamespaceInvalidated:
+            return False, "namespace_invalidated", False
+        except CandidateStoreUnavailable as error:
+            return False, error.stage, True
+        except Exception:
+            return False, "candidate_snapshot_invalid", False
+
+    if workflow_store is not None:
+        reconciliation = reconcile_candidate_from_workflow_store(
+            store,
+            workflow_store,
+            scope,
+        )
+        _log_reconciliation_outcome(
+            reconciliation.value,
+            failed=reconciliation in RECONCILIATION_FAILURE_RESULTS,
+        )
+    return True, None, False
+
+
+def _populate_priority_candidates_slow(
     authority: PriorityCandidatePopulationAuthority,
     sources: object,
     *,
@@ -612,63 +687,375 @@ def populate_priority_candidates(
             count("candidate_snapshot_invalid")
             continue
 
-        try:
-            _upsert_once(store, scope, snapshot)
-        except CandidateVersionConflict:
-            try:
-                _upsert_once(store, scope, snapshot)
-            except CandidateVersionConflict:
-                count("version_conflict")
-                continue
-            except CandidateCapacityExceeded as error:
-                count(
-                    "mailbox_capacity"
-                    if error.scope_kind == "mailbox"
-                    else "user_capacity"
-                )
-                continue
-            except CandidateNamespaceInvalidated:
-                count("namespace_invalidated")
-                continue
-            except CandidateStoreUnavailable as error:
-                abort_after_store_failure(error)
-                break
-            except Exception:
-                count("candidate_snapshot_invalid")
-                continue
-        except CandidateCapacityExceeded as error:
-            count(
-                "mailbox_capacity"
-                if error.scope_kind == "mailbox"
-                else "user_capacity"
-            )
+        row_written, reason_code, fatal = _write_projected_candidate(
+            store,
+            workflow_store,
+            scope,
+            snapshot,
+        )
+        if row_written:
+            written += 1
             continue
-        except CandidateNamespaceInvalidated:
-            count("namespace_invalidated")
-            continue
-        except CandidateStoreUnavailable as error:
-            abort_after_store_failure(error)
+        assert reason_code is not None
+        if fatal:
+            abort_after_store_failure(CandidateStoreUnavailable(reason_code))
             break
-        except Exception:
-            count("candidate_snapshot_invalid")
-            continue
-        written += 1
-        if workflow_store is not None:
-            reconciliation = reconcile_candidate_from_workflow_store(
-                store,
-                workflow_store,
-                scope,
+        count(reason_code)
+
+    return _report(attempted, processed, written, reason_counts)
+
+
+def _workflow_scope_for_candidate(
+    scope: PriorityCandidateScope,
+) -> PriorityWorkflowScope:
+    return PriorityWorkflowScope(
+        workspace_id=scope.workspace_id,
+        user_id=scope.user_id,
+        mailbox_id=scope.mailbox_id,
+        identity=scope.identity,
+    )
+
+
+def _candidate_unchanged_evidence(
+    candidate_evidence: object,
+    scope: PriorityCandidateScope,
+    snapshot: PriorityCandidateSnapshot,
+    *,
+    observed_at: int,
+) -> bool:
+    try:
+        record = candidate_evidence.record
+        return bool(
+            candidate_evidence.scope == scope
+            and record is not None
+            and record.scope == scope
+            and candidate_evidence.raw is not None
+            and candidate_evidence.storage_valid
+            and candidate_evidence.indexes_valid
+            and type(candidate_evidence.marker_values) is tuple
+            and len(candidate_evidence.marker_values) == 3
+            and candidate_evidence.marker_values[2] is None
+            and record.state == "provider_confirmed"
+            and record.authority_state_at(observed_at) == "provider_confirmed"
+            and _provider_snapshot_unchanged(record.snapshot, snapshot)
+        )
+    except Exception:
+        return False
+
+
+def _unchanged_confirmation(
+    candidate_evidence: object,
+    workflow_evidence: object,
+    scope: PriorityCandidateScope,
+    snapshot: PriorityCandidateSnapshot,
+    *,
+    observed_at: int,
+) -> tuple[PriorityCandidateUnchangedConfirmation, str] | None:
+    try:
+        record = candidate_evidence.record
+        if not _candidate_unchanged_evidence(
+            candidate_evidence,
+            scope,
+            snapshot,
+            observed_at=observed_at,
+        ):
+            return None
+        assert record is not None
+
+        workflow_scope = _workflow_scope_for_candidate(scope)
+        if (
+            workflow_evidence.scope != workflow_scope
+            or not workflow_evidence.storage_valid
+            or type(workflow_evidence.key) is not str
+            or not workflow_evidence.key
+        ):
+            return None
+
+        workflow_record = workflow_evidence.record
+        workflow_raw = workflow_evidence.raw
+        if workflow_raw is None:
+            if workflow_record is None or workflow_record.version != 0:
+                return None
+            return (
+                PriorityCandidateUnchangedConfirmation(
+                    evidence=candidate_evidence,
+                    workflow_key=workflow_evidence.key,
+                    workflow_raw=None,
+                    workflow_persisted=False,
+                    workflow_valid_until=0,
+                ),
+                "workflow_record_absent",
             )
-            if reconciliation in RECONCILIATION_FAILURE_RESULTS:
-                logger.warning(
-                    "Priority candidate workflow reference reconciliation outcome=%s",
-                    reconciliation.value,
-                )
+        if (
+            type(workflow_raw) is not str
+            or not workflow_raw
+            or workflow_record is None
+        ):
+            return None
+
+        requested = workflow_reference_expiries(workflow_record)
+        if (
+            type(requested) is not tuple
+            or len(requested) != 3
+            or any(type(value) is not int or value < 0 for value in requested)
+        ):
+            return None
+        absolute_expires_at = (
+            observed_at + CANDIDATE_ABSOLUTE_TTL_SECONDS * 1_000
+        )
+        kinds = ("manual_priority", "waiting", "returned_reply")
+        post_provider = tuple(
+            0
+            if record.positive_reference_expires_at(kind) <= observed_at
+            else min(
+                record.positive_reference_expires_at(kind),
+                absolute_expires_at,
+            )
+            for kind in kinds
+        )
+        normalized_workflow = tuple(
+            0
+            if expires_at <= observed_at
+            else min(
+                expires_at,
+                absolute_expires_at,
+                observed_at + POSITIVE_REFERENCE_MAX_SECONDS[kind] * 1_000,
+            )
+            for kind, expires_at in zip(kinds, requested, strict=True)
+        )
+        if post_provider != normalized_workflow:
+            return None
+
+        active_boundaries = tuple(
+            expires_at
+            for active, expires_at in (
+                (
+                    workflow_record.manual_priority != "none",
+                    workflow_record.manual_expires_at,
+                ),
+                (
+                    workflow_record.cleared != "active",
+                    workflow_record.cleared_expires_at,
+                ),
+                (
+                    workflow_record.waiting != "absent",
+                    workflow_record.waiting_expires_at,
+                ),
+            )
+            if active
+        )
+        if any(
+            type(expires_at) is not int or expires_at <= observed_at
+            for expires_at in active_boundaries
+        ):
+            return None
+        workflow_valid_until = min(active_boundaries, default=0)
+        return (
+            PriorityCandidateUnchangedConfirmation(
+                evidence=candidate_evidence,
+                workflow_key=workflow_evidence.key,
+                workflow_raw=workflow_raw,
+                workflow_persisted=True,
+                workflow_valid_until=workflow_valid_until,
+            ),
+            "candidate_reference_reconciled",
+        )
+    except Exception:
+        return None
+
+
+def populate_priority_candidates(
+    authority: PriorityCandidatePopulationAuthority,
+    sources: object,
+    *,
+    store: PriorityCandidateStore,
+    workflow_store: PriorityWorkflowStore | None = None,
+) -> PriorityCandidatePopulationReport:
+    """Best-effort reconcile only rows observed in one current provider window."""
+
+    if (
+        not isinstance(authority, PriorityCandidatePopulationAuthority)
+        or not isinstance(store, PriorityCandidateStore)
+    ):
+        return _report(0, 0, 0, {"authority_invalid": 1})
+    if (
+        type(sources) is not list
+        or len(sources) > MAX_CURRENT_WINDOW_CANDIDATES
+    ):
+        return _report(0, 0, 0, {"window_invalid": 1})
+    if authority.provider != "google" or workflow_store is None:
+        return _populate_priority_candidates_slow(
+            authority,
+            sources,
+            store=store,
+            workflow_store=workflow_store,
+        )
+
+    staged: list[
+        tuple[PriorityCandidateScope, PriorityCandidateSnapshot] | str
+    ] = []
+    valid_rows: list[tuple[PriorityCandidateScope, PriorityCandidateSnapshot]] = []
+    seen_scopes: set[bytes] = set()
+    for source in sources:
+        try:
+            scope, snapshot = project_priority_candidate(authority, source)
+            canonical_scope = scope.canonical_bytes()
+            if canonical_scope in seen_scopes:
+                staged.append("candidate_duplicate")
+                continue
+            seen_scopes.add(canonical_scope)
+        except CandidateProjectionInvalid as error:
+            staged.append(error.reason_code)
+            continue
+        except Exception:
+            staged.append("candidate_snapshot_invalid")
+            continue
+        row = (scope, snapshot)
+        staged.append(row)
+        valid_rows.append(row)
+
+    if not valid_rows:
+        reason_counts: dict[str, int] = {}
+        for reason_code in staged:
+            assert isinstance(reason_code, str)
+            reason_counts[reason_code] = reason_counts.get(reason_code, 0) + 1
+        return _report(len(sources), len(sources), 0, reason_counts)
+
+    try:
+        preflight = store.preflight_unchanged_confirmations(
+            tuple(scope for scope, _snapshot in valid_rows)
+        )
+        if len(preflight.evidence) != len(valid_rows):
+            raise ValueError("invalid Priority candidate confirmation preflight")
+        potential_rows = tuple(
+            index
+            for index, ((scope, snapshot), candidate_evidence) in enumerate(
+                zip(valid_rows, preflight.evidence, strict=True)
+            )
+            if _candidate_unchanged_evidence(
+                candidate_evidence,
+                scope,
+                snapshot,
+                observed_at=preflight.observed_at,
+            )
+        )
+        if not potential_rows:
+            return _populate_priority_candidates_slow(
+                authority,
+                sources,
+                store=store,
+                workflow_store=workflow_store,
+            )
+        workflow_scopes = tuple(
+            _workflow_scope_for_candidate(valid_rows[index][0])
+            for index in potential_rows
+        )
+        workflow_evidence = workflow_store.read_confirmation_evidence(
+            workflow_scopes,
+            observed_at=preflight.observed_at,
+        )
+        if (
+            type(workflow_evidence) is not tuple
+            or len(workflow_evidence) != len(potential_rows)
+        ):
+            raise ValueError("invalid Priority workflow confirmation preflight")
+    except Exception:
+        return _populate_priority_candidates_slow(
+            authority,
+            sources,
+            store=store,
+            workflow_store=workflow_store,
+        )
+
+    confirmations: list[PriorityCandidateUnchangedConfirmation] = []
+    confirmation_rows: list[int] = []
+    confirmation_outcomes: list[str] = []
+    for index, current_workflow in zip(
+        potential_rows,
+        workflow_evidence,
+        strict=True,
+    ):
+        scope, snapshot = valid_rows[index]
+        candidate_evidence = preflight.evidence[index]
+        confirmation = _unchanged_confirmation(
+            candidate_evidence,
+            current_workflow,
+            scope,
+            snapshot,
+            observed_at=preflight.observed_at,
+        )
+        if confirmation is None:
+            continue
+        item, outcome = confirmation
+        confirmations.append(item)
+        confirmation_rows.append(index)
+        confirmation_outcomes.append(outcome)
+
+    committed_by_valid_row: dict[int, tuple[object, str]] = {}
+    if confirmations:
+        try:
+            committed = store.confirm_unchanged_batch(
+                preflight,
+                tuple(confirmations),
+            )
+            if type(committed) is not tuple or len(committed) != len(confirmations):
+                committed = (None,) * len(confirmations)
+        except Exception:
+            committed = (None,) * len(confirmations)
+        for row_index, outcome, record in zip(
+            confirmation_rows,
+            confirmation_outcomes,
+            committed,
+            strict=True,
+        ):
+            if record is not None:
+                committed_by_valid_row[row_index] = (record, outcome)
+
+    attempted = len(sources)
+    processed = 0
+    written = 0
+    reason_counts: dict[str, int] = {}
+    valid_index = 0
+    store_failed = False
+
+    def count(reason_code: str) -> None:
+        reason_counts[reason_code] = reason_counts.get(reason_code, 0) + 1
+
+    for staged_row in staged:
+        if isinstance(staged_row, str):
+            if store_failed:
+                count("not_processed_after_store_failure")
             else:
-                logger.info(
-                    "Priority candidate workflow reference reconciliation outcome=%s",
-                    reconciliation.value,
-                )
+                processed += 1
+                count(staged_row)
+            continue
+
+        scope, snapshot = staged_row
+        committed_row = committed_by_valid_row.get(valid_index)
+        valid_index += 1
+        if committed_row is not None:
+            processed += 1
+            written += 1
+            _record, outcome = committed_row
+            _log_reconciliation_outcome(outcome, failed=False)
+            continue
+        if store_failed:
+            count("not_processed_after_store_failure")
+            continue
+
+        processed += 1
+        row_written, reason_code, fatal = _write_projected_candidate(
+            store,
+            workflow_store,
+            scope,
+            snapshot,
+        )
+        if row_written:
+            written += 1
+            continue
+        assert reason_code is not None
+        count(reason_code)
+        store_failed = fatal
 
     return _report(attempted, processed, written, reason_counts)
 
