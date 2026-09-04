@@ -1626,7 +1626,7 @@ else:
           or (a == 239 and b == 187 and c == 191)
           or (a == 239 and b == 191 and c >= 185 and c <= 187)
           or (a == 240 and b == 145 and ((c == 130 and d == 189) or (c == 131 and d == 141)))
-          or (a == 240 and b == 147 and c == 144 and d >= 176 and d <= 191)
+          or (a == 240 and b == 147 and c == 144 and d >= 176 and d <= 184)
           or (a == 240 and b == 155 and c == 178 and d >= 160 and d <= 163)
           or (a == 240 and b == 157 and c == 133 and d >= 179 and d <= 186)
           or (a == 243 and b == 160 and ((c == 128 and (d == 129 or d >= 160)) or c == 129)) then

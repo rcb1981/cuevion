@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from . import (
+    application,
     authorization,
     guest_http,
     guest_rate_limit,
@@ -1102,6 +1103,102 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                 True,
             ),
             (
+                "egyptian_format_control_end",
+                "invite",
+                mutated_raw(
+                    base_invite,
+                    "invite",
+                    lambda value: value["createdBy"].__setitem__(
+                        "displayName", "Owner\U00013438"
+                    ),
+                ),
+                False,
+            ),
+            (
+                "unicode_14_unassigned_after_egyptian_controls_start",
+                "invite",
+                mutated_raw(
+                    base_invite,
+                    "invite",
+                    lambda value: value["createdBy"].__setitem__(
+                        "displayName", "Owner\U00013439"
+                    ),
+                ),
+                True,
+            ),
+            (
+                "unicode_14_unassigned_after_egyptian_controls_end",
+                "invite",
+                mutated_raw(
+                    base_invite,
+                    "invite",
+                    lambda value: value["createdBy"].__setitem__(
+                        "displayName", "Owner\U0001343F"
+                    ),
+                ),
+                True,
+            ),
+            (
+                "unicode_after_egyptian_control_block",
+                "invite",
+                mutated_raw(
+                    base_invite,
+                    "invite",
+                    lambda value: value["createdBy"].__setitem__(
+                        "displayName", "Owner\U00013440"
+                    ),
+                ),
+                True,
+            ),
+            (
+                "escaped_egyptian_format_control_end",
+                "invite",
+                mutated_raw(
+                    base_invite,
+                    "invite",
+                    lambda value: value["createdBy"].__setitem__(
+                        "displayName", "Owner\U00013438"
+                    ),
+                ).replace("\U00013438", "\\ud80d\\udc38"),
+                False,
+            ),
+            (
+                "escaped_unicode_14_unassigned_after_egyptian_controls",
+                "invite",
+                mutated_raw(
+                    base_invite,
+                    "invite",
+                    lambda value: value["createdBy"].__setitem__(
+                        "displayName", "Owner\U00013439"
+                    ),
+                ).replace("\U00013439", "\\ud80d\\udc39"),
+                True,
+            ),
+            (
+                "free_text_egyptian_format_control_end",
+                "thread",
+                mutated_raw(
+                    base_thread,
+                    "thread",
+                    lambda value: value["sourceMessage"].__setitem__(
+                        "bodyText", "Body\U00013438"
+                    ),
+                ),
+                False,
+            ),
+            (
+                "free_text_unicode_14_unassigned_after_egyptian_controls",
+                "thread",
+                mutated_raw(
+                    base_thread,
+                    "thread",
+                    lambda value: value["sourceMessage"].__setitem__(
+                        "bodyText", "Body\U00013439"
+                    ),
+                ),
+                True,
+            ),
+            (
                 "leading_em_space_guest_display",
                 "session",
                 mutated_raw(
@@ -1400,12 +1497,26 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                 )
             )
 
+        exchanged_invite = {
+            **base_invite,
+            "status": "exchanged",
+            "exchangedAt": SEC + 110,
+            "exchangeCount": 1,
+            "activeSessionHash": base_session["sessionHash"],
+        }
         revoked_invite = {
             **base_invite,
             "status": "revoked",
             "revokedAt": SEC + 110,
             "revokedBy": base_invite["ownerEmail"],
         }
+        revoked_after_exchange_invite = {
+            **exchanged_invite,
+            "status": "revoked",
+            "revokedAt": SEC + 120,
+            "revokedBy": base_invite["ownerEmail"],
+        }
+        expired_invite = {**base_invite, "status": "expired"}
         revoked_session = {**base_session, "status": "revoked", "revokedAt": SEC + 102}
         logged_out_session = {**base_session, "status": "logged_out", "loggedOutAt": SEC + 102}
         equal_revoked_session = {
@@ -1435,7 +1546,25 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         }
         cases.extend(
             (
+                (
+                    "valid_exchanged_invite",
+                    "invite",
+                    valid_raw(exchanged_invite, "invite"),
+                    True,
+                ),
                 ("valid_revoked_invite", "invite", valid_raw(revoked_invite, "invite"), True),
+                (
+                    "valid_revoked_after_exchange_invite",
+                    "invite",
+                    valid_raw(revoked_after_exchange_invite, "invite"),
+                    True,
+                ),
+                (
+                    "valid_expired_invite",
+                    "invite",
+                    valid_raw(expired_invite, "invite"),
+                    True,
+                ),
                 (
                     "alternate_revoked_by",
                     "invite",
@@ -8394,6 +8523,250 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                 self.assertTrue(created.get("threadCreated"), created)
                 self.assertTrue(created.get("inviteCreated"), created)
                 logger.assert_not_called()
+
+    def test_application_external_first_unicode_parity_uses_real_atomic_lua(self):
+        owner_user_id = "usr_" + ("A" * 22)
+        display_name = "Owner\U00013439"
+
+        for invited_email in (None, "reviewer@example.com"):
+            with self.subTest(invited_email=invited_email):
+                self.client.command(["FLUSHALL"])
+                canonical_thread = thread_record()
+                capability = authorization._InternalCollaborationCapability(
+                    authorization._INTERNAL_CAPABILITY_SENTINEL,
+                    canonical_thread["ownerEmail"],
+                    canonical_thread["workspaceId"],
+                    canonical_thread["mailboxId"],
+                    canonical_thread["sourceRef"]["provider"],
+                    None,
+                    "create",
+                    "owner",
+                    display_name,
+                    owner_user_id,
+                    "owner",
+                    owner_user_id,
+                    display_name,
+                )
+                source_result = {
+                    "status": "ok",
+                    "source": {
+                        "sourceRef": canonical_thread["sourceRef"],
+                        "sourceMessage": canonical_thread["sourceMessage"],
+                    },
+                    "error": None,
+                }
+                captured: dict[str, dict] = {}
+
+                def create(thread, invite, *, now):
+                    captured["thread"] = thread
+                    captured["invite"] = invite
+                    self.assertEqual(normalize_v2_thread_record(thread), thread)
+                    self.assertEqual(normalize_v2_invite_record(invite), invite)
+                    self.assertIsNotNone(redis_store._v2_wire_json(invite, "invite"))
+                    return redis_store._create_v2_thread_with_guest(
+                        thread,
+                        invite,
+                        now=now,
+                        command_transport=self.client.transport,
+                    )
+
+                def load_external_guests(*args, **kwargs):
+                    return redis_store._load_v2_external_guest_records(
+                        *args,
+                        **kwargs,
+                        command_transport=self.client.transport,
+                    )
+
+                payload = {
+                    "mailboxId": canonical_thread["mailboxId"],
+                    "sourceRef": {
+                        "providerMessageId": canonical_thread["sourceRef"][
+                            "providerMessageId"
+                        ]
+                    },
+                    "state": "needs_review",
+                }
+                if invited_email is not None:
+                    payload["invitedEmail"] = invited_email
+
+                with patch.object(
+                    application,
+                    "resolve_verified_owner_collaboration_context",
+                    return_value={"status": "ok", "context": capability, "error": None},
+                ), patch.object(
+                    application,
+                    "resolve_source_message",
+                    return_value=source_result,
+                ), patch.object(
+                    application,
+                    "generate_v2_opaque_id",
+                    side_effect=[canonical_thread["collaborationId"], "I" * 22],
+                ), patch.object(
+                    application,
+                    "generate_v2_bearer_secret",
+                    return_value="r" * 43,
+                ), patch.object(
+                    application.time,
+                    "time_ns",
+                    return_value=MS * 1_000_000,
+                ), patch.object(
+                    application.time,
+                    "time",
+                    return_value=SEC,
+                ), patch.object(
+                    application,
+                    "_create_v2_thread_with_guest",
+                    side_effect=create,
+                ), patch.object(
+                    application,
+                    "_load_v2_external_guest_records",
+                    side_effect=load_external_guests,
+                ), patch("builtins.print") as logger:
+                    result = application.create_v2_collaboration_with_guest_for_verified_owner(
+                        object(),
+                        object(),
+                        payload,
+                        owner_security_configuration=object(),
+                    )
+
+                self.assertTrue(result.get("created"), result)
+                self.assertTrue(result.get("invitationCreated"), result)
+                self.assertEqual(result.get("token"), "r" * 43)
+                self.assertEqual(
+                    captured["invite"].get("invitedEmail"), invited_email
+                )
+                self.assertEqual(
+                    captured["invite"]["createdBy"]["displayName"], display_name
+                )
+                logger.assert_not_called()
+
+                thread_key = self._thread_key(captured["thread"]["collaborationId"])
+                invite_key, token_key, identity_key = self._invite_keys(
+                    captured["invite"]
+                )
+                source_key = self._source_key(captured["thread"])
+                index_key = redis_store.build_v2_external_guest_index_key(
+                    captured["thread"]["collaborationId"]
+                )
+                self.assertEqual(
+                    typed_wire_json(self.client.command(["GET", thread_key]), "thread"),
+                    captured["thread"],
+                )
+                self.assertEqual(
+                    typed_wire_json(self.client.command(["GET", invite_key]), "invite"),
+                    captured["invite"],
+                )
+                self.assertEqual(
+                    set(self.client.command(["KEYS", f"{redis_store.V2_KEY_PREFIX}:*"])),
+                    {thread_key, source_key, invite_key, token_key, identity_key, index_key},
+                )
+
+    def test_external_first_atomic_invite_security_rejections_are_zero_write(self):
+        def mutate_invite(mutator):
+            def mutate(command, argv_start):
+                wire = json.loads(command[argv_start + 1])
+                mutator(wire)
+                command[argv_start + 1] = compact_json(wire)
+
+            return mutate
+
+        def noncanonical_owner(value):
+            value["ownerEmail"] = "Owner@example.com"
+            value["createdBy"]["ownerEmail"] = "Owner@example.com"
+
+        def overlong_lifetime(value):
+            value["expiresAt"] = str(int(value["createdAt"]) + 86_401)
+
+        cases = {
+            "egyptian_control_start": lambda value: value["createdBy"].__setitem__(
+                "displayName", "Owner\U00013430"
+            ),
+            "egyptian_control_end": lambda value: value["createdBy"].__setitem__(
+                "displayName", "Owner\U00013438"
+            ),
+            "cc_display": lambda value: value["createdBy"].__setitem__(
+                "displayName", "Owner\u0001"
+            ),
+            "cf_display": lambda value: value["createdBy"].__setitem__(
+                "displayName", "Owner\u200b"
+            ),
+            "empty_display": lambda value: value["createdBy"].__setitem__(
+                "displayName", ""
+            ),
+            "overlong_display": lambda value: value["createdBy"].__setitem__(
+                "displayName", "é" * 129
+            ),
+            "invalid_created_by": lambda value: value.__setitem__(
+                "createdBy", {"ownerEmail": value["ownerEmail"]}
+            ),
+            "wrong_schema": lambda value: value.__setitem__("v", "3"),
+            "malformed_token_hash": lambda value: value.__setitem__(
+                "tokenHash", "g" * 64
+            ),
+            "noncanonical_owner": noncanonical_owner,
+            "invalid_workspace": lambda value: value.__setitem__(
+                "workspaceId", "bad_" + ("W" * 22)
+            ),
+            "invalid_mailbox": lambda value: value.__setitem__(
+                "mailboxId", "Mailbox-1"
+            ),
+            "reordered_actions": lambda value: value.__setitem__(
+                "allowedActions", ["reply", "read"]
+            ),
+            "bad_timestamp": lambda value: value.__setitem__(
+                "createdAt", "1577836799"
+            ),
+            "overlong_lifetime": overlong_lifetime,
+            "active_session_hash": lambda value: value.__setitem__(
+                "activeSessionHash", "a" * 64
+            ),
+        }
+
+        for label, mutator in cases.items():
+            with self.subTest(case=label):
+                self.client.command(["FLUSHALL"])
+                thread = thread_record()
+                invite = invite_record()
+                transport = self._transport_mutating_eval(
+                    redis_store._CREATE_V2_THREAD_WITH_GUEST_LUA,
+                    mutate_invite(mutator),
+                )
+
+                with patch("builtins.print") as logger:
+                    result = redis_store._create_v2_thread_with_guest(
+                        thread,
+                        invite,
+                        now=invite["createdAt"],
+                        command_transport=transport,
+                    )
+
+                self.assertEqual(
+                    result,
+                    {
+                        "status": "malformed",
+                        "error": {"code": "storage_protocol_error"},
+                    },
+                )
+                events = [json.loads(call.args[0]) for call in logger.call_args_list]
+                self.assertEqual(
+                    events,
+                    [
+                        {
+                            "event": "cuevion_collaboration_atomic_guest_store_failure",
+                            "stage": "lua_malformed",
+                            "internalSafeCode": "storage_protocol_error",
+                        },
+                        {
+                            "event": "cuevion_collaboration_atomic_guest_lua_malformed",
+                            "predicate": "invite_valid",
+                        },
+                    ],
+                )
+                self.assertEqual(self.client.command(["DBSIZE"]), 0)
+                self.assertEqual(
+                    self.client.command(["KEYS", f"{redis_store.V2_KEY_PREFIX}:*"]),
+                    [],
+                )
 
     def test_external_first_failure_and_cross_workspace_leave_no_partial_graph(self):
         thread = thread_record()
