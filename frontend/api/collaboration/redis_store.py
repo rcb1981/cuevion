@@ -1640,7 +1640,7 @@ else:
       return nil, nil
     end
     local parseJsonValue
-    local function parseJsonObject(raw, cursor, depth)
+    local function parseJsonObject(raw, cursor, depth, members)
       cursor = skipJsonWhitespace(raw, cursor + 1)
       if string.byte(raw, cursor) == 125 then return cursor + 1 end
       local seen = {}
@@ -1650,8 +1650,13 @@ else:
         seen[key] = true
         cursor = skipJsonWhitespace(raw, nextCursor)
         if string.byte(raw, cursor) ~= 58 then return nil end
-        cursor = parseJsonValue(raw, cursor + 1, depth + 1)
+        local valueCursor = skipJsonWhitespace(raw, cursor + 1)
+        cursor = parseJsonValue(raw, valueCursor, depth + 1)
         if not cursor then return nil end
+        if members then
+          -- The value parser accepts only literal null at an 'n' token boundary.
+          members[key] = string.byte(raw, valueCursor) == 110 and 'null' or 'value'
+        end
         cursor = skipJsonWhitespace(raw, cursor)
         local byte = string.byte(raw, cursor)
         if byte == 125 then return cursor + 1 end
@@ -1992,12 +1997,38 @@ else:
         and timestampMilliseconds(value.createdAt) and timestampMilliseconds(value.updatedAt)
         and updatedAt >= createdAt
     end
-    local function inviteValid(invite)
+    local INVITE_REQUIRED_KEYS = {
+      v=true,inviteId=true,tokenHash=true,ownerEmail=true,workspaceId=true,mailboxId=true,
+      collaborationId=true,identityAssurance=true,allowedActions=true,visibility=true,
+      createdBy=true,createdAt=true,expiresAt=true,status=true,exchangedAt=true,
+      exchangeCount=true,revokedAt=true,revokedBy=true
+    }
+    local INVITE_NULLABLE_KEYS = {exchangedAt=true,revokedAt=true,revokedBy=true}
+    local function rawInviteMembers(raw)
+      if type(raw) ~= 'string' or #raw > 16384 or not rawIsValidUtf8(raw) then return nil end
+      local cursor = skipJsonWhitespace(raw, 1)
+      if string.byte(raw, cursor) ~= 123 then return nil end
+      local members = {}
+      cursor = parseJsonObject(raw, cursor, 0, members)
+      if not cursor or skipJsonWhitespace(raw, cursor) ~= #raw + 1 then return nil end
+      return members
+    end
+    local function inviteNull(invite, members, key)
+      return members[key] == 'null' and (invite[key] == nil or invite[key] == JSON_NULL)
+    end
+    local function inviteValid(invite, raw)
       if type(invite) ~= 'table' then return false, 'key_count' end
-      local count = keyCount(invite)
+      local members = rawInviteMembers(raw)
+      if not members then return false, 'key_count' end
+      local count = keyCount(members)
       local createdAt = integerValue(invite.createdAt)
       local expiresAt = integerValue(invite.expiresAt)
       if count < 18 or count > 20 then return false, 'key_count' end
+      for key, _ in pairs(INVITE_REQUIRED_KEYS) do
+        if not members[key] or (not INVITE_NULLABLE_KEYS[key] and invite[key] == nil) then
+          return false, 'key_count'
+        end
+      end
       if invite.v ~= '2' or not exactInteger(invite.v) then return false, 'schema_version' end
       if not opaqueId(invite.inviteId) then return false, 'invite_id' end
       if type(invite.tokenHash) ~= 'string' or #invite.tokenHash ~= 64
@@ -2018,37 +2049,45 @@ else:
       if not timestampSeconds(invite.expiresAt) then return false, 'expires_at' end
       if createdAt >= expiresAt or expiresAt - createdAt > 86400 then return false, 'lifetime' end
       if not exactInteger(invite.exchangeCount) then return false, 'exchange_count' end
-      if invite.invitedEmail ~= nil and not canonicalEmail(invite.invitedEmail) then
+      if (members.invitedEmail ~= nil or invite.invitedEmail ~= nil)
+        and not canonicalEmail(invite.invitedEmail) then
         return false, 'invited_email'
       end
       local allowed = {v=true,inviteId=true,tokenHash=true,ownerEmail=true,workspaceId=true,mailboxId=true,
         collaborationId=true,invitedEmail=true,identityAssurance=true,allowedActions=true,visibility=true,
         createdBy=true,createdAt=true,expiresAt=true,status=true,exchangedAt=true,exchangeCount=true,
         revokedAt=true,revokedBy=true,activeSessionHash=true}
-      for key, _ in pairs(invite) do if not allowed[key] then return false, 'allowed_keys' end end
-      if invite.exchangedAt ~= JSON_NULL and not timestampSeconds(invite.exchangedAt) then
+      for key, _ in pairs(members) do if not allowed[key] then return false, 'allowed_keys' end end
+      for key, _ in pairs(invite) do
+        if not allowed[key] or not members[key] then return false, 'allowed_keys' end
+      end
+      local exchangedNull = inviteNull(invite, members, 'exchangedAt')
+      local revokedAtNull = inviteNull(invite, members, 'revokedAt')
+      local revokedByNull = inviteNull(invite, members, 'revokedBy')
+      if not exchangedNull and not timestampSeconds(invite.exchangedAt) then
         return false, 'exchanged_at'
       end
-      if invite.revokedAt ~= JSON_NULL and not timestampSeconds(invite.revokedAt) then
+      if not revokedAtNull and not timestampSeconds(invite.revokedAt) then
         return false, 'revoked_at'
       end
-      if invite.revokedBy ~= JSON_NULL and (
+      if not revokedByNull and (
         not canonicalEmail(invite.revokedBy) or invite.revokedBy ~= invite.ownerEmail
       ) then return false, 'revoked_by' end
-      if invite.activeSessionHash ~= nil and (type(invite.activeSessionHash) ~= 'string'
+      if (members.activeSessionHash ~= nil or invite.activeSessionHash ~= nil)
+        and (type(invite.activeSessionHash) ~= 'string'
         or #invite.activeSessionHash ~= 64
         or string.match(invite.activeSessionHash, '^[0-9a-f]+$') == nil) then
         return false, 'active_session_hash'
       end
       if invite.status == 'active' then
-        if invite.exchangeCount == '0' and invite.exchangedAt == JSON_NULL and invite.revokedAt == JSON_NULL
-          and invite.revokedBy == JSON_NULL and invite.activeSessionHash == nil then return true, nil end
+        if invite.exchangeCount == '0' and exchangedNull and revokedAtNull
+          and revokedByNull and invite.activeSessionHash == nil then return true, nil end
         return false, 'status_active'
       elseif invite.status == 'exchanged' then
         local exchangedAt = integerValue(invite.exchangedAt)
         if invite.exchangeCount == '1' and timestampSeconds(invite.exchangedAt)
           and exchangedAt >= createdAt and exchangedAt < expiresAt
-          and invite.revokedAt == JSON_NULL and invite.revokedBy == JSON_NULL
+          and revokedAtNull and revokedByNull
           and invite.activeSessionHash ~= nil then return true, nil end
         return false, 'status_exchanged'
       elseif invite.status == 'revoked' then
@@ -2056,7 +2095,7 @@ else:
         if not timestampSeconds(invite.revokedAt) or revokedAt <= createdAt or revokedAt >= expiresAt
           or invite.revokedBy ~= invite.ownerEmail then return false, 'status_revoked' end
         if invite.exchangeCount == '0' then
-          if invite.exchangedAt == JSON_NULL and invite.activeSessionHash == nil then return true, nil end
+          if exchangedNull and invite.activeSessionHash == nil then return true, nil end
           return false, 'status_revoked'
         end
         local exchangedAt = integerValue(invite.exchangedAt)
@@ -2065,11 +2104,30 @@ else:
           and exchangedAt < expiresAt and invite.activeSessionHash ~= nil then return true, nil end
         return false, 'status_revoked'
       elseif invite.status == 'expired' then
-        if invite.exchangeCount == '0' and invite.exchangedAt == JSON_NULL and invite.revokedAt == JSON_NULL
-          and invite.revokedBy == JSON_NULL and invite.activeSessionHash == nil then return true, nil end
+        if invite.exchangeCount == '0' and exchangedNull and revokedAtNull
+          and revokedByNull and invite.activeSessionHash == nil then return true, nil end
         return false, 'status_expired'
       end
       return false, 'status_unknown'
+    end
+    local function encodeInvite(invite, originalRaw)
+      -- Called only after validating the original invite and applying the Lua mutation.
+      -- Preserve only absent decoded fields whose original raw token proves JSON null.
+      local members = rawInviteMembers(originalRaw)
+      if not members then return nil end
+      local fields = {}
+      for key, value in pairs(invite) do
+        table.insert(fields, cjson.encode(key) .. ':' .. cjson.encode(value))
+      end
+      for key, _ in pairs(INVITE_NULLABLE_KEYS) do
+        if invite[key] == nil then
+          if members[key] ~= 'null' then return nil end
+          table.insert(fields, cjson.encode(key) .. ':null')
+        end
+      end
+      local raw = '{' .. table.concat(fields, ',') .. '}'
+      if not inviteValid(invite, raw) then return nil end
+      return raw
     end
     local function sessionValid(session)
       if type(session) ~= 'table' then return false end
@@ -2133,7 +2191,7 @@ else:
     if not ok then return cjson.encode({status='malformed'}) end
     local valid = false
     if kind == 'thread' then valid = rawTopLevelArray(raw, 'messages') and threadValid(value)
-    elseif kind == 'invite' then valid = inviteValid(value)
+    elseif kind == 'invite' then valid = inviteValid(value, raw)
     else valid = sessionValid(value) end
     return cjson.encode({status=valid and 'valid' or 'malformed'})
     """.strip()
@@ -2381,7 +2439,7 @@ else:
     if not threadValid(proposedThread) then return cjson.encode({status='malformed', predicate='thread_valid'}) end
     if proposedThread.collaborationId ~= ARGV[3] then return cjson.encode({status='malformed', predicate='thread_id_binding'}) end
     if not inviteOk then return cjson.encode({status='malformed', predicate='invite_decode'}) end
-    local inviteIsValid, inviteSubpredicate = inviteValid(proposedInvite)
+    local inviteIsValid, inviteSubpredicate = inviteValid(proposedInvite, ARGV[2])
     if not inviteIsValid then
       if inviteSubpredicate == 'key_count' then
         local diagnosticOk, bound, decodedShape = pcall(decodedInviteKeyShape, proposedInvite)
@@ -2669,7 +2727,7 @@ else:
     if inviteState == 'missing' then return cjson.encode({status='invite_missing'}) end
     if inviteState ~= 'ok' then return cjson.encode({status='invite_invalid'}) end
     local inviteOk, invite = decodeWire(inviteRaw)
-    if not inviteOk or not inviteValid(invite) then return cjson.encode({status='invite_invalid'}) end
+    if not inviteOk or not inviteValid(invite, inviteRaw) then return cjson.encode({status='invite_invalid'}) end
     if invite.inviteId ~= ARGV[9] or invite.collaborationId ~= ARGV[5]
       or invite.ownerEmail ~= ARGV[6] or invite.workspaceId ~= ARGV[7]
       or invite.mailboxId ~= ARGV[8] then return cjson.encode({status='invite_invalid'}) end
@@ -3610,7 +3668,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         if inviteState == 'ok' then
           local inviteOk, invite = decodeWire(inviteRaw)
           local invitePttl = redis.call('PTTL', invitePrefix .. inviteId)
-          if not inviteOk or not inviteValid(invite) or invite.inviteId ~= inviteId
+          if not inviteOk or not inviteValid(invite, inviteRaw) or invite.inviteId ~= inviteId
             or invite.ownerEmail ~= proposed.ownerEmail
             or invite.workspaceId ~= proposed.workspaceId
             or invite.mailboxId ~= proposed.mailboxId
@@ -3642,7 +3700,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     end
     local proposedOk, proposed = decodeWire(ARGV[1])
     local now = integerValue(ARGV[3])
-    if not proposedOk or not inviteValid(proposed) or proposed.status ~= 'active' or proposed.createdAt ~= ARGV[3]
+    if not proposedOk or not inviteValid(proposed, ARGV[1]) or proposed.status ~= 'active' or proposed.createdAt ~= ARGV[3]
       or integerValue(proposed.expiresAt) - now ~= integerValue(ARGV[2])
       or proposed.inviteId ~= ARGV[4] or proposed.tokenHash ~= ARGV[12]
       or (ARGV[7] ~= '0' and ARGV[7] ~= '1') then
@@ -3688,12 +3746,12 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     if currentRaw then
       local ok
       ok, current = decodeWire(currentRaw)
-      if not ok or not inviteValid(current) then return cjson.encode({status='conflict'}) end
+      if not ok or not inviteValid(current, currentRaw) then return cjson.encode({status='conflict'}) end
     end
     if previousRaw then
       local ok
       ok, previous = decodeWire(previousRaw)
-      if not ok or not inviteValid(previous) then return cjson.encode({status='conflict'}) end
+      if not ok or not inviteValid(previous, previousRaw) then return cjson.encode({status='conflict'}) end
     end
     if current and previous and (current.inviteId ~= previous.inviteId or not inviteLinkEqual(current, previous)) then
       return cjson.encode({status='conflict'})
@@ -3709,7 +3767,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
       local tokenState, tokenPointer = readString(KEYS[tokenKeyIndex], 128)
       if canonicalState ~= 'ok' or tokenState ~= 'ok' then return cjson.encode({status='conflict'}) end
       local canonicalOk, canonical = decodeWire(canonicalRaw)
-      if not canonicalOk or not inviteValid(canonical) or canonical.status ~= 'active'
+      if not canonicalOk or not inviteValid(canonical, canonicalRaw) or canonical.status ~= 'active'
         or integerValue(canonical.expiresAt) <= now or not inviteLinkEqual(existing, canonical)
         or not inviteMatchesRequested(canonical, proposed) or tokenPointer ~= canonical.inviteId then
         return cjson.encode({status='conflict'})
@@ -3804,7 +3862,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     local expectedOk, expected = decodeWire(ARGV[1])
     local proposedOk, proposed = decodeWire(ARGV[2])
     local now = integerValue(ARGV[3])
-    if not expectedOk or not proposedOk or not inviteValid(expected) or not inviteValid(proposed)
+    if not expectedOk or not proposedOk or not inviteValid(expected, ARGV[1]) or not inviteValid(proposed, ARGV[2])
       or expected.status ~= 'active' or integerValue(expected.expiresAt) <= now
       or expected.inviteId ~= ARGV[4] or expected.tokenHash ~= ARGV[5]
       or not inviteMatchesRequested(expected, proposed) then
@@ -3821,7 +3879,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     end
     local currentOk, current = decodeWire(currentRaw)
     local canonicalOk, canonical = decodeWire(canonicalRaw)
-    if not currentOk or not canonicalOk or not inviteValid(current) or not inviteValid(canonical)
+    if not currentOk or not canonicalOk or not inviteValid(current, currentRaw) or not inviteValid(canonical, canonicalRaw)
       or current.status ~= 'active' or canonical.status ~= 'active'
       or integerValue(current.expiresAt) <= now or integerValue(canonical.expiresAt) <= now
       or not inviteLinkEqual(current, expected) or not inviteLinkEqual(canonical, expected)
@@ -3838,21 +3896,20 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
       or currentPttl > canonicalPttl + 1000 or tokenPttl > canonicalPttl + 1000 then
       return cjson.encode({status='conflict'})
     end
-    return cjson.encode({
-      status='validated',
-      invitation=canonical,
-      linkage={
-        inviteId=expected.inviteId,
-        tokenHash=expected.tokenHash,
-        tokenPointer=tokenPointer,
-        currentIdentityState='present',
-        currentIdentityInviteId=current.inviteId,
-        currentIdentityTokenHash=current.tokenHash,
-        canonicalInviteId=canonical.inviteId,
-        canonicalTokenHash=canonical.tokenHash,
-        previousIdentityState=hasPrevious and 'absent' or 'not_configured'
-      }
-    })
+    local linkage = {
+      inviteId=expected.inviteId,
+      tokenHash=expected.tokenHash,
+      tokenPointer=tokenPointer,
+      currentIdentityState='present',
+      currentIdentityInviteId=current.inviteId,
+      currentIdentityTokenHash=current.tokenHash,
+      canonicalInviteId=canonical.inviteId,
+      canonicalTokenHash=canonical.tokenHash,
+      previousIdentityState=hasPrevious and 'absent' or 'not_configured'
+    }
+    -- The validated raw record keeps explicit null members in the Python response.
+    return '{"status":"validated","invitation":' .. canonicalRaw
+      .. ',"linkage":' .. cjson.encode(linkage) .. '}'
     """.strip()
 
 
@@ -4188,7 +4245,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     local now = integerValue(ARGV[2])
     local inviteOk, invite = decodeWire(raw)
     local sessionOk, session = decodeWire(ARGV[4])
-    if not inviteOk or not sessionOk or not inviteValid(invite) or not sessionValid(session) then
+    if not inviteOk or not sessionOk or not inviteValid(invite, raw) or not sessionValid(session) then
       return cjson.encode({status='malformed'})
     end
     if invite.inviteId ~= ARGV[1] or invite.tokenHash ~= ARGV[15]
@@ -4219,7 +4276,8 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     invite.exchangedAt = ARGV[2]
     invite.exchangeCount = '1'
     invite.activeSessionHash = ARGV[5]
-    if session.createdAt ~= invite.exchangedAt or not inviteValid(invite) then
+    local inviteJson = encodeInvite(invite, raw)
+    if session.createdAt ~= invite.exchangedAt or not inviteJson then
       return cjson.encode({status='malformed'})
     end
     local tokenPttl = redis.call('PTTL', KEYS[1])
@@ -4231,7 +4289,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     local inviteWritePttl = math.min(tokenPttl, invitePttl, inviteAbsolutePttl)
     local sessionWritePttl = math.min(integerValue(ARGV[7]) * 1000, inviteWritePttl)
     if sessionWritePttl <= 0 then return cjson.encode({status='expired'}) end
-    redis.call('SET', KEYS[2], cjson.encode(invite), 'PX', math.floor(inviteWritePttl))
+    redis.call('SET', KEYS[2], inviteJson, 'PX', math.floor(inviteWritePttl))
     redis.call('SET', KEYS[3], ARGV[4], 'PX', math.floor(sessionWritePttl))
     return cjson.encode({status='exchanged_ok'})
     """.strip()
@@ -4353,7 +4411,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
       or not positiveInteger(ARGV[3]) then return cjson.encode({status='malformed'}) end
     local now = integerValue(ARGV[1])
     if not sessionOk or not inviteOk or not expectedOk or not sessionValid(session)
-      or not inviteValid(invite) or not sessionValid(expected)
+      or not inviteValid(invite, inviteRaw) or not sessionValid(expected)
       or expected.status ~= 'active' or expected.revokedAt ~= JSON_NULL
       or expected.loggedOutAt ~= JSON_NULL
       or session.sessionHash ~= ARGV[6] or session.inviteId ~= ARGV[7]
@@ -4495,7 +4553,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     if inviteState == 'missing' then return cjson.encode({status='missing'}) end
     if inviteState ~= 'ok' then return cjson.encode({status='malformed'}) end
     local inviteOk, invite = decodeWire(raw)
-    if not inviteOk or not inviteValid(invite) then return cjson.encode({status='malformed'}) end
+    if not inviteOk or not inviteValid(invite, raw) then return cjson.encode({status='malformed'}) end
     if invite.ownerEmail ~= ARGV[1] or invite.workspaceId ~= ARGV[2]
       or invite.mailboxId ~= ARGV[3] or invite.collaborationId ~= ARGV[4]
       or invite.inviteId ~= ARGV[5] or ARGV[6] ~= ARGV[1]
@@ -4509,12 +4567,12 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     local inviteAlreadyRevoked = invite.status == 'revoked'
     if inviteAlreadyRevoked then
       if now < integerValue(invite.createdAt)
-        or (invite.exchangedAt ~= JSON_NULL and now < integerValue(invite.exchangedAt))
-        or (invite.revokedAt ~= JSON_NULL and now < integerValue(invite.revokedAt)) then
+        or (invite.exchangedAt ~= nil and invite.exchangedAt ~= JSON_NULL and now < integerValue(invite.exchangedAt))
+        or (invite.revokedAt ~= nil and invite.revokedAt ~= JSON_NULL and now < integerValue(invite.revokedAt)) then
         return cjson.encode({status='malformed'})
       end
     elseif now <= integerValue(invite.createdAt)
-      or (invite.exchangedAt ~= JSON_NULL and now <= integerValue(invite.exchangedAt)) then
+      or (invite.exchangedAt ~= nil and invite.exchangedAt ~= JSON_NULL and now <= integerValue(invite.exchangedAt)) then
       return cjson.encode({status='malformed'})
     end
     local invitePttl = redis.call('PTTL', KEYS[1])
@@ -4574,9 +4632,10 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     invite.status = 'revoked'
     invite.revokedAt = ARGV[8]
     invite.revokedBy = ARGV[6]
-    if not inviteValid(invite) then return cjson.encode({status='malformed'}) end
+    local inviteJson = encodeInvite(invite, raw)
+    if not inviteJson then return cjson.encode({status='malformed'}) end
     local inviteWritePttl = math.min(invitePttl, inviteAbsolutePttl)
-    redis.call('SET', KEYS[1], cjson.encode(invite), 'PX', math.floor(inviteWritePttl))
+    redis.call('SET', KEYS[1], inviteJson, 'PX', math.floor(inviteWritePttl))
     if writeSession then
       redis.call('SET', KEYS[2], cjson.encode(session), 'PX', math.floor(sessionTtl))
     end
@@ -4668,7 +4727,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     if inviteState == 'missing' then return cjson.encode({status='invite_missing'}) end
     if inviteState ~= 'ok' then return cjson.encode({status='malformed'}) end
     local inviteOk, invite = decodeWire(inviteRaw)
-    if not sessionOk or not inviteOk or not sessionValid(session) or not inviteValid(invite)
+    if not sessionOk or not inviteOk or not sessionValid(session) or not inviteValid(invite, inviteRaw)
       or session.sessionHash ~= ARGV[2] or session.inviteId ~= ARGV[3]
       or session.ownerEmail ~= ARGV[4] or session.workspaceId ~= ARGV[5]
       or session.mailboxId ~= ARGV[6] or session.collaborationId ~= ARGV[7]
@@ -4684,8 +4743,8 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     if now < integerValue(session.createdAt) or now < integerValue(session.lastUsedAt)
       or (session.revokedAt ~= JSON_NULL and now < integerValue(session.revokedAt))
       or (session.loggedOutAt ~= JSON_NULL and now < integerValue(session.loggedOutAt))
-      or (invite.exchangedAt ~= JSON_NULL and now < integerValue(invite.exchangedAt))
-      or (invite.revokedAt ~= JSON_NULL and now < integerValue(invite.revokedAt)) then
+      or (invite.exchangedAt ~= nil and invite.exchangedAt ~= JSON_NULL and now < integerValue(invite.exchangedAt))
+      or (invite.revokedAt ~= nil and invite.revokedAt ~= JSON_NULL and now < integerValue(invite.revokedAt)) then
       return cjson.encode({status='malformed'})
     end
     if session.status == 'revoked' or session.status == 'logged_out' or session.loggedOutAt ~= cjson.null then

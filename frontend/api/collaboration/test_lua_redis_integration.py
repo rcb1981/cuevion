@@ -282,6 +282,29 @@ def wire_lexical_variants(raw: str) -> tuple[tuple[str, str], ...]:
     return tuple(variants)
 
 
+def invite_null_semantics_script(script: str, mode: str) -> str:
+    """Reproduce hosted invite decoding without changing raw bytes or sessions."""
+    if mode == "normal":
+        return script
+    if mode not in {"hosted", "hosted_without_null_sentinel"}:
+        raise AssertionError(f"unknown null semantics {mode}")
+    null_sentinel = "nil" if mode == "hosted_without_null_sentinel" else "redisCjson.null"
+    return (
+        "local redisCjson = cjson\n"
+        "local cjson = {encode=redisCjson.encode, null=" + null_sentinel + "}\n"
+        "cjson.decode = function(raw)\n"
+        "  local value = redisCjson.decode(raw)\n"
+        "  if type(value) == 'table' and value.tokenHash ~= nil then\n"
+        "    for _, member in ipairs({'exchangedAt', 'revokedAt', 'revokedBy'}) do\n"
+        "      if value[member] == redisCjson.null then value[member] = nil end\n"
+        "    end\n"
+        "  end\n"
+        "  return value\n"
+        "end\n"
+        + script
+    )
+
+
 class _RespClient:
     def __init__(self, socket_path: str):
         self.socket_path = socket_path
@@ -780,6 +803,461 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
             return self.client.transport(command)
 
         return transport
+
+    def _invite_null_transport(self, mode: str, *, mutate_create=None, observed=None):
+        def transport(command):
+            if command[0] == "EVAL":
+                changed = list(command)
+                if observed is not None:
+                    observed.append(command[1])
+                if (
+                    mutate_create is not None
+                    and command[1] == redis_store._CREATE_V2_THREAD_WITH_GUEST_LUA
+                ):
+                    mutate_create(changed, 3 + int(changed[2]))
+                changed[1] = invite_null_semantics_script(changed[1], mode)
+                command = changed
+            return self.client.transport(command)
+
+        return transport
+
+    def _assert_canonical_stored_invite(self, key: str, expected: dict) -> str:
+        raw = self.client.command(["GET", key])
+        wire = json.loads(raw)
+        self.assertEqual(set(wire), set(expected))
+        self.assertTrue(set(invite_record()).issubset(wire))
+        for member in ("exchangedAt", "revokedAt", "revokedBy"):
+            self.assertIn(member, wire)
+            if expected[member] is None:
+                self.assertIsNone(wire[member])
+        typed = typed_wire_json(raw, "invite")
+        self.assertEqual(typed, expected)
+        self.assertEqual(normalize_v2_invite_record(typed), expected)
+        return raw
+
+    def test_d9_fixture_removes_only_invite_nulls_and_preserves_raw(self):
+        invite_raw = wire_json(invite_record(), "invite")
+        session_raw = wire_json(session_record("s" * 43), "session")
+        probe = r"""
+        local invite = cjson.decode(ARGV[1])
+        local session = cjson.decode(ARGV[2])
+        local count = 0
+        for _ in pairs(invite) do count = count + 1 end
+        return redisCjson.encode({count=count,
+          nullablesMissing=invite.exchangedAt == nil and invite.revokedAt == nil
+            and invite.revokedBy == nil,
+          sessionNullsPreserved=session.revokedAt == redisCjson.null
+            and session.loggedOutAt == redisCjson.null,
+          raw=ARGV[1]})
+        """
+        for mode in ("hosted", "hosted_without_null_sentinel"):
+            with self.subTest(mode=mode):
+                result = json.loads(self.client.command([
+                    "EVAL", invite_null_semantics_script(probe, mode), 0,
+                    invite_raw, session_raw,
+                ]))
+                self.assertEqual(result, {
+                    "count": 15, "nullablesMissing": True,
+                    "sessionNullsPreserved": True, "raw": invite_raw,
+                })
+                self.assertEqual(self.client.command(["DBSIZE"]), 0)
+
+    def test_d9_blank_email_create_duplicate_and_graph_preserve_canonical_nulls(self):
+        for mode in ("normal", "hosted"):
+            with self.subTest(mode=mode):
+                self.client.command(["FLUSHALL"])
+                thread, invite = thread_record(), invite_record()
+                scripts = []
+                transport = self._invite_null_transport(mode, observed=scripts)
+                with patch("builtins.print") as logger:
+                    created = redis_store._create_v2_thread_with_guest(
+                        thread, invite, now=invite["createdAt"], command_transport=transport,
+                    )
+                self.assertEqual(created.get("status"), "ok", created)
+                self.assertTrue(created.get("threadCreated"), created)
+                self.assertTrue(created.get("inviteCreated"), created)
+                logger.assert_not_called()
+                primary, token, identity = self._invite_keys(invite)
+                thread_key, source = self._thread_key(thread["collaborationId"]), self._source_key(thread)
+                index = redis_store.build_v2_external_guest_index_key(thread["collaborationId"])
+                keys = {primary, token, identity, thread_key, source, index}
+                self.assertEqual(set(self.client.command(["KEYS", "*"])), keys)
+                self.assertEqual(self.client.command(["DBSIZE"]), 6)
+                self.assertEqual(len(set(invite)), 18)
+                for key in (primary, identity):
+                    self._assert_canonical_stored_invite(key, invite)
+                    wire = json.loads(self.client.command(["GET", key]))
+                    self.assertEqual(len(wire), 18)
+                    self.assertNotIn("invitedEmail", wire)
+                    self.assertNotIn("activeSessionHash", wire)
+                self.assertEqual(typed_wire_json(self.client.command(["GET", thread_key]), "thread"), thread)
+                self.assertEqual(self.client.command(["GET", source]), thread["collaborationId"])
+                self.assertEqual(self.client.command(["GET", token]), invite["inviteId"])
+                self.assertEqual(json.loads(self.client.command(["GET", index])), {
+                    "v": "1", "inviteIds": [invite["inviteId"]],
+                })
+                self._assert_retention_pair(thread_key, source)
+                for key in (primary, token, identity):
+                    self._assert_ttl_ceiling(key, invite["expiresAt"] - invite["createdAt"])
+
+                before = self._snapshot_v2_state()
+                with patch("builtins.print") as logger:
+                    duplicate = redis_store._create_v2_thread_with_guest(
+                        thread, self._duplicate_invite_proposal(invite),
+                        now=invite["createdAt"], command_transport=transport,
+                    )
+                    issued_duplicate = self._real_create_v2_invite(
+                        self._duplicate_invite_proposal(invite),
+                        now=invite["createdAt"], command_transport=transport,
+                    )
+                    loaded = redis_store._load_v2_invite_by_token(
+                        "t" * 43, now=SEC + 101, command_transport=transport,
+                    )
+                    guests = redis_store._load_v2_external_guest_records(
+                        thread["collaborationId"], owner_email=thread["ownerEmail"],
+                        workspace_id=thread["workspaceId"], mailbox_id=thread["mailboxId"],
+                        now=SEC + 101, session_normalizer=guest_session.normalize_v2_guest_session_record,
+                        command_transport=transport,
+                    )
+                self.assertEqual(duplicate.get("status"), "ok", duplicate)
+                self.assertFalse(duplicate.get("threadCreated"))
+                self.assertFalse(duplicate.get("inviteCreated"))
+                self.assertEqual(issued_duplicate.get("record"), invite, issued_duplicate)
+                self.assertFalse(issued_duplicate["created"])
+                self.assertEqual(loaded.get("record"), invite, loaded)
+                self.assertEqual(guests, {"status": "ok", "records": [{"invite": invite, "session": None}]})
+                self.assertIn(redis_store._VALIDATE_V2_INVITE_GRAPH_LUA, scripts)
+                logger.assert_not_called()
+                self._assert_v2_state_unchanged(before)
+
+    def test_d9_invite_issue_and_active_revoke_preserve_explicit_exchanged_null(self):
+        for mode in ("normal", "hosted"):
+            with self.subTest(mode=mode):
+                self.client.command(["FLUSHALL"])
+                thread, invite = thread_record(), invite_record()
+                transport = self._invite_null_transport(mode)
+                created_thread = redis_store._create_v2_thread(thread, command_transport=transport)
+                self.assertEqual(created_thread.get("status"), "ok", created_thread)
+                with patch("builtins.print") as logger:
+                    issued = self._real_create_v2_invite(invite, now=SEC + 100, command_transport=transport)
+                self.assertEqual(issued.get("record"), invite, issued)
+                self.assertTrue(issued["created"])
+                logger.assert_not_called()
+                primary, _, identity = self._invite_keys(invite)
+                self._assert_canonical_stored_invite(primary, invite)
+                self._assert_canonical_stored_invite(identity, invite)
+                before = self._pttls(primary)
+                revoked = redis_store._revoke_v2_invite(
+                    invite["inviteId"], owner_email=invite["ownerEmail"],
+                    workspace_id=invite["workspaceId"], mailbox_id=invite["mailboxId"],
+                    collaboration_id=invite["collaborationId"], revoked_by=invite["ownerEmail"],
+                    now=SEC + 102, command_transport=transport,
+                )
+                self.assertEqual(revoked, {"status": "ok"})
+                expected = {**invite, "status": "revoked", "revokedAt": SEC + 102, "revokedBy": invite["ownerEmail"]}
+                self._assert_canonical_stored_invite(primary, expected)
+                self.assertLessEqual(self._pttls(primary)[0], before[0])
+                self._assert_ttl_ceiling(primary, invite["expiresAt"] - (SEC + 102))
+
+    def test_d9_create_exchange_session_reply_logout_revoke_lifecycle(self):
+        for mode in ("normal", "hosted"):
+            for terminal in ("logout_then_revoke", "owner_revoke"):
+                with self.subTest(mode=mode, terminal=terminal):
+                    self.client.command(["FLUSHALL"])
+                    thread, invite, session = thread_record(), invite_record(), session_record("s" * 43)
+                    transport = self._invite_null_transport(mode)
+                    with patch("builtins.print") as logger:
+                        created = redis_store._create_v2_thread_with_guest(
+                            thread, invite, now=SEC + 100, command_transport=transport,
+                        )
+                        self.assertEqual(created.get("status"), "ok", created)
+                        primary = self._invite_keys(invite)[0]
+                        session_key = self._session_key(session)
+                        self._assert_canonical_stored_invite(primary, invite)
+                        exchanged = redis_store._atomic_exchange_v2_invite(
+                            raw_token="t" * 43, invite_id=invite["inviteId"], session_record=session,
+                            now=SEC + 101, session_ttl=49, command_transport=transport,
+                        )
+                        self.assertEqual(exchanged, {"status": "ok"})
+                        expected = {**invite, "status": "exchanged", "exchangeCount": 1,
+                                    "exchangedAt": SEC + 101, "activeSessionHash": session["sessionHash"]}
+                        raw_invite = self._assert_canonical_stored_invite(primary, expected)
+                        self.assertEqual(guest_session.normalize_v2_guest_session_record(
+                            typed_wire_json(self.client.command(["GET", session_key]), "session")
+                        ), session)
+                        invite_ttl = self._pttls(primary)
+                        updated = redis_store._update_v2_guest_session(
+                            session, normalizer=guest_session.normalize_v2_guest_session_record,
+                            now=SEC + 102, csrf_token_hash=session["csrfTokenHash"], command_transport=transport,
+                        )
+                        self.assertEqual(updated.get("status"), "updated", updated)
+                        session = typed_wire_json(self.client.command(["GET", session_key]), "session")
+                        self.assertEqual(session["lastUsedAt"], SEC + 102)
+                        self.assertEqual(guest_session.normalize_v2_guest_session_record(session), session)
+                        self.assertEqual(self._assert_canonical_stored_invite(primary, expected), raw_invite)
+                        capability = self._guest_mutation_capability(now=SEC + 103)
+                        with patch.object(mutations.time, "time", return_value=SEC + 103), patch.object(
+                            mutations.time, "time_ns", return_value=(SEC + 103) * 1_000_000_000,
+                        ):
+                            reply = mutations.append_guest_v2_reply(capability, "Guest reply", command_transport=transport)
+                        self.assertEqual(reply.get("status"), "ok", reply)
+                        self.assertEqual(self._assert_canonical_stored_invite(primary, expected), raw_invite)
+                        if terminal == "logout_then_revoke":
+                            logged_out = revoke_guest_session(session, now=SEC + 104, command_transport=transport)
+                            self.assertEqual(logged_out, {"status": "ok"})
+                            self.assertEqual(self._assert_canonical_stored_invite(primary, expected), raw_invite)
+                            logged_out_session = typed_wire_json(self.client.command(["GET", session_key]), "session")
+                            self.assertEqual(logged_out_session["status"], "logged_out")
+                            self.assertEqual(guest_session.normalize_v2_guest_session_record(logged_out_session), logged_out_session)
+                        revoked = redis_store._revoke_v2_invite(
+                            invite["inviteId"], owner_email=invite["ownerEmail"], workspace_id=invite["workspaceId"],
+                            mailbox_id=invite["mailboxId"], collaboration_id=invite["collaborationId"],
+                            revoked_by=invite["ownerEmail"], now=SEC + 105, command_transport=transport,
+                        )
+                        self.assertEqual(revoked, {"status": "ok"})
+                        expected.update(status="revoked", revokedAt=SEC + 105, revokedBy=invite["ownerEmail"])
+                        self._assert_canonical_stored_invite(primary, expected)
+                        self.assertLessEqual(self._pttls(primary)[0], invite_ttl[0])
+                        self._assert_ttl_ceiling(primary, invite["expiresAt"] - (SEC + 105))
+                        terminal_session = typed_wire_json(self.client.command(["GET", session_key]), "session")
+                        self.assertEqual(terminal_session["status"], "logged_out" if terminal == "logout_then_revoke" else "revoked")
+                        self.assertEqual(guest_session.normalize_v2_guest_session_record(terminal_session), terminal_session)
+                    logger.assert_not_called()
+
+    def test_d9_status_matrix_matches_strict_python_under_both_null_semantics(self):
+        active = invite_record()
+        exchanged = {**active, "status": "exchanged", "exchangeCount": 1,
+                     "exchangedAt": SEC + 101, "activeSessionHash": hash_v2_secret("s" * 43)}
+        revoked = {**active, "status": "revoked", "revokedAt": SEC + 105,
+                   "revokedBy": active["ownerEmail"]}
+        revoked_exchanged = {**exchanged, "status": "revoked", "revokedAt": SEC + 105,
+                             "revokedBy": active["ownerEmail"]}
+        expired = {**active, "status": "expired"}
+        valid = {"active": active, "exchanged": exchanged, "revoked_unexchanged": revoked,
+                 "revoked_exchanged": revoked_exchanged, "expired": expired}
+        cases = [(label, wire_json(value, "invite"), True) for label, value in valid.items()]
+
+        def invalid(label, value, **updates):
+            wire = json.loads(wire_json(value, "invite"))
+            wire.update(updates)
+            cases.append((label, compact_json(wire), False))
+
+        for label, value in valid.items():
+            for member in ("exchangedAt", "revokedAt", "revokedBy"):
+                wire = json.loads(wire_json(value, "invite"))
+                del wire[member]
+                cases.append((f"{label}_missing_{member}", compact_json(wire), False))
+        for status in ("active", "expired"):
+            for member, value in (("exchangedAt", str(SEC + 101)), ("revokedAt", str(SEC + 105)),
+                                  ("revokedBy", active["ownerEmail"]), ("exchangeCount", "1"),
+                                  ("activeSessionHash", exchanged["activeSessionHash"])):
+                invalid(f"{status}_unexpected_{member}", valid[status], **{member: value})
+        for member, value in (("exchangedAt", None), ("exchangeCount", "0"),
+                              ("revokedAt", str(SEC + 105)), ("revokedBy", active["ownerEmail"]),
+                              ("activeSessionHash", None)):
+            invalid(f"exchanged_invalid_{member}", exchanged, **{member: value})
+        for label, record in (("revoked_unexchanged", revoked), ("revoked_exchanged", revoked_exchanged)):
+            for member, value in (("revokedAt", None), ("revokedBy", None),
+                                  ("revokedBy", "other@example.com"), ("revokedAt", str(SEC + 100))):
+                invalid(f"{label}_invalid_{member}_{value}", record, **{member: value})
+        invalid("revoked_unexchanged_with_exchange", revoked, exchangedAt=str(SEC + 101))
+        invalid("revoked_exchanged_without_exchange", revoked_exchanged, exchangedAt=None)
+        invalid("revoked_at_equal_to_exchange", revoked_exchanged, revokedAt=str(SEC + 101))
+        invalid("exchanged_before_created", exchanged, exchangedAt=str(SEC + 99))
+        invalid("exchanged_at_expiry", exchanged, exchangedAt=str(SEC + 200))
+
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for label, raw, expected in cases:
+                with self.subTest(mode=mode, case=label):
+                    decoded = redis_store._v2_json_from_wire(raw, "invite")
+                    python_valid = decoded is not None and normalize_v2_invite_record(decoded) is not None
+                    self.assertEqual(python_valid, expected)
+                    result = json.loads(self.client.command([
+                        "EVAL", invite_null_semantics_script(redis_store._VALIDATE_V2_WIRE_RECORD_LUA, mode),
+                        0, "invite", raw,
+                    ]))
+                    self.assertEqual(result, {"status": "valid" if expected else "malformed"})
+                    self.assertEqual(self.client.command(["DBSIZE"]), 0)
+
+    def test_d9_raw_shape_negative_matrix_rejects_without_any_graph_writes(self):
+        invite = invite_record()
+        raw = wire_json(invite, "invite")
+        wire = json.loads(raw)
+        cases = []
+        for member in invite:
+            missing = {key: value for key, value in wire.items() if key != member}
+            cases.append((f"missing_{member}", compact_json(missing)))
+            cases.append((f"missing_{member}_with_optional_padding", compact_json({
+                **missing, "invitedEmail": "reviewer@example.com",
+            })))
+        for member in ("exchangedAt", "revokedAt", "revokedBy"):
+            for invalid in (False, {}, [], "invalid", 0):
+                cases.append((f"invalid_{member}_{type(invalid).__name__}", compact_json({**wire, member: invalid})))
+        for value in (True, None):
+            cases.append((f"unexpected_{value}", compact_json({**wire, "unexpected": value})))
+        for member in ("invitedEmail", "activeSessionHash"):
+            cases.append((f"optional_null_{member}", compact_json({**wire, member: None})))
+        cases.extend((
+            ("duplicate_nullable_literal", raw.replace('"revokedAt":null', '"revokedAt":null,"revokedAt":null', 1)),
+            ("duplicate_nullable_escaped", raw.replace('"revokedAt":null', '"revokedAt":null,"revoked\\u0041t":null', 1)),
+            ("duplicate_required_literal", raw.replace('"v":"2"', '"v":"2","v":"2"', 1)),
+            ("duplicate_required_escaped", raw.replace('"v":"2"', '"v":"2","\\u0076":"2"', 1)),
+            ("malformed_object", raw[:-1]),
+            ("malformed_null", raw.replace('"revokedAt":null', '"revokedAt":nul', 1)),
+            ("null_like_string", raw.replace('"revokedAt":null', '"revokedAt":"null"', 1)),
+            ("nested_null_is_not_top_level", compact_json({key: value for key, value in wire.items() if key != "revokedAt"}).replace(
+                '"createdBy":{', '"createdBy":{"revokedAt":null,', 1,
+            )),
+        ))
+        for mode in ("normal", "hosted"):
+            for label, corrupt_raw in cases:
+                with self.subTest(mode=mode, case=label):
+                    self.client.command(["FLUSHALL"])
+                    def mutate(command, argv_start):
+                        command[argv_start + 1] = corrupt_raw
+                    with patch("builtins.print"):
+                        result = redis_store._create_v2_thread_with_guest(
+                            thread_record(), invite, now=SEC + 100,
+                            command_transport=self._invite_null_transport(mode, mutate_create=mutate),
+                        )
+                    self.assertEqual(result, {"status": "malformed", "error": {"code": "storage_protocol_error"}})
+                    self.assertEqual(self.client.command(["DBSIZE"]), 0)
+                    self.assertEqual(self.client.command(["KEYS", "*"]), [])
+
+    def test_d9_raw_null_proof_accepts_escaped_members_and_rejects_nonnull_decode_loss(self):
+        invite = invite_record()
+        for mode in ("normal", "hosted"):
+            with self.subTest(mode=mode, case="escaped_required_nulls"):
+                self.client.command(["FLUSHALL"])
+                def escaped(command, argv_start):
+                    command[argv_start + 1] = command[argv_start + 1].replace(
+                        '"exchangedAt":', '"exchanged\\u0041t" : ', 1,
+                    ).replace('"revokedAt":', '"revoked\\u0041t" : ', 1).replace(
+                        '"revokedBy":', '"revoked\\u0042y" : ', 1,
+                    )
+                with patch("builtins.print") as logger:
+                    result = redis_store._create_v2_thread_with_guest(
+                        thread_record(), invite, now=SEC + 100,
+                        command_transport=self._invite_null_transport(mode, mutate_create=escaped),
+                    )
+                self.assertEqual(result.get("status"), "ok", result)
+                self._assert_canonical_stored_invite(self._invite_keys(invite)[0], invite)
+                logger.assert_not_called()
+            for member, nonnull in (("exchangedAt", str(SEC + 101)), ("revokedAt", str(SEC + 105)),
+                                     ("revokedBy", invite["ownerEmail"])):
+                with self.subTest(mode=mode, case=f"nonnull_lost_{member}"):
+                    self.client.command(["FLUSHALL"])
+                    def force_nonnull_loss(command, argv_start):
+                        wire = json.loads(command[argv_start + 1])
+                        wire[member] = nonnull
+                        command[argv_start + 1] = compact_json(wire)
+                        marker = "local inviteOk, proposedInvite = decodeWire(ARGV[2])"
+                        self.assertEqual(command[1].count(marker), 1)
+                        command[1] = command[1].replace(marker, marker + f"\nproposedInvite.{member}=nil", 1)
+                    with patch("builtins.print"):
+                        result = redis_store._create_v2_thread_with_guest(
+                            thread_record(), invite, now=SEC + 100,
+                            command_transport=self._invite_null_transport(mode, mutate_create=force_nonnull_loss),
+                        )
+                    self.assertEqual(result.get("status"), "malformed", result)
+                    self.assertEqual(self.client.command(["DBSIZE"]), 0)
+
+        for member in ("unexpected", "invitedEmail", "activeSessionHash"):
+            with self.subTest(case=f"erased_raw_null_{member}"):
+                self.client.command(["FLUSHALL"])
+                def erase_added_null(command, argv_start):
+                    wire = json.loads(command[argv_start + 1])
+                    wire[member] = None
+                    command[argv_start + 1] = compact_json(wire)
+                    marker = "local inviteOk, proposedInvite = decodeWire(ARGV[2])"
+                    self.assertEqual(command[1].count(marker), 1)
+                    command[1] = command[1].replace(marker, marker + f"\nproposedInvite.{member}=nil", 1)
+                with patch("builtins.print"):
+                    result = redis_store._create_v2_thread_with_guest(
+                        thread_record(), invite, now=SEC + 100,
+                        command_transport=self._invite_null_transport("hosted", mutate_create=erase_added_null),
+                    )
+                self.assertEqual(result.get("status"), "malformed", result)
+                self.assertEqual(self.client.command(["DBSIZE"]), 0)
+
+    def test_d9_hosted_invite_identity_hmac_migration_preserves_canonical_raw(self):
+        invite = invite_record()
+        proposal = self._duplicate_invite_proposal(invite)
+        old_secret, new_secret = b"p" * 32, b"c" * 32
+        old_identity = self._invite_keys(invite, hmac_key=old_secret)[2]
+        new_identity = self._invite_keys(invite, hmac_key=new_secret)[2]
+        encoded = lambda value: base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+        transport = self._invite_null_transport("hosted")
+        with patch.dict(os.environ, {redis_store.V2_INDEX_HMAC_ENV: encoded(old_secret)}, clear=False):
+            created = redis_store._create_v2_invite(invite, now=SEC + 100, command_transport=transport)
+            self.assertEqual(created.get("status"), "ok", created)
+            primary, token, _ = self._invite_keys(invite)
+            canonical_raw = self._assert_canonical_stored_invite(primary, invite)
+            old_ttl = self.client.command(["PTTL", old_identity])
+            os.environ[redis_store.V2_INDEX_HMAC_ENV] = encoded(new_secret)
+            os.environ[redis_store.V2_INDEX_HMAC_PREVIOUS_ENV] = encoded(old_secret)
+            migrated = self._real_create_v2_invite(proposal, now=SEC + 100, command_transport=transport)
+            self.assertEqual(migrated.get("record"), invite, migrated)
+            self.assertFalse(migrated["created"])
+            self.assertIsNone(self.client.command(["GET", old_identity]))
+            self.assertEqual(self._assert_canonical_stored_invite(new_identity, invite), canonical_raw)
+            self.assertEqual(self._assert_canonical_stored_invite(primary, invite), canonical_raw)
+            self.assertEqual(self.client.command(["GET", token]), invite["inviteId"])
+            self.assertLessEqual(self.client.command(["PTTL", new_identity]), old_ttl)
+
+    def test_d9_hosted_missing_stored_nullables_reject_each_mutation_without_writes(self):
+        for operation in ("exchange", "session_update", "session_logout", "invite_revoke"):
+            for member in ("exchangedAt", "revokedAt", "revokedBy"):
+                with self.subTest(operation=operation, member=member):
+                    self.client.command(["FLUSHALL"])
+                    invite, session = invite_record(), session_record("s" * 43)
+                    transport = self._invite_null_transport("hosted")
+                    created = redis_store._create_v2_thread_with_guest(
+                        thread_record(), invite, now=SEC + 100, command_transport=transport,
+                    )
+                    self.assertEqual(created.get("status"), "ok", created)
+                    if operation != "exchange":
+                        exchanged = redis_store._atomic_exchange_v2_invite(
+                            raw_token="t" * 43, invite_id=invite["inviteId"], session_record=session,
+                            now=SEC + 101, session_ttl=49, command_transport=transport,
+                        )
+                        self.assertEqual(exchanged, {"status": "ok"})
+                    primary = self._invite_keys(invite)[0]
+                    corrupted = json.loads(self.client.command(["GET", primary]))
+                    del corrupted[member]
+                    snapshots = []
+                    script = {
+                        "exchange": redis_store._EXCHANGE_V2_INVITE_LUA,
+                        "session_update": redis_store._UPDATE_V2_SESSION_LUA,
+                        "session_logout": redis_store._REVOKE_V2_SESSION_LUA,
+                        "invite_revoke": redis_store._REVOKE_V2_INVITE_LUA,
+                    }[operation]
+                    def corrupt_before_lua(command):
+                        if command[0] == "EVAL" and command[1] == script:
+                            self.client.command(["SET", primary, compact_json(corrupted), "KEEPTTL"])
+                            snapshots.append(self._snapshot_v2_state())
+                        return transport(command)
+                    if operation == "exchange":
+                        result = redis_store._atomic_exchange_v2_invite(
+                            raw_token="t" * 43, invite_id=invite["inviteId"], session_record=session,
+                            now=SEC + 101, session_ttl=49, command_transport=corrupt_before_lua,
+                        )
+                    elif operation == "session_update":
+                        result = redis_store._update_v2_guest_session(
+                            session, normalizer=guest_session.normalize_v2_guest_session_record,
+                            now=SEC + 102, csrf_token_hash=session["csrfTokenHash"], command_transport=corrupt_before_lua,
+                        )
+                    elif operation == "session_logout":
+                        result = revoke_guest_session(session, now=SEC + 102, command_transport=corrupt_before_lua)
+                    else:
+                        result = redis_store._revoke_v2_invite(
+                            invite["inviteId"], owner_email=invite["ownerEmail"], workspace_id=invite["workspaceId"],
+                            mailbox_id=invite["mailboxId"], collaboration_id=invite["collaborationId"],
+                            revoked_by=invite["ownerEmail"], now=SEC + 102, command_transport=corrupt_before_lua,
+                        )
+                    self.assertEqual(result.get("status"), "malformed", result)
+                    self.assertEqual(len(snapshots), 1, "must exercise the actual Lua mutation")
+                    self._assert_v2_state_unchanged(snapshots[0])
 
     def _put_thread(self, thread: dict, source_key: str, *, ttl: int = 120, raw: str | None = None):
         thread_key = self._thread_key(thread["collaborationId"])
@@ -4528,8 +5006,12 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         idempotency_redis_key = redis_store.build_v2_owner_idempotency_key(key)
         self.assertIsNotNone(idempotency_redis_key)
         thread_key = self._thread_key(thread["collaborationId"])
-        before_id_ttl = self.client.command(["PTTL", idempotency_redis_key])
-        before_thread_ttl = self.client.command(["PTTL", thread_key])
+        # Compare expiries at one Redis clock instant; separate PTTL reads can
+        # make equal expiries appear inverted by a millisecond.
+        before_id_ttl, before_thread_ttl = self.client.command([
+            "EVAL", "return {redis.call('PTTL', KEYS[1]), redis.call('PTTL', KEYS[2])}",
+            2, idempotency_redis_key, thread_key,
+        ])
         self.assertGreater(before_id_ttl, 0)
         self.assertLessEqual(before_id_ttl, before_thread_ttl)
         second_retry = self._owner_append(
@@ -8539,9 +9021,13 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         owner_user_id = "usr_" + ("A" * 22)
         display_name = "Owner\U00013439"
 
-        for invited_email in (None, "reviewer@example.com"):
-            with self.subTest(invited_email=invited_email):
+        for mode, invited_email in (
+            (mode, email) for mode in ("normal", "hosted")
+            for email in (None, "reviewer@example.com")
+        ):
+            with self.subTest(mode=mode, invited_email=invited_email):
                 self.client.command(["FLUSHALL"])
+                transport = self._invite_null_transport(mode)
                 canonical_thread = thread_record()
                 capability = authorization._InternalCollaborationCapability(
                     authorization._INTERNAL_CAPABILITY_SENTINEL,
@@ -8578,14 +9064,14 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                         thread,
                         invite,
                         now=now,
-                        command_transport=self.client.transport,
+                        command_transport=transport,
                     )
 
                 def load_external_guests(*args, **kwargs):
                     return redis_store._load_v2_external_guest_records(
                         *args,
                         **kwargs,
-                        command_transport=self.client.transport,
+                        command_transport=transport,
                     )
 
                 payload = {
@@ -8824,7 +9310,10 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                     self.assertEqual(changed[1].count(decode_marker), 1)
                     changed[1] = changed[1].replace(
                         decode_marker,
-                        decode_marker + "\n" + lua_statements,
+                        decode_marker + "\n" + lua_statements
+                        # D9 accepts canonical decoded-null loss. Force the
+                        # failure branch to keep testing the frozen classifier.
+                        + "\ninviteValid=function(_, _) return false, 'key_count' end",
                         1,
                     )
                     command = changed
@@ -9028,6 +9517,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                     decode_marker,
                     decode_marker
                     + "\nproposedInvite.exchangedAt=nil"
+                    + "\ninviteValid=function(_, _) return false, 'key_count' end"
                     + "\ndecodedInviteKeyShape=function(_) error('diagnostic') end",
                     1,
                 )
@@ -9083,7 +9573,8 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                     1,
                 ).replace(
                     decode_marker,
-                    decode_marker + "\nproposedInvite.exchangedAt=nil",
+                    decode_marker + "\nproposedInvite.exchangedAt=nil"
+                    + "\ninviteValid=function(_, _) return false, 'key_count' end",
                     1,
                 )
                 command = changed
@@ -9681,7 +10172,10 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                     decode_marker
                     + "\nproposedInvite.exchangedAt=nil"
                     + "\nproposedInvite.revokedAt=nil"
-                    + "\nproposedInvite.revokedBy=nil",
+                    + "\nproposedInvite.revokedBy=nil"
+                    # Force a future schema failure; hosted null loss by itself
+                    # now succeeds and is tested in the D9 cases above.
+                    + "\ninviteValid=function(_, _) return false, 'key_count' end",
                     1,
                 )
                 command = changed
