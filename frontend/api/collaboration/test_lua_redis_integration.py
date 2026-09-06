@@ -305,6 +305,38 @@ def invite_null_semantics_script(script: str, mode: str) -> str:
     )
 
 
+def session_null_semantics_script(script: str, mode: str) -> str:
+    """Simulate hosted session/invite null loss while preserving original JSON."""
+    if mode == "normal":
+        return script
+    if mode not in {"hosted", "hosted_without_null_sentinel"}:
+        raise AssertionError(f"unknown null semantics {mode}")
+    null_sentinel = "nil" if mode == "hosted_without_null_sentinel" else "redisCjson.null"
+    return (
+        "local redisCjson = cjson\n"
+        "local cjson = {encode=redisCjson.encode, null=" + null_sentinel + "}\n"
+        "cjson.decode = function(raw)\n"
+        "  local value = redisCjson.decode(raw)\n"
+        "  if type(value) == 'table' then\n"
+        "    local members = nil\n"
+        "    if value.sessionHash ~= nil then\n"
+        "      members = {}\n"
+        "      for member, entry in pairs(value) do\n"
+        "        if entry == redisCjson.null then table.insert(members, member) end\n"
+        "      end\n"
+        "    elseif value.tokenHash ~= nil then members = {'exchangedAt', 'revokedAt', 'revokedBy'} end\n"
+        "    if members ~= nil then\n"
+        "      for _, member in ipairs(members) do\n"
+        "        if value[member] == redisCjson.null then value[member] = nil end\n"
+        "      end\n"
+        "    end\n"
+        "  end\n"
+        "  return value\n"
+        "end\n"
+        + script
+    )
+
+
 class _RespClient:
     def __init__(self, socket_path: str):
         self.socket_path = socket_path
@@ -1258,6 +1290,413 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                     self.assertEqual(result.get("status"), "malformed", result)
                     self.assertEqual(len(snapshots), 1, "must exercise the actual Lua mutation")
                     self._assert_v2_state_unchanged(snapshots[0])
+
+    def _session_null_transport(self, mode: str, *, mutate=None, observed=None):
+        def transport(command):
+            if command[0] == "EVAL":
+                changed = list(command)
+                if observed is not None:
+                    observed.append(command[1])
+                if mutate is not None:
+                    mutate(changed, 3 + int(changed[2]))
+                changed[1] = session_null_semantics_script(changed[1], mode)
+                command = changed
+            return self.client.transport(command)
+        return transport
+
+    def _assert_canonical_stored_session(self, key: str, expected: dict) -> str:
+        required = {
+            "v", "sessionHash", "inviteId", "ownerEmail", "workspaceId", "mailboxId",
+            "collaborationId", "allowedActions", "visibility", "identityAssurance",
+            "guestDisplayName", "createdAt", "lastUsedAt", "expiresAt", "status",
+            "csrfTokenHash", "revokedAt", "loggedOutAt",
+        }
+        raw = self.client.command(["GET", key])
+        pairs = json.loads(raw, object_pairs_hook=lambda entries: entries)
+        self.assertEqual(len(pairs), 18)
+        self.assertEqual({name for name, _ in pairs}, required)
+        wire = json.loads(raw)
+        for member in ("revokedAt", "loggedOutAt"):
+            self.assertIn(member, wire)
+            if expected[member] is None:
+                self.assertIsNone(wire[member])
+        typed = typed_wire_json(raw, "session")
+        self.assertEqual(typed, expected)
+        self.assertEqual(guest_session.normalize_v2_guest_session_record(typed), expected)
+        return raw
+
+    def _d10_guest_mutation_capability(self, transport, *, now: int, csrf: str = "c" * 43):
+        headers = [
+            ("Origin", "https://app.cuevion.test"),
+            ("Content-Type", "application/json"),
+            (guest_session.CSRF_HEADER_NAME, csrf),
+            ("Cookie", f"{guest_session.GUEST_SESSION_COOKIE_NAME}={'s' * 43}"),
+        ]
+        with patch.dict(os.environ, {
+            "VERCEL_ENV": "production", "CUEVION_APP_ORIGIN": "https://app.cuevion.test",
+        }, clear=False):
+            resolved = guest_session.resolve_guest_v2_mutation_context(
+                "POST", headers, now=now, command_transport=transport,
+            )
+        self.assertEqual(resolved.get("status"), "ok", resolved)
+        return resolved["context"]
+
+    def _d10_session_corruptions(self, session: dict):
+        raw = wire_json(session, "session")
+        wire = json.loads(raw)
+        cases = [
+            (f"missing_{member}", compact_json({key: value for key, value in wire.items() if key != member}))
+            for member in session
+        ]
+        for member in ("revokedAt", "loggedOutAt"):
+            for invalid in (False, {}, [], "null", 0, "invalid", str(SEC + 105)):
+                cases.append((f"invalid_{member}_{invalid!r}", compact_json({**wire, member: invalid})))
+            marker = f'"{member}":null'
+            escaped = member.replace("At", r"\u0041t")
+            cases.extend((
+                (f"duplicate_{member}", raw.replace(marker, marker + "," + marker, 1)),
+                (f"duplicate_escaped_{member}", raw.replace(marker, marker + f',"{escaped}":null', 1)),
+                (f"missing_{member}_string_decoy", compact_json({
+                    **{key: value for key, value in wire.items() if key != member},
+                    "guestDisplayName": f'Guest {{"{member}":null}}',
+                })),
+            ))
+        cases.extend((
+            ("unexpected_true", compact_json({**wire, "unexpected": True})),
+            ("unexpected_null", compact_json({**wire, "unexpected": None})),
+            ("duplicate_nonnullable", raw.replace('"v":"2"', '"v":"2","v":"2"', 1)),
+            ("malformed_object", raw[:-1]),
+            ("malformed_null", raw.replace('"revokedAt":null', '"revokedAt":nul', 1)),
+            ("trailing_json", raw + "{}"),
+            ("logged_out_with_null_timestamp", compact_json({**wire, "status": "logged_out"})),
+            ("revoked_with_null_timestamp", compact_json({**wire, "status": "revoked"})),
+        ))
+        return cases
+
+    def test_d10_fixture_proves_raw_eighteen_decoded_sixteen_and_invite_null_loss(self):
+        session_raw = wire_json(session_record("s" * 43), "session")
+        invite_raw = wire_json(invite_record(), "invite")
+        probe = r"""
+        local session = cjson.decode(ARGV[1])
+        local invite = cjson.decode(ARGV[2])
+        local count = 0
+        for _ in pairs(session) do count = count + 1 end
+        return redisCjson.encode({count=count, raw=ARGV[1],
+          nullablesMissing=session.revokedAt == nil and session.loggedOutAt == nil,
+          inviteNullsMissing=invite.exchangedAt == nil and invite.revokedAt == nil
+            and invite.revokedBy == nil})
+        """
+        self.assertEqual(len(json.loads(session_raw)), 18)
+        for mode in ("hosted", "hosted_without_null_sentinel"):
+            with self.subTest(mode=mode):
+                result = json.loads(self.client.command([
+                    "EVAL", session_null_semantics_script(probe, mode), 0, session_raw, invite_raw,
+                ]))
+                self.assertEqual(result, {
+                    "count": 16, "raw": session_raw, "nullablesMissing": True,
+                    "inviteNullsMissing": True,
+                })
+                self.assertEqual(self.client.command(["DBSIZE"]), 0)
+
+    def test_d10_status_matrix_matches_python_with_and_without_null_sentinel(self):
+        active = session_record("s" * 43)
+        states = {
+            "active": active,
+            "revoked": {**active, "status": "revoked", "revokedAt": SEC + 105},
+            "logged_out": {**active, "status": "logged_out", "loggedOutAt": SEC + 105},
+            "expired": {**active, "status": "expired"},
+        }
+        cases = []
+        for status, record in states.items():
+            cases.append((status, wire_json(record, "session"), True))
+            wire = json.loads(wire_json(record, "session"))
+            for member in ("revokedAt", "loggedOutAt"):
+                cases.append((f"{status}_missing_{member}", compact_json({
+                    key: value for key, value in wire.items() if key != member
+                }), False))
+                for value in (None, str(SEC + 101), str(SEC + 105), str(SEC + 150), False, {}):
+                    candidate = {**wire, member: value}
+                    decoded = redis_store._v2_json_from_wire(compact_json(candidate), "session")
+                    valid = decoded is not None and guest_session.normalize_v2_guest_session_record(decoded) is not None
+                    cases.append((f"{status}_{member}_{value!r}", compact_json(candidate), valid))
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for label, raw, expected in cases:
+                with self.subTest(mode=mode, case=label):
+                    decoded = redis_store._v2_json_from_wire(raw, "session")
+                    python_valid = decoded is not None and guest_session.normalize_v2_guest_session_record(decoded) is not None
+                    self.assertEqual(python_valid, expected)
+                    result = json.loads(self.client.command([
+                        "EVAL", session_null_semantics_script(redis_store._VALIDATE_V2_WIRE_RECORD_LUA, mode),
+                        0, "session", raw,
+                    ]))
+                    self.assertEqual(result, {"status": "valid" if expected else "malformed"})
+                    self.assertEqual(self.client.command(["DBSIZE"]), 0)
+
+    def test_d10_exchange_raw_schema_rejections_leave_all_values_and_ttls_unchanged(self):
+        invite, session = invite_record(), session_record("s" * 43)
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for label, corrupt_raw in self._d10_session_corruptions(session):
+                with self.subTest(mode=mode, case=label):
+                    self.client.command(["FLUSHALL"])
+                    self.assertEqual(redis_store._create_v2_thread_with_guest(
+                        thread_record(), invite, now=SEC + 100,
+                        command_transport=self._session_null_transport(mode),
+                    ).get("status"), "ok")
+                    before = self._snapshot_v2_state()
+                    observed = []
+                    def replace_session(command, argv_start):
+                        if command[1] == redis_store._EXCHANGE_V2_INVITE_LUA:
+                            command[argv_start + 3] = corrupt_raw
+                    rejected = redis_store._atomic_exchange_v2_invite(
+                        raw_token="t" * 43, invite_id=invite["inviteId"], session_record=session,
+                        now=SEC + 101, session_ttl=49,
+                        command_transport=self._session_null_transport(mode, mutate=replace_session, observed=observed),
+                    )
+                    self.assertEqual(rejected.get("status"), "malformed", rejected)
+                    self.assertIn(redis_store._EXCHANGE_V2_INVITE_LUA, observed)
+                    self._assert_v2_state_unchanged(before)
+                    self.assertIsNone(self.client.command(["GET", self._session_key(session)]))
+                    self._assert_canonical_stored_invite(self._invite_keys(invite)[0], invite)
+
+    def test_d10_raw_null_proof_escaped_members_and_nonnull_decode_loss(self):
+        session = session_record("s" * 43)
+        raw = wire_json(session, "session")
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            with self.subTest(mode=mode, case="escaped_required_members"):
+                escaped = raw.replace('"revokedAt":', '"revoked\\u0041t" : ', 1).replace(
+                    '"loggedOutAt":', '"loggedOut\\u0041t" : ', 1,
+                )
+                self.assertEqual(json.loads(self.client.command([
+                    "EVAL", session_null_semantics_script(redis_store._VALIDATE_V2_WIRE_RECORD_LUA, mode),
+                    0, "session", escaped,
+                ])), {"status": "valid"})
+            for member in ("revokedAt", "loggedOutAt"):
+                with self.subTest(mode=mode, case=f"nonnull_lost_{member}"):
+                    self.client.command(["FLUSHALL"])
+                    invite = invite_record()
+                    self.assertEqual(redis_store._create_v2_thread_with_guest(
+                        thread_record(), invite, now=SEC + 100,
+                        command_transport=self._session_null_transport(mode),
+                    ).get("status"), "ok")
+                    before = self._snapshot_v2_state()
+                    def lose_nonnull(command, argv_start):
+                        if command[1] == redis_store._EXCHANGE_V2_INVITE_LUA:
+                            wire = json.loads(command[argv_start + 3])
+                            wire[member] = str(SEC + 105)
+                            command[argv_start + 3] = compact_json(wire)
+                            marker = "local sessionOk, session = decodeWire(ARGV[4])"
+                            self.assertEqual(command[1].count(marker), 1)
+                            command[1] = command[1].replace(marker, marker + f"\nsession.{member} = nil", 1)
+                    rejected = redis_store._atomic_exchange_v2_invite(
+                        raw_token="t" * 43, invite_id=invite["inviteId"], session_record=session,
+                        now=SEC + 101, session_ttl=49,
+                        command_transport=self._session_null_transport(mode, mutate=lose_nonnull),
+                    )
+                    self.assertEqual(rejected.get("status"), "malformed", rejected)
+                    self._assert_v2_state_unchanged(before)
+
+    def test_d10_exchange_update_reply_logout_revoke_preserve_schema_bindings_and_ttls(self):
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for terminal in ("logout_then_revoke", "owner_revoke"):
+                with self.subTest(mode=mode, terminal=terminal):
+                    self.client.command(["FLUSHALL"])
+                    thread, invite, session = thread_record(), invite_record(), session_record("s" * 43)
+                    transport = self._session_null_transport(mode)
+                    self.assertEqual(redis_store._create_v2_thread_with_guest(
+                        thread, invite, now=SEC + 100, command_transport=transport,
+                    ).get("status"), "ok")
+                    primary, token, identity = self._invite_keys(invite)
+                    session_key = self._session_key(session)
+                    keys_before = set(self.client.command(["KEYS", "*"]))
+                    self.assertEqual(redis_store._atomic_exchange_v2_invite(
+                        raw_token="t" * 43, invite_id=invite["inviteId"], session_record=session,
+                        now=SEC + 101, session_ttl=49, command_transport=transport,
+                    ), {"status": "ok"})
+                    self.assertEqual(set(self.client.command(["KEYS", "*"])), keys_before | {session_key})
+                    expected_invite = {**invite, "status": "exchanged", "exchangeCount": 1,
+                                       "exchangedAt": SEC + 101, "activeSessionHash": session["sessionHash"]}
+                    self._assert_canonical_stored_invite(primary, expected_invite)
+                    self._assert_canonical_stored_session(session_key, session)
+                    owner_guests = redis_store._load_v2_external_guest_records(
+                        thread["collaborationId"], owner_email=thread["ownerEmail"],
+                        workspace_id=thread["workspaceId"], mailbox_id=thread["mailboxId"], now=SEC + 102,
+                        session_normalizer=guest_session.normalize_v2_guest_session_record,
+                        command_transport=transport,
+                    )
+                    self.assertEqual(owner_guests, {
+                        "status": "ok", "records": [{"invite": expected_invite, "session": session}],
+                    })
+                    self._assert_ttl_ceiling(session_key, 49)
+                    self._assert_ttl_ceiling(primary, 99)
+                    self.assertEqual(self.client.command(["GET", token]), invite["inviteId"])
+                    self._assert_canonical_stored_invite(identity, invite)
+                    invite_ttl = self._pttls(primary)
+                    session_ttl = self._pttls(session_key)
+                    updated = redis_store._update_v2_guest_session(
+                        session, normalizer=guest_session.normalize_v2_guest_session_record,
+                        now=SEC + 102, csrf_token_hash=hash_v2_secret("d" * 43), command_transport=transport,
+                    )
+                    self.assertEqual(updated.get("status"), "updated", updated)
+                    session = {**session, "lastUsedAt": SEC + 102, "csrfTokenHash": hash_v2_secret("d" * 43)}
+                    self.assertEqual(updated.get("record"), session, updated)
+                    self._assert_canonical_stored_session(session_key, session)
+                    self._assert_ttl_ceiling(session_key, 48)
+                    self.assertLessEqual(self._pttls(session_key)[0], session_ttl[0])
+                    self._assert_canonical_stored_invite(primary, expected_invite)
+                    capability = self._d10_guest_mutation_capability(transport, now=SEC + 103, csrf="d" * 43)
+                    with patch.object(mutations.time, "time", return_value=SEC + 103), patch.object(
+                        mutations.time, "time_ns", return_value=(SEC + 103) * 1_000_000_000,
+                    ):
+                        reply = mutations.append_guest_v2_reply(capability, "D10 Guest reply", command_transport=transport)
+                    self.assertEqual(reply.get("status"), "ok", reply)
+                    self._assert_canonical_stored_session(session_key, session)
+                    self._assert_canonical_stored_invite(primary, expected_invite)
+                    if terminal == "logout_then_revoke":
+                        self.assertEqual(revoke_guest_session(session, now=SEC + 104, command_transport=transport), {"status": "ok"})
+                        session = {**session, "status": "logged_out", "loggedOutAt": SEC + 104}
+                        self._assert_canonical_stored_session(session_key, session)
+                        self._assert_ttl_ceiling(session_key, 46)
+                        self._assert_canonical_stored_invite(primary, expected_invite)
+                    self.assertEqual(redis_store._revoke_v2_invite(
+                        invite["inviteId"], owner_email=invite["ownerEmail"], workspace_id=invite["workspaceId"],
+                        mailbox_id=invite["mailboxId"], collaboration_id=invite["collaborationId"],
+                        revoked_by=invite["ownerEmail"], now=SEC + 105, command_transport=transport,
+                    ), {"status": "ok"})
+                    if terminal == "owner_revoke":
+                        session = {**session, "status": "revoked", "revokedAt": SEC + 105}
+                        self._assert_ttl_ceiling(session_key, 45)
+                    self._assert_canonical_stored_session(session_key, session)
+                    self._assert_canonical_stored_invite(primary, {
+                        **expected_invite, "status": "revoked", "revokedAt": SEC + 105, "revokedBy": invite["ownerEmail"],
+                    })
+                    self.assertLessEqual(self._pttls(primary)[0], invite_ttl[0])
+                    self._assert_ttl_ceiling(primary, 95)
+                    self._assert_retention_pair(self._thread_key(thread["collaborationId"]), self._source_key(thread))
+
+    def test_d10_public_guest_http_bootstrap_read_reply_logout_under_hosted_null_semantics(self):
+        # Run the accepted public HTTP/security lifecycle unchanged against the
+        # deterministic hosted decoder, including no exported cjson.null sentinel.
+        for mode in ("hosted", "hosted_without_null_sentinel"):
+            with self.subTest(mode=mode):
+                self.client.command(["FLUSHALL"])
+                original = self.client.command
+                scripts = []
+                def command_with_null_loss(command):
+                    if command[0] == "EVAL":
+                        command = list(command)
+                        scripts.append(command[1])
+                        command[1] = session_null_semantics_script(command[1], mode)
+                    return original(command)
+                with patch.object(self.client, "command", side_effect=command_with_null_loss):
+                    self.test_public_guest_http_real_redis_exchange_bootstrap_read_reply_logout()
+                session_keys = self.client.command(["KEYS", f"{redis_store.V2_KEY_PREFIX}:guest-session:*"])
+                self.assertEqual(len(session_keys), 1)
+                session = typed_wire_json(self.client.command(["GET", session_keys[0]]), "session")
+                self.assertEqual(session["status"], "logged_out")
+                self.assertEqual(session["loggedOutAt"], SEC + 105)
+                self._assert_canonical_stored_session(session_keys[0], session)
+                invite_key = redis_store.build_v2_invite_key(session["inviteId"])
+                invite = typed_wire_json(self.client.command(["GET", invite_key]), "invite")
+                self._assert_canonical_stored_invite(invite_key, invite)
+                self.assertEqual(invite["status"], "exchanged")
+                self.assertEqual(invite["activeSessionHash"], session["sessionHash"])
+                self.assertIn(redis_store._EXCHANGE_V2_INVITE_LUA, scripts)
+                self.assertIn(redis_store._APPEND_V2_GUEST_REPLY_LUA, scripts)
+                self.assertIn(redis_store._REVOKE_V2_SESSION_LUA, scripts)
+                self._assert_ttl_ceiling(session_keys[0], session["expiresAt"] - (SEC + 105))
+
+    def test_d10_stored_session_and_expected_argv_corruption_rejects_every_consumer_without_writes(self):
+        scripts = {
+            "update_stored": redis_store._UPDATE_V2_SESSION_LUA,
+            "update_expected": redis_store._UPDATE_V2_SESSION_LUA,
+            "logout": redis_store._REVOKE_V2_SESSION_LUA,
+            "owner_revoke": redis_store._REVOKE_V2_INVITE_LUA,
+            "reply": redis_store._APPEND_V2_GUEST_REPLY_LUA,
+        }
+        corruptions = self._d10_session_corruptions(session_record("s" * 43))
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for operation in (*scripts, "read"):
+                for label, corrupt_raw in corruptions:
+                    with self.subTest(mode=mode, operation=operation, corruption=label):
+                        self.client.command(["FLUSHALL"])
+                        invite, session, _, session_key = self._create_exchanged_invitation()
+                        transport = self._session_null_transport(mode)
+                        capability = (
+                            self._d10_guest_mutation_capability(transport, now=SEC + 102)
+                            if operation == "reply" else None
+                        )
+                        snapshots = []
+                        def corrupt_at_lua(command):
+                            if command[0] == "EVAL" and command[1] == scripts[operation]:
+                                if operation == "update_expected":
+                                    command = list(command)
+                                    command[3 + int(command[2]) + 12] = corrupt_raw
+                                else:
+                                    self.client.command(["SET", session_key, corrupt_raw, "KEEPTTL"])
+                                snapshots.append(self._snapshot_v2_state())
+                            return transport(command)
+                        if operation == "read":
+                            self.client.command(["SET", session_key, corrupt_raw, "KEEPTTL"])
+                            snapshots.append(self._snapshot_v2_state())
+                            result = redis_store._load_v2_guest_session_record(
+                                "s" * 43, normalizer=guest_session.normalize_v2_guest_session_record,
+                                now=SEC + 102, command_transport=transport,
+                            )
+                        elif operation in {"update_stored", "update_expected"}:
+                            result = redis_store._update_v2_guest_session(
+                                session, normalizer=guest_session.normalize_v2_guest_session_record,
+                                now=SEC + 102, csrf_token_hash=hash_v2_secret("d" * 43),
+                                command_transport=corrupt_at_lua,
+                            )
+                        elif operation == "logout":
+                            result = revoke_guest_session(session, now=SEC + 102, command_transport=corrupt_at_lua)
+                        elif operation == "owner_revoke":
+                            result = redis_store._revoke_v2_invite(
+                                invite["inviteId"], owner_email=invite["ownerEmail"], workspace_id=invite["workspaceId"],
+                                mailbox_id=invite["mailboxId"], collaboration_id=invite["collaborationId"],
+                                revoked_by=invite["ownerEmail"], now=SEC + 102, command_transport=corrupt_at_lua,
+                            )
+                        else:
+                            with patch.object(mutations.time, "time", return_value=SEC + 102), patch.object(
+                                mutations.time, "time_ns", return_value=(SEC + 102) * 1_000_000_000,
+                            ):
+                                result = mutations.append_guest_v2_reply(capability, "Must never persist", command_transport=corrupt_at_lua)
+                        if operation == "reply":
+                            self.assertEqual(result, {"status": "error", "error": {"code": "storage_protocol_error"}})
+                        else:
+                            self.assertEqual(result.get("status"), "malformed", result)
+                        self.assertEqual(len(snapshots), 1, "must reach the selected stored/ARGV validation path")
+                        self._assert_v2_state_unchanged(snapshots[0])
+
+    def test_d10_terminal_read_and_idempotent_logout_keep_existing_contract(self):
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for status in ("revoked", "logged_out", "expired"):
+                with self.subTest(mode=mode, status=status):
+                    self.client.command(["FLUSHALL"])
+                    _, session, _, session_key = self._create_exchanged_invitation()
+                    session = {**session, "status": status}
+                    if status == "revoked":
+                        session["revokedAt"] = SEC + 104
+                    elif status == "logged_out":
+                        session["loggedOutAt"] = SEC + 104
+                    self.client.command(["SET", session_key, wire_json(session, "session"), "KEEPTTL"])
+                    self._assert_canonical_stored_session(session_key, session)
+                    before = self._snapshot_v2_state()
+                    transport = self._session_null_transport(mode)
+                    read = redis_store._load_v2_guest_session_record(
+                        "s" * 43, normalizer=guest_session.normalize_v2_guest_session_record,
+                        now=SEC + 105, command_transport=transport,
+                    )
+                    self.assertEqual(read, {
+                        "status": "expired" if status == "expired" else "revoked",
+                        "error": {"code": "session_expired" if status == "expired" else "session_revoked"},
+                    })
+                    if status != "expired":
+                        self.assertEqual(revoke_guest_session(session, now=SEC + 105, command_transport=transport), {
+                            "status": "already_logged_out", "error": {"code": "already_logged_out"},
+                        })
+                    self._assert_v2_state_unchanged(before)
+                    self._assert_canonical_stored_session(session_key, session)
 
     def _put_thread(self, thread: dict, source_key: str, *, ttl: int = 120, raw: str | None = None):
         thread_key = self._thread_key(thread["collaborationId"])
