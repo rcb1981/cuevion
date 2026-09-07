@@ -121,6 +121,12 @@ function formatTimestamp(value: number | string) {
       }).format(date);
 }
 
+function isTerminalGuestFailure(status: CollaborationGuestFailureStatus) {
+  return status === "session_missing" ||
+    status === "session_expired" ||
+    status === "session_revoked";
+}
+
 const stateCopy: Record<
   Exclude<
     ExternalCollaborationGuestState,
@@ -261,19 +267,60 @@ export function ExternalCollaborationGuestView({
   const [notice, setNotice] = useState<string | null>(null);
   const [retryAfterSeconds, setRetryAfterSeconds] = useState<number | null>(null);
   const startupPromiseRef = useRef<Promise<void> | null>(null);
+  const endedRef = useRef(false);
+  const mountedRef = useRef(false);
+  const requestsInFlightRef = useRef(0);
+  const wasHiddenRef = useRef(false);
+
+  const canApplyResult = () => mountedRef.current && !endedRef.current;
+
+  const request = async <T,>(operation: () => Promise<T>): Promise<T> => {
+    requestsInFlightRef.current += 1;
+    try {
+      return await operation();
+    } finally {
+      requestsInFlightRef.current -= 1;
+    }
+  };
+
+  const clearGuestMemory = () => {
+    setInviteToken(null);
+    setSession(null);
+    setCsrfToken(null);
+    setCollaboration(null);
+    setDraft("");
+    setDraftError(null);
+    setDisplayName("");
+    setDisplayNameError(null);
+    setNotice(null);
+    setRetryAfterSeconds(null);
+  };
+
+  const endGuestSession = () => {
+    // Latch synchronously: an earlier success must never restore active UI.
+    endedRef.current = true;
+    clearGuestMemory();
+    setState("session_revoked");
+  };
 
   useLayoutEffect(() => {
     scrubCollaborationGuestFragment();
   }, []);
 
   const applyFailure = (failure: CollaborationGuestFailure) => {
+    if (!canApplyResult()) return;
+    if (isTerminalGuestFailure(failure.status)) {
+      endGuestSession();
+      return;
+    }
     setRetryAfterSeconds(failure.retryAfterSeconds ?? null);
     setState(mapCollaborationGuestFailureToState(failure.status));
   };
 
   const loadCollaboration = async () => {
     setState("loading_collaboration");
-    const result = await api.read();
+    const result = await request(() => api.read());
+    if (!canApplyResult()) return false;
     if (result.status !== "success") {
       applyFailure(result);
       return false;
@@ -284,9 +331,11 @@ export function ExternalCollaborationGuestView({
   };
 
   const startSessionFirst = async () => {
+    if (!canApplyResult()) return;
     setState("checking_session");
     setNotice(null);
-    const result = await api.bootstrap();
+    const result = await request(() => api.bootstrap());
+    if (!canApplyResult()) return;
     if (result.status === "success") {
       setInviteToken(null);
       setSession(result.session);
@@ -302,11 +351,38 @@ export function ExternalCollaborationGuestView({
   };
 
   useEffect(() => {
+    mountedRef.current = true;
+    wasHiddenRef.current = document.visibilityState === "hidden";
     startupPromiseRef.current ??= startSessionFirst();
+    return () => { mountedRef.current = false; };
   }, []);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      const wasHidden = wasHiddenRef.current;
+      wasHiddenRef.current = document.visibilityState === "hidden";
+      if (
+        document.visibilityState !== "visible" || !wasHidden ||
+        !canApplyResult() || state !== "ready" ||
+        requestsInFlightRef.current > 0
+      ) return;
+
+      // Every guest request checks server authority; reuse one already in flight.
+      void request(() => api.read()).then((result) => {
+        if (!canApplyResult()) return;
+        if (result.status !== "success") {
+          applyFailure(result);
+        }
+        // This check establishes access only; it cannot overwrite a newer reply.
+      });
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [api, state]);
 
   const handleExchange = async (event: FormEvent) => {
     event.preventDefault();
+    if (!canApplyResult()) return;
     if (!inviteToken) {
       setState("invitation_invalid");
       return;
@@ -319,7 +395,8 @@ export function ExternalCollaborationGuestView({
     }
     setDisplayNameError(null);
     setState("exchanging");
-    const result = await api.exchange(inviteToken, displayName);
+    const result = await request(() => api.exchange(inviteToken, displayName));
+    if (!canApplyResult()) return;
     if (result.status !== "success") {
       if (
         result.status !== "network_failure" &&
@@ -339,7 +416,8 @@ export function ExternalCollaborationGuestView({
   };
 
   const recoverSessionAfterReplyFailure = async () => {
-    const result = await api.bootstrap();
+    const result = await request(() => api.bootstrap());
+    if (!canApplyResult()) return;
     if (result.status !== "success") {
       applyFailure(result);
       return;
@@ -352,6 +430,7 @@ export function ExternalCollaborationGuestView({
 
   const handleReply = async (event: FormEvent) => {
     event.preventDefault();
+    if (!canApplyResult()) return;
     if (!isValidCollaborationGuestReply(draft)) {
       setDraftError("Enter a reply up to 16 KB without hidden control characters.");
       return;
@@ -364,53 +443,35 @@ export function ExternalCollaborationGuestView({
     setDraftError(null);
     setNotice(null);
     setState("replying");
-    const result = await api.reply(draft, csrfToken);
+    const result = await request(() => api.reply(draft, csrfToken));
+    if (!canApplyResult()) return;
     if (result.status === "success") {
       setCollaboration(result.collaboration);
       setDraft("");
       setState("ready");
       return;
     }
-    if (
-      result.status === "csrf_failed" ||
-      result.status === "session_missing" ||
-      result.status === "session_expired" ||
-      result.status === "session_revoked"
-    ) {
+    if (result.status === "csrf_failed") {
       await recoverSessionAfterReplyFailure();
       return;
     }
     applyFailure(result);
   };
 
-  const clearGuestMemory = () => {
-    setInviteToken(null);
-    setSession(null);
-    setCsrfToken(null);
-    setCollaboration(null);
-    setDraft("");
-    setNotice(null);
-  };
-
   const handleLogout = async () => {
+    if (!canApplyResult()) return;
     if (!csrfToken) {
-      clearGuestMemory();
-      setState("session_expired");
+      endGuestSession();
       return;
     }
     setState("logging_out");
-    const result = await api.logout(csrfToken);
+    const result = await request(() => api.logout(csrfToken));
+    if (!canApplyResult()) return;
     if (result.status === "success") {
+      endedRef.current = true;
       clearGuestMemory();
       setState("logged_out");
       return;
-    }
-    if (
-      result.status === "session_missing" ||
-      result.status === "session_expired" ||
-      result.status === "session_revoked"
-    ) {
-      clearGuestMemory();
     }
     applyFailure(result);
   };

@@ -37,8 +37,8 @@ assert.equal(source.includes("Team Settings"), false);
 assert.equal(source.includes("Checking your session"), true);
 
 assert.ok(
-  source.indexOf("const result = await api.bootstrap()") <
-    source.indexOf("const result = await api.exchange(inviteToken, displayName)"),
+  source.indexOf("const result = await request(() => api.bootstrap())") <
+    source.indexOf("const result = await request(() => api.exchange(inviteToken, displayName))"),
   "session bootstrap must be defined before invite exchange",
 );
 assert.match(
@@ -53,7 +53,7 @@ assert.match(source, /setCollaboration\(result\.collaboration\);[\s\S]*?setDraft
 const recoveryStart = source.indexOf("const recoverSessionAfterReplyFailure");
 const recoveryEnd = source.indexOf("const handleReply", recoveryStart);
 const recoveryBlock = source.slice(recoveryStart, recoveryEnd);
-assert.match(recoveryBlock, /await api\.bootstrap\(\)/);
+assert.match(recoveryBlock, /await request\(\(\) => api\.bootstrap\(\)\)/);
 assert.doesNotMatch(recoveryBlock, /api\.reply/);
 assert.match(recoveryBlock, /press Send reply again/);
 
@@ -88,3 +88,5 @@ assert.equal(source.includes("document.title"), false);
 assert.equal(source.includes("useDeferredValue"), false);
 assert.equal(source.includes("startTransition"), false);
 assert.equal(source.includes("setTimeout"), false);
+assert.equal(source.includes("setInterval"), false);
+assert.equal(source.includes("WebSocket"), false);
