@@ -282,6 +282,57 @@ async function run() {
   const reset = readApi.__resetCollaborationOwnerReadApiForTests;
 
   try {
+    await test("lifecycle sends one captured CAS snapshot and accepts canonical retry noops", reset, async () => {
+      for (const operation of ["resolve", "reopen"] as const) {
+        for (const changed of [true, false]) {
+          reset();
+          const before = collaboration("mailbox-google", operation === "resolve" ? "needs_review" : "resolved");
+          const snapshot = readApi.parseCollaborationOwnerReadDto(before);
+          if (snapshot?.viewerAccess !== "owner") throw new Error("Invalid owner fixture");
+          const after = { ...before, state: operation === "resolve" ? "resolved" : "note_only", updatedAt: NOW_MS };
+          const calls: FetchCall[] = [];
+          installFetch([csrfResponse("csrf-token"), response(200, { ok: true, data: { changed, collaboration: after } })], calls);
+          const result = await (operation === "resolve"
+            ? writeApi.resolveCollaborationForOwner(snapshot)
+            : writeApi.reopenCollaborationForOwner(snapshot));
+          assert.deepEqual(result, { status: "success", changed, collaboration: after });
+          assert.equal(calls.length, 2);
+          assertExactRequest(calls[1], {
+            operation, collaborationId: COLLABORATION_ID,
+            expectedState: before.state, expectedUpdatedAt: String(before.updatedAt),
+          }, "csrf-token");
+        }
+      }
+    });
+
+    await test("lifecycle rejects participant input and malformed or mismatched canonical responses", reset, async () => {
+      const snapshot = readApi.parseCollaborationOwnerReadDto(collaboration("mailbox-google"));
+      if (snapshot?.viewerAccess !== "owner") throw new Error("Invalid owner fixture");
+      const calls: FetchCall[] = [];
+      installFetch([], calls);
+      for (const invalid of [null, {}, collaboration("mailbox-google", "needs_review", "participant")]) {
+        assert.deepEqual(await writeApi.resolveCollaborationForOwner(invalid as unknown as ReadApi.CollaborationOwnerViewerReadDto), { status: "invalid_lifecycle_snapshot" });
+      }
+      assert.equal(calls.length, 0);
+      const resolved = { ...collaboration("mailbox-google", "resolved"), updatedAt: NOW_MS };
+      for (const data of [
+        { changed: "true", collaboration: resolved },
+        { changed: true, collaboration: { ...resolved, mailboxId: "other" } },
+        { changed: true, collaboration: { ...resolved, collaborationId: "B".repeat(22) } },
+        { changed: true, collaboration: { ...resolved, state: "needs_action" } },
+        { changed: true, collaboration: { ...resolved, updatedAt: snapshot.updatedAt } },
+        { changed: true, collaboration: { ...resolved, viewerAccess: "participant" } },
+        { changed: true, collaboration: resolved, token: "unexpected" },
+      ]) {
+        reset();
+        installFetch([csrfResponse("token"), response(200, { ok: true, data })], calls);
+        assert.deepEqual(await writeApi.resolveCollaborationForOwner(snapshot), { status: "invalid_response" });
+      }
+      reset();
+      installFetch([csrfResponse("token"), response(409, { ok: false, error: { code: "conflict" } })], calls);
+      assert.deepEqual(await writeApi.resolveCollaborationForOwner(snapshot), { status: "conflict" });
+    });
+
     await test("sends the exact Gmail create contract without idempotency", reset, async () => {
       const calls: FetchCall[] = [];
       installFetch(

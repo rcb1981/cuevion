@@ -22,6 +22,8 @@ from .http_adapter import (
 )
 from .http_boundary import BoundaryError, get_security_header
 from .models import (
+    MAX_V2_TIMESTAMP_MILLISECONDS,
+    MIN_V2_TIMESTAMP_MILLISECONDS,
     MAX_V2_TIMESTAMP_SECONDS,
     MIN_V2_TIMESTAMP_SECONDS,
     hash_v2_secret,
@@ -56,6 +58,8 @@ _OWNER_BODY_FIELDS = frozenset(
         "participantUserId",
         "invitedEmail",
         "inviteId",
+        "expectedState",
+        "expectedUpdatedAt",
     }
 )
 _SECURITY_CONFIGURATION_NAMES = (
@@ -103,6 +107,8 @@ _OWNER_APPLICATION_OPERATIONS = frozenset(
         "append_internal",
         "issue_guest_invite",
         "revoke_guest_invite",
+        "resolve",
+        "reopen",
     }
 )
 _UNKNOWN_SAFE_FAILURE = "unknown_safe_failure"
@@ -520,6 +526,39 @@ def owner_response(
 
         if http_mode != "owner_write":
             raise OwnerSecurityError("rollout_unavailable")
+
+        if operation in {"resolve", "reopen"}:
+            _require_exact_fields(
+                payload,
+                frozenset({"operation", "collaborationId", "expectedState", "expectedUpdatedAt"}),
+            )
+            # The owner boundary intentionally rejects JSON numbers. Accept one
+            # canonical millisecond decimal string, then pass a typed timestamp.
+            expected_at = payload.get("expectedUpdatedAt")
+            if (
+                type(expected_at) is not str or len(expected_at) != 13
+                or not expected_at.isascii() or not expected_at.isdecimal()
+                or not MIN_V2_TIMESTAMP_MILLISECONDS <= int(expected_at) <= MAX_V2_TIMESTAMP_MILLISECONDS
+            ):
+                raise BoundaryError("invalid_value", 400)
+            limited = _rate_limit_response(
+                context, owner_rate_limit.RATE_LIMIT_WRITE, rate_limit_configuration,
+            )
+            if limited is not None:
+                return limited
+            result = application.transition_v2_lifecycle_for_verified_owner(
+                context, raw_headers, payload.get("collaborationId"),
+                {"expectedState": payload.get("expectedState"),
+                 "expectedUpdatedAt": int(expected_at)},
+                operation=operation, owner_security_configuration=configuration,
+            )
+            if (
+                type(result) is dict and set(result) == {"changed", "collaboration"}
+                and type(result["changed"]) is bool
+                and type(result["collaboration"]) is dict
+            ):
+                return json_success(result)
+            return _application_failure(result, operation=operation)
 
         if operation == "create":
             _require_exact_fields(

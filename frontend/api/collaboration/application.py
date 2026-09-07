@@ -305,7 +305,30 @@ def _thread_matches_create_binding(
         and thread["workspaceId"] == capability.workspace_id
         and thread["mailboxId"] == capability.mailbox_id
         and thread["sourceRef"] == source_ref
+        and (
+            "ownerUserId" not in thread
+            or capability.actor_user_id is None
+            or thread["ownerUserId"] == capability.owner_user_id
+        )
     )
+
+
+def _canonical_owner_authority(capability: object) -> dict | None:
+    """Required on authenticated creates; legacy decoding stays read-compatible."""
+    if (
+        not _is_internal_capability(capability, actions={"create"})
+        or capability.actor_kind != "owner"
+        or capability.viewer_access != "owner"
+        or normalize_v2_user_id(capability.actor_user_id) is None
+        or capability.owner_user_id != capability.actor_user_id
+        or _v2_bounded_string(capability.owner_display_name, max_length=256) is None
+    ):
+        return None
+    return {
+        "ownerUserId": capability.actor_user_id,
+        "ownerDisplayName": capability.owner_display_name,
+        "participants": [],
+    }
 
 
 def _guest_session_matches_capability(
@@ -375,6 +398,8 @@ def _build_verified_thread_dto(
                 "manage_participants",
                 "issue_invite",
                 "revoke_invite",
+                "resolve",
+                "reopen",
             },
         )
         or capability.viewer_access not in {"owner", "participant"}
@@ -510,12 +535,18 @@ def _build_verified_owner_thread_dto(
                 "manage_participants",
                 "issue_invite",
                 "revoke_invite",
+                "resolve",
+                "reopen",
             },
         )
         or capability.viewer_access != "owner"
         or thread.get("ownerEmail") != capability.owner_email
         or thread.get("workspaceId") != capability.workspace_id
         or thread.get("mailboxId") != capability.mailbox_id
+        or (
+            "ownerUserId" in thread
+            and thread["ownerUserId"] != capability.owner_user_id
+        )
         or (
             capability.collaboration_id is not None
             and thread.get("collaborationId") != capability.collaboration_id
@@ -988,10 +1019,11 @@ def _create_v2_collaboration_for_owner(
         return _failure("forbidden", "forbidden")
 
     participant_authority = None
+    owner_authority = None
     if owner_context is not None:
+        owner_authority = _canonical_owner_authority(capability)
         if (
-            normalize_v2_user_id(capability.actor_user_id)
-            != capability.actor_user_id
+            owner_authority is None
             or payload.get("participantUserId") == capability.actor_user_id
         ):
             return _failure("malformed", "invalid_request")
@@ -1080,8 +1112,7 @@ def _create_v2_collaboration_for_owner(
     if participant_authority is not None:
         proposed_record.update(
             {
-                "ownerUserId": capability.actor_user_id,
-                "ownerDisplayName": capability.actor_display_name,
+                **owner_authority,
                 "participants": [participant_authority],
             }
         )
@@ -1224,6 +1255,9 @@ def create_v2_collaboration_with_guest_for_verified_owner(
         or normalize_v2_email(capability.owner_email) != capability.owner_email
     ):
         return _failure("forbidden", "forbidden")
+    owner_authority = _canonical_owner_authority(capability)
+    if owner_authority is None:
+        return _failure("forbidden", "forbidden")
 
     def reuse_authorized_context(
         received_headers: object,
@@ -1302,6 +1336,7 @@ def create_v2_collaboration_with_guest_for_verified_owner(
             "v": COLLABORATION_V2_THREAD_SCHEMA_VERSION,
             "collaborationId": collaboration_id,
             "ownerEmail": capability.owner_email,
+            **owner_authority,
             "workspaceId": capability.workspace_id,
             "mailboxId": capability.mailbox_id,
             "sourceRef": canonical_source_ref,
@@ -1441,6 +1476,63 @@ def create_v2_collaboration_with_guest_for_verified_owner(
     if stored.invite_created:
         result["token"] = raw_token
     return result
+
+
+def transition_v2_lifecycle_for_verified_owner(
+    owner_context: object,
+    headers: object,
+    collaboration_id: object,
+    payload: object,
+    *,
+    operation: str,
+    owner_security_configuration: object,
+) -> dict[str, Any]:
+    if (
+        type(operation) is not str or operation not in {"resolve", "reopen"}
+        or type(payload) is not dict or set(payload) != {"expectedState", "expectedUpdatedAt"}
+        or type(payload.get("expectedState")) is not str
+        or payload["expectedState"] not in _ALLOWED_INITIAL_STATES | {"resolved"}
+        or type(payload.get("expectedUpdatedAt")) is not int
+        or not MIN_V2_TIMESTAMP_MILLISECONDS <= payload["expectedUpdatedAt"] <= MAX_V2_TIMESTAMP_MILLISECONDS
+    ):
+        return _failure("malformed", "invalid_request")
+    authorized = resolve_verified_owner_collaboration_context(
+        owner_context, headers, collaboration_id=collaboration_id,
+        required_action=operation,
+        owner_security_configuration=owner_security_configuration,
+    )
+    if type(authorized) is not dict or authorized.get("status") != "ok":
+        return _failure_from_result(
+            authorized, default_status="error", default_code="storage_protocol_error",
+        )
+    capability = authorized.get("context")
+    if (
+        not _is_internal_capability(capability, actions={operation})
+        or capability.collaboration_id != collaboration_id
+    ):
+        return _failure("forbidden", "forbidden")
+    from .mutations import transition_v2_lifecycle
+
+    mutated = transition_v2_lifecycle(
+        capability, operation=operation, expected_state=payload["expectedState"],
+        expected_updated_at=payload["expectedUpdatedAt"],
+    )
+    if (
+        type(mutated) is not dict
+        or set(mutated) != {"status", "record", "changed", "error"}
+        or mutated.get("status") != "ok" or mutated.get("error") is not None
+        or type(mutated.get("changed")) is not bool
+    ):
+        return _owner_mutation_failure(mutated)
+    thread = normalize_v2_thread_record(mutated["record"])
+    if thread is None:
+        return _failure("malformed", "storage_protocol_error")
+    dto, error = _build_verified_owner_thread_dto(thread, capability)
+    if error is not None:
+        return error
+    if dto is None:
+        return _failure("malformed", "storage_protocol_error")
+    return {"changed": mutated["changed"], "collaboration": dto}
 
 
 def add_v2_participant_for_verified_owner(

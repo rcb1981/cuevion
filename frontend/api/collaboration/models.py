@@ -876,6 +876,9 @@ else:
             "createdAt",
             "updatedAt",
         }
+        # v2 compatibility: historical records may omit the entire authority
+        # group. Authenticated creation always supplies it, including an empty
+        # participant array for guest-only threads. Partial groups remain invalid.
         participant_fields = {"ownerUserId", "ownerDisplayName", "participants"}
         if (
             not isinstance(value, dict)
@@ -940,7 +943,7 @@ else:
                 or owner_user_id is None
                 or owner_display_name is None
                 or not isinstance(participants, list)
-                or not 1 <= len(participants) <= MAX_V2_EXPLICIT_PARTICIPANTS
+                or not 0 <= len(participants) <= MAX_V2_EXPLICIT_PARTICIPANTS
             ):
                 return None
             normalized_participants = [

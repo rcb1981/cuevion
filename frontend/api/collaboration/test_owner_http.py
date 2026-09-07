@@ -524,6 +524,49 @@ class OwnerHttpBoundaryTests(unittest.TestCase):
         )
         return serialized
 
+    def test_lifecycle_operations_use_exact_write_contract_csrf_and_rate_limit(self):
+        for operation in ("resolve", "reopen"):
+            for changed in (False, True):
+                payload = {"operation": operation, "collaborationId": COLLABORATION_ID,
+                           "expectedState": "needs_review", "expectedUpdatedAt": str(NOW * 1000)}
+                result = {"changed": changed, "collaboration": _owner_collaboration()}
+                with mock.patch.object(
+                    owner_http.application, "transition_v2_lifecycle_for_verified_owner", return_value=result,
+                ) as service:
+                    response = _invoke(_request(payload, csrf=self._csrf()))
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(_json(response), {"ok": True, "data": result})
+                    self.assertEqual(service.call_args.args[2:], (
+                        COLLABORATION_ID, {"expectedState": "needs_review", "expectedUpdatedAt": NOW * 1000},
+                    ))
+                    self.assertEqual(service.call_args.kwargs["operation"], operation)
+                    self.assertEqual(self.rate_limiter.call_args.args[1], owner_rate_limit.RATE_LIMIT_WRITE)
+                    service.reset_mock()
+                    self.assertNotEqual(_invoke(_request(payload)).status, 200)
+                    self.assertNotEqual(_invoke(_request(payload, csrf=self._csrf()), mode="owner_read").status, 200)
+                    for key in ("ownerUserId", "mailboxId", "text", "state"):
+                        self.assertEqual(_invoke(_request({**payload, key: "untrusted"}, csrf=self._csrf())).status, 400)
+                    for invalid in (NOW * 1000, True, "01" + str(NOW * 1000), "1.8e12", " " + str(NOW * 1000), "9" * 13):
+                        self.assertEqual(_invoke(_request({**payload, "expectedUpdatedAt": invalid}, csrf=self._csrf())).status, 400)
+                    service.assert_not_called()
+
+    def test_lifecycle_failures_keep_existing_public_masking_and_write_budget(self):
+        payload = {"operation": "resolve", "collaborationId": COLLABORATION_ID,
+                   "expectedState": "needs_review", "expectedUpdatedAt": str(NOW * 1000)}
+        with mock.patch.object(owner_http.application, "transition_v2_lifecycle_for_verified_owner") as service:
+            for code, status, public_code in (
+                ("forbidden", 404, "not_found"), ("stale_thread", 409, "conflict"),
+                ("invalid_request", 400, "invalid_request"), ("storage_protocol_error", 503, "service_unavailable"),
+            ):
+                service.return_value = {"status": "error", "error": {"code": code}}
+                response = _invoke(_request(payload, csrf=self._csrf()))
+                self.assertEqual(response.status, status)
+                self.assertEqual(_json(response)["error"]["code"], public_code)
+            service.reset_mock()
+            self.rate_limiter.return_value = owner_rate_limit.OwnerRateLimitDecision("limited", 30)
+            self.assertEqual(_invoke(_request(payload, csrf=self._csrf())).status, 429)
+            service.assert_not_called()
+
     def test_create_with_guest_provider_unavailable_emits_safe_503_event(self):
         serialized = self._assert_logged_create_with_guest_failure(
             "provider_unavailable"

@@ -835,6 +835,14 @@ else:
 
 
     @dataclass(frozen=True, slots=True)
+    class _V2LifecycleResult:
+        """Canonical state transition or side-effect-free retry outcome."""
+
+        record: dict
+        changed: bool
+
+
+    @dataclass(frozen=True, slots=True)
     class _V2OwnerAppendResult:
         """Canonical committed owner-append outcome recovered from Redis."""
 
@@ -1731,7 +1739,12 @@ else:
     local function decodeWire(raw)
       if not rawIsValidUtf8(raw) or not rawHasNoJsonNumbers(raw)
         or not rawHasUniqueObjectKeys(raw) then return false, nil end
-      return pcall(cjson.decode, raw)
+      local ok, value = pcall(cjson.decode, raw)
+      -- cjson represents both [] and {} as an empty table. Owner-only threads
+      -- must carry a real participants array, never an accepted empty object.
+      if ok and type(value) == 'table' and value.participants ~= nil
+        and not rawTopLevelArray(raw, 'participants') then return false, nil end
+      return ok, value
     end
     local function integerValue(value)
       if type(value) ~= 'string' or #value == 0 or #value > 16 then return nil end
@@ -1948,7 +1961,7 @@ else:
         and a.displayName == b.displayName
     end
     local function participantsValid(values, ownerUserId)
-      if type(values) ~= 'table' or #values < 1 or #values > 15
+      if type(values) ~= 'table' or #values > 15
         or keyCount(values) ~= #values then return false end
       local previous = nil
       for index = 1, #values do
@@ -3017,6 +3030,121 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         ):
             return loaded if loaded.get("status") != "ok" else {"status": "malformed"}
         return loaded
+
+
+    _TRANSITION_V2_LIFECYCLE_LUA = _V2_LUA_COMMON + r"""
+    if #KEYS ~= 2 or #ARGV ~= 6 or not timestampMilliseconds(ARGV[1])
+      or not positiveInteger(ARGV[3]) or not canonicalUserId(ARGV[4])
+      or (ARGV[5] ~= 'resolve' and ARGV[5] ~= 'reopen')
+      or (ARGV[6] ~= 'needs_review' and ARGV[6] ~= 'needs_action'
+        and ARGV[6] ~= 'note_only' and ARGV[6] ~= 'resolved') then
+      return cjson.encode({status='malformed'})
+    end
+    local threadState, raw = readString(KEYS[1], 262144)
+    if threadState == 'missing' then return cjson.encode({status='missing'}) end
+    if threadState ~= 'ok' or #ARGV[2] > 262144 then return cjson.encode({status='malformed'}) end
+    local currentOk, current = decodeWire(raw)
+    local replacementOk, replacement = decodeWire(ARGV[2])
+    if not currentOk or not replacementOk or not rawTopLevelArray(raw, 'messages')
+      or not rawTopLevelArray(ARGV[2], 'messages') or not threadValid(current)
+      or not threadValid(replacement) then return cjson.encode({status='malformed'}) end
+    if replacement.ownerUserId ~= ARGV[4]
+      or (current.ownerUserId ~= nil and current.ownerUserId ~= ARGV[4])
+      or current.collaborationId ~= replacement.collaborationId
+      or current.v ~= replacement.v or current.ownerEmail ~= replacement.ownerEmail
+      or current.workspaceId ~= replacement.workspaceId
+      or current.mailboxId ~= replacement.mailboxId
+      or current.createdAt ~= replacement.createdAt
+      or not sourceEqual(current.sourceRef, replacement.sourceRef)
+      or not sourceMessageEqual(current.sourceMessage, replacement.sourceMessage) then
+      return cjson.encode({status='invalid_scope'})
+    end
+    local pointerState, pointer = readString(KEYS[2], 256)
+    if pointerState ~= 'ok' or pointer ~= current.collaborationId
+      or redis.call('PTTL', KEYS[1]) <= 0 or redis.call('PTTL', KEYS[2]) <= 0 then
+      return cjson.encode({status='malformed'})
+    end
+    -- Check authority and bindings even on retries. No-op returns the current
+    -- wire record without re-encoding arrays or refreshing any expiration.
+    if (ARGV[5] == 'resolve' and current.state == 'resolved')
+      or (ARGV[5] == 'reopen' and current.state ~= 'resolved') then
+      return cjson.encode({status='unchanged', record=raw})
+    end
+    if current.updatedAt ~= ARGV[1] or current.state ~= ARGV[6] then
+      return cjson.encode({status='stale'})
+    end
+    local target = ARGV[5] == 'resolve' and 'resolved' or 'note_only'
+    if replacement.state ~= target
+      or integerValue(replacement.updatedAt) <= integerValue(current.updatedAt)
+      or not messagesEqual(current.messages, replacement.messages) then
+      return cjson.encode({status='malformed'})
+    end
+    if current.ownerUserId ~= nil then
+      if not participantAuthorityEqual(current, replacement) then
+        return cjson.encode({status='invalid_scope'})
+      end
+    elseif #replacement.participants ~= 0 then
+      return cjson.encode({status='invalid_scope'})
+    end
+    redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+    redis.call('EXPIRE', KEYS[2], ARGV[3])
+    return cjson.encode({status='changed', record=ARGV[2]})
+    """.strip()
+
+
+    def _transition_v2_lifecycle_if_expected(
+        thread_record: dict,
+        expected_updated_at: int,
+        *,
+        expected_state: str,
+        operation: str,
+        owner_user_id: str,
+        command_transport=None,
+    ) -> _V2LifecycleResult | dict:
+        thread = normalize_v2_thread_record(thread_record)
+        wire = _v2_wire_json(thread, "thread") if thread is not None else None
+        if (
+            thread is None or wire is None
+            or type(expected_updated_at) is not int
+            or not MIN_V2_TIMESTAMP_MILLISECONDS <= expected_updated_at <= MAX_V2_TIMESTAMP_MILLISECONDS
+            or type(expected_state) is not str
+            or expected_state not in {"needs_review", "needs_action", "note_only", "resolved"}
+            or type(operation) is not str or operation not in {"resolve", "reopen"}
+            or normalize_v2_user_id(owner_user_id) is None
+            or thread.get("ownerUserId") != owner_user_id
+        ):
+            return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
+        hmac_keys = resolve_v2_index_hmac_keys()
+        thread_key = build_v2_thread_key(thread["collaborationId"])
+        source_key = build_v2_source_thread_key(
+            thread["ownerEmail"], thread["mailboxId"], thread["sourceRef"],
+            hmac_key=hmac_keys[0],
+        ) if hmac_keys is not None else None
+        if thread_key is None or source_key is None:
+            return {"status": "unavailable", "error": {"code": "storage_unavailable"}}
+        result = _v2_eval(
+            ["EVAL", _TRANSITION_V2_LIFECYCLE_LUA, 2, thread_key, source_key,
+             str(expected_updated_at), wire, str(V2_THREAD_RETENTION_SECONDS),
+             owner_user_id, operation, expected_state],
+            command_transport,
+            response_shapes={
+                "changed": {"record"}, "unchanged": {"record"}, "missing": set(),
+                "stale": set(), "malformed": set(), "invalid_scope": set(),
+            },
+        )
+        status = result.get("status")
+        if status in {"changed", "unchanged"}:
+            saved = normalize_v2_thread_record(_v2_json_from_wire(result.get("record"), "thread"))
+            if saved is None:
+                return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
+            return _V2LifecycleResult(saved, status == "changed")
+        if status == "missing":
+            return {"status": "missing", "error": {"code": "collaboration_not_found"}}
+        if status == "stale":
+            return {"status": "conflict", "error": {"code": "stale_thread"}}
+        if status in {"malformed", "invalid_scope"}:
+            return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
+        return result
 
 
     _SAVE_V2_THREAD_CAS_LUA = _V2_LUA_COMMON + r"""

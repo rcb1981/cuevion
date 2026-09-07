@@ -98,6 +98,15 @@ export type CollaborationOwnerAppendResult =
     }
   | CollaborationOwnerTransportFailure;
 
+export type CollaborationOwnerLifecycleResult =
+  | {
+      status: "success";
+      changed: boolean;
+      collaboration: CollaborationOwnerViewerReadDto;
+    }
+  | { status: "invalid_lifecycle_snapshot" }
+  | CollaborationOwnerTransportFailure;
+
 export type CollaborationOwnerAppendOperation = Readonly<{
   execute: () => Promise<CollaborationOwnerAppendResult>;
 }>;
@@ -683,6 +692,65 @@ export async function revokeGuestInvitationForOwner(
     collaboration,
     invitation: { ...invitation, status: "revoked" },
   };
+}
+
+async function transitionCollaborationForOwner(
+  snapshot: CollaborationOwnerViewerReadDto,
+  operation: "resolve" | "reopen",
+): Promise<CollaborationOwnerLifecycleResult> {
+  const expected = parseVerifiedOwnerCollaboration(snapshot);
+  if (expected === null) {
+    return { status: "invalid_lifecycle_snapshot" };
+  }
+  // Capture one version before the first await. Retrying with the same snapshot
+  // cannot undo a subsequent opposite transition.
+  const { collaborationId, mailboxId, state, updatedAt } = expected;
+  const result = await performAuthenticatedCollaborationOwnerRequest({
+    operation,
+    collaborationId,
+    expectedState: state,
+    expectedUpdatedAt: String(updatedAt),
+  });
+  if (result.status !== "response") {
+    return result;
+  }
+  const data =
+    result.httpStatus === 200 &&
+    isExactRecord(result.payload, ["ok", "data"]) &&
+    result.payload.ok === true &&
+    isExactRecord(result.payload.data, ["changed", "collaboration"])
+      ? result.payload.data
+      : null;
+  const collaboration = data
+    ? parseVerifiedOwnerCollaboration(data.collaboration)
+    : null;
+  if (
+    data === null || typeof data.changed !== "boolean" || collaboration === null ||
+    collaboration.collaborationId !== collaborationId ||
+    collaboration.mailboxId !== mailboxId ||
+    (operation === "resolve" && collaboration.state !== "resolved") ||
+    (operation === "reopen" && !isCreateState(collaboration.state)) ||
+    (data.changed && (
+      collaboration.updatedAt <= updatedAt ||
+      (operation === "resolve" && state === "resolved") ||
+      (operation === "reopen" && (state !== "resolved" || collaboration.state !== "note_only"))
+    ))
+  ) {
+    return { status: "invalid_response" };
+  }
+  return { status: "success", changed: data.changed, collaboration };
+}
+
+export function resolveCollaborationForOwner(
+  snapshot: CollaborationOwnerViewerReadDto,
+): Promise<CollaborationOwnerLifecycleResult> {
+  return transitionCollaborationForOwner(snapshot, "resolve");
+}
+
+export function reopenCollaborationForOwner(
+  snapshot: CollaborationOwnerViewerReadDto,
+): Promise<CollaborationOwnerLifecycleResult> {
+  return transitionCollaborationForOwner(snapshot, "reopen");
 }
 
 export async function addParticipantToCollaborationForOwner(

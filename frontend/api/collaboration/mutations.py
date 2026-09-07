@@ -19,6 +19,9 @@ from .models import (
     _build_v2_context_message,
     MAX_V2_EXPLICIT_PARTICIPANTS,
     MAX_V2_SAFE_INTEGER,
+    MIN_V2_TIMESTAMP_MILLISECONDS,
+    MAX_V2_TIMESTAMP_MILLISECONDS,
+    _v2_bounded_string,
     normalize_v2_thread_record,
     normalize_v2_message_record,
     normalize_v2_owner_idempotency_key,
@@ -29,12 +32,14 @@ from .authorization import _is_internal_capability
 from .guest_session import _is_guest_mutation_capability
 from .redis_store import (
     _V2RecordResult,
+    _V2LifecycleResult,
     _V2OwnerAppendResult,
     _append_v2_owner_message_idempotently,
     _append_v2_guest_reply_if_expected,
     _load_v2_thread,
     _save_v2_participants_if_expected,
     _save_v2_thread_if_expected,
+    _transition_v2_lifecycle_if_expected,
 )
 
 
@@ -114,6 +119,91 @@ def _load_scoped_thread(capability: object, *, thread_loader, command_transport=
     ):
         return None, _failure("forbidden")
     return thread, None
+
+
+def transition_v2_lifecycle(
+    capability: object,
+    *,
+    operation: str,
+    expected_state: str,
+    expected_updated_at: int,
+    thread_loader=_load_v2_thread,
+    thread_saver=_transition_v2_lifecycle_if_expected,
+    command_transport=None,
+) -> dict:
+    if (
+        type(operation) is not str or operation not in {"resolve", "reopen"}
+        or not _is_internal_capability(capability, actions={operation})
+        or capability.actor_kind != "owner" or capability.viewer_access != "owner"
+        or normalize_v2_user_id(capability.actor_user_id) is None
+        or capability.owner_user_id != capability.actor_user_id
+        or _v2_bounded_string(capability.owner_display_name, max_length=256) is None
+    ):
+        return _failure("forbidden")
+    if (
+        type(expected_state) is not str
+        or expected_state not in {"needs_review", "needs_action", "note_only", "resolved"}
+        or type(expected_updated_at) is not int
+        or not MIN_V2_TIMESTAMP_MILLISECONDS <= expected_updated_at <= MAX_V2_TIMESTAMP_MILLISECONDS
+    ):
+        return _failure("invalid_request")
+    thread, error = _load_scoped_thread(
+        capability, thread_loader=thread_loader, command_transport=command_transport,
+    )
+    if error:
+        return error
+    if (
+        thread["sourceRef"]["provider"] != capability.mailbox_provider
+        or thread.get("ownerUserId", capability.owner_user_id) != capability.owner_user_id
+    ):
+        return _failure("forbidden")
+    target = "resolved" if operation == "resolve" else "note_only"
+    already_target = (
+        thread["state"] == "resolved"
+        if operation == "resolve"
+        else thread["state"] != "resolved"
+    )
+    authority = {} if "ownerUserId" in thread else {
+        "ownerUserId": capability.owner_user_id,
+        "ownerDisplayName": capability.owner_display_name,
+        "participants": [],
+    }
+    # A retry still goes through Lua so authorization/bindings and the returned
+    # canonical record refer to the same atomic observation. Legacy enrichment
+    # is persisted only alongside an actual successful state transition.
+    replacement = normalize_v2_thread_record({
+        **thread, **authority,
+        "state": thread["state"] if already_target else target,
+        "updatedAt": thread["updatedAt"] if already_target else max(
+            time.time_ns() // 1_000_000, thread["updatedAt"] + 1,
+        ),
+    })
+    if replacement is None:
+        return _failure("invalid_request")
+    try:
+        result = thread_saver(
+            replacement, expected_updated_at, expected_state=expected_state,
+            operation=operation, owner_user_id=capability.owner_user_id,
+            command_transport=command_transport,
+        )
+    except Exception:
+        return _failure("storage_unavailable")
+    if type(result) is not _V2LifecycleResult:
+        return _failure(_canonical_storage_error(result))
+    saved = normalize_v2_thread_record(result.record)
+    if (
+        saved is None or type(result.changed) is not bool
+        or (result.changed and (already_target or saved != replacement))
+        or any(saved[field] != thread[field] for field in (
+            "v", "collaborationId", "ownerEmail", "workspaceId", "mailboxId",
+            "sourceRef", "sourceMessage", "createdAt",
+        ))
+        or saved.get("ownerUserId", capability.owner_user_id) != capability.owner_user_id
+        or (operation == "resolve" and saved["state"] != "resolved")
+        or (operation == "reopen" and saved["state"] == "resolved")
+    ):
+        return _failure("storage_protocol_error")
+    return {"status": "ok", "record": saved, "changed": result.changed, "error": None}
 
 
 def _append_message(

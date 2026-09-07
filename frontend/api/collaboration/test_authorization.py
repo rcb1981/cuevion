@@ -296,10 +296,13 @@ class CollaborationV2ParticipantAuthorizationTests(unittest.TestCase):
         )
 
     def test_participant_cannot_manage_people(self):
-        self.assertEqual(
-            self.resolve(action="manage_participants")["error"],
-            {"code": "forbidden"},
-        )
+        for action in ("manage_participants", "resolve", "reopen"):
+            for team_result in (None, (None, "not_active")):
+                with self.subTest(action=action, team_result=team_result):
+                    self.assertEqual(
+                        self.resolve(action=action, team_result=team_result)["error"],
+                        {"code": "forbidden"},
+                    )
 
     def test_unknown_action_is_rejected_before_resolvers_are_invoked(self):
         calls = []

@@ -4625,8 +4625,8 @@ class ExternalGuestApplicationTests(unittest.TestCase):
             self.assertTrue(result["created"])
             self.assertTrue(result["invitationCreated"])
             self.assertEqual(result["token"], "R" * 43)
-            self.assertNotIn("participants", captured["thread"])
-            self.assertNotIn("ownerUserId", captured["thread"])
+            self.assertEqual(captured["thread"]["participants"], [])
+            self.assertEqual(captured["thread"]["ownerUserId"], self.owner_user_id)
             self.assertEqual(result["collaboration"]["viewerAccess"], "owner")
             self.assertEqual(
                 result["collaboration"]["participants"],
