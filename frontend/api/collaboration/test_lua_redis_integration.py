@@ -10942,7 +10942,10 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         self.assertNotIn(removed_id, pruned_ids)
         self.assertIn(replacement["inviteId"], pruned_ids)
 
-    def _c2g5_issue_for_owner(self, thread, payload, *, now, transport):
+    def _c2g5_issue_for_owner(
+        self, thread, payload, *, now, transport,
+        invite_id="J" * 22, raw_token="u" * 43,
+    ):
         owner_id = "usr_" + "A" * 22
         capability = authorization._InternalCollaborationCapability(
             authorization._INTERNAL_CAPABILITY_SENTINEL,
@@ -10964,15 +10967,20 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
             application, "_load_v2_thread", side_effect=load_thread,
         ), patch.object(application, "_load_v2_external_guest_records", side_effect=load_guests), patch.object(
             application.time, "time", return_value=now,
-        ), patch.object(guest_session, "generate_v2_opaque_id", return_value="J" * 22), patch.object(
-            guest_session, "generate_v2_bearer_secret", return_value="u" * 43,
+        ), patch.object(guest_session, "generate_v2_opaque_id", return_value=invite_id), patch.object(
+            guest_session, "generate_v2_bearer_secret", return_value=raw_token,
         ):
             return application.issue_v2_guest_invitation_for_verified_owner(
                 object(), (), thread["collaborationId"], payload,
                 owner_security_configuration=object(),
             )
 
-    def _c2g5_prepare_revoked(self, mode, email, *, exchanged, hmac_mode="current", prior_capabilities=None):
+    def _c2g5_prepare_revoked_logical_clock(self, mode, email, *, exchanged, hmac_mode="current", prior_capabilities=None):
+        """Synthetic-clock semantic/corruption fixture, not a timing regression.
+
+        TTL aging compensates for advanced fixed SEC timestamps. Natural-clock
+        regressions use their separate fixture and never call this helper.
+        """
         thread = thread_record()
         invite = invite_record()
         if email is not None:
@@ -11015,6 +11023,409 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
             self.client.command(["PEXPIRE", key, min(self.client.command(["PTTL", key]), 47_000)])
         return thread, invite, session, (primary, token, old_identity, current_identity), transport
 
+    @staticmethod
+    def _c2g52_at_clock_phase(second, phase):
+        """Schedule a boundary stimulus; replacement itself never waits or retries."""
+        delay = second + phase - time.time()
+        if delay > 0:
+            time.sleep(delay)
+
+    def _c2g52_observe_create(self, transport, observations, *, setup=()):
+        """Observe actual Redis bytes/PTTLs at the production EVAL's instant.
+
+        Adversarial callers may supply Redis setup commands; natural-clock
+        callers leave setup empty. The production script remains unchanged.
+        """
+        setup_lua = "\n".join(
+            "redis.call(" + ",".join(json.dumps(item) for item in command) + ")"
+            for command in setup
+        )
+        prefix = json.dumps(redis_store.V2_KEY_PREFIX + ":*")
+        snapshot = """
+local function snapshotGraph()
+  local result = {}
+  local names = redis.call('KEYS', SNAPSHOT_PREFIX)
+  table.sort(names)
+  for _, key in ipairs(names) do
+    table.insert(result, {key=key, raw=redis.call('GET', key), pttl=redis.call('PTTL', key)})
+  end
+  return result
+end
+""".replace("SNAPSHOT_PREFIX", prefix)
+
+        def observed(command):
+            if command[0] != "EVAL" or command[1] != redis_store._CREATE_V2_INVITE_LUA:
+                return transport(command)
+            changed = list(command)
+            changed[1] = (setup_lua + "\n" + snapshot + "\nlocal before=snapshotGraph()\n"
+                          + "local function productionCreate()\n" + command[1]
+                          + "\nend\nlocal result=productionCreate()\n"
+                          + "return cjson.encode({result=result,before=before,after=snapshotGraph()})")
+            envelope = json.loads(transport(changed)["result"])
+            observations.append(envelope)
+            return {"result": envelope["result"]}
+        return observed
+
+    _c2g52_same_email = object()
+
+    def _c2g52_natural_generations(
+        self, mode, email, hmac_mode, exchanged, *, generations=5, replacement_email=_c2g52_same_email,
+    ):
+        self.client.command(["FLUSHALL"])
+        encoded = lambda value: base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+        os.environ[redis_store.V2_INDEX_HMAC_ENV] = encoded(b"p" * 32)
+        os.environ.pop(redis_store.V2_INDEX_HMAC_PREVIOUS_ENV, None)
+        transport = self._session_null_transport(mode)
+        second = int(time.time()) + 1
+        self._c2g52_at_clock_phase(second, 0.08)
+        now = int(time.time())
+        thread = {**thread_record(), "createdAt": now * 1000, "updatedAt": now * 1000}
+        first = {**invite_record("t" * 42 + "0"), "createdAt": now, "expiresAt": now + 120}
+        if email is not None:
+            first["invitedEmail"] = email
+        self.assertEqual(redis_store._create_v2_thread_with_guest(
+            thread, first, now=now, command_transport=transport,
+        ).get("status"), "ok")
+        invites = [first]
+        sessions = []
+        historical = {}
+        issue_email = email if replacement_email is self._c2g52_same_email else replacement_email
+        payload = {} if issue_email is None else {"invitedEmail": issue_email}
+
+        def exchange(generation, invite):
+            stamp = int(time.time())
+            record = {**session_record("s" * 42 + str(generation)),
+                      "inviteId": invite["inviteId"], "createdAt": stamp,
+                      "lastUsedAt": stamp, "expiresAt": stamp + 60}
+            self.assertEqual(redis_store._atomic_exchange_v2_invite(
+                raw_token="t" * 42 + str(generation), invite_id=invite["inviteId"],
+                session_record=record, now=stamp, session_ttl=60, command_transport=transport,
+            ), {"status": "ok"})
+            sessions.append((generation, record))
+
+        def revoke(invite):
+            return redis_store._revoke_v2_invite(
+                invite["inviteId"], owner_email=invite["ownerEmail"],
+                workspace_id=invite["workspaceId"], mailbox_id=invite["mailboxId"],
+                collaboration_id=invite["collaborationId"], revoked_by=invite["ownerEmail"],
+                now=int(time.time()), command_transport=transport,
+            )
+
+        if exchanged[0]:
+            exchange(0, first)
+        self._c2g52_at_clock_phase(second + 1, 0.65)
+        self.assertEqual(revoke(first), {"status": "ok"})
+        old_identity = self._invite_keys(first)[2]
+        if hmac_mode != "current":
+            os.environ[redis_store.V2_INDEX_HMAC_ENV] = encoded(b"c" * 32)
+            os.environ[redis_store.V2_INDEX_HMAC_PREVIOUS_ENV] = encoded(b"p" * 32)
+        if hmac_mode == "both":
+            self.client.command(["SET", self._invite_keys(first)[2],
+                                 self.client.command(["GET", old_identity]), "PX",
+                                 self.client.command(["PTTL", old_identity])])
+        for key in self._invite_keys(first)[:2]:
+            historical[key] = self.client.command(["GET", key])
+        for _, record in sessions:
+            historical[self._session_key(record)] = self.client.command(["GET", self._session_key(record)])
+
+        # A was created early. B is created late, then revoked just after the
+        # next integer second. Its natural EX-derived PTTLs exceed the rounded
+        # absolute remainder; no key receives manual TTL aging in this fixture.
+        first_observations = []
+        result = self._c2g5_issue_for_owner(
+            thread, payload, now=int(time.time()),
+            transport=self._c2g52_observe_create(transport, first_observations),
+            invite_id="J" * 22, raw_token="t" * 42 + "1",
+        )
+        self.assertEqual(result.get("status"), "ok", "first replacement must succeed")
+        self.assertTrue(result.get("invitationCreated"))
+        self.assertEqual(len(first_observations), 1)
+        first_before = {entry["key"]: entry for entry in first_observations[0]["before"]}
+        first_after = {entry["key"]: entry for entry in first_observations[0]["after"]}
+        for key, raw in historical.items():
+            self.assertEqual(first_after[key]["raw"], raw)
+            self.assertEqual(first_after[key]["pttl"], first_before[key]["pttl"])
+        current = typed_wire_json(self.client.command(["GET", redis_store.build_v2_invite_key("J" * 22)]), "invite")
+        invites.append(current)
+        if exchanged[1]:
+            exchange(1, current)
+        self._c2g52_at_clock_phase(second + 2, 0.04)
+
+        for generation in range(2, generations):
+            if generation > 2:
+                self._c2g52_at_clock_phase(current["createdAt"] + 1, 0.04)
+            # Keep these calls adjacent: an immediate, first-attempt C is the
+            # regression. No sleep, retry, or TTL mutation follows revocation.
+            observations = []
+            observed_transport = self._c2g52_observe_create(transport, observations)
+            revoked = revoke(current)
+            issue_now = int(time.time())
+            result = self._c2g5_issue_for_owner(
+                thread, payload, now=issue_now, transport=observed_transport,
+                invite_id=chr(ord("I") + generation) * 22,
+                raw_token="t" * 42 + str(generation),
+            )
+            self.assertEqual(revoked, {"status": "ok"})
+            self.assertEqual(len(observations), 1, "one production create EVAL; no implicit retry")
+            before = {entry["key"]: entry for entry in observations[0]["before"]}
+            after = {entry["key"]: entry for entry in observations[0]["after"]}
+            if generation == 2:
+                absolute_ms = (current["expiresAt"] - issue_now) * 1000
+                for key in self._invite_keys(current)[1:]:
+                    excess = before[key]["pttl"] - absolute_ms
+                    self.assertGreater(excess, 0, "clock stimulus must reach fractional PTTL overhang")
+                    self.assertLessEqual(excess, 999)
+            self.assertEqual(result.get("status"), "ok", "immediate replacement must succeed on its first attempt")
+            self.assertTrue(result.get("invitationCreated"))
+            for key in self._invite_keys(current)[:2]:
+                historical[key] = before[key]["raw"]
+            for old_generation, old_session in sessions:
+                if old_generation < generation:
+                    key = self._session_key(old_session)
+                    historical.setdefault(key, before[key]["raw"])
+            for key, raw in historical.items():
+                self.assertEqual(after[key]["raw"], raw)
+                self.assertEqual(after[key]["pttl"], before[key]["pttl"])
+            current = typed_wire_json(self.client.command([
+                "GET", redis_store.build_v2_invite_key(chr(ord("I") + generation) * 22),
+            ]), "invite")
+            invites.append(current)
+            exchange(generation, current)
+            guests = {entry["inviteId"]: entry["status"] for entry in result["collaboration"]["externalGuests"]}
+            self.assertEqual(guests, {invite["inviteId"]: "revoked" for invite in invites[:-1]} |
+                             {current["inviteId"]: "pending"})
+            for key, raw in historical.items():
+                self.assertEqual(self.client.command(["GET", key]), raw)
+
+        self.assertEqual(len({invite["inviteId"] for invite in invites}), generations)
+        self.assertEqual(len({invite["tokenHash"] for invite in invites}), generations)
+        self.assertEqual(json.loads(self.client.command([
+            "GET", redis_store.build_v2_external_guest_index_key(thread["collaborationId"]),
+        ]))["inviteIds"], sorted(invite["inviteId"] for invite in invites))
+        expected_keys = {self._thread_key(thread["collaborationId"]),
+                         self._source_key(thread, hmac_key=b"p" * 32),
+                         redis_store.build_v2_external_guest_index_key(thread["collaborationId"]),
+                         self._invite_keys(current)[2]}
+        if issue_email != email:
+            # A's distinct email identity remains a separate revoked history.
+            expected_keys.add(old_identity)
+        for invite in invites:
+            expected_keys.update(self._invite_keys(invite)[:2])
+        expected_keys.update(self._session_key(record) for _, record in sessions)
+        self.assertEqual(set(self.client.command(["KEYS", redis_store.V2_KEY_PREFIX + ":*"])), expected_keys)
+        self.assertEqual(self.client.command(["GET", self._invite_keys(current)[2]]),
+                         wire_json(current, "invite"))
+        for invite in invites:
+            self.assertEqual(self.client.command(["GET", self._invite_keys(invite)[1]]), invite["inviteId"])
+        denied_before = self._snapshot_v2_state()
+        for generation, old in enumerate(invites[:-1]):
+            denied = redis_store._atomic_exchange_v2_invite(
+                raw_token="t" * 42 + str(generation), invite_id=old["inviteId"],
+                session_record={**session_record("x" * 43), "inviteId": old["inviteId"],
+                                "createdAt": int(time.time()), "lastUsedAt": int(time.time()),
+                                "expiresAt": int(time.time()) + 60},
+                now=int(time.time()), session_ttl=60, command_transport=transport,
+            )
+            self.assertEqual(denied.get("error"), {"code": "invite_revoked"})
+        for generation, record in sessions[:-1]:
+            resolved = guest_session._bootstrap_v2_guest_session_read_only(
+                "s" * 42 + str(generation), now=int(time.time()), command_transport=transport,
+            )
+            self.assertEqual(resolved.get("error", {}).get("code"), "session_revoked")
+        self._assert_v2_state_unchanged(denied_before)
+        capability, loaded, error = guest_session._resolve_guest_read_access(
+            "s" * 42 + str(generations - 1), now=int(time.time()), command_transport=transport,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(capability.invite_id, current["inviteId"])
+        self.assertEqual(loaded, sessions[-1][1])
+
+    def test_c2g52_natural_clock_blank_immediate_third_invitation_first_attempt(self):
+        self._c2g52_natural_generations("normal", None, "current", (False, False), generations=3)
+
+    def test_c2g52_natural_clock_repeated_generations_preserve_history_and_access(self):
+        scenarios = ((None, (False, False)), (None, (True, True)),
+                     ("reviewer@example.com", (False, False)), ("reviewer@example.com", (True, True)),
+                     (None, (False, True)), ("reviewer@example.com", (True, False)))
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for hmac_mode in ("current", "previous", "both"):
+                for email, exchanged in scenarios:
+                    with self.subTest(mode=mode, hmac=hmac_mode, email=email, exchanged=exchanged):
+                        self._c2g52_natural_generations(mode, email, hmac_mode, exchanged)
+
+    def test_c2g52_natural_clock_email_then_blank_generations_remain_distinct(self):
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for exchanged in ((False, False), (True, True)):
+                with self.subTest(mode=mode, exchanged=exchanged):
+                    self._c2g52_natural_generations(
+                        mode, "reviewer@example.com", "current", exchanged,
+                        replacement_email=None,
+                    )
+
+    def _c2g52_capture_create_command(self, proposal, *, now, transport):
+        commands = []
+
+        def capture(command):
+            if command[0] == "EVAL" and command[1] == redis_store._CREATE_V2_INVITE_LUA:
+                commands.append(list(command))
+                return {"result": '{"status":"malformed"}'}
+            return transport(command)
+        self._real_create_v2_invite(proposal, now=now, command_transport=capture)
+        self.assertEqual(len(commands), 1)
+        return commands[0]
+
+    def _c2g52_boundary_fixture(self, mode, hmac_mode):
+        self.client.command(["FLUSHALL"])
+        _, old, session, keys, transport = self._c2g5_prepare_revoked_logical_clock(
+            mode, None, exchanged=True, hmac_mode=hmac_mode,
+        )
+        proposal = {**invite_record("u" * 43), "inviteId": "J" * 22,
+                    "createdAt": SEC + 103, "expiresAt": SEC + 303}
+        command = self._c2g52_capture_create_command(proposal, now=SEC + 103, transport=transport)
+        roles = {"canonical": keys[0], "token": keys[1]}
+        if self.client.command(["EXISTS", keys[3]]):
+            roles["current_identity"] = keys[3]
+        if keys[2] != keys[3] and self.client.command(["EXISTS", keys[2]]):
+            roles["previous_identity"] = keys[2]
+        absolute_ms = (old["expiresAt"] - (SEC + 103)) * 1000
+        return old, session, proposal, command, roles, absolute_ms, transport
+
+    def test_c2g52_revoked_replacement_exact_absolute_ttl_boundaries(self):
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for hmac_mode in ("current", "previous", "both"):
+                roles_to_check = ("canonical", "token", "current_identity") if hmac_mode == "current" else (
+                    ("canonical", "token", "previous_identity") if hmac_mode == "previous" else
+                    ("canonical", "token", "current_identity", "previous_identity")
+                )
+                for role in roles_to_check:
+                    for excess in (999, 1000, 10_000):
+                        with self.subTest(mode=mode, hmac=hmac_mode, role=role, excess=excess):
+                            old, session, proposal, command, roles, absolute_ms, transport = self._c2g52_boundary_fixture(mode, hmac_mode)
+                            setup = [["PEXPIRE", key, absolute_ms] for key in roles.values()]
+                            setup.append(["PEXPIRE", roles[role], absolute_ms + excess])
+                            observations = []
+                            observed = self._c2g52_observe_create(transport, observations, setup=setup)
+                            outcome = json.loads(observed(command)["result"])
+                            self.assertEqual(len(observations), 1)
+                            before = {entry["key"]: entry for entry in observations[0]["before"]}
+                            after = {entry["key"]: entry for entry in observations[0]["after"]}
+                            self.assertEqual(before[roles[role]]["pttl"], absolute_ms + excess)
+                            if excess == 999:
+                                self.assertEqual(outcome.get("status"), "created")
+                                new_primary, new_token, new_identity = self._invite_keys(proposal)
+                                self.assertIn(new_primary, after)
+                                self.assertEqual(after[new_token]["raw"], proposal["inviteId"])
+                                self.assertEqual(after[new_identity]["raw"], after[new_primary]["raw"])
+                                for key in (roles["canonical"], roles["token"], self._session_key(session)):
+                                    self.assertEqual(after[key], before[key])
+                                if "previous_identity" in roles:
+                                    self.assertNotIn(roles["previous_identity"], after)
+                            else:
+                                self.assertEqual(outcome.get("status"), "conflict")
+                                self.assertEqual(observations[0]["after"], observations[0]["before"])
+
+    def test_c2g52_revoked_replacement_preserves_relative_thousand_millisecond_guard(self):
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for hmac_mode in ("current", "previous", "both"):
+                roles_to_check = ("token", "current_identity") if hmac_mode == "current" else (
+                    ("token", "previous_identity") if hmac_mode == "previous" else
+                    ("token", "current_identity", "previous_identity")
+                )
+                for role in roles_to_check:
+                    for relative_excess in (1000, 1001):
+                        with self.subTest(mode=mode, hmac=hmac_mode, role=role, relative_excess=relative_excess):
+                            _, _, _, command, roles, absolute_ms, transport = self._c2g52_boundary_fixture(mode, hmac_mode)
+                            setup = [["PEXPIRE", key, absolute_ms] for key in roles.values()]
+                            setup.extend([
+                                ["PEXPIRE", roles["canonical"], absolute_ms + 999 - relative_excess],
+                                ["PEXPIRE", roles[role], absolute_ms + 999],
+                            ])
+                            observations = []
+                            outcome = json.loads(self._c2g52_observe_create(transport, observations, setup=setup)(command)["result"])
+                            before = {entry["key"]: entry for entry in observations[0]["before"]}
+                            self.assertEqual(before[roles[role]]["pttl"] - before[roles["canonical"]]["pttl"], relative_excess)
+                            self.assertEqual(before[roles[role]]["pttl"], absolute_ms + 999)
+                            if relative_excess == 1000:
+                                self.assertEqual(outcome.get("status"), "created")
+                            else:
+                                self.assertEqual(outcome.get("status"), "conflict")
+                                self.assertEqual(observations[0]["after"], observations[0]["before"])
+
+    def test_c2g52_missing_required_replacement_keys_reject_without_any_write(self):
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for hmac_mode in ("current", "previous", "both"):
+                roles_to_check = ("canonical", "token", "current_identity") if hmac_mode == "current" else (
+                    ("canonical", "token", "previous_identity") if hmac_mode == "previous" else
+                    ("canonical", "token", "current_identity", "previous_identity")
+                )
+                for role in roles_to_check:
+                    for mutation in ("DEL", "PERSIST"):
+                        with self.subTest(mode=mode, hmac=hmac_mode, role=role, mutation=mutation):
+                            _, _, _, command, roles, _, transport = self._c2g52_boundary_fixture(mode, hmac_mode)
+                            observations = []
+                            outcome = json.loads(self._c2g52_observe_create(
+                                transport, observations, setup=([mutation, roles[role]],),
+                            )(command)["result"])
+                            before = {entry["key"]: entry for entry in observations[0]["before"]}
+                            if mutation == "PERSIST":
+                                self.assertEqual(before[roles[role]]["pttl"], -1)
+                            else:
+                                self.assertNotIn(roles[role], before)
+                            expected = "retry" if mutation == "DEL" and role.endswith("identity") else "conflict"
+                            self.assertEqual(outcome.get("status"), expected)
+                            self.assertEqual(observations[0]["after"], observations[0]["before"])
+
+    def test_c2g52_active_duplicate_keeps_strict_absolute_ttl_validation(self):
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for role_index in range(3):
+                for excess in (0, 1, 999):
+                    with self.subTest(mode=mode, role=role_index, excess=excess):
+                        self.client.command(["FLUSHALL"])
+                        thread, invite = thread_record(), invite_record()
+                        transport = self._session_null_transport(mode)
+                        self.assertEqual(redis_store._create_v2_thread_with_guest(
+                            thread, invite, now=SEC + 100, command_transport=transport,
+                        ).get("status"), "ok")
+                        proposal = self._duplicate_invite_proposal(invite)
+                        command = self._c2g52_capture_create_command(proposal, now=SEC + 100, transport=transport)
+                        keys = self._invite_keys(invite)
+                        setup = [["PEXPIRE", key, 100_000] for key in keys]
+                        setup.append(["PEXPIRE", keys[role_index], 100_000 + excess])
+                        observations = []
+                        outcome = json.loads(self._c2g52_observe_create(transport, observations, setup=setup)(command)["result"])
+                        before = {entry["key"]: entry for entry in observations[0]["before"]}
+                        after = {entry["key"]: entry for entry in observations[0]["after"]}
+                        self.assertEqual(before[keys[role_index]]["pttl"], 100_000 + excess)
+                        self.assertEqual(outcome.get("status"), "duplicate" if excess == 0 else "conflict")
+                        if excess == 0:
+                            for key in keys:
+                                self.assertEqual(after[key], before[key])
+                            self.assertEqual({key: entry["raw"] for key, entry in after.items()},
+                                             {key: entry["raw"] for key, entry in before.items()})
+                        else:
+                            self.assertEqual(observations[0]["after"], observations[0]["before"])
+
+    def test_c2g52_expired_revoked_record_with_positive_pttl_cannot_be_replaced(self):
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for hmac_mode in ("current", "previous", "both"):
+                with self.subTest(mode=mode, hmac=hmac_mode):
+                    old, _, proposal, command, roles, _, transport = self._c2g52_boundary_fixture(mode, hmac_mode)
+                    now = old["expiresAt"]
+                    proposal = {**proposal, "createdAt": now}
+                    argv = 3 + int(command[2])
+                    command[argv] = wire_json(proposal, "invite")
+                    command[argv + 1] = proposal["expiresAt"] - now
+                    command[argv + 2] = now
+                    observations = []
+                    outcome = json.loads(self._c2g52_observe_create(
+                        transport, observations,
+                        setup=tuple(["PEXPIRE", key, 999] for key in roles.values()),
+                    )(command)["result"])
+                    before = {entry["key"]: entry for entry in observations[0]["before"]}
+                    self.assertTrue(all(before[key]["pttl"] == 999 for key in roles.values()))
+                    self.assertEqual(outcome.get("status"), "conflict")
+                    self.assertEqual(observations[0]["after"], observations[0]["before"])
+
     def test_c2g5_real_owner_reinvite_after_revoke_preserves_history_and_new_exchange(self):
         for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
             for email in (None, "reviewer@example.com"):
@@ -11023,7 +11434,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                         with self.subTest(mode=mode, email=email, exchanged=exchanged, hmac=hmac_mode):
                             self.client.command(["FLUSHALL"])
                             prior_capabilities = []
-                            thread, old_invite, old_session, keys, transport = self._c2g5_prepare_revoked(
+                            thread, old_invite, old_session, keys, transport = self._c2g5_prepare_revoked_logical_clock(
                                 mode, email, exchanged=exchanged, hmac_mode=hmac_mode, prior_capabilities=prior_capabilities,
                             )
                             primary, token, old_identity, current_identity = keys
@@ -11192,7 +11603,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                 for corruption in cases:
                     with self.subTest(mode=mode, hmac=hmac_mode, corruption=corruption):
                         self.client.command(["FLUSHALL"])
-                        thread, invite, _, keys, transport = self._c2g5_prepare_revoked(mode, None, exchanged=True, hmac_mode=hmac_mode)
+                        thread, invite, _, keys, transport = self._c2g5_prepare_revoked_logical_clock(mode, None, exchanged=True, hmac_mode=hmac_mode)
                         primary, token, _, _ = keys
                         value = json.loads(self.client.command(["GET", primary]))
                         if corruption == "missing_primary":
@@ -11240,7 +11651,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
             for corruption in cases:
                 with self.subTest(mode=mode, corruption=corruption):
                     self.client.command(["FLUSHALL"])
-                    _, old, _, keys, _ = self._c2g5_prepare_revoked(mode, None, exchanged=True)
+                    _, old, _, keys, _ = self._c2g5_prepare_revoked_logical_clock(mode, None, exchanged=True)
                     proposal = {**invite_record("u" * 43), "inviteId": "J" * 22, "createdAt": SEC + 103, "expiresAt": SEC + 303}
                     if corruption == "same_invite_id":
                         proposal["inviteId"] = old["inviteId"]
@@ -11287,7 +11698,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
             for hmac_mode in ("current", "previous"):
                 with self.subTest(mode=mode, hmac=hmac_mode):
                     self.client.command(["FLUSHALL"])
-                    _, old, session, keys, _ = self._c2g5_prepare_revoked(mode, None, exchanged=True, hmac_mode=hmac_mode)
+                    _, old, session, keys, _ = self._c2g5_prepare_revoked_logical_clock(mode, None, exchanged=True, hmac_mode=hmac_mode)
                     historical_keys = (keys[0], keys[1], self._session_key(session))
                     historical_values = tuple(self.client.command(["GET", key]) for key in historical_keys)
                     historical_ttls = self._pttls(*historical_keys)
@@ -11339,7 +11750,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
             for missing_index in (False, True):
                 with self.subTest(mode=mode, missing_index=missing_index):
                     self.client.command(["FLUSHALL"])
-                    _, old, session, keys, transport = self._c2g5_prepare_revoked(mode, None, exchanged=True)
+                    _, old, session, keys, transport = self._c2g5_prepare_revoked_logical_clock(mode, None, exchanged=True)
                     index = redis_store.build_v2_external_guest_index_key(old["collaborationId"])
                     if missing_index:
                         self.client.command(["DEL", index])

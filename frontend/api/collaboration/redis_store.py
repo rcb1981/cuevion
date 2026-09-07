@@ -3848,14 +3848,22 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         return cjson.encode({status='conflict'})
       end
       local absolutePttl = (integerValue(canonical.expiresAt) - now) * 1000
+      -- A relative EX write can start 0..999 ms into its integer application
+      -- second. At a later read, PTTL - (expiresAt - now)*1000 is that write
+      -- phase minus the read phase, hence at most 999 ms. Exchange/revoke
+      -- min-clamps only shorten the deadline. Accept this bounded granularity
+      -- skew for revoked replacement, including existing EX-written graphs;
+      -- whole-second clock/delivery skew and active-duplicate behavior stay
+      -- outside this allowance. No stored expiry or retention is extended.
+      local expiryPttlCeiling = absolutePttl + (replacingRevoked and 999 or 0)
       local canonicalPttl = redis.call('PTTL', KEYS[canonicalKeyIndex])
       local tokenPttl = redis.call('PTTL', KEYS[tokenKeyIndex])
       local currentPttl = current and redis.call('PTTL', KEYS[3]) or nil
       local previousPttl = previous and redis.call('PTTL', KEYS[4]) or nil
       if canonicalPttl <= 0 or tokenPttl <= 0 or tokenPttl > canonicalPttl + 1000
-        or canonicalPttl > absolutePttl or tokenPttl > absolutePttl
-        or (current and (currentPttl <= 0 or currentPttl > canonicalPttl + 1000 or currentPttl > absolutePttl))
-        or (previous and (previousPttl <= 0 or previousPttl > canonicalPttl + 1000 or previousPttl > absolutePttl)) then
+        or canonicalPttl > expiryPttlCeiling or tokenPttl > expiryPttlCeiling
+        or (current and (currentPttl <= 0 or currentPttl > canonicalPttl + 1000 or currentPttl > expiryPttlCeiling))
+        or (previous and (previousPttl <= 0 or previousPttl > canonicalPttl + 1000 or previousPttl > expiryPttlCeiling)) then
         return cjson.encode({status='conflict'})
       end
       if replacingRevoked then
