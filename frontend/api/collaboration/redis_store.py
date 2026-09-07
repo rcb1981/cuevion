@@ -2283,7 +2283,7 @@ else:
       return threadValid(thread) and rawTopLevelArray(raw, 'messages')
         and (thread.ownerUserId == nil or rawTopLevelArray(raw, 'participants'))
     end
-    local function discoveryPrepare(thread, threadKey, ttl, raw)
+    local function discoveryPrepare(thread, threadKey, ttl, raw, recipients, capacityCache)
       -- Pre-C3B1A authority is enriched only by the authenticated exact helper.
       if thread.ownerUserId == nil then return {}, nil end
       if threadKey ~= DISCOVERY_THREAD_PREFIX .. thread.collaborationId
@@ -2297,6 +2297,15 @@ else:
       local encoded = cjson.encode(binding)
       local users = {thread.ownerUserId}
       for _, participant in ipairs(thread.participants) do users[#users+1] = participant.userId end
+      -- Manual migration may publish only a separately verified subset. Normal
+      -- mutations omit this argument and retain their complete recipient set.
+      if recipients ~= nil then
+        if #recipients ~= 1 then return nil, 'malformed' end
+        local allowed = false
+        for _, user in ipairs(users) do if user == recipients[1] then allowed = true end end
+        if not allowed then return nil, 'malformed' end
+        users = recipients
+      end
       local plan = {}
       for _, user in ipairs(users) do
         local key = discoveryKey(thread.workspaceId, user)
@@ -2321,14 +2330,19 @@ else:
         if not prior and count == DISCOVERY_MAX then
           -- Rare capacity repair is bounded and only missing canonical keys
           -- authorize removal. Never evict live active or resolved work.
-          for _, id in ipairs(redis.call('HKEYS', key)) do
-            if not opaqueId(id) then return nil, 'malformed' end
-            if redis.call('EXISTS', DISCOVERY_THREAD_PREFIX .. id) == 0 then prune[#prune+1] = id end
+          if capacityCache and capacityCache[key] then prune = capacityCache[key]
+          else
+            for _, id in ipairs(redis.call('HKEYS', key)) do
+              if not opaqueId(id) then return nil, 'malformed' end
+              if redis.call('EXISTS', DISCOVERY_THREAD_PREFIX .. id) == 0 then prune[#prune+1] = id end
+            end
+            if capacityCache then capacityCache[key] = prune end
           end
           if #prune == 0 then return nil, 'discovery_capacity_reached' end
         end
         plan[#plan+1] = {key=key, id=thread.collaborationId, value=encoded,
-          changed=changed, priorTtl=(#prune == count and count > 0) and -2 or priorTtl,
+          changed=changed,
+          priorTtl=(#prune == count and count > 0) and -2 or priorTtl,
           ttl=ttl, prune=prune}
       end
       return plan, nil
