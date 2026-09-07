@@ -2815,7 +2815,9 @@ class OwnerLookupApplicationTests(unittest.TestCase):
                     application,
                     "resolve_source_message",
                     side_effect=AssertionError("lookup must not fetch provider source"),
-                ) as source_resolver:
+                ) as source_resolver, patch.object(
+                    application, "_enrich_v2_discovery", return_value={"status": "ok", "error": None},
+                ) as enricher:
                     result = (
                         application.lookup_v2_collaboration_for_verified_owner(
                             owner_context,
@@ -2848,6 +2850,7 @@ class OwnerLookupApplicationTests(unittest.TestCase):
                     workspace_id=OWNER_EMAIL,
                 )
                 source_resolver.assert_not_called()
+                enricher.assert_called_once_with(thread, capability)
 
     def test_lookup_requires_exact_canonical_provider_specific_locator(self):
         owner_context = object()

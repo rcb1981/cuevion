@@ -31,6 +31,7 @@ from .models import (
     normalize_v2_email,
     normalize_v2_external_guest_projection,
     normalize_v2_owner_idempotency_key,
+    normalize_v2_summary_page,
 )
 from .owner_authentication import resolve_verified_auth0_owner
 from .owner_request_security import (
@@ -60,6 +61,7 @@ _OWNER_BODY_FIELDS = frozenset(
         "inviteId",
         "expectedState",
         "expectedUpdatedAt",
+        "cursor",
     }
 )
 _SECURITY_CONFIGURATION_NAMES = (
@@ -71,6 +73,7 @@ _SECURITY_CONFIGURATION_NAMES = (
     "CUEVION_COLLAB_V2_MAILBOX_ALLOWLIST",
 )
 _APPLICATION_FAILURES = {
+    "discovery_capacity_reached": (409, "conflict"),
     "auth_required": (401, "unauthorized"),
     "invalid_request": (400, "invalid_request"),
     "collaboration_not_found": (404, "not_found"),
@@ -100,6 +103,7 @@ _OWNER_APPLICATION_OPERATIONS = frozenset(
         "csrf",
         "read",
         "lookup",
+        "list_summaries",
         "create",
         "create_with_guest",
         "add_participant",
@@ -465,6 +469,24 @@ def owner_response(
             configuration,
             now=timestamp,
         )
+
+        if operation == "list_summaries":
+            _require_exact_fields(payload, frozenset({"operation", "cursor"}))
+            cursor = payload.get("cursor")
+            if cursor is not None and not is_v2_opaque_id(cursor):
+                raise BoundaryError("invalid_value", 400)
+            limited = _rate_limit_response(context, owner_rate_limit.RATE_LIMIT_READ, rate_limit_configuration)
+            if limited is not None:
+                return limited
+            result = application.list_v2_summaries_for_verified_owner(
+                context, raw_headers, cursor, owner_security_configuration=configuration,
+            )
+            if (type(result) is dict and set(result) == {"status", "page", "error"}
+                and result.get("status") == "ok" and result.get("error") is None):
+                page = normalize_v2_summary_page(result["page"], workspace_id=context.workspace_id, cursor=cursor)
+                if page is not None:
+                    return json_success(page)
+            return _application_failure(result, operation=operation)
 
         if operation == "read":
             _require_exact_fields(

@@ -14,6 +14,7 @@ from .authorization import (
     _is_internal_capability,
     resolve_internal_collaboration_context,
     resolve_verified_owner_collaboration_context,
+    resolve_verified_summary_viewer,
 )
 from .guest_session import (
     INVITE_LIFETIME_SECONDS,
@@ -50,6 +51,7 @@ from .models import (
     normalize_v2_team_membership_ref,
     normalize_v2_thread_record,
     normalize_v2_user_id,
+    normalize_v2_summary_page,
 )
 from .redis_store import (
     _V2RecordResult,
@@ -59,6 +61,8 @@ from .redis_store import (
     _load_v2_external_guest_records,
     _load_v2_thread,
     _load_v2_thread_by_source,
+    _list_v2_summaries,
+    _enrich_v2_discovery,
 )
 from .source_message import resolve_source_message
 
@@ -117,6 +121,7 @@ _CREATE_WITH_GUEST_FAILURE_STAGES = frozenset(
 )
 
 _CANONICAL_OWNER_MUTATION_ERROR_CODES = {
+    "discovery_capacity_reached": "discovery_capacity_reached",
     "collaboration_not_found": "collaboration_not_found",
     "forbidden": "forbidden",
     "invalid_request": "invalid_request",
@@ -1854,6 +1859,9 @@ def lookup_v2_collaboration_for_verified_owner(
     collaboration_id = thread["collaborationId"]
     if not is_v2_opaque_id(collaboration_id):
         return _failure("unavailable", "storage_protocol_error")
+    enriched = _enrich_v2_discovery(thread, capability)
+    if enriched != {"status": "ok", "error": None}:
+        return _failure_from_result(enriched, default_status="unavailable", default_code="storage_protocol_error")
     return {
         "status": "ok",
         "collaborationId": collaboration_id,
@@ -2086,3 +2094,31 @@ __all__ = [
     "read_v2_collaboration_for_guest",
     "read_v2_collaboration_for_owner",
 ]
+
+
+def list_v2_summaries_for_verified_owner(
+    owner_context: object, headers: object, cursor: object, *, owner_security_configuration: object,
+) -> dict:
+    if cursor is not None and not is_v2_opaque_id(cursor):
+        return _failure("malformed", "invalid_request")
+    authorized = resolve_verified_summary_viewer(
+        owner_context, headers, owner_security_configuration=owner_security_configuration,
+    )
+    if authorized.get("status") != "ok":
+        return _failure_from_result(authorized, default_status="unavailable", default_code="storage_protocol_error")
+    member = authorized["member"]
+    result = _list_v2_summaries(
+        member.workspace_id, member.user_id, member.email,
+        membership_ref=authorized["membershipRef"], cursor=cursor,
+    )
+    if result.get("status") != "ok":
+        return _failure_from_result(result, default_status="unavailable", default_code="storage_protocol_error")
+    page = normalize_v2_summary_page(result.get("page"), workspace_id=member.workspace_id, cursor=cursor)
+    if page is None:
+        return _failure("unavailable", "storage_protocol_error")
+    from .owner_request_security import mailbox_is_allowlisted
+    # Preserve existing owner mailbox rollout checks with in-memory HMAC checks;
+    # participant access follows the existing explicit-participant Team contract.
+    page["summaries"] = [entry for entry in page["summaries"] if entry["viewerAccess"] != "owner"
+                         or mailbox_is_allowlisted(owner_context, entry["mailboxId"], owner_security_configuration)]
+    return {"status": "ok", "page": page, "error": None}

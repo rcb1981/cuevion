@@ -62,9 +62,13 @@ else:
         normalize_v2_message_record,
         normalize_v2_owner_idempotency_key,
         normalize_v2_source_ref,
+        normalize_v2_workspace_id,
+        normalize_v2_team_membership_ref,
+        normalize_v2_summary_page,
+        is_v2_opaque_id,
+        MAX_V2_SUMMARY_PAGE_SIZE,
         normalize_v2_thread_record,
         normalize_v2_user_id,
-        normalize_v2_workspace_id,
     )
 
     MAX_COLLABORATION_THREAD_BATCH_SIZE = 200
@@ -1404,6 +1408,8 @@ else:
                 protocol_failure_observer, "eval_status_shape"
             )
             return {"status": "unavailable", "error": {"code": "storage_protocol_error"}}
+        if value["status"] == "discovery_capacity_reached":
+            return {"status": "conflict", "error": {"code": "discovery_capacity_reached"}}
         return {
             "status": value["status"],
             **{field: value[field] for field in sorted(actual_fields)},
@@ -2251,7 +2257,95 @@ else:
     """.strip()
 
 
-    _CREATE_V2_THREAD_LUA = _V2_LUA_COMMON + r"""
+    # One bounded HASH per canonical workspace/user. Values freeze only routing
+    # bindings; lifecycle and participant entitlement are read from the thread.
+    # Dynamic keys follow the existing single {cuevion-collab-v2} slot contract.
+    _V2_DISCOVERY_LUA = _V2_LUA_COMMON + r"""
+    local DISCOVERY_PREFIX = 'cuevion:collab:v2:{cuevion-collab-v2}:discovery:'
+    local DISCOVERY_THREAD_PREFIX = 'cuevion:collab:v2:{cuevion-collab-v2}:thread:'
+    local DISCOVERY_MAX = 1000
+    local DISCOVERY_RETENTION_MS = 15552000000
+    local function discoveryKey(workspace, user)
+      return DISCOVERY_PREFIX .. workspace .. ':' .. user
+    end
+    local function discoveryBindingValid(value)
+      return type(value) == 'table' and keyCount(value) == 4
+        and canonicalUserId(value.ownerUserId) and mailboxId(value.mailboxId)
+        and sourceValid(value.sourceRef)
+        and type(value.threadHash) == 'string' and #value.threadHash == 40
+        and string.match(value.threadHash, '^[0-9a-f]+$') ~= nil
+    end
+    local function discoveryBindingEqual(a, b)
+      return a.ownerUserId == b.ownerUserId and a.mailboxId == b.mailboxId
+        and sourceEqual(a.sourceRef, b.sourceRef)
+    end
+    local function discoveryCanonical(thread, raw)
+      return threadValid(thread) and rawTopLevelArray(raw, 'messages')
+        and (thread.ownerUserId == nil or rawTopLevelArray(raw, 'participants'))
+    end
+    local function discoveryPrepare(thread, threadKey, ttl, raw)
+      -- Pre-C3B1A authority is enriched only by the authenticated exact helper.
+      if thread.ownerUserId == nil then return {}, nil end
+      if threadKey ~= DISCOVERY_THREAD_PREFIX .. thread.collaborationId
+        or not threadValid(thread) or not canonicalWorkspaceId(thread.workspaceId)
+        or not rawTopLevelArray(raw, 'participants')
+        or not ttl or ttl <= 0 or ttl > DISCOVERY_RETENTION_MS then
+        return nil, 'malformed'
+      end
+      local binding = {ownerUserId=thread.ownerUserId, mailboxId=thread.mailboxId,
+        sourceRef=thread.sourceRef, threadHash=redis.sha1hex(raw)}
+      local encoded = cjson.encode(binding)
+      local users = {thread.ownerUserId}
+      for _, participant in ipairs(thread.participants) do users[#users+1] = participant.userId end
+      local plan = {}
+      for _, user in ipairs(users) do
+        local key = discoveryKey(thread.workspaceId, user)
+        local kind = redis.call('TYPE', key).ok
+        if kind ~= 'none' and kind ~= 'hash' then return nil, 'malformed' end
+        local count = kind == 'hash' and redis.call('HLEN', key) or 0
+        if count > DISCOVERY_MAX then return nil, 'malformed' end
+        local priorTtl = redis.call('PTTL', key)
+        if kind == 'hash' and (priorTtl <= 0 or priorTtl > DISCOVERY_RETENTION_MS) then
+          return nil, 'malformed'
+        end
+        local prior = redis.call('HGET', key, thread.collaborationId)
+        local changed = not prior
+        if prior then
+          if #prior > 4096 then return nil, 'malformed' end
+          local ok, value = decodeWire(prior)
+          if not ok or not discoveryBindingValid(value)
+            or not discoveryBindingEqual(value, binding) then return nil, 'malformed' end
+          changed = value.threadHash ~= binding.threadHash
+        end
+        local prune = {}
+        if not prior and count == DISCOVERY_MAX then
+          -- Rare capacity repair is bounded and only missing canonical keys
+          -- authorize removal. Never evict live active or resolved work.
+          for _, id in ipairs(redis.call('HKEYS', key)) do
+            if not opaqueId(id) then return nil, 'malformed' end
+            if redis.call('EXISTS', DISCOVERY_THREAD_PREFIX .. id) == 0 then prune[#prune+1] = id end
+          end
+          if #prune == 0 then return nil, 'discovery_capacity_reached' end
+        end
+        plan[#plan+1] = {key=key, id=thread.collaborationId, value=encoded,
+          changed=changed, priorTtl=(#prune == count and count > 0) and -2 or priorTtl,
+          ttl=ttl, prune=prune}
+      end
+      return plan, nil
+    end
+    local function discoveryCommit(plan)
+      -- Every type, binding, capacity and encoded value was checked before the
+      -- first canonical write. No application-level best-effort publication.
+      for _, item in ipairs(plan) do
+        if #item.prune > 0 then redis.call('HDEL', item.key, unpack(item.prune)) end
+        if item.changed then redis.call('HSET', item.key, item.id, item.value) end
+        if item.ttl > item.priorTtl then redis.call('PEXPIRE', item.key, item.ttl) end
+      end
+    end
+    """
+
+
+    _CREATE_V2_THREAD_LUA = _V2_DISCOVERY_LUA + r"""
     if #ARGV[1] > 262144 or not positiveInteger(ARGV[3]) then return cjson.encode({status='malformed'}) end
     local proposedOk, proposed = decodeWire(ARGV[1])
     if not proposedOk or not rawTopLevelArray(ARGV[1], 'messages') or not threadValid(proposed) or proposed.collaborationId ~= ARGV[2] then
@@ -2282,6 +2376,9 @@ else:
           or not participantAuthorityEqual(target, proposed) then
           return cjson.encode({status='source_pointer_conflict'})
         end
+        local plan, discoveryError = discoveryPrepare(target, targetKey, integerValue(ARGV[3]) * 1000, targetRaw)
+        if discoveryError then return cjson.encode({status=discoveryError}) end
+        discoveryCommit(plan)
         redis.call('EXPIRE', targetKey, ARGV[3])
         redis.call('SET', KEYS[2], pointer, 'EX', ARGV[3])
         if #KEYS == 3 then redis.call('DEL', KEYS[3]) end
@@ -2290,10 +2387,11 @@ else:
       -- A stale source pointer is repairable only if creation can commit.  A
       -- conflicting proposed key must leave the entire namespace untouched.
       if redis.call('EXISTS', KEYS[1]) == 1 then return cjson.encode({status='conflict'}) end
-      redis.call('DEL', KEYS[2])
-      if #KEYS == 3 then redis.call('DEL', KEYS[3]) end
     end
     if redis.call('EXISTS', KEYS[1]) == 1 then return cjson.encode({status='conflict'}) end
+    local discoveryPlan, discoveryError = discoveryPrepare(proposed, KEYS[1], integerValue(ARGV[3]) * 1000, ARGV[1])
+    if discoveryError then return cjson.encode({status=discoveryError}) end
+    discoveryCommit(discoveryPlan)
     redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
     redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
     if #KEYS == 3 then redis.call('DEL', KEYS[3]) end
@@ -2336,6 +2434,7 @@ else:
             ],
             command_transport,
             response_shapes={
+                "discovery_capacity_reached": set(),
                 "created": set(), "duplicate": {"collaborationId"}, "conflict": set(),
                 "source_pointer_conflict": set(), "malformed": set(),
             },
@@ -2369,7 +2468,7 @@ else:
             ):
                 return _V2RecordResult(existing, created=False)
             return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
-        if result.get("status") == "conflict":
+        if result.get("status") == "conflict" and "error" not in result:
             return {"status": "conflict", "error": {"code": "stale_thread"}}
         if result.get("status") in {"source_pointer_conflict", "malformed"}:
             return {"status": "conflict", "error": {"code": "source_pointer_conflict"}}
@@ -2474,7 +2573,7 @@ else:
 
 
     _CREATE_V2_THREAD_WITH_GUEST_LUA = (
-        _V2_LUA_COMMON + _V2_INVITE_KEY_SHAPE_DIAGNOSTIC_LUA + r"""
+        _V2_DISCOVERY_LUA + _V2_INVITE_KEY_SHAPE_DIAGNOSTIC_LUA + r"""
     if #ARGV[1] > 262144 or #ARGV[2] > 16384
       or not positiveInteger(ARGV[5]) or not timestampSeconds(ARGV[6])
       or not positiveInteger(ARGV[7]) or (ARGV[8] ~= '0' and ARGV[8] ~= '1') then
@@ -2553,6 +2652,12 @@ else:
       or (hasPrevious and redis.call('EXISTS', KEYS[8]) == 1) then
       return cjson.encode({status='conflict'})
     end
+    local discoveryPlan, discoveryError = discoveryPrepare(proposedThread, KEYS[1], integerValue(ARGV[7]) * 1000, ARGV[1])
+    if discoveryError then
+      if discoveryError == 'malformed' then return cjson.encode({status='malformed', predicate='thread_valid'}) end
+      return cjson.encode({status=discoveryError})
+    end
+    discoveryCommit(discoveryPlan)
     redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[7])
     redis.call('SET', KEYS[2], ARGV[3], 'EX', ARGV[7])
     redis.call('SET', KEYS[3], ARGV[2], 'EX', ARGV[5])
@@ -2665,6 +2770,7 @@ else:
             ],
             command_transport,
             response_shapes={
+                "discovery_capacity_reached": set(),
                 "created": set(), "existing": {"collaborationId"},
                 "conflict": set(), "source_pointer_conflict": set(),
                 "malformed": {"predicate"},
@@ -2710,7 +2816,7 @@ else:
                 False,
                 invitation_result.created is True,
             )
-        if result.get("status") == "conflict":
+        if result.get("status") == "conflict" and "error" not in result:
             return {"status": "conflict", "error": {"code": "invalid_request"}}
         if result.get("status") == "source_pointer_conflict":
             return {
@@ -2729,7 +2835,7 @@ else:
         return result
 
 
-    _APPEND_V2_GUEST_REPLY_LUA = _V2_LUA_COMMON + r"""
+    _APPEND_V2_GUEST_REPLY_LUA = _V2_DISCOVERY_LUA + r"""
     if not positiveInteger(ARGV[3]) then return cjson.encode({status='malformed'}) end
     local threadState, raw = readString(KEYS[1], 262144)
     if threadState == 'missing' then return cjson.encode({status='missing'}) end
@@ -2737,7 +2843,7 @@ else:
     local okCurrent, current = decodeWire(raw)
     local okReplacement, replacement = decodeWire(ARGV[2])
     if not okCurrent or not okReplacement or not rawTopLevelArray(raw, 'messages')
-      or not rawTopLevelArray(ARGV[2], 'messages') or not threadValid(current) or not threadValid(replacement) then
+      or not rawTopLevelArray(ARGV[2], 'messages') or not discoveryCanonical(current, raw) or not threadValid(replacement) then
       return cjson.encode({status='malformed'})
     end
     local pointer = redis.call('GET', KEYS[2])
@@ -2816,6 +2922,9 @@ else:
       or redis.call('PTTL', KEYS[3]) <= 0 or redis.call('PTTL', KEYS[4]) <= 0 then
       return cjson.encode({status='session_invalid'})
     end
+    local discoveryPlan, discoveryError = discoveryPrepare(replacement, KEYS[1], integerValue(ARGV[3]) * 1000, ARGV[2])
+    if discoveryError then return cjson.encode({status=discoveryError}) end
+    discoveryCommit(discoveryPlan)
     redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
     redis.call('EXPIRE', KEYS[2], ARGV[3])
     return cjson.encode({status='saved'})
@@ -2879,6 +2988,7 @@ else:
             ],
             command_transport,
             response_shapes={
+                "discovery_capacity_reached": set(),
                 "saved": set(), "missing": set(), "stale": set(), "malformed": set(),
                 "invalid_scope": set(), "nonadvancing": set(), "source_pointer_conflict": set(),
                 "oversized": set(), "invalid_messages": set(), "invite_missing": set(),
@@ -3032,7 +3142,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         return loaded
 
 
-    _TRANSITION_V2_LIFECYCLE_LUA = _V2_LUA_COMMON + r"""
+    _TRANSITION_V2_LIFECYCLE_LUA = _V2_DISCOVERY_LUA + r"""
     if #KEYS ~= 2 or #ARGV ~= 6 or not timestampMilliseconds(ARGV[1])
       or not positiveInteger(ARGV[3]) or not canonicalUserId(ARGV[4])
       or (ARGV[5] ~= 'resolve' and ARGV[5] ~= 'reopen')
@@ -3046,7 +3156,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     local currentOk, current = decodeWire(raw)
     local replacementOk, replacement = decodeWire(ARGV[2])
     if not currentOk or not replacementOk or not rawTopLevelArray(raw, 'messages')
-      or not rawTopLevelArray(ARGV[2], 'messages') or not threadValid(current)
+      or not rawTopLevelArray(ARGV[2], 'messages') or not discoveryCanonical(current, raw)
       or not threadValid(replacement) then return cjson.encode({status='malformed'}) end
     if replacement.ownerUserId ~= ARGV[4]
       or (current.ownerUserId ~= nil and current.ownerUserId ~= ARGV[4])
@@ -3086,6 +3196,9 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     elseif #replacement.participants ~= 0 then
       return cjson.encode({status='invalid_scope'})
     end
+    local discoveryPlan, discoveryError = discoveryPrepare(replacement, KEYS[1], integerValue(ARGV[3]) * 1000, ARGV[2])
+    if discoveryError then return cjson.encode({status=discoveryError}) end
+    discoveryCommit(discoveryPlan)
     redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
     redis.call('EXPIRE', KEYS[2], ARGV[3])
     return cjson.encode({status='changed', record=ARGV[2]})
@@ -3128,6 +3241,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
              owner_user_id, operation, expected_state],
             command_transport,
             response_shapes={
+                "discovery_capacity_reached": set(),
                 "changed": {"record"}, "unchanged": {"record"}, "missing": set(),
                 "stale": set(), "malformed": set(), "invalid_scope": set(),
             },
@@ -3147,7 +3261,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         return result
 
 
-    _SAVE_V2_THREAD_CAS_LUA = _V2_LUA_COMMON + r"""
+    _SAVE_V2_THREAD_CAS_LUA = _V2_DISCOVERY_LUA + r"""
     if not positiveInteger(ARGV[3]) then return cjson.encode({status='malformed'}) end
     local threadState, raw = readString(KEYS[1], 262144)
     if threadState == 'missing' then return cjson.encode({status='missing'}) end
@@ -3155,7 +3269,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     local okCurrent, current = decodeWire(raw)
     local okReplacement, replacement = decodeWire(ARGV[2])
     if not okCurrent or not okReplacement or not rawTopLevelArray(raw, 'messages')
-      or not rawTopLevelArray(ARGV[2], 'messages') or not threadValid(current) or not threadValid(replacement) then
+      or not rawTopLevelArray(ARGV[2], 'messages') or not discoveryCanonical(current, raw) or not threadValid(replacement) then
       return cjson.encode({status='malformed'})
     end
     local pointer = redis.call('GET', KEYS[2])
@@ -3186,6 +3300,9 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     if redis.call('PTTL', KEYS[1]) <= 0 or redis.call('PTTL', KEYS[2]) <= 0 then
       return cjson.encode({status='malformed'})
     end
+    local discoveryPlan, discoveryError = discoveryPrepare(replacement, KEYS[1], integerValue(ARGV[3]) * 1000, ARGV[2])
+    if discoveryError then return cjson.encode({status=discoveryError}) end
+    discoveryCommit(discoveryPlan)
     redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
     redis.call('EXPIRE', KEYS[2], ARGV[3])
     return cjson.encode({status='saved'})
@@ -3222,6 +3339,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
             ],
             command_transport,
             response_shapes={
+                "discovery_capacity_reached": set(),
                 "saved": set(), "missing": set(), "stale": set(),
                 "malformed": set(), "invalid_scope": set(), "nonadvancing": set(),
                 "source_pointer_conflict": set(), "oversized": set(), "invalid_messages": set(),
@@ -3238,7 +3356,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         return result
 
 
-    _SAVE_V2_PARTICIPANTS_CAS_LUA = _V2_LUA_COMMON + r"""
+    _SAVE_V2_PARTICIPANTS_CAS_LUA = _V2_DISCOVERY_LUA + r"""
     local function findParticipant(values, userId)
       if type(values) ~= 'table' then return nil end
       for index = 1, #values do
@@ -3257,7 +3375,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     local currentOk, current = decodeWire(raw)
     local replacementOk, replacement = decodeWire(ARGV[2])
     if not currentOk or not replacementOk or not rawTopLevelArray(raw, 'messages')
-      or not rawTopLevelArray(ARGV[2], 'messages') or not threadValid(current)
+      or not rawTopLevelArray(ARGV[2], 'messages') or not discoveryCanonical(current, raw)
       or not threadValid(replacement) then return cjson.encode({status='malformed'}) end
     if not timestampMilliseconds(ARGV[1]) or current.updatedAt ~= ARGV[1] then
       return cjson.encode({status='stale'})
@@ -3317,6 +3435,9 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     if redis.call('PTTL', KEYS[1]) <= 0 or redis.call('PTTL', KEYS[2]) <= 0 then
       return cjson.encode({status='malformed'})
     end
+    local discoveryPlan, discoveryError = discoveryPrepare(replacement, KEYS[1], integerValue(ARGV[3]) * 1000, ARGV[2])
+    if discoveryError then return cjson.encode({status=discoveryError}) end
+    discoveryCommit(discoveryPlan)
     redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
     redis.call('EXPIRE', KEYS[2], ARGV[3])
     return cjson.encode({status='saved'})
@@ -3387,6 +3508,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
             ],
             command_transport,
             response_shapes={
+                "discovery_capacity_reached": set(),
                 "saved": set(),
                 "missing": set(),
                 "stale": set(),
@@ -3419,7 +3541,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         return result
 
 
-    _APPEND_V2_OWNER_IDEMPOTENT_LUA = _V2_LUA_COMMON + r"""
+    _APPEND_V2_OWNER_IDEMPOTENT_LUA = _V2_DISCOVERY_LUA + r"""
     local IDEMPOTENCY_RECORD_MAX = 1024
     local RETENTION_MAX = 15552000
 
@@ -3464,7 +3586,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     if threadState ~= 'ok' then return cjson.encode({status='malformed'}) end
     local currentOk, current = decodeWire(currentRaw)
     if not currentOk or not rawTopLevelArray(currentRaw, 'messages')
-      or not threadValid(current) then return cjson.encode({status='malformed'}) end
+      or not discoveryCanonical(current, currentRaw) then return cjson.encode({status='malformed'}) end
     if current.collaborationId ~= ARGV[7] or current.ownerEmail ~= ARGV[8]
       or current.workspaceId ~= ARGV[9] or current.mailboxId ~= ARGV[10] then
       return cjson.encode({status='invalid_scope'})
@@ -3576,6 +3698,9 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
       return cjson.encode({status='idempotency_malformed'})
     end
 
+    local discoveryPlan, discoveryError = discoveryPrepare(replacement, KEYS[1], integerValue(ARGV[3]) * 1000, ARGV[2])
+    if discoveryError then return cjson.encode({status=discoveryError}) end
+    discoveryCommit(discoveryPlan)
     redis.call('PSETEX', KEYS[3], tostring(idempotencyRetention * 1000), ARGV[6])
     redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
     redis.call('EXPIRE', KEYS[2], ARGV[3])
@@ -3730,6 +3855,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
             ],
             command_transport,
             response_shapes={
+                "discovery_capacity_reached": set(),
                 "saved": {"message", "updatedAt"},
                 "recovered": {"message", "updatedAt"},
                 "missing": set(),
@@ -5050,4 +5176,219 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
             return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
         if result.get("status") == "expired":
             return {"status": "expired", "error": {"code": "session_expired"}}
+        return result
+
+
+    def build_v2_discovery_key(workspace_id: str, user_id: str) -> str | None:
+        if normalize_v2_workspace_id(workspace_id) is None or normalize_v2_user_id(user_id) is None:
+            return None
+        return f"{V2_KEY_PREFIX}:discovery:{workspace_id}:{user_id}"
+
+
+    _LIST_V2_SUMMARIES_LUA = _V2_DISCOVERY_LUA + r"""
+    if #KEYS ~= 1 or #ARGV ~= 4 or not canonicalWorkspaceId(ARGV[1])
+      or not canonicalUserId(ARGV[2]) or not canonicalEmail(ARGV[3])
+      or KEYS[1] ~= discoveryKey(ARGV[1], ARGV[2]) then
+      return cjson.encode({status='malformed'})
+    end
+    local optionsOk, options = decodeWire(ARGV[4])
+    if not optionsOk or type(options) ~= 'table' or keyCount(options) ~= 2
+      or (options.cursor ~= '' and not opaqueId(options.cursor))
+      or (options.membershipRef ~= '' and not membershipRef(options.membershipRef)) then
+      return cjson.encode({status='malformed'})
+    end
+    local kind = redis.call('TYPE', KEYS[1]).ok
+    if kind == 'none' then return cjson.encode({status='ok', items='[]', nextCursor=''}) end
+    if kind ~= 'hash' or redis.call('HLEN', KEYS[1]) > DISCOVERY_MAX then
+      return cjson.encode({status='malformed'})
+    end
+    local indexTtl = redis.call('PTTL', KEYS[1])
+    if indexTtl <= 0 or indexTtl > DISCOVERY_RETENTION_MS then return cjson.encode({status='malformed'}) end
+    local entries = redis.call('HGETALL', KEYS[1])
+    local ids, bindings = {}, {}
+    for index = 1, #entries, 2 do
+      local id, raw = entries[index], entries[index+1]
+      if not opaqueId(id) or #raw > 4096 then return cjson.encode({status='malformed'}) end
+      local ok, binding = decodeWire(raw)
+      if not ok or not discoveryBindingValid(binding) then return cjson.encode({status='malformed'}) end
+      if id > options.cursor then ids[#ids+1] = id; bindings[id] = binding end
+    end
+    table.sort(ids)
+    local keys, page = {}, {}
+    for index = 1, math.min(#ids, 50) do
+      page[index] = ids[index]
+      keys[index] = DISCOVERY_THREAD_PREFIX .. ids[index]
+    end
+    -- One true MGET; no Python/REST loop and no owner or guest DTO hydration.
+    local records = #keys > 0 and redis.call('MGET', unpack(keys)) or {}
+    local items, prune = {}, {}
+    for index, id in ipairs(page) do
+      local raw = records[index]
+      if not raw then
+        -- MGET also yields nil for a wrong-type value; only absent authority
+        -- permits pruning. Corrupt existing records receive zero index writes.
+        if redis.call('EXISTS', keys[index]) == 0 then prune[#prune+1] = id end
+      elseif #raw <= 262144 then
+        local ttl = redis.call('PTTL', keys[index])
+        -- Every publishing mutation fully validated these exact bytes before
+        -- saving their digest. SHA1 is an integrity/version check, never an
+        -- authorization token. Do not repeat the slow Lua content parser here.
+        local ok, thread = false, nil
+        if ttl > 0 and ttl <= DISCOVERY_RETENTION_MS
+          and redis.sha1hex(raw) == bindings[id].threadHash then
+          ok, thread = pcall(cjson.decode, raw)
+        end
+        if ok and type(thread) == 'table' and thread.v == '2'
+          and participantAuthorityValid(thread) and canonicalEmail(thread.ownerEmail)
+          and timestampMilliseconds(thread.createdAt) and timestampMilliseconds(thread.updatedAt)
+          and integerValue(thread.updatedAt) >= integerValue(thread.createdAt)
+          and (thread.state == 'needs_review' or thread.state == 'needs_action'
+            or thread.state == 'note_only' or thread.state == 'resolved')
+          and thread.collaborationId == id
+          and thread.workspaceId == ARGV[1] and discoveryBindingEqual(thread, bindings[id]) then
+          local access = nil
+          if thread.ownerUserId == ARGV[2] and thread.ownerEmail == ARGV[3] then access = 'owner'
+          elseif thread.ownerUserId ~= ARGV[2] and options.membershipRef ~= '' then
+            for _, participant in ipairs(thread.participants) do
+              if participant.userId == ARGV[2] and participant.membershipRef == options.membershipRef then
+                access = 'participant'
+              end
+            end
+          end
+          if access then
+            items[#items+1] = cjson.encode({collaborationId=id, workspaceId=thread.workspaceId,
+              mailboxId=thread.mailboxId, sourceRef=thread.sourceRef, state=thread.state,
+              updatedAt=thread.updatedAt, viewerAccess=access})
+          end
+        end
+      end
+    end
+    if #prune > 0 then redis.call('HDEL', KEYS[1], unpack(prune)) end
+    return cjson.encode({status='ok', items='[' .. table.concat(items, ',') .. ']',
+      nextCursor=#ids > 50 and page[#page] or ''})
+    """.strip()
+
+
+    def _list_v2_summaries(workspace_id: str, user_id: str, email: str, *,
+                           membership_ref: str | None, cursor: str | None = None,
+                           command_transport=None) -> dict:
+        key = build_v2_discovery_key(workspace_id, user_id)
+        if (key is None or normalize_v2_email(email) is None or normalize_v2_email(email) != email
+            or (cursor is not None and not is_v2_opaque_id(cursor))
+            or (membership_ref is not None and normalize_v2_team_membership_ref(membership_ref) is None)):
+            return {"status": "malformed", "error": {"code": "invalid_request"}}
+        result = _v2_eval(
+            ["EVAL", _LIST_V2_SUMMARIES_LUA, 1, key, workspace_id, user_id, email,
+             json.dumps({"cursor": cursor or "", "membershipRef": membership_ref or ""}, separators=(",", ":"))],
+            command_transport, response_shapes={"ok": {"items", "nextCursor"}, "malformed": set()},
+        )
+        if result.get("status") == "unavailable":
+            return result
+        try:
+            raw = result.get("items")
+            if result.get("status") != "ok" or type(raw) is not str or len(raw.encode("utf-8")) > 131_072:
+                raise ValueError()
+            items = _strict_json_loads(raw, reject_numbers=True)
+            if type(items) is not list or len(items) > MAX_V2_SUMMARY_PAGE_SIZE:
+                raise ValueError()
+            for item in items:
+                at = item.get("updatedAt") if type(item) is dict else None
+                if type(at) is not str or re.fullmatch(r"[1-9][0-9]{12}", at) is None:
+                    raise ValueError()
+                item["updatedAt"] = int(at)
+            next_cursor = result["nextCursor"]
+            if type(next_cursor) is not str:
+                raise ValueError()
+            page = normalize_v2_summary_page(
+                {"v": 1, "workspaceId": workspace_id, "summaries": items,
+                 "nextCursor": next_cursor if next_cursor else None},
+                workspace_id=workspace_id, cursor=cursor,
+            )
+            if page is None:
+                raise ValueError()
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            return {"status": "unavailable", "error": {"code": "storage_protocol_error"}}
+        return {"status": "ok", "page": page, "error": None}
+
+
+    _ENRICH_V2_DISCOVERY_LUA = _V2_DISCOVERY_LUA + r"""
+    if #KEYS ~= 2 or #ARGV ~= 2 or #ARGV[1] > 262144 or #ARGV[2] > 262144 then
+      return cjson.encode({status='malformed'})
+    end
+    local state, raw = readString(KEYS[1], 262144)
+    if state == 'missing' then return cjson.encode({status='missing'}) end
+    if state ~= 'ok' then return cjson.encode({status='malformed'}) end
+    local currentOk, current = decodeWire(raw)
+    local expectedOk, expected = decodeWire(ARGV[1])
+    local proposedOk, proposed = decodeWire(ARGV[2])
+    if not currentOk or not expectedOk or not proposedOk
+      or not discoveryCanonical(current, raw) or not threadValid(expected) or not threadValid(proposed)
+      or not rawTopLevelArray(raw, 'messages') then return cjson.encode({status='malformed'}) end
+    -- Full semantic CAS tolerates canonical key ordering but no content changes.
+    if current.collaborationId ~= expected.collaborationId or current.ownerEmail ~= expected.ownerEmail
+      or current.workspaceId ~= expected.workspaceId or current.mailboxId ~= expected.mailboxId
+      or current.state ~= expected.state or current.createdAt ~= expected.createdAt
+      or current.updatedAt ~= expected.updatedAt or not sourceEqual(current.sourceRef, expected.sourceRef)
+      or not sourceMessageEqual(current.sourceMessage, expected.sourceMessage)
+      or not messagesEqual(current.messages, expected.messages)
+      or not participantAuthorityEqual(current, expected) then return cjson.encode({status='stale'}) end
+    if proposed.collaborationId ~= current.collaborationId or proposed.ownerEmail ~= current.ownerEmail
+      or proposed.workspaceId ~= current.workspaceId or proposed.mailboxId ~= current.mailboxId
+      or proposed.state ~= current.state or proposed.createdAt ~= current.createdAt
+      or proposed.updatedAt ~= current.updatedAt or not sourceEqual(proposed.sourceRef, current.sourceRef)
+      or not sourceMessageEqual(proposed.sourceMessage, current.sourceMessage)
+      or not messagesEqual(proposed.messages, current.messages)
+      or (current.ownerUserId ~= nil and not participantAuthorityEqual(current, proposed))
+      or (current.ownerUserId == nil and #proposed.participants ~= 0) then
+      return cjson.encode({status='malformed'})
+    end
+    local pointerState, pointer = readString(KEYS[2], 128)
+    local ttl = redis.call('PTTL', KEYS[1])
+    if pointerState ~= 'ok' or pointer ~= current.collaborationId or redis.call('PTTL', KEYS[2]) <= 0 then
+      return cjson.encode({status='malformed'})
+    end
+    local canonicalRaw = current.ownerUserId == nil and ARGV[2] or raw
+    local plan, discoveryError = discoveryPrepare(proposed, KEYS[1], ttl, canonicalRaw)
+    if discoveryError then return cjson.encode({status=discoveryError}) end
+    discoveryCommit(plan)
+    if current.ownerUserId == nil then redis.call('PSETEX', KEYS[1], ttl, ARGV[2]) end
+    return cjson.encode({status='ok'})
+    """.strip()
+
+
+    def _enrich_v2_discovery(thread_record: dict, capability: object, *, command_transport=None) -> dict:
+        from .authorization import _is_internal_capability
+        thread = normalize_v2_thread_record(thread_record)
+        if (thread is None or not _is_internal_capability(capability, actions={"read"})
+            or capability.viewer_access != "owner" or capability.actor_kind != "owner"
+            or normalize_v2_user_id(capability.actor_user_id) is None
+            or capability.actor_user_id != capability.owner_user_id
+            or thread["ownerEmail"] != capability.owner_email
+            or thread["workspaceId"] != capability.workspace_id
+            or thread["mailboxId"] != capability.mailbox_id
+            or thread["sourceRef"]["provider"] != capability.mailbox_provider
+            or (capability.collaboration_id is not None and capability.collaboration_id != thread["collaborationId"])
+            or thread.get("ownerUserId", capability.owner_user_id) != capability.owner_user_id):
+            return {"status": "forbidden", "error": {"code": "forbidden"}}
+        proposed = normalize_v2_thread_record({**thread, **({} if "ownerUserId" in thread else {
+            "ownerUserId": capability.owner_user_id, "ownerDisplayName": capability.owner_display_name,
+            "participants": [],
+        })})
+        expected_wire = _v2_wire_json(thread, "thread")
+        wire = _v2_wire_json(proposed, "thread") if proposed is not None else None
+        key = build_v2_thread_key(thread["collaborationId"])
+        source_key = build_v2_source_thread_key(thread["ownerEmail"], thread["mailboxId"], thread["sourceRef"])
+        if wire is None or expected_wire is None or key is None or source_key is None:
+            return {"status": "unavailable", "error": {"code": "storage_unavailable"}}
+        result = _v2_eval(
+            ["EVAL", _ENRICH_V2_DISCOVERY_LUA, 2, key, source_key, expected_wire, wire],
+            command_transport, response_shapes={"ok": set(), "missing": set(), "stale": set(),
+                                                "malformed": set(), "discovery_capacity_reached": set()},
+        )
+        if result.get("status") == "ok":
+            return {"status": "ok", "error": None}
+        if result.get("status") in {"missing", "stale"}:
+            return {"status": "conflict", "error": {"code": "stale_thread"}}
+        if result.get("status") == "malformed":
+            return {"status": "unavailable", "error": {"code": "storage_protocol_error"}}
         return result

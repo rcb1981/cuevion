@@ -47,6 +47,8 @@ else:
     MAX_V2_INVITE_BYTES = 16_384
     MAX_V2_MESSAGES = 500
     MAX_V2_EXPLICIT_PARTICIPANTS = 15
+    MAX_V2_DISCOVERY_ENTRIES = 1000
+    MAX_V2_SUMMARY_PAGE_SIZE = 50
     MAX_V2_EXTERNAL_GUESTS = 16
     MAX_V2_MESSAGE_TEXT = 16_384
     MAX_V2_SOURCE_BODY = 131_072
@@ -95,6 +97,7 @@ else:
             "already_revoked",
             "already_logged_out",
             "guest_capacity_reached",
+            "discovery_capacity_reached",
             "internal_error",
         }
     )
@@ -991,6 +994,57 @@ else:
             )
             else None
         )
+
+
+    def normalize_v2_summary(value: Any, *, workspace_id: str) -> dict | None:
+        """Public lifecycle/source authority; never a content or guest DTO."""
+        fields = {"collaborationId", "workspaceId", "mailboxId", "sourceRef",
+                  "state", "updatedAt", "viewerAccess"}
+        if (
+            type(value) is not dict or not _v2_exact_keys(value, fields)
+            or normalize_v2_workspace_id(workspace_id) is None
+            or value.get("workspaceId") != workspace_id
+            or not is_v2_opaque_id(value.get("collaborationId"))
+            or _v2_mailbox_id(value.get("mailboxId")) is None
+            or normalize_v2_source_ref(value.get("sourceRef")) is None
+            or type(value.get("state")) is not str
+            or value["state"] not in {"needs_review", "needs_action", "note_only", "resolved"}
+            or _v2_timestamp_milliseconds(value.get("updatedAt")) is None
+            or type(value.get("viewerAccess")) is not str
+            or value["viewerAccess"] not in {"owner", "participant"}
+        ):
+            return None
+        return {**value, "sourceRef": dict(value["sourceRef"])}
+
+
+    def normalize_v2_summary_page(value: Any, *, workspace_id: str, cursor=None) -> dict | None:
+        if (
+            type(value) is not dict
+            or not _v2_exact_keys(value, {"v", "workspaceId", "summaries", "nextCursor"})
+            or type(value.get("v")) is not int or value["v"] != 1
+            or normalize_v2_workspace_id(workspace_id) is None
+            or value.get("workspaceId") != workspace_id
+            or (cursor is not None and not is_v2_opaque_id(cursor))
+            or type(value.get("summaries")) is not list
+            or len(value["summaries"]) > MAX_V2_SUMMARY_PAGE_SIZE
+            or (value.get("nextCursor") is not None and (
+                not is_v2_opaque_id(value["nextCursor"])
+                or value["nextCursor"] <= (cursor or "")
+            ))
+        ):
+            return None
+        summaries = []
+        previous = cursor or ""
+        for raw in value["summaries"]:
+            summary = normalize_v2_summary(raw, workspace_id=workspace_id)
+            if summary is None or summary["collaborationId"] <= previous:
+                return None
+            previous = summary["collaborationId"]
+            summaries.append(summary)
+        if value["nextCursor"] is not None and previous > value["nextCursor"]:
+            return None
+        return {"v": 1, "workspaceId": workspace_id, "summaries": summaries,
+                "nextCursor": value["nextCursor"]}
 
 
     def normalize_v2_invite_record(value: Any) -> dict | None:

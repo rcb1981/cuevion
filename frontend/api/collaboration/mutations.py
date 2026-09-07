@@ -51,6 +51,7 @@ def _failure(code: str) -> dict:
 
 
 _CANONICAL_MUTATION_STORAGE_ERRORS = {
+    ("conflict", "discovery_capacity_reached"): "discovery_capacity_reached",
     ("conflict", "stale_thread"): "stale_thread",
     ("conflict", "idempotency_conflict"): "idempotency_conflict",
     ("expired", "session_expired"): "session_expired",

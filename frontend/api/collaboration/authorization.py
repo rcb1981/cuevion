@@ -533,3 +533,50 @@ def resolve_verified_owner_collaboration_context(
         ),
     )
     return {"status": "ok", "context": capability, "error": None}
+
+
+def resolve_verified_summary_viewer(
+    owner_context: object, headers: object, *, owner_security_configuration: object,
+    member_resolver=None, team_member_resolver=None,
+) -> dict:
+    """One current account resolution and one exact Team snapshot per request."""
+    from . import owner_request_security as security
+    try:
+        from api.auth import runtime
+    except ImportError:
+        return _failure("unavailable", "storage_unavailable")
+    if not security._is_owner_context(owner_context):
+        return _failure("unauthorized", "auth_required")
+    if not security.owner_is_allowlisted(owner_context, owner_security_configuration):
+        raise security.OwnerSecurityError("rollout_unavailable")
+    member_resolver = member_resolver or _resolve_current_authenticated_member
+    team_member_resolver = team_member_resolver or _resolve_active_team_member
+    try:
+        member, error = member_resolver(headers)
+    except Exception:
+        return _failure("unavailable", "storage_unavailable")
+    if error == "unauthorized":
+        return _failure("unauthorized", "auth_required")
+    if error is not None:
+        return _failure("unavailable", "storage_unavailable")
+    if (type(member) is not runtime.AuthenticatedMemberContext
+        or member.auth_source != "auth0" or member.user_type != "member"
+        or normalize_v2_user_id(member.user_id) != member.user_id
+        or member.email != owner_context.owner_email
+        or member.workspace_id != owner_context.workspace_id
+        or member.name != owner_context.display_name):
+        return _failure("forbidden", "forbidden")
+    try:
+        membership, error = team_member_resolver(member.workspace_id, member.user_id)
+    except Exception:
+        return _failure("unavailable", "storage_unavailable")
+    from .models import normalize_v2_team_membership_ref
+    if error == "not_active" and membership is None:
+        membership_ref = None  # Owner authority is independent of Team enrollment.
+    elif error is None and type(membership) is dict and membership.get("memberUserId") == member.user_id:
+        membership_ref = normalize_v2_team_membership_ref(membership.get("sourceInvitationId"))
+        if membership_ref is None:
+            return _failure("unavailable", "storage_protocol_error")
+    else:
+        return _failure("unavailable", "storage_unavailable")
+    return {"status": "ok", "member": member, "membershipRef": membership_ref, "error": None}
