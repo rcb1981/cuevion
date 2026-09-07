@@ -271,6 +271,7 @@ export function ExternalCollaborationGuestView({
   const mountedRef = useRef(false);
   const requestsInFlightRef = useRef(0);
   const wasHiddenRef = useRef(false);
+  const returnCheckedRef = useRef(false);
 
   const canApplyResult = () => mountedRef.current && !endedRef.current;
 
@@ -358,14 +359,15 @@ export function ExternalCollaborationGuestView({
   }, []);
 
   useEffect(() => {
-    const handleVisibilityChange = () => {
-      const wasHidden = wasHiddenRef.current;
-      wasHiddenRef.current = document.visibilityState === "hidden";
+    const revalidateOnReturn = () => {
       if (
-        document.visibilityState !== "visible" || !wasHidden ||
-        !canApplyResult() || state !== "ready" ||
-        requestsInFlightRef.current > 0
+        document.visibilityState !== "visible" || !canApplyResult() ||
+        returnCheckedRef.current
       ) return;
+
+      // Focus and visibility can describe the same return, even after GET settles.
+      returnCheckedRef.current = true;
+      if (state !== "ready" || requestsInFlightRef.current > 0) return;
 
       // Every guest request checks server authority; reuse one already in flight.
       void request(() => api.read()).then((result) => {
@@ -376,8 +378,24 @@ export function ExternalCollaborationGuestView({
         // This check establishes access only; it cannot overwrite a newer reply.
       });
     };
+    const handleBlur = () => { returnCheckedRef.current = false; };
+    const handleVisibilityChange = () => {
+      const wasHidden = wasHiddenRef.current;
+      wasHiddenRef.current = document.visibilityState === "hidden";
+      if (wasHiddenRef.current) {
+        handleBlur();
+      } else if (wasHidden) {
+        revalidateOnReturn();
+      }
+    };
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", revalidateOnReturn);
+    window.addEventListener("blur", handleBlur);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", revalidateOnReturn);
+      window.removeEventListener("blur", handleBlur);
+    };
   }, [api, state]);
 
   const handleExchange = async (event: FormEvent) => {
