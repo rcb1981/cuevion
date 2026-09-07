@@ -4678,6 +4678,44 @@ class ExternalGuestApplicationTests(unittest.TestCase):
         authorize.assert_not_called()
         create.assert_not_called()
 
+    def test_external_create_and_issue_reject_present_empty_email_before_side_effects(self):
+        create_payload = {
+            "mailboxId": MAILBOX_ID,
+            "sourceRef": {"providerMessageId": "provider-1"},
+            "state": "needs_review",
+        }
+        with ExitStack() as stack:
+            blocked = [
+                stack.enter_context(patch.object(
+                    application, name,
+                    side_effect=AssertionError("invalid email must not cause side effects"),
+                ))
+                for name in (
+                    "resolve_verified_owner_collaboration_context",
+                    "generate_v2_opaque_id", "generate_v2_bearer_secret",
+                    "_create_v2_thread_with_guest", "issue_v2_invitation",
+                )
+            ]
+            for invalid_email in ("", " ", None, "not-an-email"):
+                for operation in ("create", "issue"):
+                    with self.subTest(operation=operation, invited_email=invalid_email):
+                        if operation == "create":
+                            result = application.create_v2_collaboration_with_guest_for_verified_owner(
+                                object(), object(),
+                                {**create_payload, "invitedEmail": invalid_email},
+                                owner_security_configuration=object(),
+                            )
+                        else:
+                            result = application.issue_v2_guest_invitation_for_verified_owner(
+                                object(), object(), COLLABORATION_ID,
+                                {"invitedEmail": invalid_email},
+                                owner_security_configuration=object(),
+                            )
+                        self.assertEqual(result["status"], "malformed")
+                        self.assertEqual(result["error"], {"code": "invalid_request"})
+            for helper in blocked:
+                helper.assert_not_called()
+
     def test_duplicate_and_failed_create_never_return_an_unpersisted_token(self):
         capability = self.capability("create")
         source = self.source_result()

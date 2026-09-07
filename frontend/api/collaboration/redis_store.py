@@ -3677,6 +3677,23 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         and nullableEqual(a.revokedAt, b.revokedAt) and nullableEqual(a.revokedBy, b.revokedBy)
         and nullableEqual(a.activeSessionHash, b.activeSessionHash)
     end
+    local function revokedInviteMatchesIdentity(identity, revoked)
+      -- Exchange/revoke update the canonical invite, while the identity slot
+      -- retains its original active snapshot. After validated revocation, require
+      -- every immutable field to match without equating the mutable audit fields.
+      return identity.v == revoked.v and identity.inviteId == revoked.inviteId
+        and identity.tokenHash == revoked.tokenHash
+        and identity.ownerEmail == revoked.ownerEmail and identity.workspaceId == revoked.workspaceId
+        and identity.mailboxId == revoked.mailboxId and identity.collaborationId == revoked.collaborationId
+        and nullableEqual(identity.invitedEmail, revoked.invitedEmail)
+        and identity.identityAssurance == revoked.identityAssurance
+        and identity.allowedActions[1] == revoked.allowedActions[1]
+        and identity.allowedActions[2] == revoked.allowedActions[2]
+        and identity.visibility == revoked.visibility
+        and identity.createdBy.ownerEmail == revoked.createdBy.ownerEmail
+        and identity.createdBy.displayName == revoked.createdBy.displayName
+        and identity.createdAt == revoked.createdAt and identity.expiresAt == revoked.expiresAt
+    end
     local function inviteMatchesRequested(existing, proposed)
       return existing.ownerEmail == proposed.ownerEmail and existing.workspaceId == proposed.workspaceId
         and existing.mailboxId == proposed.mailboxId and existing.collaborationId == proposed.collaborationId
@@ -3808,9 +3825,20 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
       local tokenState, tokenPointer = readString(KEYS[tokenKeyIndex], 128)
       if canonicalState ~= 'ok' or tokenState ~= 'ok' then return cjson.encode({status='conflict'}) end
       local canonicalOk, canonical = decodeWire(canonicalRaw)
-      if not canonicalOk or not inviteValid(canonical, canonicalRaw) or canonical.status ~= 'active'
-        or integerValue(canonical.expiresAt) <= now or not inviteLinkEqual(existing, canonical)
+      if not canonicalOk or not inviteValid(canonical, canonicalRaw)
+        or integerValue(canonical.expiresAt) <= now
         or not inviteMatchesRequested(canonical, proposed) or tokenPointer ~= canonical.inviteId then
+        return cjson.encode({status='conflict'})
+      end
+      local replacingRevoked = canonical.status == 'revoked'
+      if replacingRevoked then
+        if not revokedInviteMatchesIdentity(existing, canonical)
+          or integerValue(canonical.revokedAt) > now
+          or proposed.inviteId == canonical.inviteId or proposed.tokenHash == canonical.tokenHash
+          or KEYS[1] == KEYS[canonicalKeyIndex] or KEYS[2] == KEYS[tokenKeyIndex] then
+          return cjson.encode({status='conflict'})
+        end
+      elseif canonical.status ~= 'active' or not inviteLinkEqual(existing, canonical) then
         return cjson.encode({status='conflict'})
       end
       if KEYS[1] ~= KEYS[canonicalKeyIndex] and redis.call('EXISTS', KEYS[1]) == 1 then
@@ -3829,6 +3857,21 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         or (current and (currentPttl <= 0 or currentPttl > canonicalPttl + 1000 or currentPttl > absolutePttl))
         or (previous and (previousPttl <= 0 or previousPttl > canonicalPttl + 1000 or previousPttl > absolutePttl)) then
         return cjson.encode({status='conflict'})
+      end
+      if replacingRevoked then
+        if not addGuestReference(guestIds, canonical.inviteId, integerValue(ARGV[11]))
+          or not addGuestReference(guestIds, proposed.inviteId, integerValue(ARGV[11])) then
+          return cjson.encode({status='capacity'})
+        end
+        -- Publish a distinct invite atomically; retain the old canonical record,
+        -- token pointer, session and historical index entry with their current TTLs.
+        redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+        redis.call('SET', KEYS[2], ARGV[4], 'EX', ARGV[2])
+        redis.call('SET', KEYS[3], ARGV[1], 'EX', ARGV[2])
+        if previous then redis.call('DEL', KEYS[4]) end
+        guestIndexPttl = math.max(guestIndexPttl, canonicalPttl, integerValue(ARGV[2]) * 1000)
+        redis.call('SET', KEYS[indexKeyIndex], cjson.encode({v='1', inviteIds=guestIds}), 'PX', math.floor(guestIndexPttl))
+        return cjson.encode({status='created'})
       end
       if not addGuestReference(guestIds, canonical.inviteId, integerValue(ARGV[11])) then
         return cjson.encode({status='capacity'})

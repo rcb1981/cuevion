@@ -10942,6 +10942,422 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         self.assertNotIn(removed_id, pruned_ids)
         self.assertIn(replacement["inviteId"], pruned_ids)
 
+    def _c2g5_issue_for_owner(self, thread, payload, *, now, transport):
+        owner_id = "usr_" + "A" * 22
+        capability = authorization._InternalCollaborationCapability(
+            authorization._INTERNAL_CAPABILITY_SENTINEL,
+            thread["ownerEmail"], thread["workspaceId"], thread["mailboxId"],
+            thread["sourceRef"]["provider"], thread["collaborationId"],
+            "issue_invite", "owner", "Owner", owner_id, "owner", owner_id, "Owner",
+        )
+        def issue(context, collaboration_id, **kwargs):
+            return guest_session.issue_v2_invitation(
+                context, collaboration_id, **kwargs, now=now, command_transport=transport,
+            )
+        def load_thread(collaboration_id):
+            return redis_store._load_v2_thread(collaboration_id, command_transport=transport)
+        def load_guests(*args, **kwargs):
+            return redis_store._load_v2_external_guest_records(*args, **kwargs, command_transport=transport)
+        with patch.object(application, "resolve_verified_owner_collaboration_context", return_value={
+            "status": "ok", "context": capability, "error": None,
+        }), patch.object(application, "issue_v2_invitation", side_effect=issue), patch.object(
+            application, "_load_v2_thread", side_effect=load_thread,
+        ), patch.object(application, "_load_v2_external_guest_records", side_effect=load_guests), patch.object(
+            application.time, "time", return_value=now,
+        ), patch.object(guest_session, "generate_v2_opaque_id", return_value="J" * 22), patch.object(
+            guest_session, "generate_v2_bearer_secret", return_value="u" * 43,
+        ):
+            return application.issue_v2_guest_invitation_for_verified_owner(
+                object(), (), thread["collaborationId"], payload,
+                owner_security_configuration=object(),
+            )
+
+    def _c2g5_prepare_revoked(self, mode, email, *, exchanged, hmac_mode="current", prior_capabilities=None):
+        thread = thread_record()
+        invite = invite_record()
+        if email is not None:
+            invite["invitedEmail"] = email
+        encode_key = lambda value: base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+        os.environ[redis_store.V2_INDEX_HMAC_ENV] = encode_key(b"p" * 32)
+        os.environ.pop(redis_store.V2_INDEX_HMAC_PREVIOUS_ENV, None)
+        transport = self._session_null_transport(mode)
+        self.assertEqual(redis_store._create_v2_thread_with_guest(
+            thread, invite, now=SEC + 100, command_transport=transport,
+        ).get("status"), "ok")
+        primary, token, old_identity = self._invite_keys(invite)
+        session = session_record("s" * 43) if exchanged else None
+        if session is not None:
+            self.assertEqual(redis_store._atomic_exchange_v2_invite(
+                raw_token="t" * 43, invite_id=invite["inviteId"], session_record=session,
+                now=SEC + 101, session_ttl=49, command_transport=transport,
+            ), {"status": "ok"})
+            if prior_capabilities is not None:
+                prior_capabilities.append(self._d10_guest_mutation_capability(transport, now=SEC + 101))
+        self.assertEqual(redis_store._revoke_v2_invite(
+            invite["inviteId"], owner_email=invite["ownerEmail"], workspace_id=invite["workspaceId"],
+            mailbox_id=invite["mailboxId"], collaboration_id=invite["collaborationId"],
+            revoked_by=invite["ownerEmail"], now=SEC + 102, command_transport=transport,
+        ), {"status": "ok"})
+        if hmac_mode != "current":
+            os.environ[redis_store.V2_INDEX_HMAC_ENV] = encode_key(b"c" * 32)
+            os.environ[redis_store.V2_INDEX_HMAC_PREVIOUS_ENV] = encode_key(b"p" * 32)
+        current_identity = self._invite_keys(invite)[2]
+        if hmac_mode == "both":
+            self.client.command(["SET", current_identity, self.client.command(["GET", old_identity]), "PX", 97_000])
+        # Age the local keys to the fixture's advanced logical clock without
+        # sleeping through each lifecycle. Production TTL formulas are unchanged.
+        for key in {primary, token, old_identity, current_identity}:
+            pttl = self.client.command(["PTTL", key])
+            if pttl > 0:
+                self.client.command(["PEXPIRE", key, min(pttl, 97_000)])
+        if session is not None:
+            key = self._session_key(session)
+            self.client.command(["PEXPIRE", key, min(self.client.command(["PTTL", key]), 47_000)])
+        return thread, invite, session, (primary, token, old_identity, current_identity), transport
+
+    def test_c2g5_real_owner_reinvite_after_revoke_preserves_history_and_new_exchange(self):
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for email in (None, "reviewer@example.com"):
+                for exchanged in (False, True):
+                    for hmac_mode in ("current", "previous", "both"):
+                        with self.subTest(mode=mode, email=email, exchanged=exchanged, hmac=hmac_mode):
+                            self.client.command(["FLUSHALL"])
+                            prior_capabilities = []
+                            thread, old_invite, old_session, keys, transport = self._c2g5_prepare_revoked(
+                                mode, email, exchanged=exchanged, hmac_mode=hmac_mode, prior_capabilities=prior_capabilities,
+                            )
+                            primary, token, old_identity, current_identity = keys
+                            historical_keys = (primary, token) + ((self._session_key(old_session),) if old_session else ())
+                            historical_values = tuple(self.client.command(["GET", key]) for key in historical_keys)
+                            historical_ttls = self._pttls(*historical_keys)
+                            existing_keys = set(self.client.command(["KEYS", f"{redis_store.V2_KEY_PREFIX}:*"]))
+                            payload = {} if email is None else {"invitedEmail": email}
+                            result = self._c2g5_issue_for_owner(thread, payload, now=SEC + 103, transport=transport)
+                            self.assertEqual(result.get("status"), "ok", result)
+                            self.assertTrue(result.get("invitationCreated"), result)
+                            self.assertEqual(result.get("token"), "u" * 43)
+                            new_primary = redis_store.build_v2_invite_key("J" * 22)
+                            new_token = redis_store.build_v2_invite_token_key(hash_v2_secret("u" * 43))
+                            new_invite = typed_wire_json(self.client.command(["GET", new_primary]), "invite")
+                            self._assert_canonical_stored_invite(new_primary, new_invite)
+                            self._assert_canonical_stored_invite(current_identity, new_invite)
+                            self.assertEqual(new_invite["tokenHash"], hash_v2_secret(result["token"]))
+                            self.assertNotEqual(new_invite["tokenHash"], old_invite["tokenHash"])
+                            self.assertNotEqual(new_invite["inviteId"], old_invite["inviteId"])
+                            self.assertEqual(new_invite["status"], "active")
+                            self.assertEqual(new_invite["createdAt"], SEC + 103)
+                            self.assertEqual(new_invite["expiresAt"] - new_invite["createdAt"], guest_session.INVITE_LIFETIME_SECONDS)
+                            self.assertEqual("invitedEmail" in new_invite, email is not None)
+                            if email is not None:
+                                self.assertEqual(new_invite["invitedEmail"], email)
+                            for member in ("ownerEmail", "workspaceId", "mailboxId", "collaborationId", "identityAssurance", "allowedActions", "visibility"):
+                                self.assertEqual(new_invite[member], old_invite[member])
+                            self.assertEqual(self.client.command(["GET", new_token]), new_invite["inviteId"])
+                            if old_identity != current_identity:
+                                self.assertIsNone(self.client.command(["GET", old_identity]))
+                            for key in (new_primary, new_token, current_identity):
+                                self._assert_ttl_ceiling(key, guest_session.INVITE_LIFETIME_SECONDS)
+                            index = redis_store.build_v2_external_guest_index_key(thread["collaborationId"])
+                            self.assertEqual(json.loads(self.client.command(["GET", index]))["inviteIds"], ["I" * 22, "J" * 22])
+                            guests = {entry["inviteId"]: entry for entry in result["collaboration"]["externalGuests"]}
+                            self.assertEqual(guests["I" * 22]["status"], "revoked")
+                            self.assertEqual(guests["J" * 22]["status"], "pending")
+                            self.assertEqual("invitedEmail" in guests["J" * 22], email is not None)
+                            if email is not None:
+                                self.assertEqual(guests["J" * 22]["invitedEmail"], email)
+                            new_session = {**session_record("v" * 43), "inviteId": "J" * 22,
+                                           "createdAt": SEC + 104, "lastUsedAt": SEC + 104}
+                            self.assertEqual(redis_store._atomic_exchange_v2_invite(
+                                raw_token=result["token"], invite_id=new_invite["inviteId"], session_record=new_session,
+                                now=SEC + 104, session_ttl=46, command_transport=transport,
+                            ), {"status": "ok"})
+                            self._assert_canonical_stored_session(self._session_key(new_session), new_session)
+                            self._assert_canonical_stored_invite(new_primary, {
+                                **new_invite, "status": "exchanged", "exchangeCount": 1,
+                                "exchangedAt": SEC + 104, "activeSessionHash": new_session["sessionHash"],
+                            })
+                            denied = redis_store._atomic_exchange_v2_invite(
+                                raw_token="t" * 43, invite_id=old_invite["inviteId"], session_record=session_record("x" * 43),
+                                now=SEC + 104, session_ttl=46, command_transport=transport,
+                            )
+                            self.assertEqual(denied.get("error"), {"code": "invite_revoked"})
+                            before_denied_access = self._snapshot_v2_state()
+                            for prior_secret, expected_code in (("t" * 43, "session_not_found"), ("s" * 43, "session_revoked" if old_session else "session_not_found")):
+                                bootstrap = guest_session._bootstrap_v2_guest_session_read_only(
+                                    prior_secret, now=SEC + 104, command_transport=transport,
+                                )
+                                self.assertEqual(bootstrap.get("error", {}).get("code"), expected_code)
+                                capability, loaded_session, access_error = guest_session._resolve_guest_read_access(
+                                    prior_secret, now=SEC + 104, command_transport=transport,
+                                )
+                                self.assertIsNone(capability)
+                                self.assertIsNone(loaded_session)
+                                self.assertEqual(access_error.get("error", {}).get("code"), expected_code)
+                                denied_mutation = guest_session.resolve_guest_v2_mutation_context(
+                                    "POST", [("Origin", "https://app.cuevion.test"), ("Content-Type", "application/json"),
+                                             (guest_session.CSRF_HEADER_NAME, "c" * 43),
+                                             ("Cookie", f"{guest_session.GUEST_SESSION_COOKIE_NAME}={prior_secret}")],
+                                    now=SEC + 104, command_transport=transport,
+                                    environment={"VERCEL_ENV": "production", "CUEVION_APP_ORIGIN": "https://app.cuevion.test"},
+                                )
+                                self.assertEqual(denied_mutation.get("error", {}).get("code"), expected_code)
+                            if prior_capabilities:
+                                with patch.object(mutations.time, "time", return_value=SEC + 104), patch.object(
+                                    mutations.time, "time_ns", return_value=(SEC + 104) * 1_000_000_000,
+                                ):
+                                    denied_reply = mutations.append_guest_v2_reply(prior_capabilities[0], "Revoked session cannot reply", command_transport=transport)
+                                expected_reply_code = "session_revoked" if hmac_mode == "current" else "storage_protocol_error"
+                                self.assertEqual(denied_reply, {"status": "error", "error": {"code": expected_reply_code}})
+                            self._assert_v2_state_unchanged(before_denied_access)
+                            new_capability, loaded_new_session, access_error = guest_session._resolve_guest_read_access(
+                                "v" * 43, now=SEC + 104, command_transport=transport,
+                            )
+                            self.assertIsNone(access_error)
+                            self.assertEqual(new_capability.invite_id, new_invite["inviteId"])
+                            self.assertEqual(loaded_new_session, new_session)
+                            self.assertEqual(tuple(self.client.command(["GET", key]) for key in historical_keys), historical_values)
+                            self._assert_ttls_not_refreshed(historical_ttls, self._pttls(*historical_keys))
+                            expected_keys = existing_keys | {new_primary, new_token, current_identity, self._session_key(new_session)}
+                            if old_identity != current_identity:
+                                expected_keys.discard(old_identity)
+                            self.assertEqual(set(self.client.command(["KEYS", f"{redis_store.V2_KEY_PREFIX}:*"])), expected_keys)
+                            self._assert_retention_pair(self._thread_key(thread["collaborationId"]), self._source_key(thread, hmac_key=b"p" * 32))
+
+    def test_c2g5_active_duplicate_and_invalid_email_contract_remain_fail_closed(self):
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for email in (None, "reviewer@example.com"):
+                with self.subTest(mode=mode, email=email):
+                    self.client.command(["FLUSHALL"])
+                    thread = thread_record()
+                    invite = {**invite_record(), **({"invitedEmail": email} if email else {})}
+                    transport = self._session_null_transport(mode)
+                    self.assertEqual(redis_store._create_v2_thread_with_guest(thread, invite, now=SEC + 100, command_transport=transport).get("status"), "ok")
+                    before = self._snapshot_v2_state()
+                    duplicate = self._c2g5_issue_for_owner(thread, {} if email is None else {"invitedEmail": email}, now=SEC + 100, transport=transport)
+                    self.assertEqual(duplicate.get("status"), "ok", duplicate)
+                    self.assertFalse(duplicate["invitationCreated"])
+                    self.assertNotIn("token", duplicate)
+                    self.assertEqual(duplicate["invitation"]["inviteId"], invite["inviteId"])
+                    self._assert_v2_state_unchanged(before)
+                    self.assertEqual(redis_store._revoke_v2_invite(
+                        invite["inviteId"], owner_email=invite["ownerEmail"], workspace_id=invite["workspaceId"],
+                        mailbox_id=invite["mailboxId"], collaboration_id=invite["collaborationId"],
+                        revoked_by=invite["ownerEmail"], now=SEC + 102, command_transport=transport,
+                    ), {"status": "ok"})
+                    for invalid in ("", " ", "invalid", None, 7):
+                        with self.subTest(invalid=invalid):
+                            before = self._snapshot_v2_state()
+                            rejected = self._c2g5_issue_for_owner(thread, {"invitedEmail": invalid}, now=SEC + 103, transport=transport)
+                            self.assertEqual(rejected, {"status": "malformed", "collaboration": None, "error": {"code": "invalid_request"}})
+                            self._assert_v2_state_unchanged(before)
+
+    def test_c2g5_reinvite_after_physical_expiry_preserves_existing_expiry_contract(self):
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for email in (None, "reviewer@example.com"):
+                with self.subTest(mode=mode, email=email):
+                    self.client.command(["FLUSHALL"])
+                    thread = thread_record()
+                    invite = {**invite_record(), **({"invitedEmail": email} if email else {})}
+                    transport = self._session_null_transport(mode)
+                    self.assertEqual(redis_store._create_v2_thread_with_guest(thread, invite, now=SEC + 100, command_transport=transport).get("status"), "ok")
+                    payload = {} if email is None else {"invitedEmail": email}
+                    before = self._snapshot_v2_state()
+                    retained = self._c2g5_issue_for_owner(thread, payload, now=SEC + 201, transport=transport)
+                    self.assertEqual(retained.get("error"), {"code": "invalid_request"})
+                    self._assert_v2_state_unchanged(before)
+                    for key in self._invite_keys(invite):
+                        self.client.command(["PEXPIRE", key, 1])
+                    time.sleep(0.01)
+                    self.assertTrue(all(self.client.command(["GET", key]) is None for key in self._invite_keys(invite)))
+                    replacement = self._c2g5_issue_for_owner(thread, payload, now=SEC + 201, transport=transport)
+                    self.assertEqual(replacement.get("status"), "ok", replacement)
+                    self.assertTrue(replacement["invitationCreated"])
+                    primary = redis_store.build_v2_invite_key("J" * 22)
+                    stored = typed_wire_json(self.client.command(["GET", primary]), "invite")
+                    self._assert_canonical_stored_invite(primary, stored)
+                    self.assertEqual("invitedEmail" in stored, email is not None)
+                    if email is not None:
+                        self.assertEqual(stored["invitedEmail"], email)
+                    self.assertIsNone(self.client.command(["GET", redis_store.build_v2_invite_key(invite["inviteId"])]))
+                    self.assertIsNone(self.client.command(["GET", redis_store.build_v2_invite_token_key(invite["tokenHash"])]))
+                    index = redis_store.build_v2_external_guest_index_key(thread["collaborationId"])
+                    self.assertEqual(json.loads(self.client.command(["GET", index]))["inviteIds"], ["J" * 22])
+
+    def test_c2g5_revoked_replacement_rejects_corrupt_graph_without_any_write(self):
+        cases = ("missing_primary", "malformed_primary", "missing_nullable", "wrong_token", "missing_token",
+                 "wrong_owner", "wrong_workspace", "wrong_mailbox", "wrong_collaboration", "wrong_email",
+                 "changed_created_at", "changed_expiry", "future_revocation", "exchanged", "expired")
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for hmac_mode in ("current", "previous"):
+                for corruption in cases:
+                    with self.subTest(mode=mode, hmac=hmac_mode, corruption=corruption):
+                        self.client.command(["FLUSHALL"])
+                        thread, invite, _, keys, transport = self._c2g5_prepare_revoked(mode, None, exchanged=True, hmac_mode=hmac_mode)
+                        primary, token, _, _ = keys
+                        value = json.loads(self.client.command(["GET", primary]))
+                        if corruption == "missing_primary":
+                            self.client.command(["DEL", primary])
+                        elif corruption == "malformed_primary":
+                            self.client.command(["SET", primary, "not-json", "KEEPTTL"])
+                        elif corruption == "missing_token":
+                            self.client.command(["DEL", token])
+                        elif corruption == "wrong_token":
+                            self.client.command(["SET", token, "K" * 22, "KEEPTTL"])
+                        else:
+                            if corruption == "missing_nullable":
+                                del value["revokedBy"]
+                            elif corruption == "wrong_owner":
+                                value.update(ownerEmail="other@example.com", revokedBy="other@example.com", createdBy={"ownerEmail": "other@example.com", "displayName": "Owner"})
+                            elif corruption == "wrong_workspace":
+                                value["workspaceId"] = OTHER_WORKSPACE_ID
+                            elif corruption == "wrong_mailbox":
+                                value["mailboxId"] = "other-mailbox"
+                            elif corruption == "wrong_collaboration":
+                                value["collaborationId"] = "B" * 22
+                            elif corruption == "wrong_email":
+                                value["invitedEmail"] = "other@example.com"
+                            elif corruption == "changed_created_at":
+                                value["createdAt"] = str(SEC + 99)
+                            elif corruption == "changed_expiry":
+                                value["expiresAt"] = str(SEC + 199)
+                            elif corruption == "future_revocation":
+                                value["revokedAt"] = str(SEC + 105)
+                            elif corruption == "exchanged":
+                                value.update(status="exchanged", revokedAt=None, revokedBy=None)
+                            elif corruption == "expired":
+                                value.update(status="expired", revokedAt=None, revokedBy=None, exchangedAt=None, exchangeCount="0")
+                                del value["activeSessionHash"]
+                            self.client.command(["SET", primary, compact_json(value), "KEEPTTL"])
+                        before = self._snapshot_v2_state()
+                        rejected = self._c2g5_issue_for_owner(thread, {}, now=SEC + 103, transport=transport)
+                        self.assertEqual(rejected, {"status": "error", "collaboration": None, "error": {"code": "invalid_request"}})
+                        self._assert_v2_state_unchanged(before)
+
+    def test_c2g5_invalid_proposal_and_key_collisions_never_partially_replace(self):
+        malformed = {"missing_nullable", "duplicate_nullable", "empty_email", "wrong_token_argument", "wrong_id_argument"}
+        cases = (*sorted(malformed), "same_invite_id", "same_token_hash", "alias_old_primary", "alias_old_token", "occupied_primary", "occupied_token")
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for corruption in cases:
+                with self.subTest(mode=mode, corruption=corruption):
+                    self.client.command(["FLUSHALL"])
+                    _, old, _, keys, _ = self._c2g5_prepare_revoked(mode, None, exchanged=True)
+                    proposal = {**invite_record("u" * 43), "inviteId": "J" * 22, "createdAt": SEC + 103, "expiresAt": SEC + 303}
+                    if corruption == "same_invite_id":
+                        proposal["inviteId"] = old["inviteId"]
+                    elif corruption == "same_token_hash":
+                        proposal["tokenHash"] = old["tokenHash"]
+                    if corruption in {"occupied_primary", "occupied_token"}:
+                        collision = self._invite_keys(proposal)[0 if corruption == "occupied_primary" else 1]
+                        self.client.command(["SET", collision, "occupied", "EX", 97])
+                    before = self._snapshot_v2_state()
+                    def corrupt(command, argv):
+                        if command[1] != redis_store._CREATE_V2_INVITE_LUA:
+                            return
+                        if corruption in {"missing_nullable", "empty_email"}:
+                            value = json.loads(command[argv])
+                            if corruption == "missing_nullable":
+                                del value["revokedAt"]
+                            else:
+                                value["invitedEmail"] = ""
+                            command[argv] = compact_json(value)
+                        elif corruption == "duplicate_nullable":
+                            command[argv] = command[argv].replace('"revokedAt":null', '"revokedAt":null,"revokedAt":null', 1)
+                        elif corruption == "wrong_token_argument":
+                            command[argv + 11] = "f" * 64
+                        elif corruption == "wrong_id_argument":
+                            command[argv + 3] = "K" * 22
+                        elif corruption == "alias_old_primary":
+                            command[3] = keys[0]
+                        elif corruption == "alias_old_token":
+                            command[4] = keys[1]
+                    null_transport = self._session_null_transport(mode, mutate=corrupt)
+                    lua_statuses = []
+                    def transport(command):
+                        result = null_transport(command)
+                        if command[0] == "EVAL" and command[1] == redis_store._CREATE_V2_INVITE_LUA:
+                            lua_statuses.append(json.loads(result["result"])["status"])
+                        return result
+                    rejected = self._real_create_v2_invite(proposal, now=SEC + 103, command_transport=transport)
+                    self.assertEqual(rejected.get("status"), "malformed" if corruption in malformed else "conflict", rejected)
+                    self.assertEqual(lua_statuses[-1], "malformed" if corruption in malformed else "conflict")
+                    self._assert_v2_state_unchanged(before)
+
+    def test_c2g5_concurrent_replacements_use_existing_hmac_cas_without_orphans(self):
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for hmac_mode in ("current", "previous"):
+                with self.subTest(mode=mode, hmac=hmac_mode):
+                    self.client.command(["FLUSHALL"])
+                    _, old, session, keys, _ = self._c2g5_prepare_revoked(mode, None, exchanged=True, hmac_mode=hmac_mode)
+                    historical_keys = (keys[0], keys[1], self._session_key(session))
+                    historical_values = tuple(self.client.command(["GET", key]) for key in historical_keys)
+                    historical_ttls = self._pttls(*historical_keys)
+                    candidates = [
+                        {**invite_record(secret * 43), "inviteId": marker * 22, "createdAt": SEC + 103, "expiresAt": SEC + 303}
+                        for marker, secret in (("J", "u"), ("K", "v"))
+                    ]
+                    barrier = threading.Barrier(2)
+                    def replace(proposal):
+                        client = _RespClient(self.socket_path)
+                        statuses = []
+                        first_eval = True
+                        def transport(command):
+                            nonlocal first_eval
+                            if command[0] == "EVAL":
+                                if command[1] == redis_store._CREATE_V2_INVITE_LUA and first_eval:
+                                    first_eval = False
+                                    barrier.wait(timeout=5)
+                                changed = list(command)
+                                changed[1] = session_null_semantics_script(command[1], mode)
+                                result = client.transport(changed)
+                                if command[1] == redis_store._CREATE_V2_INVITE_LUA:
+                                    statuses.append(json.loads(result["result"])["status"])
+                                return result
+                            return client.transport(command)
+                        return self._real_create_v2_invite(proposal, now=SEC + 103, command_transport=transport), statuses
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        outcomes = list(pool.map(replace, candidates))
+                    results = [result for result, _ in outcomes]
+                    self.assertTrue(all(result.get("status") == "ok" for result in results), results)
+                    self.assertEqual(sum(result.get("created") is True for result in results), 1)
+                    self.assertIn("retry", [status for _, statuses in outcomes for status in statuses])
+                    winner = next(result["record"] for result in results if result.get("created") is True)
+                    self.assertTrue(all(result["record"] == winner for result in results))
+                    self._assert_canonical_stored_invite(keys[3], winner)
+                    if keys[2] != keys[3]:
+                        self.assertIsNone(self.client.command(["GET", keys[2]]))
+                    for candidate in candidates:
+                        if candidate["inviteId"] != winner["inviteId"]:
+                            self.assertIsNone(self.client.command(["GET", self._invite_keys(candidate)[0]]))
+                            self.assertIsNone(self.client.command(["GET", self._invite_keys(candidate)[1]]))
+                    index = redis_store.build_v2_external_guest_index_key(old["collaborationId"])
+                    self.assertEqual(json.loads(self.client.command(["GET", index]))["inviteIds"], sorted([old["inviteId"], winner["inviteId"]]))
+                    self.assertEqual(tuple(self.client.command(["GET", key]) for key in historical_keys), historical_values)
+                    self._assert_ttls_not_refreshed(historical_ttls, self._pttls(*historical_keys))
+
+    def test_c2g5_replacement_restores_missing_history_reference_without_shortening_index_ttl(self):
+        for mode in ("normal", "hosted", "hosted_without_null_sentinel"):
+            for missing_index in (False, True):
+                with self.subTest(mode=mode, missing_index=missing_index):
+                    self.client.command(["FLUSHALL"])
+                    _, old, session, keys, transport = self._c2g5_prepare_revoked(mode, None, exchanged=True)
+                    index = redis_store.build_v2_external_guest_index_key(old["collaborationId"])
+                    if missing_index:
+                        self.client.command(["DEL", index])
+                    else:
+                        self.client.command(["SET", index, '{"v":"1","inviteIds":[]}', "EX", 5])
+                    history = (keys[0], keys[1], self._session_key(session))
+                    old_values = tuple(self.client.command(["GET", key]) for key in history)
+                    old_ttls = self._pttls(*history)
+                    proposal = {**invite_record("u" * 43), "inviteId": "J" * 22, "createdAt": SEC + 103, "expiresAt": SEC + 113}
+                    result = self._real_create_v2_invite(proposal, now=SEC + 103, command_transport=transport)
+                    self.assertTrue(result.get("created"), result)
+                    self.assertEqual(json.loads(self.client.command(["GET", index]))["inviteIds"], [old["inviteId"], proposal["inviteId"]])
+                    self._assert_ttl_ceiling(index, 97)
+                    for key in self._invite_keys(proposal):
+                        self._assert_ttl_ceiling(key, 10)
+                    self.assertEqual(tuple(self.client.command(["GET", key]) for key in history), old_values)
+                    self._assert_ttls_not_refreshed(old_ttls, self._pttls(*history))
+
     def test_external_guest_index_loader_is_bounded_compatible_and_fail_closed(self):
         thread = thread_record()
         redis_store._create_v2_thread(thread, command_transport=self.client.transport)
