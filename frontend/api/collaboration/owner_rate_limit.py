@@ -24,8 +24,12 @@ RATE_LIMIT_BOOTSTRAP = "bootstrap"
 RATE_LIMIT_READ = "read"
 RATE_LIMIT_WRITE = "write"
 RATE_LIMIT_OPERATOR_GRANT = "operator_grant"
+RATE_LIMIT_MIGRATION_DRY_RUN = "migration_dry_run"
 RATE_LIMIT_CLASSES = frozenset(
-    {RATE_LIMIT_BOOTSTRAP, RATE_LIMIT_READ, RATE_LIMIT_WRITE, RATE_LIMIT_OPERATOR_GRANT}
+    {
+        RATE_LIMIT_BOOTSTRAP, RATE_LIMIT_READ, RATE_LIMIT_WRITE,
+        RATE_LIMIT_OPERATOR_GRANT, RATE_LIMIT_MIGRATION_DRY_RUN,
+    }
 )
 
 _DISTINCT_BASE64URL_SECRET_NAMES = (
@@ -51,6 +55,9 @@ _CANONICAL_UINT_RE = re.compile(r"^(?:0|[1-9][0-9]*)$")
 _RATE_LIMIT_KEY_DOMAIN = "cuevion-collaboration-v2/owner-rate-limit-key/v1"
 _OPERATOR_GRANT_RATE_LIMIT_KEY_DOMAIN = (
     "cuevion-collaboration-v2/operator-grant-rate-limit-key/v1"
+)
+_MIGRATION_DRY_RUN_RATE_LIMIT_KEY_DOMAIN = (
+    "cuevion-collaboration-v2/migration-dry-run-rate-limit-key/v1"
 )
 _CONFIGURATION_SENTINEL = object()
 _MAX_RATE_LIMIT_RECORD_BYTES = 128
@@ -86,6 +93,11 @@ _POLICIES = {
         RATE_LIMIT_OPERATOR_GRANT,
         300_000_000,
         3,
+    ),
+    RATE_LIMIT_MIGRATION_DRY_RUN: OwnerRateLimitPolicy(
+        RATE_LIMIT_MIGRATION_DRY_RUN,
+        300_000_000,
+        2,
     ),
 }
 
@@ -251,11 +263,15 @@ def build_owner_rate_limit_key(
         return None
     if policy is None or not valid_context:
         return None
-    if rate_class == RATE_LIMIT_OPERATOR_GRANT:
+    if rate_class in {RATE_LIMIT_OPERATOR_GRANT, RATE_LIMIT_MIGRATION_DRY_RUN}:
         if normalize_v2_user_id(operator_user_id) is None:
             return None
         identity_fields = {
-            "domain": _OPERATOR_GRANT_RATE_LIMIT_KEY_DOMAIN,
+            "domain": (
+                _OPERATOR_GRANT_RATE_LIMIT_KEY_DOMAIN
+                if rate_class == RATE_LIMIT_OPERATOR_GRANT
+                else _MIGRATION_DRY_RUN_RATE_LIMIT_KEY_DOMAIN
+            ),
             "userId": operator_user_id,
             "workspaceId": context.workspace_id,
         }
@@ -436,7 +452,7 @@ def consume_owner_rate_limit(
             parsed_retry = int(retry_after)
             maximum_retry = (
                 (policy.emission_interval_microseconds + 999_999) // 1_000_000
-                if rate_class == RATE_LIMIT_OPERATOR_GRANT
+                if rate_class in {RATE_LIMIT_OPERATOR_GRANT, RATE_LIMIT_MIGRATION_DRY_RUN}
                 else 60
             )
             if 1 <= parsed_retry <= maximum_retry:
@@ -454,6 +470,7 @@ __all__ = (
     "RATE_LIMIT_CLASSES",
     "RATE_LIMIT_CONFIGURATION_NAMES",
     "RATE_LIMIT_HMAC_ENV",
+    "RATE_LIMIT_MIGRATION_DRY_RUN",
     "RATE_LIMIT_OPERATOR_GRANT",
     "RATE_LIMIT_READ",
     "RATE_LIMIT_WRITE",

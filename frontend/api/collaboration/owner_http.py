@@ -37,12 +37,14 @@ from .owner_authentication import resolve_verified_auth0_owner
 from .owner_request_security import (
     OwnerSecurityError,
     issue_owner_csrf_token,
+    mailbox_is_allowlisted,
     normalize_owner_security_failure,
     owner_is_allowlisted,
     parse_owner_csrf_header,
     parse_owner_security_configuration,
     resolve_owner_request_context,
     validate_owner_mutation_origin,
+    valid_allowlist_mailbox_id,
     verify_owner_csrf_token,
 )
 
@@ -53,6 +55,7 @@ _OWNER_BODY_FIELDS = frozenset(
         "operation",
         "collaborationId",
         "mailboxId",
+        "ownerMailboxId",
         "sourceRef",
         "state",
         "text",
@@ -116,6 +119,106 @@ _OWNER_APPLICATION_OPERATIONS = frozenset(
     }
 )
 _UNKNOWN_SAFE_FAILURE = "unknown_safe_failure"
+_MIGRATION_DRY_RUN_COUNTERS = (
+    "examined", "wouldEnroll", "alreadyPresent", "alreadyPlanned",
+    "skippedInvalid", "skippedUnauthorized", "unresolvedIdentity",
+    "staleEntitlement", "missing", "capacity", "retry", "deferred",
+)
+
+
+def _migration_dry_run_response(result: object) -> PublicResponse:
+    """Project only the bounded page-1 DTO; never publish engine internals."""
+    failed = json_failure("migration_dry_run_failed", status=503)
+    fields = set(_MIGRATION_DRY_RUN_COUNTERS) | {
+        "v", "dryRun", "scanCalls", "hasMore", "done", "status", "error",
+    }
+    if (
+        type(result) is not dict or set(result) != fields
+        or type(result["v"]) is not int or result["v"] != 1
+        or result["dryRun"] is not True
+        or any(type(result[name]) is not int or not 0 <= result[name] <= 5
+               for name in _MIGRATION_DRY_RUN_COUNTERS)
+        or sum(result[name] for name in _MIGRATION_DRY_RUN_COUNTERS[1:]) != result["examined"]
+        or type(result["scanCalls"]) is not int or not 0 <= result["scanCalls"] <= 1
+        or type(result["hasMore"]) is not bool or type(result["done"]) is not bool
+        or type(result["status"]) is not str or result["status"] not in {"ok", "blocked"}
+    ):
+        return failed
+    error = result["error"]
+    if error is not None:
+        if type(error) is not dict or set(error) != {"code"} or type(error["code"]) is not str:
+            return failed
+        if error["code"] not in {"capacity", "retry"}:
+            code, status = {
+                "forbidden": ("owner_not_authorized", 403),
+                "owner_not_authorized": ("owner_not_authorized", 403),
+                "mailbox_not_authorized": ("mailbox_not_authorized", 403),
+                "auth_unavailable": ("authority_unavailable", 503),
+                "authority_unavailable": ("authority_unavailable", 503),
+                "storage_unavailable": ("migration_unavailable", 503),
+                "index_hmac_unavailable": ("migration_unavailable", 503),
+                "migration_unavailable": ("migration_unavailable", 503),
+            }.get(error["code"], ("migration_dry_run_failed", 503))
+            return json_failure(code, status=status)
+        if result["status"] != "blocked" or result[error["code"]] == 0:
+            return failed
+    elif result["status"] != "ok" or result["capacity"] or result["retry"]:
+        return failed
+    if (result["done"] == result["hasMore"] or result["scanCalls"] != 1
+            or (result["done"] and (result["capacity"] or result["retry"] or result["deferred"]))):
+        return failed
+    return json_success({name: result[name] for name in fields - {"error"}})
+
+
+def _run_migration_dry_run(context, raw_headers, mailbox_id, configuration, rate_configuration):
+    """Temporary authenticated sample, with no caller execution options."""
+    from . import authorization
+
+    if not mailbox_is_allowlisted(context, mailbox_id, configuration):
+        return json_failure("mailbox_not_authorized", status=403)
+    try:
+        resolved = authorization.resolve_verified_owner_collaboration_context(
+            context, raw_headers, mailbox_id, required_action="read",
+            owner_security_configuration=configuration,
+        )
+        if type(resolved) is not dict or resolved.get("status") != "ok":
+            status = resolved.get("status") if type(resolved) is dict else None
+            if status == "unauthorized":
+                return json_failure("authentication_required", status=401)
+            if status in {"not_found", "forbidden"}:
+                return json_failure("mailbox_not_authorized", status=403)
+            return json_failure("authority_unavailable", status=503)
+        capability = resolved.get("context")
+        if (not authorization._is_internal_capability(capability, actions={"read"})
+            or capability.actor_kind != "owner" or capability.viewer_access != "owner"
+            or capability.actor_user_id != capability.owner_user_id
+            or capability.workspace_id != context.workspace_id
+            or capability.owner_email != context.owner_email
+            or capability.collaboration_id is not None or capability.mailbox_id != mailbox_id
+            or capability.mailbox_provider not in {"google", "custom_imap"}):
+            return json_failure("owner_not_authorized", status=403)
+        decision = owner_rate_limit.consume_owner_rate_limit(
+            context, owner_rate_limit.RATE_LIMIT_MIGRATION_DRY_RUN,
+            rate_configuration, operator_user_id=capability.actor_user_id,
+        )
+        if type(decision) is not owner_rate_limit.OwnerRateLimitDecision:
+            return json_failure("service_unavailable", status=503)
+        if (decision.status == "limited" and type(decision.retry_after_seconds) is int
+                and 1 <= decision.retry_after_seconds <= 60):
+            return json_rate_limited(decision.retry_after_seconds)
+        if decision.status != "allowed" or decision.retry_after_seconds is not None:
+            return json_failure("service_unavailable", status=503)
+        # Imported only after this exact operation's authority and limiter gates.
+        from . import discovery_migration
+        result = discovery_migration.run_runtime_dry_run_page(
+            context, raw_headers, owner_mailbox_id=mailbox_id,
+            owner_security_configuration=configuration,
+        )
+        return _migration_dry_run_response(result)
+    except OwnerSecurityError as error:
+        return _owner_failure(error)
+    except Exception:
+        return json_failure("migration_dry_run_failed", status=503)
 
 
 def _trusted_security_snapshot(environment: Mapping[str, str]) -> dict[str, str]:
@@ -470,10 +573,22 @@ def owner_response(
             now=timestamp,
         )
 
+        if operation == "run_discovery_migration_dry_run_page":
+            _require_exact_fields(payload, frozenset({"operation", "ownerMailboxId"}))
+            mailbox_id = payload["ownerMailboxId"]
+            if not valid_allowlist_mailbox_id(mailbox_id):
+                raise BoundaryError("invalid_value", 400)
+            from . import operator_grant
+            if operator_grant.operator_mode(source) != "dry_run_grant":
+                return json_failure("operator_mode_off", status=404)
+            return _run_migration_dry_run(
+                context, raw_headers, mailbox_id, configuration, rate_limit_configuration,
+            )
+
         if operation == "issue_migration_operator_grant":
             _require_exact_fields(payload, frozenset({"operation"}))
-            # Identity attestation only. Neither this boundary nor the grant
-            # module imports the manual migration or accepts migration options.
+            # Identity attestation only. This grant branch neither imports the
+            # migration nor accepts migration options.
             from . import operator_grant
             if operator_grant.operator_mode(source) != "dry_run_grant":
                 return json_failure("operator_mode_off", status=404)

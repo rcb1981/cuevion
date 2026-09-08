@@ -1,8 +1,9 @@
-"""Explicit, operator-invoked historical discovery repair. Never import in routes.
+"""Explicit, operator-invoked historical discovery repair.
 
-One call does at most one SCAN and processes five candidates. There is no CLI,
-startup hook, background loop, default execution, or public HTTP operation.
-See C3B1C_DISCOVERY_MIGRATION.md for invocation and checkpoint semantics.
+One call does at most one SCAN and processes five candidates. The temporary
+owner dry-run operation imports this module only in its authenticated branch.
+There is no startup hook, background loop, or default execution. See
+C3B1C_DISCOVERY_MIGRATION.md for manual invocation and checkpoint semantics.
 """
 from __future__ import annotations
 
@@ -418,7 +419,8 @@ def _load(path, scope, scan_budget):
     return state
 
 
-def _verified_config(owner_context, headers, configuration, owner_mailbox_id):
+def _verified_config(owner_context, headers, configuration, owner_mailbox_id, *,
+                     classify_unavailable=False):
     try:
         viewer = auth.resolve_verified_summary_viewer(
             owner_context, headers, owner_security_configuration=configuration)
@@ -437,6 +439,8 @@ def _verified_config(owner_context, headers, configuration, owner_mailbox_id):
                 owner_security_configuration=configuration)
         except Exception:
             raise MigrationError("forbidden") from None
+        if classify_unavailable and type(result) is dict and result.get("status") == "unavailable":
+            raise MigrationError("auth_unavailable")
         capability = result.get("context") if type(result) is dict else None
         if (not auth._is_internal_capability(capability, actions={"read"})
             or capability.viewer_access != "owner" or capability.actor_kind != "owner"
@@ -447,6 +451,103 @@ def _verified_config(owner_context, headers, configuration, owner_mailbox_id):
         config.update(ownerMailboxId=capability.mailbox_id, ownerProvider=capability.mailbox_provider,
                       ownerDisplayName=capability.owner_display_name)
     return config
+
+
+def _run_one_page(state, config, *, command_transport, persist_scan_state=lambda: None):
+    """Execute one bounded page using in-memory state and the canonical Lua.
+
+    The manual adapter supplies a persistence callback at the existing scan
+    boundaries. The runtime adapter uses transient state and no persistence.
+    There is no scan loop or retry here, including for an empty SCAN batch.
+    """
+    if not state["pending"] and not state["scanFinished"]:
+        if state["scanCalls"] >= state["scanBudget"]:
+            raise MigrationError("scan_budget_exhausted")
+        # Persist the attempt before Redis I/O and the complete returned batch
+        # before processing. Failed attempts cannot create an uncounted retry.
+        state["scanCalls"] += 1
+        state["previousResult"] = None
+        persist_scan_state()
+        scanned = store._v2_command(
+            ["SCAN", state["scanCursor"], "MATCH", SCAN_PATTERN, "COUNT", SCAN_COUNT],
+            command_transport)
+        value = scanned.get("result")
+        if scanned.get("status") != "ok":
+            raise MigrationError("storage_unavailable")
+        if (type(value) is not list or len(value) != 2 or not _scan_cursor(value[0])
+            or type(value[1]) is not list or len(value[1]) > MAX_PENDING
+            or any(not _scan_key(k) for k in value[1])):
+            raise MigrationError("scan_response_limit_or_protocol")
+        state["scanCursor"], state["pending"] = value[0], sorted(set(value[1]))
+        state["scanFinished"] = value[0] == "0"
+        persist_scan_state()
+    keys = state["pending"][:PAGE_SIZE]
+    page_config = dict(config, reserved=state["reserved"])
+    outcomes = _process(keys, page_config, command_transport) if keys else []
+    counts = {name: 0 for name in _COUNTERS}
+    counts["examined"] = len(keys)
+    retry = []
+    reserved = set(state["reserved"])
+    for key, outcome in zip(keys, outcomes):
+        counts[outcome] += 1
+        if outcome in {"capacity", "retry", "deferred"}:
+            retry.append(key)
+        if outcome == "wouldEnroll":
+            reserved.add(key[len(store.V2_THREAD_KEY_PREFIX):])
+    state["reserved"] = sorted(reserved)
+    state["pending"] = retry + state["pending"][len(keys):]
+    state["done"] = state["scanFinished"] and not state["pending"]
+    return counts
+
+
+def run_runtime_dry_run_page(owner_context, headers, *, owner_mailbox_id,
+                             owner_security_configuration, command_transport=None):
+    """One current owner-authorized first-page sample, structurally dry-run only.
+
+    No caller-supplied mode, cursor, budget, or checkpoint is accepted. The owner
+    HTTP boundary separately enforces its feature gate, origin, CSRF and limiter.
+    Only aggregate facts and fixed error codes leave this adapter.
+    """
+    counts = {name: 0 for name in _COUNTERS if name != "enrolled"}
+    state = {"scanBudget": 1, "scanCalls": 0, "scanCursor": "0", "scanFinished": False,
+             "pending": [], "reserved": [], "previousResult": None, "done": False}
+    error = None
+    try:
+        from . import owner_request_security as security
+        if (not security._is_owner_context(owner_context)
+            or not security.owner_is_allowlisted(owner_context, owner_security_configuration)):
+            raise MigrationError("owner_not_authorized")
+        if (type(owner_mailbox_id) is not str
+            or re.fullmatch(r"[a-z0-9][a-z0-9._:-]{0,255}", owner_mailbox_id) is None
+            or not security.mailbox_is_allowlisted(
+                owner_context, owner_mailbox_id, owner_security_configuration)):
+            raise MigrationError("mailbox_not_authorized")
+        config = _verified_config(
+            owner_context, headers, owner_security_configuration, owner_mailbox_id,
+            classify_unavailable=True)
+        if store.resolve_v2_index_hmac_keys() is None:
+            raise MigrationError("migration_unavailable")
+        config["dryRun"] = True
+        page_counts = _run_one_page(state, config, command_transport=command_transport)
+        if page_counts["enrolled"]:
+            raise MigrationError("migration_dry_run_failed")
+        counts = {name: page_counts[name] for name in counts}
+        error = "capacity" if counts["capacity"] else "retry" if counts["retry"] else None
+    except MigrationError as exc:
+        code = str(exc)
+        error = {
+            "forbidden": "owner_not_authorized", "auth_unavailable": "authority_unavailable",
+            "storage_unavailable": "migration_unavailable",
+            "index_hmac_unavailable": "migration_unavailable",
+        }.get(code, code if code in {
+            "owner_not_authorized", "mailbox_not_authorized", "migration_unavailable",
+            "migration_dry_run_failed",
+        } else "migration_dry_run_failed")
+    except Exception:
+        error = "migration_dry_run_failed"
+    return {"v": 1, "dryRun": True, **counts, "scanCalls": state["scanCalls"],
+            "hasMore": not state["done"], "done": state["done"],
+            "status": "blocked" if error else "ok", "error": {"code": error} if error else None}
 
 
 def run_page(owner_context, headers, *, enabled=False, checkpoint_path, cursor=None,
@@ -542,42 +643,10 @@ def _run_page(config_resolver, *, enabled, checkpoint_path, cursor,
             raise MigrationError("migration_complete")
         if cursor != state["cursor"]:
             raise MigrationError("invalid_cursor")
-        if not state["pending"] and not state["scanFinished"]:
-            if state["scanCalls"] >= scan_budget:
-                raise MigrationError("scan_budget_exhausted")
-            # Count attempts before issuing Redis work. Interrupted/failed scans
-            # may consume budget, but cannot create an uncounted retry loop.
-            state["scanCalls"] += 1
-            state["previousResult"] = None
-            _save(path, state)
-            scanned = store._v2_command(["SCAN", state["scanCursor"], "MATCH", SCAN_PATTERN, "COUNT", SCAN_COUNT], command_transport)
-            value = scanned.get("result")
-            if scanned.get("status") != "ok":
-                raise MigrationError("storage_unavailable")
-            if (type(value) is not list or len(value) != 2 or not _scan_cursor(value[0])
-                or type(value[1]) is not list or len(value[1]) > MAX_PENDING
-                or any(not _scan_key(k) for k in value[1])):
-                raise MigrationError("scan_response_limit_or_protocol")
-            state["scanCursor"], state["pending"] = value[0], sorted(set(value[1]))
-            state["scanFinished"] = value[0] == "0"
-            # The complete SCAN response is durable before its cursor can be
-            # advanced again or any canonical/discovery mutation is attempted.
-            _save(path, state)
-        keys = state["pending"][:PAGE_SIZE]
-        config.update(dryRun=dry_run, reserved=state["reserved"])
-        outcomes = _process(keys, config, command_transport) if keys else []
-        counts = dict(zero, examined=len(keys))
-        retry = []
-        reserved = set(state["reserved"])
-        for key, outcome in zip(keys, outcomes):
-            counts[outcome] += 1
-            if outcome in {"capacity", "retry", "deferred"}:
-                retry.append(key)
-            if outcome == "wouldEnroll":
-                reserved.add(key[len(store.V2_THREAD_KEY_PREFIX):])
-        state["reserved"] = sorted(reserved)
-        state["pending"] = retry + state["pending"][len(keys):]
-        state["done"] = state["scanFinished"] and not state["pending"]
+        config["dryRun"] = dry_run
+        counts = _run_one_page(
+            state, config, command_transport=command_transport,
+            persist_scan_state=lambda: _save(path, state))
         state["previousCursor"] = cursor
         state["cursor"] = secrets.token_urlsafe(24)
         blocked = "capacity" if counts["capacity"] else "retry" if counts["retry"] else None
