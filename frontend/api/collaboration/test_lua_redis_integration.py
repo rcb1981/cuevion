@@ -3362,9 +3362,10 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
 
         self.client.command(["PEXPIRE", thread_key, 120_000])
         self.client.command(["PEXPIRE", source_key, 120_000])
+        duplicate_expiry = [self.client.command(["PEXPIRETIME", key]) for key in (thread_key, source_key)]
         duplicate = redis_store._create_v2_thread(thread, command_transport=self.client.transport)
         self.assertFalse(duplicate["created"])
-        self._assert_retention_pair(thread_key, source_key)
+        self.assertEqual([self.client.command(["PEXPIRETIME", key]) for key in (thread_key, source_key)], duplicate_expiry)
 
         self.client.command(["PEXPIRE", thread_key, 120_000])
         self.client.command(["PEXPIRE", source_key, 120_000])
@@ -9594,7 +9595,8 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     set(self.client.command(["KEYS", f"{redis_store.V2_KEY_PREFIX}:*"])),
-                    {thread_key, source_key, invite_key, token_key, identity_key, index_key},
+                    {thread_key, source_key, invite_key, token_key, identity_key, index_key,
+                     redis_store.build_v2_discovery_key(captured["thread"]["workspaceId"], owner_user_id)},
                 )
 
     def test_external_first_atomic_invite_key_shape_raw_classifier_variants(self):

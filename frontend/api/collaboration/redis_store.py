@@ -2283,7 +2283,7 @@ else:
       return threadValid(thread) and rawTopLevelArray(raw, 'messages')
         and (thread.ownerUserId == nil or rawTopLevelArray(raw, 'participants'))
     end
-    local function discoveryPrepare(thread, threadKey, ttl, raw, recipients, capacityCache)
+    local function discoveryPrepare(thread, threadKey, ttl, raw, recipients, capacityCache, repair)
       -- Pre-C3B1A authority is enriched only by the authenticated exact helper.
       if thread.ownerUserId == nil then return {}, nil end
       if threadKey ~= DISCOVERY_THREAD_PREFIX .. thread.collaborationId
@@ -2320,11 +2320,15 @@ else:
         local prior = redis.call('HGET', key, thread.collaborationId)
         local changed = not prior
         if prior then
-          if #prior > 4096 then return nil, 'malformed' end
-          local ok, value = decodeWire(prior)
+          local ok, value = false, nil
+          if #prior <= 4096 then ok, value = decodeWire(prior) end
           if not ok or not discoveryBindingValid(value)
-            or not discoveryBindingEqual(value, binding) then return nil, 'malformed' end
-          changed = value.threadHash ~= binding.threadHash
+            or not discoveryBindingEqual(value, binding) then
+            -- Only an exact, fully validated canonical/source boundary may
+            -- replace this field. Normal mutations retain strict preflight.
+            if not repair then return nil, 'malformed' end
+            changed = true
+          else changed = value.threadHash ~= binding.threadHash end
         end
         local prune = {}
         if not prior and count == DISCOVERY_MAX then
@@ -2355,6 +2359,27 @@ else:
         if item.changed then redis.call('HSET', item.key, item.id, item.value) end
         if item.ttl > item.priorTtl then redis.call('PEXPIRE', item.key, item.ttl) end
       end
+    end
+    local function discoveryRepairExisting(thread, key, ttl, raw, authority, recipients)
+      local enriched = false
+      if thread.ownerUserId == nil and authority.ownerUserId ~= nil then
+        -- The authenticated owner may enrich historical owner identity only.
+        -- Keep the original wire content/arrays and never infer participants.
+        raw = string.gsub(raw, '}%s*$', function()
+          return ',"ownerUserId":' .. cjson.encode(authority.ownerUserId)
+            .. ',"ownerDisplayName":' .. cjson.encode(authority.ownerDisplayName)
+            .. ',"participants":[]}'
+        end)
+        local ok, value = decodeWire(raw)
+        if #raw > 262144 or not ok or not discoveryCanonical(value, raw) then return 'malformed' end
+        thread = value
+        enriched = true
+      elseif thread.ownerUserId ~= authority.ownerUserId then return 'malformed' end
+      local plan, err = discoveryPrepare(thread, key, ttl, raw, recipients, nil, true)
+      if err then return err end
+      discoveryCommit(plan)
+      if enriched then redis.call('SET', key, raw, 'KEEPTTL') end
+      return nil
     end
     """
 
@@ -2390,12 +2415,11 @@ else:
           or not participantAuthorityEqual(target, proposed) then
           return cjson.encode({status='source_pointer_conflict'})
         end
-        local plan, discoveryError = discoveryPrepare(target, targetKey, integerValue(ARGV[3]) * 1000, targetRaw)
+        local discoveryError = discoveryRepairExisting(target, targetKey,
+          redis.call('PTTL', targetKey), targetRaw, proposed)
         if discoveryError then return cjson.encode({status=discoveryError}) end
-        discoveryCommit(plan)
-        redis.call('EXPIRE', targetKey, ARGV[3])
-        redis.call('SET', KEYS[2], pointer, 'EX', ARGV[3])
-        if #KEYS == 3 then redis.call('DEL', KEYS[3]) end
+        -- Duplicate creation is read/repair only. Source-key rotation, when
+        -- needed, remains the existing bounded-TTL source loader's job.
         return cjson.encode({status='duplicate', collaborationId=pointer})
       end
       -- A stale source pointer is repairable only if creation can commit.  A
@@ -2652,8 +2676,16 @@ else:
           or target.ownerEmail ~= proposedThread.ownerEmail
           or target.workspaceId ~= proposedThread.workspaceId
           or target.mailboxId ~= proposedThread.mailboxId
-          or not sourceEqual(target.sourceRef, proposedThread.sourceRef) then
+          or not sourceEqual(target.sourceRef, proposedThread.sourceRef)
+          or (target.ownerUserId ~= nil and target.ownerUserId ~= proposedThread.ownerUserId) then
           return cjson.encode({status='source_pointer_conflict'})
+        end
+        local recipients = proposedThread.ownerUserId and {proposedThread.ownerUserId} or nil
+        local discoveryError = discoveryRepairExisting(target, targetKey,
+          redis.call('PTTL', targetKey), targetRaw, proposedThread, recipients)
+        if discoveryError then
+          if discoveryError == 'malformed' then return cjson.encode({status='malformed', predicate='thread_valid'}) end
+          return cjson.encode({status=discoveryError})
         end
         return cjson.encode({status='existing', collaborationId=pointer})
       end
@@ -5326,7 +5358,8 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
 
 
     _ENRICH_V2_DISCOVERY_LUA = _V2_DISCOVERY_LUA + r"""
-    if #KEYS ~= 2 or #ARGV ~= 2 or #ARGV[1] > 262144 or #ARGV[2] > 262144 then
+    if (#KEYS ~= 2 and #KEYS ~= 3) or #ARGV ~= 3 or #ARGV[1] > 262144 or #ARGV[2] > 262144
+      or not canonicalUserId(ARGV[3]) then
       return cjson.encode({status='malformed'})
     end
     local state, raw = readString(KEYS[1], 262144)
@@ -5358,31 +5391,61 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     end
     local pointerState, pointer = readString(KEYS[2], 128)
     local ttl = redis.call('PTTL', KEYS[1])
-    if pointerState ~= 'ok' or pointer ~= current.collaborationId or redis.call('PTTL', KEYS[2]) <= 0 then
+    local previousState, previous = 'missing', nil
+    if #KEYS == 3 then previousState, previous = readString(KEYS[3], 128) end
+    -- Exact ID reads also accept the configured previous HMAC generation.
+    -- Verify every present pointer; repair never migrates/extends either one.
+    if (pointerState ~= 'missing' and (pointerState ~= 'ok' or pointer ~= current.collaborationId
+        or redis.call('PTTL', KEYS[2]) <= 0))
+      or (previousState ~= 'missing' and (previousState ~= 'ok' or previous ~= current.collaborationId
+        or redis.call('PTTL', KEYS[3]) <= 0))
+      or (pointerState ~= 'ok' and previousState ~= 'ok') then
       return cjson.encode({status='malformed'})
     end
     local canonicalRaw = current.ownerUserId == nil and ARGV[2] or raw
-    local plan, discoveryError = discoveryPrepare(proposed, KEYS[1], ttl, canonicalRaw)
+    local plan, discoveryError = discoveryPrepare(proposed, KEYS[1], ttl, canonicalRaw, {ARGV[3]}, nil, true)
     if discoveryError then return cjson.encode({status=discoveryError}) end
     discoveryCommit(plan)
-    if current.ownerUserId == nil then redis.call('PSETEX', KEYS[1], ttl, ARGV[2]) end
+    if current.ownerUserId == nil then redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL') end
     return cjson.encode({status='ok'})
     """.strip()
 
 
     def _enrich_v2_discovery(thread_record: dict, capability: object, *, command_transport=None) -> dict:
-        from .authorization import _is_internal_capability
+        from .authorization import _is_internal_capability, _resolve_active_team_member
         thread = normalize_v2_thread_record(thread_record)
         if (thread is None or not _is_internal_capability(capability, actions={"read"})
-            or capability.viewer_access != "owner" or capability.actor_kind != "owner"
             or normalize_v2_user_id(capability.actor_user_id) is None
-            or capability.actor_user_id != capability.owner_user_id
             or thread["ownerEmail"] != capability.owner_email
             or thread["workspaceId"] != capability.workspace_id
             or thread["mailboxId"] != capability.mailbox_id
             or thread["sourceRef"]["provider"] != capability.mailbox_provider
             or (capability.collaboration_id is not None and capability.collaboration_id != thread["collaborationId"])
             or thread.get("ownerUserId", capability.owner_user_id) != capability.owner_user_id):
+            return {"status": "forbidden", "error": {"code": "forbidden"}}
+        if capability.viewer_access == "owner":
+            if capability.actor_kind != "owner" or capability.actor_user_id != capability.owner_user_id:
+                return {"status": "forbidden", "error": {"code": "forbidden"}}
+        elif capability.viewer_access == "participant":
+            participant = next((entry for entry in thread.get("participants", [])
+                                if entry["userId"] == capability.actor_user_id), None)
+            if (capability.actor_kind != "internal" or participant is None
+                or capability.actor_user_id == capability.owner_user_id):
+                return {"status": "forbidden", "error": {"code": "forbidden"}}
+            # Match the existing live Team request-snapshot contract. Lua then
+            # CAS-checks this exact canonical participant before enrolling only
+            # this viewer; listing independently revalidates live membership.
+            try:
+                membership, error = _resolve_active_team_member(thread["workspaceId"], capability.actor_user_id)
+            except Exception:
+                return {"status": "unavailable", "error": {"code": "storage_unavailable"}}
+            if error == "unavailable":
+                return {"status": "unavailable", "error": {"code": "storage_unavailable"}}
+            if (error is not None or type(membership) is not dict
+                or membership.get("memberUserId") != capability.actor_user_id
+                or membership.get("sourceInvitationId") != participant["membershipRef"]):
+                return {"status": "forbidden", "error": {"code": "forbidden"}}
+        else:
             return {"status": "forbidden", "error": {"code": "forbidden"}}
         proposed = normalize_v2_thread_record({**thread, **({} if "ownerUserId" in thread else {
             "ownerUserId": capability.owner_user_id, "ownerDisplayName": capability.owner_display_name,
@@ -5391,11 +5454,20 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         expected_wire = _v2_wire_json(thread, "thread")
         wire = _v2_wire_json(proposed, "thread") if proposed is not None else None
         key = build_v2_thread_key(thread["collaborationId"])
-        source_key = build_v2_source_thread_key(thread["ownerEmail"], thread["mailboxId"], thread["sourceRef"])
-        if wire is None or expected_wire is None or key is None or source_key is None:
+        hmac_keys = resolve_v2_index_hmac_keys()
+        if wire is None or expected_wire is None or key is None or hmac_keys is None:
             return {"status": "unavailable", "error": {"code": "storage_unavailable"}}
+        keys = [key]
+        for hmac_key in hmac_keys:
+            if hmac_key is None:
+                continue
+            source_key = build_v2_source_thread_key(thread["ownerEmail"], thread["mailboxId"], thread["sourceRef"], hmac_key=hmac_key)
+            if source_key is None:
+                return {"status": "unavailable", "error": {"code": "storage_unavailable"}}
+            if source_key not in keys:
+                keys.append(source_key)
         result = _v2_eval(
-            ["EVAL", _ENRICH_V2_DISCOVERY_LUA, 2, key, source_key, expected_wire, wire],
+            ["EVAL", _ENRICH_V2_DISCOVERY_LUA, len(keys), *keys, expected_wire, wire, capability.actor_user_id],
             command_transport, response_shapes={"ok": set(), "missing": set(), "stale": set(),
                                                 "malformed": set(), "discovery_capacity_reached": set()},
         )

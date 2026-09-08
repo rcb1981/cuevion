@@ -23789,6 +23789,15 @@ function MailboxView({
       const readResult = await readCollaborationForOwner(
         lookupResult.collaborationId,
       );
+      if (
+        readResult.status === "success" &&
+        readResult.collaboration.collaborationId === lookupResult.collaborationId &&
+        readResult.collaboration.mailboxId === trustedLocator.mailboxId
+      ) {
+        // Exact authorized access may repair discovery. Publish through the
+        // account-scoped store even if the modal closed while this read ran.
+        onCanonicalCollaborationMutation(readResult.collaboration);
+      }
       if (!isCurrentRequest()) {
         return;
       }

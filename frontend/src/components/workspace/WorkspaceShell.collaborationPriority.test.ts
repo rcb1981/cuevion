@@ -162,6 +162,7 @@ async function run() {
         return { status: "success", collaborationId: outcome === "wrong-id" ? "B".repeat(22) : summary.collaborationId };
       },
       readCollaborationForOwner: async (id: string) => { reads++; assert.equal(id, summary.collaborationId); return { status: "success", collaboration: summary }; },
+      onCanonicalCollaborationMutation: () => {},
       setPendingEndCollaborationMessageId: () => {}, setIsCollaborationParticipantPickerOpen: () => {},
       setIsCollaborationInviteComposerOpen: () => {}, setIsCollaborationActionsMenuOpen: () => {},
     });
@@ -170,6 +171,67 @@ async function run() {
     assert.equal(reads, outcome === "exact" ? 1 : 0, "read only the exact current summary ID");
     assert.equal(projection.at(-1).status, outcome === "exact" ? "success" : "non_retryable_failure");
     assert.equal(requestRef.current.inFlight, false, "invalidated binding must not leave a stuck read");
+  }
+
+  for (const provider of ["google", "custom_imap"] as const) {
+    for (const outcome of ["repaired", "closed", "selection-changed", "wrong-id", "wrong-mailbox", "read-failed", "summary-absent"]) {
+      const exactMailbox = { ...mailbox, provider };
+      const exactMail = provider === "google" ? mail : {
+        ...mail, providerMessageId: undefined, providerFolder: "INBOX", uidValidity: "9001", imapUid: "42",
+        threadIdentityContext: { mailboxId: mailbox.id, provider: "custom_imap", folder: "INBOX", uidValidity: "9001" },
+      };
+      const exactSummary = { ...summary, sourceRef: provider === "google" ? summary.sourceRef : {
+        provider: "custom_imap", folder: "INBOX", uidValidity: "9001", imapUid: "42",
+      } };
+      const unrelated = { ...summary, collaborationId: "B".repeat(22), sourceRef: { provider: "google", providerMessageId: "unrelated" } };
+      let summaries: any[] = [unrelated];
+      let refreshes = 0;
+      const store = summaryStore.createCollaborationSummaryStore(workspaceId, async () => {
+        refreshes++;
+        return { status: "success", page: { v: 1, workspaceId, summaries, nextCursor: null } };
+      });
+      await store.refresh();
+      const locatorInput = { workspaceDataMode: "live", hasAuthenticatedMemberAuthority: true,
+        managedMailbox: exactMailbox, sourceMailboxId: mailbox.id, trustedFolder: "INBOX", message: exactMail };
+      assert.equal(summaryStore.lookupActiveCollaborationSummary(store.getSnapshot(), workspaceId, locatorInput), null);
+      const requestRef: any = { current: null };
+      const projection: any[] = [];
+      const publications: Promise<void>[] = [];
+      const read = evaluate("beginCollaborationOwnerRead", {
+        managedInboxes: [exactMailbox], workspaceDataMode: "live", hasAuthenticatedMemberAuthority: true,
+        deriveCollaborationOwnerSourceLocator, fenceCollaborationOwnerProjection: () => {},
+        collaborationOwnerProjectionRequestRef: requestRef, collaborationOwnerProjectionGenerationRef: { current: 0 },
+        setCollaborationOwnerCreateState: () => {}, setCollaborationOwnerProjection: (value: any) => projection.push(value),
+        isCollaborationOwnerReadFailureRetryable: () => false,
+        lookupCollaborationForOwner: async () => ({ status: "success", collaborationId: summary.collaborationId }),
+        readCollaborationForOwner: async () => {
+          if (outcome === "closed") requestRef.current = null;
+          if (outcome === "selection-changed") requestRef.current = { identityKey: "another-selection", requestId: 2 };
+          if (outcome === "read-failed") return { status: "service_unavailable" };
+          if (outcome !== "summary-absent") summaries = [exactSummary, unrelated];
+          return { status: "success", collaboration: {
+            collaborationId: outcome === "wrong-id" ? unrelated.collaborationId : summary.collaborationId,
+            mailboxId: outcome === "wrong-mailbox" ? "another-mailbox" : mailbox.id,
+            state: summary.state, updatedAt: summary.updatedAt, viewerAccess: "owner",
+          } };
+        },
+        onCanonicalCollaborationMutation: (dto: any) => publications.push(store.acceptMutation(dto)),
+        setPendingEndCollaborationMessageId: () => {}, setIsCollaborationParticipantPickerOpen: () => {},
+        setIsCollaborationInviteComposerOpen: () => {}, setIsCollaborationActionsMenuOpen: () => {},
+      });
+      read(exactMail.id, mailbox.id, exactMail, "Inbox");
+      await new Promise(resolve => setImmediate(resolve));
+      await Promise.all(publications);
+      const validRead = !["wrong-id", "wrong-mailbox", "read-failed"].includes(outcome);
+      assert.equal(refreshes, validRead ? 2 : 1, `${provider}/${outcome}: exact successful access refreshes once`);
+      const active = summaryStore.lookupActiveCollaborationSummary(store.getSnapshot(), workspaceId, locatorInput);
+      assert.equal(active?.collaborationId ?? null, validRead && outcome !== "summary-absent" ? summary.collaborationId : null,
+        `${provider}/${outcome}: only the authoritative list can promote the exact source`);
+      assert.ok([...store.getSnapshot().values()].some(value => value.collaborationId === unrelated.collaborationId));
+      if (["closed", "selection-changed"].includes(outcome)) {
+        assert.deepEqual(projection.map(value => value.status), ["loading"], "access publication cannot reopen a stale modal");
+      }
+    }
   }
 
   for (const state of ["needs_review", "resolved"]) {
@@ -219,9 +281,9 @@ async function run() {
     ts.forEachChild(node, readStart);
   }
   readStart(panelTree);
-  for (const participantType of ["team", "external"]) for (const success of [true, false]) for (const open of [true, false]) {
+  for (const participantType of ["team", "external"]) for (const created of [true, false]) for (const success of [true, false]) for (const open of [true, false]) {
     const published: any[] = [], modal: any[] = [];
-    const result = success ? { status: "success", collaboration: summary } : { status: "network_failure" };
+    const result = success ? { status: "success", created, collaboration: summary } : { status: "network_failure" };
     const start = evaluate("submitStart", {
       locator: { mailboxId: mailbox.id }, participantType, mutationInFlight: false, startExternalEmail: "",
       selectedTeamMemberId: "member", initialState: "needs_review", normalizeEmail: (v: string) => v,

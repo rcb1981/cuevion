@@ -101,10 +101,8 @@ class StatefulV2Store:
                     or target.get("sourceRef") != proposed.get("sourceRef")
                 ):
                     return {"status": "source_pointer_conflict"}
-                self.ttls[target_key] = self.ttls[keys[1]] = int(args[2])
-                self.values[keys[1]] = existing
-                if len(keys) == 3:
-                    self.values.pop(keys[2], None)
+                # Match the production duplicate contract: no retention reset.
+                # The exact source loader handles HMAC rotation separately.
                 return {"status": "duplicate", "collaborationId": existing}
         if keys[0] in self.values:
             return {"status": "conflict"}

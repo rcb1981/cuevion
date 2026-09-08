@@ -4013,7 +4013,8 @@ class ParticipantAuthorityApplicationTests(unittest.TestCase):
         self.assertEqual(source_calls, [])
         self.assertEqual(create_calls, [])
 
-    def test_old_owner_record_projects_new_dto_and_inactive_history_is_omitted(self):
+    @patch.object(application, "_enrich_v2_discovery", return_value={"status": "ok", "error": None})
+    def test_old_owner_record_projects_new_dto_and_inactive_history_is_omitted(self, repair):
         old = {**_thread_record(), "workspaceId": self.workspace_id}
         capability = self.capability("read")
         authorized = {"status": "ok", "context": capability, "error": None}
@@ -4034,6 +4035,7 @@ class ParticipantAuthorityApplicationTests(unittest.TestCase):
                 object(), object(), COLLABORATION_ID,
                 owner_security_configuration=object(),
             )
+        repair.assert_called_once_with(old, capability)
         self.assertEqual(result["collaboration"]["viewerAccess"], "owner")
         self.assertEqual(result["collaboration"]["externalGuests"], [])
         self.assertEqual(
@@ -5104,7 +5106,8 @@ class ExternalGuestApplicationTests(unittest.TestCase):
             )
         self.assertEqual(failed["error"], {"code": "storage_unavailable"})
 
-    def test_verified_owner_sees_external_guests_but_participant_does_not(self):
+    @patch.object(application, "_enrich_v2_discovery", return_value={"status": "ok", "error": None})
+    def test_verified_owner_sees_external_guests_but_participant_does_not(self, repair):
         thread = {
             **_thread_record(),
             "workspaceId": self.workspace_id,
@@ -5139,6 +5142,7 @@ class ExternalGuestApplicationTests(unittest.TestCase):
                 owner_security_configuration=object(),
             )
         self.assertNotIn("externalGuests", participant_result["collaboration"])
+        repair.assert_called_with(thread, participant)
         load_guests.assert_not_called()
 
     def test_owner_guest_projection_storage_failure_fails_closed(self):

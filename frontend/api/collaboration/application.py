@@ -1912,6 +1912,9 @@ def _read_v2_collaboration_for_owner(
 
     if owner_context is None:
         return _success(_build_owner_thread_dto(thread))
+    enriched = _enrich_v2_discovery(thread, capability)
+    if enriched != {"status": "ok", "error": None}:
+        return _failure_from_result(enriched, default_status="unavailable", default_code="storage_protocol_error")
     if capability.viewer_access == "owner":
         dto, dto_error = _build_verified_owner_thread_dto(thread, capability)
     else:
