@@ -54,7 +54,9 @@ type CollaborationAccessPanelProps = {
   onCanonicalCollaboration: (
     collaboration: CollaborationOwnerReadDto,
     expectedContextKey: string,
+    summaryAlreadyPublished?: boolean,
   ) => void;
+  onCanonicalCreation?: (collaboration: CollaborationOwnerReadDto) => void;
   onRequestOverlayClose: () => void;
   onSecureLinkVisibilityChange: (visible: boolean) => void;
 };
@@ -185,6 +187,7 @@ export function CollaborationAccessPanel({
   currentMemberUserId,
   currentUserEmail,
   onCanonicalCollaboration,
+  onCanonicalCreation,
   onRequestOverlayClose,
   onSecureLinkVisibilityChange,
 }: CollaborationAccessPanelProps) {
@@ -354,6 +357,7 @@ export function CollaborationAccessPanel({
           initialState,
           selectedTeamMemberId,
         );
+        if (result.status === "success") onCanonicalCreation?.(result.collaboration);
         if (!isCurrentRequest(requestId)) {
           return;
         }
@@ -365,7 +369,7 @@ export function CollaborationAccessPanel({
           return;
         }
         setStartMutation({ status: "idle" });
-        onCanonicalCollaboration(result.collaboration, contextKey);
+        onCanonicalCollaboration(result.collaboration, contextKey, Boolean(onCanonicalCreation));
         return;
       }
 
@@ -374,6 +378,7 @@ export function CollaborationAccessPanel({
         initialState,
         normalizedExternalEmail || undefined,
       );
+      if (result.status === "success") onCanonicalCreation?.(result.collaboration);
       if (!isCurrentRequest(requestId)) {
         return;
       }
@@ -385,7 +390,7 @@ export function CollaborationAccessPanel({
         return;
       }
       setStartMutation({ status: "idle" });
-      onCanonicalCollaboration(result.collaboration, contextKey);
+      onCanonicalCollaboration(result.collaboration, contextKey, Boolean(onCanonicalCreation));
       applyNewInvitation(
         result.invitationCreated,
         result.invitation,

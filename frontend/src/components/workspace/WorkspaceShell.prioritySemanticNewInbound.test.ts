@@ -309,7 +309,7 @@ assert.doesNotMatch(
 );
 assert.match(
   source.slice(hydratedProjectionEnd),
-  /const livePriorityInboxEntries =\s*mergePrioritySemanticNewInboundPromotionsIntoCanonicalPriorityEntries\([\s\S]*?broadLivePriorityInboxEntries,[\s\S]*?normalPriorityGateCandidateEntries,[\s\S]*?prioritySemanticNewInboundHydratedObservations/,
+  /const livePriorityInboxEntries =\s*mergeExactCollaborationPriorityCandidates\(\{\s*representatives: mergePrioritySemanticNewInboundPromotionsIntoCanonicalPriorityEntries\([\s\S]*?broadLivePriorityInboxEntries,[\s\S]*?normalPriorityGateCandidateEntries,[\s\S]*?prioritySemanticNewInboundHydratedObservations/,
   "active records must join the same canonical Priority collection consumed by count, list, and actions",
 );
 assert.match(

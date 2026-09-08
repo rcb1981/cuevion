@@ -247,8 +247,22 @@ import {
 import {
   prepareInternalCollaborationMessageForOwner,
   prepareSharedCollaborationMessageForOwner,
+  resolveCollaborationForOwner,
+  reopenCollaborationForOwner,
   type CollaborationOwnerAppendOperation,
 } from "../../lib/collaborationOwnerWriteApi";
+import { useCollaborationSummaries } from "../../lib/useCollaborationSummaries";
+import {
+  lookupActiveCollaborationSummary,
+  isCurrentCollaborationOpenBinding,
+  type CollaborationOpenBinding,
+} from "../../lib/collaborationSummaryStore";
+import type { CollaborationSummary } from "../../lib/collaborationSummaryApi";
+import {
+  composeCollaborationPrioritySource,
+  isCollaborationPrioritySuppressed,
+  mergeExactCollaborationPriorityCandidates,
+} from "../../lib/collaborationPriority";
 import {
   deriveCollaborationOwnerSourceLocator,
   type CollaborationOwnerSourceLocator,
@@ -17617,6 +17631,9 @@ const collaborationCompactDisabledActionButtonClass =
 
 function MailboxView({
   mailbox,
+  collaborationSummaryScopeKey,
+  getActiveCollaborationSummary,
+  onCanonicalCollaborationMutation,
   activeMailboxTitleOverride,
   mailboxTitleOverrides,
   orderedMailboxes,
@@ -17746,6 +17763,9 @@ function MailboxView({
   hasRealInternalCollaborationTeammates: boolean;
   currentUserId: string;
   currentMemberUserId: string | null;
+  collaborationSummaryScopeKey: string;
+  getActiveCollaborationSummary: (mailboxId: InboxId, message: MailMessage, folder: MailFolder) => CollaborationSummary | null;
+  onCanonicalCollaborationMutation: (collaboration: CollaborationOwnerReadDto) => void;
   currentUserName: string;
   currentUserEmail: string;
   currentViewerPersistenceKey: string;
@@ -20238,6 +20258,28 @@ function MailboxView({
       primaryMessageSelection?.key ?? null,
     );
   const renderTargetMessage = isFullMessageOpen ? fullWidthMessage : selectedMessage;
+  const getCollaborationOpenBinding = (message: MailMessage | null): CollaborationOpenBinding | null => {
+    if (!message || !collaborationSummaryScopeKey) return null;
+    const location = currentMessageLocationByMessage.get(message);
+    if (!location) return null;
+    const summary = getActiveCollaborationSummary(location.mailboxId, message, location.folder);
+    return summary ? {
+      scopeKey: collaborationSummaryScopeKey,
+      selectionKey: buildCurrentMessageSelection(message).key,
+      summary,
+    } : null;
+  };
+  const currentCollaborationOpenBindingRef = useRef<CollaborationOpenBinding | null>(null);
+  currentCollaborationOpenBindingRef.current = getCollaborationOpenBinding(
+    isFullMessageOpen ? fullMessageModalMessage : selectedMessage,
+  );
+  const [collaborationLifecycleStatus, setCollaborationLifecycleStatus] = useState<"idle" | "pending" | "failure">("idle");
+  const collaborationLifecycleRequestRef = useRef<object | null>(null);
+  useEffect(() => () => {
+    collaborationOwnerProjectionRequestRef.current = null;
+    collaborationLifecycleRequestRef.current = null;
+    currentCollaborationOpenBindingRef.current = null;
+  }, []);
   const getVisiblePriorityReasonCopyForMessage = (message: MailMessage | null) => {
     if (!message || isSharedView || activeSmartFolder) {
       return null;
@@ -21642,7 +21684,28 @@ function MailboxView({
     }
   };
 
-  const renderMessageCollaboration = (message: MailMessage) => {
+  const renderMessageCollaboration = (message: MailMessage, surface: "split" | "full" = "split") => {
+    if (workspaceDataMode === "live") {
+      const binding = getCollaborationOpenBinding(message);
+      if (!binding || isFullMessageOpen !== (surface === "full")) return null;
+      return (
+        <button
+          type="button"
+          className={collaborationCompactPrimaryActionButtonClass}
+          onClick={() => {
+            if (!isCurrentCollaborationOpenBinding(binding, currentCollaborationOpenBindingRef.current)) return;
+            openCollaborationOverlay(message.id, {
+              sourceMailboxId: binding.summary.mailboxId as InboxId,
+              sourceMessage: message,
+              loadOwnerProjection: true,
+              expectedBinding: binding,
+            });
+          }}
+        >
+          Open Collaboration
+        </button>
+      );
+    }
     const sourceMailboxId = resolveCollaborationStorageMailboxId(
       message.id,
       null,
@@ -23608,6 +23671,7 @@ function MailboxView({
     sourceMailboxId: InboxId,
     message: MailMessage | null,
     trustedFolder: MailFolder | null,
+    expectedBinding?: CollaborationOpenBinding,
   ) => {
     const managedMailbox =
       managedInboxes.find((candidate) => candidate.id === sourceMailboxId) ?? null;
@@ -23651,10 +23715,13 @@ function MailboxView({
 
     const isCurrentRequest = () => {
       const currentRequest = collaborationOwnerProjectionRequestRef.current;
-      return (
-        currentRequest?.identityKey === identityKey &&
-        currentRequest.requestId === requestId
-      );
+      if (currentRequest?.identityKey !== identityKey || currentRequest.requestId !== requestId) return false;
+      if (expectedBinding && !isCurrentCollaborationOpenBinding(expectedBinding, currentCollaborationOpenBindingRef.current)) {
+        collaborationOwnerProjectionRequestRef.current = { ...currentRequest, inFlight: false };
+        setCollaborationOwnerProjection({ status: "non_retryable_failure", identityKey, requestId, failureStatus: "invalid_response" });
+        return false;
+      }
+      return true;
     };
     const commitFailure = (
       failureStatus: string,
@@ -23715,6 +23782,10 @@ function MailboxView({
         return;
       }
 
+      if (expectedBinding && lookupResult.collaborationId !== expectedBinding.summary.collaborationId) {
+        commitFailure("invalid_response");
+        return;
+      }
       const readResult = await readCollaborationForOwner(
         lookupResult.collaborationId,
       );
@@ -23856,8 +23927,12 @@ function MailboxView({
       sourceMailboxId?: InboxId;
       sourceMessage?: MailMessage | null;
       loadOwnerProjection?: boolean;
+      expectedBinding?: CollaborationOpenBinding;
     },
   ) => {
+    if (options?.expectedBinding && !isCurrentCollaborationOpenBinding(options.expectedBinding, currentCollaborationOpenBindingRef.current)) return;
+    collaborationLifecycleRequestRef.current = null;
+    setCollaborationLifecycleStatus("idle");
     if (
       !activeCollaborationMessageId &&
       typeof document !== "undefined" &&
@@ -23923,6 +23998,7 @@ function MailboxView({
         sourceMailboxId,
         message,
         authoritativeLocation?.folder ?? null,
+        options.expectedBinding,
       );
     } else {
       fenceCollaborationOwnerProjection();
@@ -24058,6 +24134,7 @@ function MailboxView({
   const applyCanonicalCollaborationAccessResult = (
     collaboration: CollaborationOwnerReadDto,
     expectedContextKey: string,
+    summaryAlreadyPublished = false,
   ) => {
     const activeRequest = collaborationOwnerProjectionRequestRef.current;
     if (
@@ -24088,6 +24165,37 @@ function MailboxView({
       requestId,
       collaboration,
     });
+    if (!summaryAlreadyPublished) onCanonicalCollaborationMutation(collaboration);
+  };
+
+  const transitionCanonicalCollaboration = async () => {
+    const collaboration = activeCollaborationOwnerProjection;
+    const request = collaborationOwnerProjectionRequestRef.current;
+    if (!collaboration || collaboration.viewerAccess !== "owner" || !request ||
+      request.inFlight || collaborationLifecycleRequestRef.current ||
+      request.identityKey !== activeCollaborationOwnerContextKey) return;
+    const token = {};
+    collaborationLifecycleRequestRef.current = token;
+    setCollaborationLifecycleStatus("pending");
+    const result = await (collaboration.state === "resolved"
+      ? reopenCollaborationForOwner(collaboration)
+      : resolveCollaborationForOwner(collaboration));
+    // Summary authority belongs to the account/workspace, even if this modal
+    // closed during the request. The callback independently fences that scope.
+    if (result.status === "success") onCanonicalCollaborationMutation(result.collaboration);
+    if (collaborationLifecycleRequestRef.current !== token) return;
+    if (collaborationOwnerProjectionRequestRef.current !== request) {
+      collaborationLifecycleRequestRef.current = null;
+      setCollaborationLifecycleStatus("idle");
+      return;
+    }
+    collaborationLifecycleRequestRef.current = null;
+    if (result.status !== "success") {
+      setCollaborationLifecycleStatus("failure");
+      return;
+    }
+    setCollaborationLifecycleStatus("idle");
+    applyCanonicalCollaborationAccessResult(result.collaboration, request.identityKey, true);
   };
 
   const syncCollaborationMentionState = (
@@ -29546,7 +29654,7 @@ function MailboxView({
                               .slice(0, MAIL_LIST_PREVIEW_CHARACTER_CAP)
                               .trimEnd()
                           : message.snippet;
-                      const sharedContextHint = message.collaboration
+                      const sharedContextHint = workspaceDataMode === "live" ? null : message.collaboration
                         ? "Collaboration…"
                         : isSharedView && message.isShared
                           ? formatSharedContextHint(message.sharedContext)
@@ -29835,7 +29943,7 @@ function MailboxView({
                                   ) : null}
                                 </div>
                               ) : null}
-                              {message.collaboration ? (
+                              {workspaceDataMode !== "live" && message.collaboration ? (
                                 <div className="pt-1">
                                   <button
                                     type="button"
@@ -30226,7 +30334,7 @@ function MailboxView({
                         ? renderAIDecisionBlock(fullMessageModalMessage)
                         : null}
 
-                      {renderMessageCollaboration(fullMessageModalMessage)}
+                      {renderMessageCollaboration(fullMessageModalMessage, "full")}
 
                       <div className="space-y-3">
                         {renderBehaviorSuggestion(fullMessageModalMessage)}
@@ -30951,6 +31059,7 @@ function MailboxView({
                         currentMemberUserId={currentMemberUserId}
                         currentUserEmail={currentUserEmail}
                         onCanonicalCollaboration={applyCanonicalCollaborationAccessResult}
+                        onCanonicalCreation={onCanonicalCollaborationMutation}
                         onRequestOverlayClose={requestCloseCollaborationOverlay}
                         onSecureLinkVisibilityChange={setIsCollaborationSecureLinkVisible}
                       />
@@ -31802,7 +31911,21 @@ function MailboxView({
 
                   <div className="mt-4 flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-[var(--workspace-border-soft)] pt-4">
                     {hasActiveCollaborationOwnerLifecycle ? (
-                      <div className="ml-auto">
+                      <div className="ml-auto flex flex-wrap items-center gap-2">
+                        {collaborationLifecycleStatus === "failure" ? (
+                          <span role="status" className="text-sm text-[var(--workspace-text-soft)]">Collaboration could not be updated. Retry.</span>
+                        ) : null}
+                        {activeCollaborationOwnerProjection?.viewerAccess === "owner" ? (
+                          <button
+                            type="button"
+                            disabled={collaborationLifecycleStatus === "pending"}
+                            onClick={() => { void transitionCanonicalCollaboration(); }}
+                            className={collaborationCompactPrimaryActionButtonClass}
+                          >
+                            {collaborationLifecycleStatus === "pending" ? "Updating…" :
+                              activeCollaborationOwnerProjection.state === "resolved" ? "Reopen Collaboration" : "Resolve Collaboration"}
+                          </button>
+                        ) : null}
                         <button
                           type="button"
                           onClick={requestCloseCollaborationOverlay}
@@ -43209,6 +43332,10 @@ export function WorkspaceShell({
   );
   const hasAuthenticatedMemberAuthority =
     authenticationContext === "auth0" && authenticatedUser?.userType === "member";
+  const collaborationSummaries = useCollaborationSummaries(
+    workspaceDataMode === "live" && hasAuthenticatedMemberAuthority ? authenticatedUser?.workspaceId ?? null : null,
+    workspaceDataMode === "live" && hasAuthenticatedMemberAuthority ? authenticatedUser?.userId ?? null : null,
+  );
   const authoritativeManagedInboxSeed = useMemo(
     () =>
       hasAuthenticatedMemberAuthority
@@ -48789,6 +48916,40 @@ export function WorkspaceShell({
     priorityWorkflowAuthorityRevision,
     priorityWorkflowCanonicalTargets,
   ]);
+  const collaborationManagedMailboxById = useMemo(
+    () => new Map(savedManagedInboxes.map(candidate => [candidate.id, candidate])),
+    [savedManagedInboxes],
+  );
+  const getActiveCollaborationSummary = (mailboxId: InboxId, message: MailMessage, folder: MailFolder = "Inbox") =>
+    lookupActiveCollaborationSummary(collaborationSummaries.index, authenticatedUser?.workspaceId ?? null, {
+      workspaceDataMode,
+      hasAuthenticatedMemberAuthority,
+      managedMailbox: collaborationManagedMailboxById.get(mailboxId) ?? null,
+      sourceMailboxId: mailboxId,
+      trustedFolder: folder === "Inbox" ? "INBOX" : folder,
+      message,
+    });
+  const collaborationPriorityLatestByConversation = new Map(
+    collaborationSummaries.index.size === 0 ? [] : dedupeLatestCanonicalConversationEntries(orderedMailboxes.flatMap(candidate =>
+      (mailboxStore[candidate.id]?.Inbox ?? []).map(message => ({
+        mailboxId: candidate.id, mailboxTitle: candidate.title, message,
+      })),
+    )).map(entry => [resolveCanonicalConversationIdentity(entry.message, entry.mailboxId).key, entry]),
+  );
+  const isCollaborationPriorityEntrySuppressed = ({ mailboxId, message }: { mailboxId: InboxId; message: MailMessage }) => {
+    const workflow = resolvePriorityWorkflowReadAuthority(mailboxId, message);
+    return isCollaborationPrioritySuppressed({
+      removed: resolveManualPriorityOverride(manualPriorityOverrides, message) === "removed",
+      cleared: isPriorityMessageCleared(mailboxId, message) || (workflow.status === "canonical" &&
+        (workflow.authority.status !== "ready" || workflow.authority.record.cleared === "cleared")),
+      noise: isWorkspaceMessageSpamSuppressed(message) || resolveMessageNoisePolicy(message).blocksAutoPriority,
+    });
+  };
+  const hasActiveCollaborationPriority = (mailboxId: InboxId, message: MailMessage) => {
+    if (!getActiveCollaborationSummary(mailboxId, message) || isCollaborationPriorityEntrySuppressed({ mailboxId, message })) return false;
+    const latest = collaborationPriorityLatestByConversation.get(resolveCanonicalConversationIdentity(message, mailboxId).key);
+    return !latest || !isCollaborationPriorityEntrySuppressed(latest);
+  };
   const normalPriorityGateCandidateEntries = (() => {
     const seenMessageKeys = new Set<string>();
     const uniqueEntries: Array<{
@@ -48829,7 +48990,9 @@ export function WorkspaceShell({
       );
       // Central Priority must evaluate the ready inbox before Bundle UI hiding so
       // strict Priority Demo/Promo work can surface without changing normal lists.
-      for (const message of candidateVisibleInboxMessages) {
+      const visibleMessages = new Set(candidateVisibleInboxMessages);
+      for (const message of candidateMailboxCollections.Inbox) {
+        if (!visibleMessages.has(message) && !hasActiveCollaborationPriority(candidate.id, message)) continue;
         addUniqueEntry({
           mailboxId: candidate.id,
           mailboxTitle: candidate.title,
@@ -48934,9 +49097,10 @@ export function WorkspaceShell({
       }),
     );
 
-    return buildPriorityRuntimeSignalsForCandidates({
+    const signals = buildPriorityRuntimeSignalsForCandidates({
       candidateMessages: normalPriorityGateCandidateEntries.map(({ mailboxId, message }) => ({
         ...message,
+        ...(workspaceDataMode === "live" ? { isShared: false, sharedContext: undefined } : {}),
         mailboxId,
       })),
       messagesByMailboxId,
@@ -48950,6 +49114,11 @@ export function WorkspaceShell({
       waitingOnOtherByMessageKey: runtimeWaitingOnOtherEvidence,
       returnedReplyEvidenceByMessageKey: runtimeReturnedReplyEvidence,
     });
+    for (const { mailboxId, message } of normalPriorityGateCandidateEntries) {
+      const signal = signals[createNormalPriorityMessageKey(mailboxId, message)];
+      if (signal) signal.prioritySource = composeCollaborationPrioritySource(signal.prioritySource, hasActiveCollaborationPriority(mailboxId, message));
+    }
+    return signals;
   }, [
     activeWorkspaceEmail,
     authenticatedUser?.email,
@@ -48972,7 +49141,7 @@ export function WorkspaceShell({
         message,
       );
       const normalPriorityGateInput = buildNormalPriorityGateInput({
-        message,
+        message: workspaceDataMode === "live" ? { ...message, isShared: false, sharedContext: undefined, collaboration: undefined } : message,
         runtimeSignal: priorityRuntimeSignalsForCandidates[messageKey],
         currentLegacyPriority: {
           hasVisiblePriorityBadge: true,
@@ -48983,9 +49152,9 @@ export function WorkspaceShell({
           action: message.action ?? null,
         },
         manualOverride,
-        hasCollaborationContext: Boolean(
+        hasCollaborationContext: hasActiveCollaborationPriority(mailboxId, message) || (workspaceDataMode !== "live" && Boolean(
           message.collaboration || message.isShared || message.sharedContext,
-        ),
+        )),
         hasAssignedReviewContext: Boolean(
           reviewController.getReviewBySourceId(message.id),
         ),
@@ -48996,7 +49165,7 @@ export function WorkspaceShell({
         isStrongSystemRuleConcreteActionable: false,
       });
 
-      if (shouldAllowNormalPriority(normalPriorityGateInput)) {
+      if (hasActiveCollaborationPriority(mailboxId, message) || shouldAllowNormalPriority(normalPriorityGateInput)) {
         nextKeys.add(messageKey);
       }
     });
@@ -49017,9 +49186,15 @@ export function WorkspaceShell({
     // This prevents an older priority message in the same thread from backfilling
     // the Priority queue/count after the latest visible message was manually set to
     // "Not priority".
-    return dedupeLatestCanonicalConversationEntries(
-      normalPriorityGateCandidateEntries,
-    ).filter(({ message, mailboxId }) => {
+    return mergeExactCollaborationPriorityCandidates({
+      representatives: dedupeLatestCanonicalConversationEntries(normalPriorityGateCandidateEntries),
+      candidates: normalPriorityGateCandidateEntries,
+      latestByConversation: collaborationPriorityLatestByConversation,
+      conversationKey: entry => resolveCanonicalConversationIdentity(entry.message, entry.mailboxId).key,
+      messageKey: entry => createNormalPriorityMessageKey(entry.mailboxId, entry.message),
+      active: entry => hasActiveCollaborationPriority(entry.mailboxId, entry.message),
+      suppressed: isCollaborationPriorityEntrySuppressed,
+    }).filter(({ message, mailboxId }) => {
       const override = resolveManualPriorityOverride(manualPriorityOverrides, message);
       const messageKey = createNormalPriorityMessageKey(mailboxId, message);
       const workflow = resolvePriorityWorkflowReadAuthority(
@@ -49073,9 +49248,8 @@ export function WorkspaceShell({
         : undefined;
       const hasIndependentPriorityAuthority = Boolean(
         override === "priority" ||
-          message.collaboration ||
-          message.isShared ||
-          message.sharedContext ||
+          hasActiveCollaborationPriority(mailboxId, message) ||
+          (workspaceDataMode !== "live" && (message.collaboration || message.isShared || message.sharedContext)) ||
           reviewController.getReviewBySourceId(message.id),
       );
       const isAutomaticOpenLoopSemanticallySuppressed = Boolean(
@@ -49100,9 +49274,11 @@ export function WorkspaceShell({
         !isAutomaticOpenLoopSemanticallySuppressed &&
         (hasWaitingOnOtherEvidence ||
           hasReturnedReplyEvidence ||
+          hasActiveCollaborationPriority(mailboxId, message) ||
           isPriorityQueueEligibleMessage(message, override)) &&
         (hasWaitingOnOtherEvidence ||
           hasReturnedReplyEvidence ||
+          hasActiveCollaborationPriority(mailboxId, message) ||
           isPriorityPageVisiblePriorityMessage(message, mailboxId)) &&
         strictNormalPriorityAllowedMessageKeys.has(messageKey)
       );
@@ -49844,11 +50020,21 @@ export function WorkspaceShell({
     senderCategoryLearning,
   ]);
   const livePriorityInboxEntries =
-    mergePrioritySemanticNewInboundPromotionsIntoCanonicalPriorityEntries(
-      broadLivePriorityInboxEntries,
-      normalPriorityGateCandidateEntries,
-      prioritySemanticNewInboundHydratedObservations,
-    );
+    mergeExactCollaborationPriorityCandidates({
+      representatives: mergePrioritySemanticNewInboundPromotionsIntoCanonicalPriorityEntries(
+        broadLivePriorityInboxEntries,
+        normalPriorityGateCandidateEntries,
+        prioritySemanticNewInboundHydratedObservations,
+      ),
+      // These exact source mails already passed the common Priority gates. The
+      // semantic merge may choose a newer representative of their conversation.
+      candidates: broadLivePriorityInboxEntries,
+      latestByConversation: collaborationPriorityLatestByConversation,
+      conversationKey: entry => resolveCanonicalConversationIdentity(entry.message, entry.mailboxId).key,
+      messageKey: entry => createNormalPriorityMessageKey(entry.mailboxId, entry.message),
+      active: entry => hasActiveCollaborationPriority(entry.mailboxId, entry.message),
+      suppressed: isCollaborationPriorityEntrySuppressed,
+    });
   const priorityWorkStateByReviewItemId = Object.fromEntries(
     livePriorityInboxEntries.map(({ mailboxId, message }) => {
       const messageKey = createNormalPriorityMessageKey(mailboxId, message);
@@ -56969,7 +57155,10 @@ export function WorkspaceShell({
 	            ) : activeMailbox ? (
               <div className="h-0 min-h-0 flex-1 overflow-hidden">
 	                <MailboxView
-	                  key={`${activeMailbox.id}-${mailboxResetToken}`}
+                      collaborationSummaryScopeKey={collaborationSummaries.scopeKey}
+                      getActiveCollaborationSummary={getActiveCollaborationSummary}
+                      onCanonicalCollaborationMutation={collaborationSummaries.acceptMutation}
+	                  key={`${activeMailbox.id}-${mailboxResetToken}-${collaborationSummaries.scopeKey}`}
 		                  mailbox={activeMailbox}
 		                  activeMailboxTitleOverride={mailboxTitleOverrides[activeMailbox.id]?.trim()}
 		                  mailboxTitleOverrides={mailboxTitleOverrides}
