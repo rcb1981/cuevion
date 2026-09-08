@@ -56,6 +56,7 @@ _OWNER_BODY_FIELDS = frozenset(
         "collaborationId",
         "mailboxId",
         "ownerMailboxId",
+        "confirmation",
         "sourceRef",
         "state",
         "text",
@@ -124,21 +125,28 @@ _MIGRATION_DRY_RUN_COUNTERS = (
     "skippedInvalid", "skippedUnauthorized", "unresolvedIdentity",
     "staleEntitlement", "missing", "capacity", "retry", "deferred",
 )
+_MIGRATION_APPLY_COUNTERS = (
+    "examined", "enrolled", "alreadyPresent", "skippedInvalid",
+    "skippedUnauthorized", "unresolvedIdentity", "staleEntitlement",
+    "missing", "capacity", "retry", "deferred",
+)
 
 
-def _migration_dry_run_response(result: object) -> PublicResponse:
+def _migration_runtime_response(result: object, *, dry_run: bool) -> PublicResponse:
     """Project only the bounded page-1 DTO; never publish engine internals."""
-    failed = json_failure("migration_dry_run_failed", status=503)
-    fields = set(_MIGRATION_DRY_RUN_COUNTERS) | {
+    failure_code = "migration_dry_run_failed" if dry_run else "migration_apply_failed"
+    failed = json_failure(failure_code, status=503)
+    counters = _MIGRATION_DRY_RUN_COUNTERS if dry_run else _MIGRATION_APPLY_COUNTERS
+    fields = set(counters) | {
         "v", "dryRun", "scanCalls", "hasMore", "done", "status", "error",
     }
     if (
         type(result) is not dict or set(result) != fields
         or type(result["v"]) is not int or result["v"] != 1
-        or result["dryRun"] is not True
+        or result["dryRun"] is not dry_run
         or any(type(result[name]) is not int or not 0 <= result[name] <= 5
-               for name in _MIGRATION_DRY_RUN_COUNTERS)
-        or sum(result[name] for name in _MIGRATION_DRY_RUN_COUNTERS[1:]) != result["examined"]
+               for name in counters)
+        or sum(result[name] for name in counters[1:]) != result["examined"]
         or type(result["scanCalls"]) is not int or not 0 <= result["scanCalls"] <= 1
         or type(result["hasMore"]) is not bool or type(result["done"]) is not bool
         or type(result["status"]) is not str or result["status"] not in {"ok", "blocked"}
@@ -158,7 +166,7 @@ def _migration_dry_run_response(result: object) -> PublicResponse:
                 "storage_unavailable": ("migration_unavailable", 503),
                 "index_hmac_unavailable": ("migration_unavailable", 503),
                 "migration_unavailable": ("migration_unavailable", 503),
-            }.get(error["code"], ("migration_dry_run_failed", 503))
+            }.get(error["code"], (failure_code, 503))
             return json_failure(code, status=status)
         if result["status"] != "blocked" or result[error["code"]] == 0:
             return failed
@@ -170,7 +178,8 @@ def _migration_dry_run_response(result: object) -> PublicResponse:
     return json_success({name: result[name] for name in fields - {"error"}})
 
 
-def _run_migration_dry_run(context, raw_headers, mailbox_id, configuration, rate_configuration):
+def _run_runtime_migration(context, raw_headers, mailbox_id, configuration, rate_configuration,
+                           *, dry_run: bool):
     """Temporary authenticated sample, with no caller execution options."""
     from . import authorization
 
@@ -198,7 +207,8 @@ def _run_migration_dry_run(context, raw_headers, mailbox_id, configuration, rate
             or capability.mailbox_provider not in {"google", "custom_imap"}):
             return json_failure("owner_not_authorized", status=403)
         decision = owner_rate_limit.consume_owner_rate_limit(
-            context, owner_rate_limit.RATE_LIMIT_MIGRATION_DRY_RUN,
+            context, (owner_rate_limit.RATE_LIMIT_MIGRATION_DRY_RUN if dry_run
+                      else owner_rate_limit.RATE_LIMIT_MIGRATION_APPLY),
             rate_configuration, operator_user_id=capability.actor_user_id,
         )
         if type(decision) is not owner_rate_limit.OwnerRateLimitDecision:
@@ -210,15 +220,17 @@ def _run_migration_dry_run(context, raw_headers, mailbox_id, configuration, rate
             return json_failure("service_unavailable", status=503)
         # Imported only after this exact operation's authority and limiter gates.
         from . import discovery_migration
-        result = discovery_migration.run_runtime_dry_run_page(
+        run = (discovery_migration.run_runtime_dry_run_page if dry_run
+               else discovery_migration.run_runtime_apply_page)
+        result = run(
             context, raw_headers, owner_mailbox_id=mailbox_id,
             owner_security_configuration=configuration,
         )
-        return _migration_dry_run_response(result)
+        return _migration_runtime_response(result, dry_run=dry_run)
     except OwnerSecurityError as error:
         return _owner_failure(error)
     except Exception:
-        return json_failure("migration_dry_run_failed", status=503)
+        return json_failure("migration_dry_run_failed" if dry_run else "migration_apply_failed", status=503)
 
 
 def _trusted_security_snapshot(environment: Mapping[str, str]) -> dict[str, str]:
@@ -581,8 +593,26 @@ def owner_response(
             from . import operator_grant
             if operator_grant.operator_mode(source) != "dry_run_grant":
                 return json_failure("operator_mode_off", status=404)
-            return _run_migration_dry_run(
+            return _run_runtime_migration(
                 context, raw_headers, mailbox_id, configuration, rate_limit_configuration,
+                dry_run=True,
+            )
+
+        if operation == "apply_discovery_migration_page":
+            _require_exact_fields(payload, frozenset({"operation", "ownerMailboxId", "confirmation"}))
+            mailbox_id = payload["ownerMailboxId"]
+            if (not valid_allowlist_mailbox_id(mailbox_id)
+                or type(payload["confirmation"]) is not str
+                or payload["confirmation"] != "APPLY_HISTORICAL_DISCOVERY"):
+                raise BoundaryError("invalid_value", 400)
+            if http_mode != "owner_write":
+                return json_failure("not_found", status=404)
+            from . import operator_grant
+            if operator_grant.operator_mode(source) != "runtime_apply":
+                return json_failure("operator_mode_off", status=404)
+            return _run_runtime_migration(
+                context, raw_headers, mailbox_id, configuration, rate_limit_configuration,
+                dry_run=False,
             )
 
         if operation == "issue_migration_operator_grant":

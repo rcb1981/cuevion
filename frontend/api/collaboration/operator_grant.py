@@ -75,7 +75,7 @@ class VerifiedMigrationOperatorContext:
 def operator_mode(environment):
     try:
         value = environment.get(MODE_ENV)
-        return "dry_run_grant" if type(value) is str and value == "dry_run_grant" else "off"
+        return value if type(value) is str and value in {"dry_run_grant", "runtime_apply"} else "off"
     except Exception:
         return "off"
 

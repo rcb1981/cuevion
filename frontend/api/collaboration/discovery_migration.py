@@ -1,7 +1,7 @@
 """Explicit, operator-invoked historical discovery repair.
 
 One call does at most one SCAN and processes five candidates. The temporary
-owner dry-run operation imports this module only in its authenticated branch.
+owner operations import this module only in their authenticated branches.
 There is no startup hook, background loop, or default execution. See
 C3B1C_DISCOVERY_MIGRATION.md for manual invocation and checkpoint semantics.
 """
@@ -508,7 +508,32 @@ def run_runtime_dry_run_page(owner_context, headers, *, owner_mailbox_id,
     HTTP boundary separately enforces its feature gate, origin, CSRF and limiter.
     Only aggregate facts and fixed error codes leave this adapter.
     """
-    counts = {name: 0 for name in _COUNTERS if name != "enrolled"}
+    return _run_runtime_page(
+        owner_context, headers, owner_mailbox_id=owner_mailbox_id,
+        owner_security_configuration=owner_security_configuration,
+        command_transport=command_transport, dry_run=True)
+
+
+def run_runtime_apply_page(owner_context, headers, *, owner_mailbox_id,
+                           owner_security_configuration, command_transport=None):
+    """Apply one current owner-authorized first page with no continuation.
+
+    The exact owner HTTP operation separately requires the exclusive apply
+    feature mode, confirmation, origin, CSRF and limiter. This adapter accepts
+    no caller-controlled execution mode, cursor, budget or checkpoint.
+    """
+    return _run_runtime_page(
+        owner_context, headers, owner_mailbox_id=owner_mailbox_id,
+        owner_security_configuration=owner_security_configuration,
+        command_transport=command_transport, dry_run=False)
+
+
+def _run_runtime_page(owner_context, headers, *, owner_mailbox_id,
+                      owner_security_configuration, command_transport, dry_run):
+    """Share authority and one-page mechanics; public adapters fix the mode."""
+    excluded = {"enrolled"} if dry_run else {"wouldEnroll", "alreadyPlanned"}
+    failure_code = "migration_dry_run_failed" if dry_run else "migration_apply_failed"
+    counts = {name: 0 for name in _COUNTERS if name not in excluded}
     state = {"scanBudget": 1, "scanCalls": 0, "scanCursor": "0", "scanFinished": False,
              "pending": [], "reserved": [], "previousResult": None, "done": False}
     error = None
@@ -527,10 +552,10 @@ def run_runtime_dry_run_page(owner_context, headers, *, owner_mailbox_id,
             classify_unavailable=True)
         if store.resolve_v2_index_hmac_keys() is None:
             raise MigrationError("migration_unavailable")
-        config["dryRun"] = True
+        config["dryRun"] = dry_run
         page_counts = _run_one_page(state, config, command_transport=command_transport)
-        if page_counts["enrolled"]:
-            raise MigrationError("migration_dry_run_failed")
+        if any(page_counts[name] for name in excluded):
+            raise MigrationError(failure_code)
         counts = {name: page_counts[name] for name in counts}
         error = "capacity" if counts["capacity"] else "retry" if counts["retry"] else None
     except MigrationError as exc:
@@ -541,11 +566,11 @@ def run_runtime_dry_run_page(owner_context, headers, *, owner_mailbox_id,
             "index_hmac_unavailable": "migration_unavailable",
         }.get(code, code if code in {
             "owner_not_authorized", "mailbox_not_authorized", "migration_unavailable",
-            "migration_dry_run_failed",
-        } else "migration_dry_run_failed")
+            failure_code,
+        } else failure_code)
     except Exception:
-        error = "migration_dry_run_failed"
-    return {"v": 1, "dryRun": True, **counts, "scanCalls": state["scanCalls"],
+        error = failure_code
+    return {"v": 1, "dryRun": dry_run, **counts, "scanCalls": state["scanCalls"],
             "hasMore": not state["done"], "done": state["done"],
             "status": "blocked" if error else "ok", "error": {"code": error} if error else None}
 
