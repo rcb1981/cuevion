@@ -470,6 +470,38 @@ def owner_response(
             now=timestamp,
         )
 
+        if operation == "issue_migration_operator_grant":
+            _require_exact_fields(payload, frozenset({"operation"}))
+            # Identity attestation only. Neither this boundary nor the grant
+            # module imports the manual migration or accepts migration options.
+            from . import operator_grant
+            if operator_grant.operator_mode(source) != "dry_run_grant":
+                return json_failure("operator_mode_off", status=404)
+            try:
+                member, scopes = operator_grant.resolve_issuance_authority(
+                    context, raw_headers, owner_security_configuration=configuration,
+                )
+                decision = owner_rate_limit.consume_owner_rate_limit(
+                    context, owner_rate_limit.RATE_LIMIT_OPERATOR_GRANT,
+                    rate_limit_configuration, operator_user_id=member.user_id,
+                )
+                if type(decision) is not owner_rate_limit.OwnerRateLimitDecision:
+                    return json_failure("service_unavailable", status=503)
+                if (decision.status == "limited" and type(decision.retry_after_seconds) is int
+                    and 1 <= decision.retry_after_seconds <= 60):
+                    return json_rate_limited(decision.retry_after_seconds)
+                if decision.status != "allowed" or decision.retry_after_seconds is not None:
+                    return json_failure("service_unavailable", status=503)
+                return json_success(operator_grant._issue_operator_grant(
+                    member, scopes, owner_security_configuration=configuration, now=timestamp,
+                ))
+            except operator_grant.OperatorGrantError as error:
+                status = {"authentication_required": 401, "owner_not_authorized": 403,
+                          "no_owned_mailboxes": 404, "grant_scope_invalid": 403}.get(error.code, 503)
+                return json_failure(error.code, status=status)
+            except Exception:
+                return json_failure("service_unavailable", status=503)
+
         if operation == "list_summaries":
             _require_exact_fields(payload, frozenset({"operation", "cursor"}))
             cursor = payload.get("cursor")

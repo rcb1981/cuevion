@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from . import owner_request_security
+from .models import normalize_v2_user_id
 from .redis_store import V2_KEY_PREFIX, _v2_eval
 
 
@@ -22,8 +23,9 @@ RATE_LIMIT_HMAC_ENV = "CUEVION_COLLAB_V2_RATE_LIMIT_HMAC_KEY"
 RATE_LIMIT_BOOTSTRAP = "bootstrap"
 RATE_LIMIT_READ = "read"
 RATE_LIMIT_WRITE = "write"
+RATE_LIMIT_OPERATOR_GRANT = "operator_grant"
 RATE_LIMIT_CLASSES = frozenset(
-    {RATE_LIMIT_BOOTSTRAP, RATE_LIMIT_READ, RATE_LIMIT_WRITE}
+    {RATE_LIMIT_BOOTSTRAP, RATE_LIMIT_READ, RATE_LIMIT_WRITE, RATE_LIMIT_OPERATOR_GRANT}
 )
 
 _DISTINCT_BASE64URL_SECRET_NAMES = (
@@ -47,6 +49,9 @@ RATE_LIMIT_CONFIGURATION_NAMES = (
 _BASE64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _CANONICAL_UINT_RE = re.compile(r"^(?:0|[1-9][0-9]*)$")
 _RATE_LIMIT_KEY_DOMAIN = "cuevion-collaboration-v2/owner-rate-limit-key/v1"
+_OPERATOR_GRANT_RATE_LIMIT_KEY_DOMAIN = (
+    "cuevion-collaboration-v2/operator-grant-rate-limit-key/v1"
+)
 _CONFIGURATION_SENTINEL = object()
 _MAX_RATE_LIMIT_RECORD_BYTES = 128
 STATE_EXPIRY_GRACE_MS = 1000
@@ -76,6 +81,11 @@ _POLICIES = {
         RATE_LIMIT_WRITE,
         2_000_000,
         10,
+    ),
+    RATE_LIMIT_OPERATOR_GRANT: OwnerRateLimitPolicy(
+        RATE_LIMIT_OPERATOR_GRANT,
+        300_000_000,
+        3,
     ),
 }
 
@@ -230,6 +240,8 @@ def build_owner_rate_limit_key(
     context: object,
     rate_class: object,
     configuration: object,
+    *,
+    operator_user_id: object = None,
 ) -> str | None:
     policy = owner_rate_limit_policy(rate_class)
     try:
@@ -239,13 +251,26 @@ def build_owner_rate_limit_key(
         return None
     if policy is None or not valid_context:
         return None
+    if rate_class == RATE_LIMIT_OPERATOR_GRANT:
+        if normalize_v2_user_id(operator_user_id) is None:
+            return None
+        identity_fields = {
+            "domain": _OPERATOR_GRANT_RATE_LIMIT_KEY_DOMAIN,
+            "userId": operator_user_id,
+            "workspaceId": context.workspace_id,
+        }
+    else:
+        # An operator identity cannot silently alter an existing policy's key.
+        if operator_user_id is not None:
+            return None
+        identity_fields = {
+            "domain": _RATE_LIMIT_KEY_DOMAIN,
+            "ownerEmail": context.owner_email,
+            "workspaceId": context.workspace_id,
+        }
     try:
         identity = json.dumps(
-            {
-                "domain": _RATE_LIMIT_KEY_DOMAIN,
-                "ownerEmail": context.owner_email,
-                "workspaceId": context.workspace_id,
-            },
+            identity_fields,
             allow_nan=False,
             ensure_ascii=True,
             separators=(",", ":"),
@@ -374,9 +399,12 @@ def consume_owner_rate_limit(
     configuration: object,
     *,
     command_transport=None,
+    operator_user_id: object = None,
 ) -> OwnerRateLimitDecision:
     policy = owner_rate_limit_policy(rate_class)
-    key = build_owner_rate_limit_key(context, rate_class, configuration)
+    key = build_owner_rate_limit_key(
+        context, rate_class, configuration, operator_user_id=operator_user_id,
+    )
     if policy is None or key is None:
         return OwnerRateLimitDecision("unavailable")
     result = _v2_eval(
@@ -406,8 +434,15 @@ def consume_owner_rate_limit(
             and _CANONICAL_UINT_RE.fullmatch(retry_after) is not None
         ):
             parsed_retry = int(retry_after)
-            if 1 <= parsed_retry <= 60:
-                return OwnerRateLimitDecision("limited", parsed_retry)
+            maximum_retry = (
+                (policy.emission_interval_microseconds + 999_999) // 1_000_000
+                if rate_class == RATE_LIMIT_OPERATOR_GRANT
+                else 60
+            )
+            if 1 <= parsed_retry <= maximum_retry:
+                # Keep the existing HTTP Retry-After contract. Redis still
+                # enforces the full operator interval on every future request.
+                return OwnerRateLimitDecision("limited", min(parsed_retry, 60))
     return OwnerRateLimitDecision("unavailable")
 
 
@@ -419,6 +454,7 @@ __all__ = (
     "RATE_LIMIT_CLASSES",
     "RATE_LIMIT_CONFIGURATION_NAMES",
     "RATE_LIMIT_HMAC_ENV",
+    "RATE_LIMIT_OPERATOR_GRANT",
     "RATE_LIMIT_READ",
     "RATE_LIMIT_WRITE",
     "STATE_EXPIRY_GRACE_MS",

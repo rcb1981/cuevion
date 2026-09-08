@@ -462,6 +462,49 @@ def run_page(owner_context, headers, *, enabled=False, checkpoint_path, cursor=N
     blocked candidate. Completed checkpoints are sealed. New dry/apply passes
     require separate files. No production transport is invoked by importing.
     """
+    return _run_page(
+        lambda: _verified_config(
+            owner_context, headers, owner_security_configuration, owner_mailbox_id),
+        enabled=enabled, checkpoint_path=checkpoint_path, cursor=cursor,
+        dry_run=dry_run, scan_budget=scan_budget, command_transport=command_transport,
+    )
+
+
+def run_page_with_operator_grant(grant, *, enabled=False, checkpoint_path,
+                                 cursor=None, dry_run=True, owner_mailbox_id,
+                                 scan_budget=25, owner_security_configuration,
+                                 command_transport=None):
+    """Manually run one dry page using a freshly verified, bounded bearer grant.
+
+    Signature, expiry, current account, owned mailbox and Team authority are
+    revalidated before reading a checkpoint, including a cached page replay.
+    This adapter never creates browser-session or generic owner authority.
+    """
+    def resolve_config():
+        if dry_run is not True or type(scan_budget) is not int or not 1 <= scan_budget <= 25:
+            raise MigrationError("grant_scope_invalid")
+        from . import operator_grant
+        try:
+            verified = operator_grant.verify_operator_grant(
+                grant, owner_security_configuration=owner_security_configuration)
+            return operator_grant.resolve_current_operator_config(
+                verified, owner_mailbox_id,
+                owner_security_configuration=owner_security_configuration)
+        except operator_grant.OperatorGrantError as exc:
+            raise MigrationError(exc.code) from None
+        except Exception:
+            raise MigrationError("grant_invalid") from None
+
+    return _run_page(
+        resolve_config, enabled=enabled, checkpoint_path=checkpoint_path,
+        cursor=cursor, dry_run=dry_run, scan_budget=scan_budget,
+        command_transport=command_transport,
+    )
+
+
+def _run_page(config_resolver, *, enabled, checkpoint_path, cursor,
+              dry_run, scan_budget, command_transport):
+    """Shared manual engine; trusted config is always resolved before I/O."""
     zero = {name: 0 for name in _COUNTERS}
     lock_fd = None
     state = None
@@ -471,7 +514,7 @@ def run_page(owner_context, headers, *, enabled=False, checkpoint_path, cursor=N
         if (type(dry_run) is not bool or type(scan_budget) is not int or not 1 <= scan_budget <= 100_000
             or (cursor is not None and not _token(cursor))):
             raise MigrationError("invalid_request")
-        config = _verified_config(owner_context, headers, owner_security_configuration, owner_mailbox_id)
+        config = config_resolver()
         scope = {k: config[k] for k in ("workspaceId", "userId", "email", "ownerMailboxId", "ownerProvider")}
         scope["dryRun"] = dry_run
         path = Path(checkpoint_path)
