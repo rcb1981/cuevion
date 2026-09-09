@@ -7,6 +7,7 @@ import {
 } from "react";
 import {
   bootstrapGuestSession,
+  createCollaborationGuestReplyIdempotencyKey,
   exchangeGuestInvitation,
   isValidCollaborationGuestDisplayName,
   isValidCollaborationGuestReply,
@@ -272,6 +273,8 @@ export function ExternalCollaborationGuestView({
   const requestsInFlightRef = useRef(0);
   const wasHiddenRef = useRef(false);
   const returnCheckedRef = useRef(false);
+  const replyInFlightRef = useRef(false);
+  const pendingReplyRef = useRef<{ text: string; idempotencyKey: string } | null>(null);
 
   const canApplyResult = () => mountedRef.current && !endedRef.current;
 
@@ -285,6 +288,7 @@ export function ExternalCollaborationGuestView({
   };
 
   const clearGuestMemory = () => {
+    pendingReplyRef.current = null;
     setInviteToken(null);
     setSession(null);
     setCsrfToken(null);
@@ -448,32 +452,51 @@ export function ExternalCollaborationGuestView({
 
   const handleReply = async (event: FormEvent) => {
     event.preventDefault();
-    if (!canApplyResult()) return;
+    if (!canApplyResult() || replyInFlightRef.current || state === "logging_out") return;
     if (!isValidCollaborationGuestReply(draft)) {
       setDraftError("Enter a reply up to 16 KB without hidden control characters.");
       return;
     }
-    if (!csrfToken) {
+    // Latch before awaiting: a second submit can precede React's disabled render.
+    replyInFlightRef.current = true;
+    try {
+      if (!csrfToken) {
+        setDraftError(null);
+        await recoverSessionAfterReplyFailure();
+        return;
+      }
+      if (pendingReplyRef.current?.text !== draft) {
+        const idempotencyKey = createCollaborationGuestReplyIdempotencyKey();
+        if (idempotencyKey === null) {
+          setDraftError("Couldn’t securely prepare your reply. Please try again.");
+          return;
+        }
+        pendingReplyRef.current = { text: draft, idempotencyKey };
+      }
+      const pendingReply = pendingReplyRef.current;
       setDraftError(null);
-      await recoverSessionAfterReplyFailure();
-      return;
+      setNotice(null);
+      setState("replying");
+      const result = await request(() => api.reply(
+        pendingReply.text, csrfToken, pendingReply.idempotencyKey,
+      ));
+      if (!canApplyResult()) return;
+      if (result.status === "success") {
+        pendingReplyRef.current = null;
+        setCollaboration(result.collaboration);
+        setDraft("");
+        setState("ready");
+        return;
+      }
+      // Preserve the logical send through uncertain responses and CSRF renewal.
+      if (result.status === "csrf_failed") {
+        await recoverSessionAfterReplyFailure();
+        return;
+      }
+      applyFailure(result);
+    } finally {
+      replyInFlightRef.current = false;
     }
-    setDraftError(null);
-    setNotice(null);
-    setState("replying");
-    const result = await request(() => api.reply(draft, csrfToken));
-    if (!canApplyResult()) return;
-    if (result.status === "success") {
-      setCollaboration(result.collaboration);
-      setDraft("");
-      setState("ready");
-      return;
-    }
-    if (result.status === "csrf_failed") {
-      await recoverSessionAfterReplyFailure();
-      return;
-    }
-    applyFailure(result);
   };
 
   const handleLogout = async () => {
@@ -564,7 +587,8 @@ export function ExternalCollaborationGuestView({
     const canRetry =
       state === "retryable_error" ||
       state === "rate_limited" ||
-      (state === "service_unavailable" && inviteToken !== null);
+      (state === "service_unavailable" &&
+        (inviteToken !== null || pendingReplyRef.current !== null));
     return (
       <CenteredState
         state={state}

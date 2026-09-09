@@ -51,6 +51,7 @@ from .models import (
     normalize_v2_team_membership_ref,
     normalize_v2_thread_record,
     normalize_v2_user_id,
+    normalize_v2_owner_idempotency_key,
     normalize_v2_summary_page,
 )
 from .redis_store import (
@@ -2009,6 +2010,7 @@ def append_v2_shared_reply_for_guest(
     raw_headers: object,
     text: object,
     *,
+    idempotency_key: object = None,
     now: int | None = None,
     command_transport=None,
     environment=None,
@@ -2019,6 +2021,7 @@ def append_v2_shared_reply_for_guest(
         or not MIN_V2_TIMESTAMP_SECONDS <= current_time <= MAX_V2_TIMESTAMP_SECONDS
         or type(text) is not str
         or _v2_free_text(text, max_length=MAX_V2_MESSAGE_TEXT) != text
+        or normalize_v2_owner_idempotency_key(idempotency_key) is None
     ):
         return _failure("malformed", "invalid_request")
     resolved = resolve_guest_v2_mutation_context(
@@ -2045,6 +2048,7 @@ def append_v2_shared_reply_for_guest(
     mutated = append_guest_v2_reply(
         capability,
         text,
+        idempotency_key=idempotency_key,
         command_transport=command_transport,
     )
     if (

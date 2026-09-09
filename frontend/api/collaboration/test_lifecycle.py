@@ -441,7 +441,7 @@ class LifecycleRedisTests(unittest.TestCase):
         with patch.object(mutations.time, "time", return_value=redis_tests.SEC + 102), patch.object(
             mutations.time, "time_ns", return_value=(redis_tests.SEC + 102) * 1_000_000_000,
         ):
-            reply = mutations.append_guest_v2_reply(guest, "Guest shared reply", command_transport=self.transport)
+            reply = mutations.append_guest_v2_reply(guest, "Guest shared reply", idempotency_key="A" * 43, command_transport=self.transport)
         self.assertEqual(reply["status"], "ok", reply)
         after_reply = self.stored()
         self.assertEqual(after_reply["ownerUserId"], OWNER_ID)

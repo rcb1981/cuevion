@@ -29,6 +29,7 @@ from .models import (
     _v2_bounded_string,
     _v2_free_text,
     is_v2_opaque_id,
+    normalize_v2_owner_idempotency_key,
 )
 
 
@@ -36,7 +37,7 @@ GUEST_HTTP_MODE_ENVIRONMENT_NAME = "CUEVION_COLLAB_V2_GUEST_HTTP_MODE"
 GUEST_HTTP_MODE_ACTIVE = "guest_on"
 GUEST_ENDPOINT_PATH = "/api/collaboration/guest"
 MAX_GUEST_REQUEST_BYTES = 32_768
-_POST_FIELDS = frozenset({"operation", "token", "displayName", "text"})
+_POST_FIELDS = frozenset({"operation", "token", "displayName", "text", "idempotencyKey"})
 _SESSION_FIELDS = frozenset(
     {
         "collaborationId",
@@ -394,9 +395,10 @@ def _post_response(
         return json_success({"session": session, "csrfToken": csrf_token})
 
     if operation == "reply":
-        _exact_fields(payload, frozenset({"operation", "text"}))
+        _exact_fields(payload, frozenset({"operation", "text", "idempotencyKey"}))
         text = payload.get("text")
-        if _v2_free_text(text, max_length=MAX_V2_MESSAGE_TEXT) != text:
+        if (_v2_free_text(text, max_length=MAX_V2_MESSAGE_TEXT) != text
+            or normalize_v2_owner_idempotency_key(payload.get("idempotencyKey")) is None):
             raise BoundaryError("invalid_value", 400)
         raw_session_id, cookie_failure = _cookie_result(raw_headers)
         if cookie_failure is not None:
@@ -414,6 +416,7 @@ def _post_response(
         result = application.append_v2_shared_reply_for_guest(
             raw_headers,
             text,
+            idempotency_key=payload["idempotencyKey"],
             now=now,
             command_transport=command_transport,
             environment=environment,

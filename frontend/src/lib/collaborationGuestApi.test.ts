@@ -5,6 +5,7 @@ import {
   bootstrapGuestSession,
   COLLABORATION_GUEST_CSRF_HEADER,
   COLLABORATION_GUEST_ENDPOINT,
+  createCollaborationGuestReplyIdempotencyKey,
   exchangeGuestInvitation,
   logoutGuestCollaboration,
   parseCollaborationGuestDto,
@@ -18,6 +19,7 @@ const TOKEN = "A".repeat(43);
 const CSRF = "C".repeat(43);
 const COLLABORATION_ID = "D".repeat(22);
 const MESSAGE_ID = "M".repeat(22);
+const IDEMPOTENCY_KEY = "I".repeat(42) + "A";
 const session = {
   collaborationId: COLLABORATION_ID,
   guestDisplayName: "External Reviewer",
@@ -126,7 +128,7 @@ async function run() {
         status: "success",
         collaboration,
       });
-      assert.deepEqual(await replyToGuestCollaboration("My reply", CSRF), {
+      assert.deepEqual(await replyToGuestCollaboration("My reply", CSRF, IDEMPOTENCY_KEY), {
         status: "success",
         collaboration,
       });
@@ -145,7 +147,9 @@ async function run() {
       assert.equal(calls[2].init?.method, "GET");
       assert.equal(calls[2].init?.body, undefined);
       assert.deepEqual(calls[2].init?.headers, { Accept: "application/json" });
-      assertPost(calls[3], { operation: "reply", text: "My reply" }, CSRF);
+      assertPost(calls[3], {
+        operation: "reply", text: "My reply", idempotencyKey: IDEMPOTENCY_KEY,
+      }, CSRF);
       assertPost(calls[4], { operation: "logout" }, CSRF);
 
       assert.equal(String(calls[1].init?.body).includes(TOKEN), false);
@@ -244,13 +248,74 @@ async function run() {
       assert.deepEqual(await exchangeGuestInvitation("bad", "Reviewer"), {
         status: "invalid_request",
       });
-      assert.deepEqual(await replyToGuestCollaboration("", CSRF), {
+      assert.deepEqual(await replyToGuestCollaboration("", CSRF, IDEMPOTENCY_KEY), {
         status: "invalid_request",
       });
       assert.deepEqual(await logoutGuestCollaboration("bad"), {
         status: "invalid_request",
       });
       assert.equal(calls.length, 0);
+    }
+
+    {
+      const calls: FetchCall[] = [];
+      installFetch([], calls);
+      for (const key of [
+        "", "A".repeat(42), "A".repeat(44), "A".repeat(42) + "B",
+        "A".repeat(42) + "=", " " + IDEMPOTENCY_KEY,
+        undefined as unknown as string,
+        { toString: () => IDEMPOTENCY_KEY } as unknown as string,
+      ]) {
+        assert.deepEqual(await replyToGuestCollaboration("Reply", CSRF, key), {
+          status: "invalid_request",
+        });
+      }
+      assert.equal(calls.length, 0, "malformed send identity never reaches the server");
+    }
+
+    {
+      const cryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+      try {
+        let randomCalls = 0;
+        Object.defineProperty(globalThis, "crypto", {
+          configurable: true,
+          value: { getRandomValues: (bytes: Uint8Array) => {
+            assert.ok(bytes instanceof Uint8Array);
+            assert.equal(bytes.length, 32, "logical send uses 256 random bits");
+            bytes.fill(++randomCalls);
+            return bytes;
+          } },
+        });
+        const first = createCollaborationGuestReplyIdempotencyKey();
+        const second = createCollaborationGuestReplyIdempotencyKey();
+        assert.match(first!, /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/);
+        assert.match(second!, /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/);
+        assert.notEqual(first, second);
+        assert.equal(randomCalls, 2);
+        Object.defineProperty(globalThis, "crypto", {
+          configurable: true,
+          value: { getRandomValues: () => { throw new Error("random unavailable"); } },
+        });
+        assert.equal(createCollaborationGuestReplyIdempotencyKey(), null);
+      } finally {
+        if (cryptoDescriptor) Object.defineProperty(globalThis, "crypto", cryptoDescriptor);
+        else Reflect.deleteProperty(globalThis, "crypto");
+      }
+    }
+
+    {
+      const calls: FetchCall[] = [];
+      globalThis.fetch = (async (input, init) => {
+        calls.push({ input, init });
+        throw new Error("lost response");
+      }) as typeof fetch;
+      assert.deepEqual(await replyToGuestCollaboration("Retry", CSRF, IDEMPOTENCY_KEY), {
+        status: "network_failure",
+      });
+      assert.equal(calls.length, 1, "transport must not retry automatically");
+      installFetch([success({ collaboration })], calls);
+      assert.equal((await replyToGuestCollaboration("Retry", CSRF, IDEMPOTENCY_KEY)).status, "success");
+      assert.deepEqual(calls[0].init?.body, calls[1].init?.body);
     }
 
     {

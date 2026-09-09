@@ -14,6 +14,7 @@ ORIGIN = "https://app.cuevion.com"
 INVITE_TOKEN = base64.urlsafe_b64encode(b"i" * 32).rstrip(b"=").decode("ascii")
 SESSION_ID = base64.urlsafe_b64encode(b"s" * 32).rstrip(b"=").decode("ascii")
 CSRF_TOKEN = base64.urlsafe_b64encode(b"c" * 32).rstrip(b"=").decode("ascii")
+IDEMPOTENCY_KEY = base64.urlsafe_b64encode(b"k" * 32).rstrip(b"=").decode("ascii")
 COLLABORATION_ID = "C" * 22
 GUEST_KEY = b"guest-csrf-key-material-32-bytes!"
 OTHER_GUEST_KEY = b"other-guest-key-material-32-byte"
@@ -400,12 +401,12 @@ class GuestHttpBoundaryTests(unittest.TestCase):
         read.assert_not_called()
 
     def test_reply_exact_fields_and_rate_limit_precede_mutation(self):
-        base = _post({"operation": "reply", "text": "Hello"}, cookie=_cookie(), csrf=CSRF_TOKEN)
+        base = _post({"operation": "reply", "text": "Hello", "idempotencyKey": IDEMPOTENCY_KEY}, cookie=_cookie(), csrf=CSRF_TOKEN)
         forbidden_payloads = (
-            {"operation": "reply", "text": "Hello", "collaborationId": COLLABORATION_ID},
-            {"operation": "reply", "text": "Hello", "displayName": "Spoof"},
-            {"operation": "reply", "text": "Hello", "visibility": "internal"},
-            {"operation": "reply", "text": "Hello", "ownerEmail": "owner@example.com"},
+            {"operation": "reply", "text": "Hello", "idempotencyKey": IDEMPOTENCY_KEY, "collaborationId": COLLABORATION_ID},
+            {"operation": "reply", "text": "Hello", "idempotencyKey": IDEMPOTENCY_KEY, "displayName": "Spoof"},
+            {"operation": "reply", "text": "Hello", "idempotencyKey": IDEMPOTENCY_KEY, "visibility": "internal"},
+            {"operation": "reply", "text": "Hello", "idempotencyKey": IDEMPOTENCY_KEY, "ownerEmail": "owner@example.com"},
         )
         with mock.patch.object(guest_http.application, "append_v2_shared_reply_for_guest") as append:
             for payload in forbidden_payloads:
@@ -424,12 +425,28 @@ class GuestHttpBoundaryTests(unittest.TestCase):
             return_value={"status": "ok", "collaboration": _collaboration(), "error": None},
         ) as append:
             response = _invoke(
-                _post({"operation": "reply", "text": "Hello"}, cookie=_cookie(), csrf=CSRF_TOKEN)
+                _post({"operation": "reply", "text": "Hello", "idempotencyKey": IDEMPOTENCY_KEY}, cookie=_cookie(), csrf=CSRF_TOKEN)
             )
         self.assertEqual(response.status, 200)
         self.assertEqual(_json(response)["data"]["collaboration"], _collaboration())
         args, _kwargs = append.call_args
         self.assertEqual(args[1], "Hello")
+        self.assertEqual(_kwargs["idempotency_key"], IDEMPOTENCY_KEY)
+
+    def test_reply_requires_one_canonical_logical_send_key_before_mutation(self):
+        malformed_payloads = [{"operation": "reply", "text": "Hello"}]
+        malformed_payloads.extend(
+            {"operation": "reply", "text": "Hello", "idempotencyKey": key}
+            for key in (None, True, "", "A" * 42, "A" * 44, "A" * 42 + "B", "A" * 42 + "=", " " + IDEMPOTENCY_KEY)
+        )
+        with mock.patch.object(guest_http.application, "append_v2_shared_reply_for_guest") as append:
+            for payload in malformed_payloads:
+                with self.subTest(payload=payload):
+                    response = _invoke(_post(payload, cookie=_cookie(), csrf=CSRF_TOKEN))
+                    self.assertEqual(response.status, 400)
+                    self.assertEqual(_json(response), {"ok": False, "error": {"code": "invalid_request"}})
+                    self.assert_no_store(response)
+        append.assert_not_called()
 
     def test_reply_maps_csrf_and_session_failures_without_details(self):
         for code, expected in (
@@ -443,13 +460,13 @@ class GuestHttpBoundaryTests(unittest.TestCase):
                 return_value={"status": "error", "error": {"code": code}},
             ):
                 response = _invoke(
-                    _post({"operation": "reply", "text": "Hello"}, cookie=_cookie(), csrf=CSRF_TOKEN)
+                    _post({"operation": "reply", "text": "Hello", "idempotencyKey": IDEMPOTENCY_KEY}, cookie=_cookie(), csrf=CSRF_TOKEN)
                 )
                 self.assertEqual((response.status, _json(response)["error"]["code"]), expected)
 
     def test_reply_and_logout_require_csrf(self):
         for operation in (
-            {"operation": "reply", "text": "Hello"},
+            {"operation": "reply", "text": "Hello", "idempotencyKey": IDEMPOTENCY_KEY},
             {"operation": "logout"},
         ):
             with self.subTest(operation=operation["operation"]):
@@ -809,6 +826,7 @@ class GuestReplyApplicationTests(unittest.TestCase):
             result = guest_http.application.append_v2_shared_reply_for_guest(
                 (("Origin", ORIGIN),),
                 "Only text",
+                idempotency_key=IDEMPOTENCY_KEY,
                 now=NOW,
                 environment=_environment(),
             )
@@ -817,12 +835,28 @@ class GuestReplyApplicationTests(unittest.TestCase):
         append.assert_called_once_with(
             capability,
             "Only text",
+            idempotency_key=IDEMPOTENCY_KEY,
             command_transport=None,
         )
         parameters = guest_http.application.append_v2_shared_reply_for_guest.__annotations__
         self.assertNotIn("collaborationId", parameters)
         self.assertNotIn("mailboxId", parameters)
         self.assertNotIn("workspaceId", parameters)
+
+    def test_guest_reply_application_rejects_missing_key_before_auth_or_storage(self):
+        with mock.patch.object(
+            guest_http.application, "resolve_guest_v2_mutation_context",
+        ) as resolve, mock.patch.object(mutations, "append_guest_v2_reply") as append:
+            result = guest_http.application.append_v2_shared_reply_for_guest(
+                (("Origin", ORIGIN),), "Only text", now=NOW,
+                environment=_environment(),
+            )
+        self.assertEqual(result, {
+            "status": "malformed", "collaboration": None,
+            "error": {"code": "invalid_request"},
+        })
+        resolve.assert_not_called()
+        append.assert_not_called()
 
 
 class GuestRateLimitTests(unittest.TestCase):

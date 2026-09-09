@@ -14,6 +14,7 @@ from .mutations import append_guest_v2_reply, append_internal_v2_message
 
 SEC = 1_800_000_000
 MS = SEC * 1000
+GUEST_IDEMPOTENCY_KEY = "A" * 43
 
 
 def thread_record() -> dict:
@@ -121,18 +122,20 @@ class CollaborationV2MutationTests(unittest.TestCase):
         session = guest_mutation_capability()
         with patch.object(mutations.time, "time_ns", return_value=(MS + 101) * 1_000_000), patch.object(mutations.time, "time", return_value=SEC + 101):
             result = append_guest_v2_reply(
-                session, "Shared reply",
+                session, "Shared reply", idempotency_key=GUEST_IDEMPOTENCY_KEY,
                 thread_loader=lambda *_args, **_kwargs: {"status": "ok", "record": thread_record()},
-                thread_saver=lambda record, expected, **kwargs: saved.append((record, expected, kwargs)) or {"status": "ok", "record": record},
+                thread_saver=lambda record, expected, **kwargs: saved.append((record, expected, kwargs)) or redis_store._V2RecordResult(record),
             )
         self.assertEqual(result["status"], "ok")
         self.assertEqual(saved[0][0]["messages"][0]["visibility"], "shared")
         self.assertIs(saved[0][2]["session_context"], session)
         self.assertEqual(saved[0][2]["now"], SEC + 101)
+        self.assertEqual(saved[0][2]["idempotency_key"], GUEST_IDEMPOTENCY_KEY)
+        self.assertEqual(saved[0][2]["reply_text"], "Shared reply")
         forged = {"copied": session, "mailbox_id": "mailbox-other"}
         with patch.object(mutations.time, "time_ns", return_value=(MS + 101) * 1_000_000), patch.object(mutations.time, "time", return_value=SEC + 101):
             denied = append_guest_v2_reply(
-                forged, "Shared reply",
+                forged, "Shared reply", idempotency_key=GUEST_IDEMPOTENCY_KEY,
                 thread_loader=lambda *_args, **_kwargs: {"status": "ok", "record": thread_record()},
                 thread_saver=lambda *_args, **_kwargs: self.fail("scope failure must precede write"),
             )
@@ -150,6 +153,7 @@ class CollaborationV2MutationTests(unittest.TestCase):
             result = append_guest_v2_reply(
                 session,
                 "Shared reply",
+                idempotency_key=GUEST_IDEMPOTENCY_KEY,
                 thread_loader=lambda *_args, **_kwargs: {"status": "ok", "record": thread_record()},
                 thread_saver=ordinary_cas_only,
             )
@@ -164,6 +168,7 @@ class CollaborationV2MutationTests(unittest.TestCase):
             result = append_guest_v2_reply(
                 session,
                 "Shared reply",
+                idempotency_key=GUEST_IDEMPOTENCY_KEY,
                 thread_loader=lambda *_args, **_kwargs: self.fail(
                     "backward chronology must fail before thread storage"
                 ),
@@ -176,6 +181,7 @@ class CollaborationV2MutationTests(unittest.TestCase):
             result = append_guest_v2_reply(
                 session,
                 "Shared reply",
+                idempotency_key=GUEST_IDEMPOTENCY_KEY,
                 thread_loader=lambda *_args, **_kwargs: self.fail(
                     "expired session must fail before thread storage"
                 ),
@@ -192,10 +198,72 @@ class CollaborationV2MutationTests(unittest.TestCase):
                 result = append_guest_v2_reply(
                     session,
                     "Shared reply",
+                    idempotency_key=GUEST_IDEMPOTENCY_KEY,
                     thread_loader=lambda *_args, **_kwargs: {"status": "ok", "record": thread_record()},
                     thread_saver=lambda *_args, **_kwargs: {"status": "revoked", "error": {"code": code}},
                 )
             self.assertEqual(result, {"status": "error", "error": {"code": code}})
+
+    def test_guest_reply_rejects_missing_and_noncanonical_keys_before_storage(self):
+        session = guest_mutation_capability()
+        for key in (None, True, "", "A" * 42, "A" * 44, "A" * 42 + "B", "A" * 42 + "=", " " + GUEST_IDEMPOTENCY_KEY):
+            with self.subTest(key=key):
+                result = append_guest_v2_reply(
+                    session, "Shared reply", idempotency_key=key,
+                    thread_loader=lambda *_args, **_kwargs: self.fail("invalid key must precede storage"),
+                    thread_saver=lambda *_args, **_kwargs: self.fail("invalid key must precede mutation"),
+                )
+                self.assertEqual(result, {"status": "error", "error": {"code": "invalid_request"}})
+
+    def test_guest_retry_returns_original_canonical_message_after_newer_activity(self):
+        session = guest_mutation_capability()
+        current = thread_record()
+        saved_keys = []
+
+        def load(*_args, **_kwargs):
+            return redis_store._V2RecordResult(current)
+
+        def save(record, expected, **kwargs):
+            nonlocal current
+            self.assertEqual(expected, current["updatedAt"])
+            self.assertIs(kwargs["session_context"], session)
+            saved_keys.append(kwargs["idempotency_key"])
+            current = record
+            return redis_store._V2RecordResult(current)
+
+        with patch.object(mutations.time, "time", return_value=SEC + 101), patch.object(
+            mutations.time, "time_ns", return_value=(MS + 101) * 1_000_000,
+        ):
+            first = append_guest_v2_reply(
+                session, "Stable reply", idempotency_key=GUEST_IDEMPOTENCY_KEY,
+                thread_loader=load, thread_saver=save,
+            )
+        self.assertEqual(first["status"], "ok")
+        current = {
+            **current,
+            "updatedAt": MS + 105,
+            "messages": [*current["messages"], {
+                "id": "Z" * 22, "authorKind": "owner", "authorDisplayName": "Owner",
+                "text": "Newer shared activity", "visibility": "shared", "createdAt": MS + 105,
+            }],
+        }
+        with patch.object(mutations.time, "time", return_value=SEC + 102), patch.object(
+            mutations.time, "time_ns", return_value=(MS + 110) * 1_000_000,
+        ):
+            replay = append_guest_v2_reply(
+                session, "Stable reply", idempotency_key=GUEST_IDEMPOTENCY_KEY,
+                thread_loader=load, thread_saver=save,
+            )
+            fresh = append_guest_v2_reply(
+                session, "Stable reply", idempotency_key="B" * 42 + "A",
+                thread_loader=load, thread_saver=save,
+            )
+        self.assertEqual(replay, first)
+        self.assertEqual(fresh["status"], "ok")
+        self.assertNotEqual(fresh["message"]["id"], first["message"]["id"])
+        self.assertEqual(len(current["messages"]), 3)
+        self.assertEqual(sum(message["authorKind"] == "guest" for message in current["messages"]), 2)
+        self.assertEqual(saved_keys, [GUEST_IDEMPOTENCY_KEY, GUEST_IDEMPOTENCY_KEY, "B" * 42 + "A"])
 
     def test_owner_saver_is_called_once_for_every_result_and_exception(self):
         context = internal_capability("reply")
@@ -475,7 +543,7 @@ class CollaborationV2MutationTests(unittest.TestCase):
             internal, guest_read_capability(), {"status": "active"}, "s" * 43,
         ):
             denied = append_guest_v2_reply(
-                forged, "message",
+                forged, "message", idempotency_key=GUEST_IDEMPOTENCY_KEY,
                 thread_loader=lambda *_args, **_kwargs: self.fail("forgery must fail before read"),
                 thread_saver=lambda *_args, **_kwargs: self.fail("forgery must fail before write"),
             )

@@ -44,7 +44,7 @@ try {
     const context = await browser.newContext();
     const page = await context.newPage();
     page.setDefaultTimeout(10000);
-    const calls = [], errors = [];
+    const calls = [], replyBodies = [], errors = [];
     page.on('pageerror', error => errors.push(error.message));
     let authority = 'active', override = null;
     await page.addInitScript(() => {
@@ -71,7 +71,13 @@ try {
       if (new URL(request.url()).pathname !== '/api/collaboration/guest') return route.continue();
       const op = request.method() === 'GET' ? 'read' : request.postDataJSON().operation;
       calls.push(op);
-      let response = override ? await override(op) : null;
+      const body = request.method() === 'GET' ? null : request.postDataJSON();
+      if (op === 'reply') {
+        replyBodies.push(body);
+        assert.deepEqual(Object.keys(body).sort(), ['idempotencyKey', 'operation', 'text']);
+        assert.match(body.idempotencyKey, /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/);
+      }
+      let response = override ? await override(op, body) : null;
       if (!response) {
         if (op === 'exchange') {
           response = authority === 'revoked' ? failure('invitation_revoked', 410) : sessionOk();
@@ -110,7 +116,7 @@ try {
       assert.equal(await page.evaluate(() => window.guestRequests), count);
     };
     try {
-      await run({ page, calls, ready, ended, submit, visibility, windowEvent, settle,
+      await run({ page, calls, replyBodies, ready, ended, submit, visibility, windowEvent, settle,
         boot: () => page.goto(`${origin}/#collab_guest`),
         setAuthority: value => { authority = value; }, setOverride: value => { override = value; } });
       assert.deepEqual(errors, []);
@@ -180,6 +186,99 @@ try {
     await t.boot(); await t.ready(); t.setOverride(op => op === 'reply' ? failure('csrf_failed', 403) : null);
     await t.submit(); await t.page.getByText('Your session was refreshed.', { exact: false }).waitFor();
     assert.deepEqual(t.calls, ['bootstrap', 'read', 'reply', 'bootstrap']);
+    assert.equal(await t.page.locator('textarea').inputValue(), 'Guest fixture draft');
+  });
+  await test('lost committed reply retries one logical key; later identical send gets a new key', async t => {
+    await t.boot(); await t.ready();
+    const committed = new Map();
+    t.setOverride((op, body) => {
+      if (op !== 'reply') return null;
+      if (!committed.has(body.idempotencyKey)) {
+        committed.set(body.idempotencyKey, {
+          id: String.fromCharCode(78 + committed.size).repeat(22),
+          authorDisplayName: 'Reviewer', authorRole: 'Guest reviewer', text: body.text,
+          timestamp: 1800000000001 + committed.size,
+        });
+      }
+      if (t.replyBodies.length === 1) return { abort: true };
+      return ok({ collaboration: { ...collaboration,
+        messages: [...collaboration.messages, ...committed.values()] } });
+    });
+    await t.submit();
+    await t.page.getByRole('heading', { name: 'Couldn’t complete that request' }).waitFor();
+    assert.equal(t.replyBodies.length, 1, 'no automatic retry after uncertain commit');
+    await t.page.getByRole('button', { name: 'Try again' }).click(); await t.ready();
+    await t.page.getByRole('button', { name: 'Send reply', exact: true }).click();
+    await t.page.waitForFunction(() => document.querySelector('textarea')?.value === '');
+    await t.page.getByText('Guest fixture draft', { exact: true }).waitFor();
+    assert.equal(committed.size, 1);
+    assert.equal(t.replyBodies[0].idempotencyKey, t.replyBodies[1].idempotencyKey);
+    assert.equal(await t.page.locator('textarea').inputValue(), '');
+    await t.submit();
+    await t.page.waitForFunction(() => document.querySelector('textarea')?.value === '');
+    assert.equal(committed.size, 2, 'new acknowledged send may intentionally repeat text');
+    assert.notEqual(t.replyBodies[1].idempotencyKey, t.replyBodies[2].idempotencyKey);
+    assert.equal(await t.page.getByText('Guest fixture draft', { exact: true }).count(), 2);
+  });
+  await test('CSRF refresh retains the original send key for manual retry', async t => {
+    await t.boot(); await t.ready();
+    t.setOverride(op => op === 'reply' && t.replyBodies.length === 1 ? failure('csrf_failed', 403) : null);
+    await t.submit(); await t.page.getByText('Your session was refreshed.', { exact: false }).waitFor();
+    assert.equal(t.replyBodies.length, 1);
+    await t.page.getByRole('button', { name: 'Send reply', exact: true }).click();
+    await t.settle(5);
+    assert.equal(t.replyBodies[0].idempotencyKey, t.replyBodies[1].idempotencyKey);
+    assert.equal(await t.page.locator('textarea').inputValue(), '');
+  });
+  for (const [label, uncertain] of [
+    ['malformed success', { status: 200, body: { unexpected: true } }],
+    ['unavailable response', failure('service_unavailable', 503)],
+  ]) {
+    await test(`${label} retains a manually retryable logical send`, async t => {
+      await t.boot(); await t.ready();
+      t.setOverride(op => op === 'reply' && t.replyBodies.length === 1 ? uncertain : null);
+      await t.submit(); await t.page.getByRole('heading', { name: 'Temporarily unavailable' }).waitFor();
+      await t.page.getByRole('button', { name: 'Try again' }).click(); await t.ready();
+      await t.page.getByRole('button', { name: 'Send reply', exact: true }).click();
+      await t.settle(6);
+      assert.equal(t.replyBodies[0].idempotencyKey, t.replyBodies[1].idempotencyKey);
+    });
+  }
+  await test('editing a failed draft establishes a new logical send', async t => {
+    await t.boot(); await t.ready();
+    t.setOverride(op => op === 'reply' && t.replyBodies.length === 1 ? { abort: true } : null);
+    await t.submit(); await t.page.getByRole('heading', { name: 'Couldn’t complete that request' }).waitFor();
+    await t.page.getByRole('button', { name: 'Try again' }).click(); await t.ready();
+    await t.page.locator('textarea').fill('New logical draft');
+    await t.page.getByRole('button', { name: 'Send reply', exact: true }).click();
+    await t.page.waitForFunction(() => document.querySelector('textarea')?.value === '');
+    assert.notEqual(t.replyBodies[0].idempotencyKey, t.replyBodies[1].idempotencyKey);
+    assert.equal(t.replyBodies[1].text, 'New logical draft');
+  });
+  await test('same-tick duplicate submit cannot overlap a logical send', async t => {
+    await t.boot(); await t.ready();
+    const pending = deferred(), started = deferred();
+    t.setOverride(op => { if (op === 'reply') { started.resolve(); return pending.promise; } return null; });
+    await t.page.locator('textarea').fill('Once only');
+    await t.page.locator('textarea').evaluate(element => {
+      element.form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      element.form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+    await started.promise;
+    assert.equal(t.replyBodies.length, 1);
+    pending.resolve(readOk()); await t.settle(3);
+    assert.equal(t.replyBodies.length, 1);
+  });
+  await test('unavailable secure randomness prevents an unsafe send', async t => {
+    await t.boot(); await t.ready();
+    await t.page.evaluate(() => {
+      Object.defineProperty(window.crypto, 'getRandomValues', {
+        value: () => { throw new Error('unavailable'); }, configurable: true,
+      });
+    });
+    await t.submit();
+    await t.page.getByText('Couldn’t securely prepare your reply. Please try again.', { exact: true }).waitFor();
+    assert.deepEqual(t.calls, ['bootstrap', 'read']);
     assert.equal(await t.page.locator('textarea').inputValue(), 'Guest fixture draft');
   });
   await test('foreground revoke, hidden and visible deduplication', async t => {

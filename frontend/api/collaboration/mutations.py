@@ -36,6 +36,7 @@ from .redis_store import (
     _V2OwnerAppendResult,
     _append_v2_owner_message_idempotently,
     _append_v2_guest_reply_if_expected,
+    build_v2_guest_reply_message_id,
     _load_v2_thread,
     _save_v2_participants_if_expected,
     _save_v2_thread_if_expected,
@@ -414,6 +415,10 @@ def append_owner_v2_message_idempotently(
     )
     if error:
         return error
+    from api.notifications.recipients import resolve_notification_recipients
+    intended = resolve_notification_recipients(thread, context.actor_user_id)
+    if intended.get("status") != "ok":
+        return _failure(intended.get("error", {}).get("code", "storage_unavailable"))
     expected = thread["updatedAt"]
     now = max(time.time_ns() // 1_000_000, expected + 1)
     if now > MAX_V2_SAFE_INTEGER:
@@ -441,6 +446,8 @@ def append_owner_v2_message_idempotently(
         fingerprint=fingerprint,
         action=context.action,
         author_kind=context.actor_kind,
+        actor_user_id=context.actor_user_id,
+        recipient_user_ids=intended["userIds"],
         command_transport=command_transport,
     )
     if type(saved) is not _V2OwnerAppendResult:
@@ -573,12 +580,16 @@ def append_guest_v2_reply(
     session_context: object,
     text: object,
     *,
+    idempotency_key: object = None,
     thread_loader=_load_v2_thread,
     thread_saver=_append_v2_guest_reply_if_expected,
     command_transport=None,
 ) -> dict:
     if not _is_guest_mutation_capability(session_context):
         return _failure("session_revoked")
+    canonical_key = normalize_v2_owner_idempotency_key(idempotency_key)
+    if canonical_key is None:
+        return _failure("invalid_request")
 
     commit_time = int(time.time())
     if commit_time < session_context.created_at or commit_time < session_context.last_used_at:
@@ -586,14 +597,56 @@ def append_guest_v2_reply(
     if commit_time >= session_context.expires_at:
         return _failure("session_expired")
 
-    def builder(capability, raw_text, created_at):
-        return build_v2_guest_shared_reply(
-            capability, raw_text, _created_at=created_at
-        )
-
-    return _append_message(
-        session_context, text, builder=builder, thread_loader=thread_loader,
-        thread_saver=thread_saver, command_transport=command_transport,
-        saver_kwargs={"session_context": session_context, "now": commit_time},
-        allow_simple_saver=False,
+    thread, error = _load_scoped_thread(
+        session_context, thread_loader=thread_loader, command_transport=command_transport,
     )
+    if error:
+        return error
+    from api.notifications.recipients import resolve_notification_recipients
+    intended = resolve_notification_recipients(thread, None)
+    if intended.get("status") != "ok":
+        return _failure(intended.get("error", {}).get("code", "storage_unavailable"))
+    expected = thread["updatedAt"]
+    created_at = max(time.time_ns() // 1_000_000, expected + 1)
+    message = build_v2_guest_shared_reply(session_context, text, _created_at=created_at)
+    message_id = build_v2_guest_reply_message_id(session_context.session_hash, canonical_key)
+    if message is None or message_id is None:
+        return _failure("invalid_request")
+    message["id"] = message_id
+    # The bounded canonical message log itself is the durable guest dedupe store.
+    # Replays still enter Lua and revalidate the live session/invitation there.
+    existing = next((entry for entry in thread["messages"] if entry["id"] == message_id), None)
+    replacement = thread if existing is not None else normalize_v2_thread_record({
+        **thread, "messages": [*thread["messages"], message], "updatedAt": created_at,
+    })
+    if replacement is None:
+        return _failure("invalid_request")
+    try:
+        saved = thread_saver(
+            replacement, expected, session_context=session_context, now=commit_time,
+            idempotency_key=canonical_key, reply_text=text,
+            recipient_user_ids=intended["userIds"],
+            command_transport=command_transport,
+        )
+    except Exception:
+        return _failure("storage_unavailable")
+    if type(saved) is not _V2RecordResult:
+        return _failure(_canonical_storage_error(saved))
+    canonical = normalize_v2_thread_record(saved.record)
+    if (canonical is None or any(canonical[field] != thread[field] for field in (
+        "collaborationId", "ownerEmail", "workspaceId", "mailboxId", "sourceRef", "createdAt",
+    ))):
+        return _failure("storage_protocol_error")
+    matches = [entry for entry in canonical["messages"] if entry["id"] == message_id]
+    committed = matches[0] if len(matches) == 1 else None
+    if (committed is None or committed["authorKind"] != "guest" or committed["visibility"] != "shared"
+        or committed["authorDisplayName"] != session_context.guest_display_name
+        or committed["text"] != text or committed["createdAt"] > canonical["updatedAt"]):
+        return _failure("storage_protocol_error")
+    return {
+        "status": "ok", "message": {
+            "id": committed["id"], "authorDisplayName": committed["authorDisplayName"],
+            "authorRole": "Guest reviewer", "text": committed["text"],
+            "timestamp": committed["createdAt"], "visibility": "shared",
+        }, "updatedAt": committed["createdAt"], "error": None,
+    }

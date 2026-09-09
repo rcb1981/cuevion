@@ -52,6 +52,7 @@ PTTL_MEASUREMENT_JITTER_MS = 100
 OWNER_RATE_LIMIT_KEY = b"real-redis-owner-rate-limit-key-01"
 GUEST_RATE_LIMIT_KEY = b"real-redis-guest-rate-limit-key-01"
 GUEST_CSRF_KEY = b"real-redis-guest-csrf-key-value-01"
+GUEST_IDEMPOTENCY_KEY = base64.urlsafe_b64encode(b"g" * 32).rstrip(b"=").decode("ascii")
 WORKSPACE_ID = "wsp_" + "W" * 22
 OTHER_WORKSPACE_ID = "wsp_" + "X" * 22
 
@@ -618,7 +619,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                 else fingerprint
             ),
             action=action,
-            command_transport=command_transport or self.client.transport,
+            recipient_user_ids=([(replacement)["ownerUserId"]] + [entry["userId"] for entry in (replacement).get("participants", [])]) if "ownerUserId" in (replacement) else [], command_transport=command_transport or self.client.transport,
         )
 
     def test_canonical_account_workspace_is_atomic_create_read_and_cas_authority(self):
@@ -1031,7 +1032,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                         with patch.object(mutations.time, "time", return_value=SEC + 103), patch.object(
                             mutations.time, "time_ns", return_value=(SEC + 103) * 1_000_000_000,
                         ):
-                            reply = mutations.append_guest_v2_reply(capability, "Guest reply", command_transport=transport)
+                            reply = mutations.append_guest_v2_reply(capability, "Guest reply", idempotency_key=GUEST_IDEMPOTENCY_KEY, command_transport=transport)
                         self.assertEqual(reply.get("status"), "ok", reply)
                         self.assertEqual(self._assert_canonical_stored_invite(primary, expected), raw_invite)
                         if terminal == "logout_then_revoke":
@@ -1547,7 +1548,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                     with patch.object(mutations.time, "time", return_value=SEC + 103), patch.object(
                         mutations.time, "time_ns", return_value=(SEC + 103) * 1_000_000_000,
                     ):
-                        reply = mutations.append_guest_v2_reply(capability, "D10 Guest reply", command_transport=transport)
+                        reply = mutations.append_guest_v2_reply(capability, "D10 Guest reply", idempotency_key=GUEST_IDEMPOTENCY_KEY, command_transport=transport)
                     self.assertEqual(reply.get("status"), "ok", reply)
                     self._assert_canonical_stored_session(session_key, session)
                     self._assert_canonical_stored_invite(primary, expected_invite)
@@ -1660,7 +1661,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                             with patch.object(mutations.time, "time", return_value=SEC + 102), patch.object(
                                 mutations.time, "time_ns", return_value=(SEC + 102) * 1_000_000_000,
                             ):
-                                result = mutations.append_guest_v2_reply(capability, "Must never persist", command_transport=corrupt_at_lua)
+                                result = mutations.append_guest_v2_reply(capability, "Must never persist", idempotency_key=GUEST_IDEMPOTENCY_KEY, command_transport=corrupt_at_lua)
                         if operation == "reply":
                             self.assertEqual(result, {"status": "error", "error": {"code": "storage_protocol_error"}})
                         else:
@@ -1773,7 +1774,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
 
     def _guest_replacement(self, thread: dict, *, created_at: int = MS + 101) -> dict:
         message = {
-            "id": "G" * 22,
+            "id": redis_store.build_v2_guest_reply_message_id(hash_v2_secret("s" * 43), GUEST_IDEMPOTENCY_KEY),
             "authorKind": "guest",
             "authorDisplayName": "Guest",
             "text": "Guest reply",
@@ -2636,7 +2637,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
             thread["updatedAt"],
             session_context=capability,
             now=SEC + 102,
-            command_transport=self._transport_mutating_eval(
+            idempotency_key=GUEST_IDEMPOTENCY_KEY, reply_text=(guest_replacement)["messages"][-1]["text"], recipient_user_ids=([(guest_replacement)["ownerUserId"]] + [entry["userId"] for entry in (guest_replacement).get("participants", [])]) if "ownerUserId" in (guest_replacement) else [], command_transport=self._transport_mutating_eval(
                 redis_store._APPEND_V2_GUEST_REPLY_LUA, mutate_append
             ),
         )
@@ -2709,7 +2710,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                     thread["updatedAt"],
                     session_context=capability,
                     now=SEC + 102,
-                    command_transport=self._transport_mutating_eval(
+                    idempotency_key=GUEST_IDEMPOTENCY_KEY, reply_text=(guest_replacement)["messages"][-1]["text"], recipient_user_ids=([(guest_replacement)["ownerUserId"]] + [entry["userId"] for entry in (guest_replacement).get("participants", [])]) if "ownerUserId" in (guest_replacement) else [], command_transport=self._transport_mutating_eval(
                         redis_store._APPEND_V2_GUEST_REPLY_LUA, mutate_append
                     ),
                 )
@@ -2937,7 +2938,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                         thread["updatedAt"],
                         session_context=capability,
                         now=SEC + 102,
-                        command_transport=self.client.transport,
+                        idempotency_key=GUEST_IDEMPOTENCY_KEY, reply_text=(guest_replacement)["messages"][-1]["text"], recipient_user_ids=([(guest_replacement)["ownerUserId"]] + [entry["userId"] for entry in (guest_replacement).get("participants", [])]) if "ownerUserId" in (guest_replacement) else [], command_transport=self.client.transport,
                     )
                     self.assertNotEqual(rejected.get("status"), "ok", rejected)
                     self._assert_v2_state_unchanged(before)
@@ -3049,7 +3050,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                     thread["updatedAt"],
                     session_context=capability,
                     now=SEC + 103,
-                    command_transport=transport,
+                    idempotency_key=GUEST_IDEMPOTENCY_KEY, reply_text=(self._guest_replacement(thread))["messages"][-1]["text"], recipient_user_ids=([(self._guest_replacement(thread))["ownerUserId"]] + [entry["userId"] for entry in (self._guest_replacement(thread)).get("participants", [])]) if "ownerUserId" in (self._guest_replacement(thread)) else [], command_transport=transport,
                 ),
             )
 
@@ -4700,7 +4701,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                             thread["updatedAt"],
                             session_context=capability,
                             now=SEC + 103,
-                            command_transport=self.client.transport,
+                            idempotency_key=GUEST_IDEMPOTENCY_KEY, reply_text=(self._guest_replacement(thread))["messages"][-1]["text"], recipient_user_ids=([(self._guest_replacement(thread))["ownerUserId"]] + [entry["userId"] for entry in (self._guest_replacement(thread)).get("participants", [])]) if "ownerUserId" in (self._guest_replacement(thread)) else [], command_transport=self.client.transport,
                         )
                     elif operation == "session_update":
                         rejected = redis_store._update_v2_guest_session(
@@ -6010,11 +6011,14 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         session_raw = self.client.command(["GET", session_key])
         capability_ttls = self._pttls(invite_keys[0], session_key)
 
-        with patch.object(mutations.time, "time", return_value=SEC + 102), patch.object(
+        with patch.object(authorization, "_resolve_active_team_member", return_value=({
+            "memberUserId": thread["participants"][0]["userId"],
+            "sourceInvitationId": thread["participants"][0]["membershipRef"],
+        }, None)), patch.object(mutations.time, "time", return_value=SEC + 102), patch.object(
             mutations.time, "time_ns", return_value=(SEC + 102) * 1_000_000_000
         ):
             saved = mutations.append_guest_v2_reply(
-                capability, "Guest reply", command_transport=self.client.transport
+                capability, "Guest reply", idempotency_key=GUEST_IDEMPOTENCY_KEY, command_transport=self.client.transport
             )
         self.assertEqual(saved.get("status"), "ok", saved)
         stored_thread = typed_wire_json(self.client.command(["GET", thread_key]), "thread")
@@ -6136,7 +6140,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                     expected,
                     session_context=cap,
                     now=now,
-                    command_transport=transport,
+                    idempotency_key=GUEST_IDEMPOTENCY_KEY, reply_text=(replacement)["messages"][-1]["text"], recipient_user_ids=([(replacement)["ownerUserId"]] + [entry["userId"] for entry in (replacement).get("participants", [])]) if "ownerUserId" in (replacement) else [], command_transport=transport,
                 )
                 self.assertEqual(result.get("error"), {"code": expected_code}, result)
                 self.assertEqual(
@@ -6254,7 +6258,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                     current["updatedAt"],
                     session_context=capability,
                     now=SEC + 102,
-                    command_transport=self._transport_mutating_eval(
+                    idempotency_key=GUEST_IDEMPOTENCY_KEY, reply_text=(replacement)["messages"][-1]["text"], recipient_user_ids=([(replacement)["ownerUserId"]] + [entry["userId"] for entry in (replacement).get("participants", [])]) if "ownerUserId" in (replacement) else [], command_transport=self._transport_mutating_eval(
                         redis_store._APPEND_V2_GUEST_REPLY_LUA, mutate_eval
                     ),
                 )
@@ -6299,7 +6303,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                     thread["updatedAt"],
                     session_context=capability,
                     now=SEC + 103,
-                    command_transport=transport_for(
+                    idempotency_key=GUEST_IDEMPOTENCY_KEY, reply_text=(replacement)["messages"][-1]["text"], recipient_user_ids=([(replacement)["ownerUserId"]] + [entry["userId"] for entry in (replacement).get("participants", [])]) if "ownerUserId" in (replacement) else [], command_transport=transport_for(
                         append_client, redis_store._APPEND_V2_GUEST_REPLY_LUA
                     ),
                 )
@@ -6371,7 +6375,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
             thread["updatedAt"],
             session_context=capability,
             now=SEC + 103,
-            command_transport=lose_first_response,
+            idempotency_key=GUEST_IDEMPOTENCY_KEY, reply_text=(replacement)["messages"][-1]["text"], recipient_user_ids=([(replacement)["ownerUserId"]] + [entry["userId"] for entry in (replacement).get("participants", [])]) if "ownerUserId" in (replacement) else [], command_transport=lose_first_response,
         )
         self.assertEqual(ambiguous.get("error"), {"code": "storage_unavailable"})
         retry = redis_store._append_v2_guest_reply_if_expected(
@@ -6379,9 +6383,10 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
             thread["updatedAt"],
             session_context=capability,
             now=SEC + 103,
-            command_transport=self.client.transport,
+            idempotency_key=GUEST_IDEMPOTENCY_KEY, reply_text=(replacement)["messages"][-1]["text"], recipient_user_ids=([(replacement)["ownerUserId"]] + [entry["userId"] for entry in (replacement).get("participants", [])]) if "ownerUserId" in (replacement) else [], command_transport=self.client.transport,
         )
-        self.assertEqual(retry.get("error"), {"code": "stale_thread"})
+        self.assertEqual(retry.get("status"), "ok", retry)
+        self.assertEqual(retry.record["messages"], replacement["messages"])
         self.assertEqual(typed_wire_json(self.client.command(["GET", thread_key]), "thread")["messages"], replacement["messages"])
 
     def test_real_distinct_id_create_race_returns_one_canonical_thread_and_revalidates_duplicate(self):
@@ -7458,7 +7463,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
             owner_replacement["updatedAt"],
             session_context=capability,
             now=SEC + 102,
-            command_transport=self.client.transport,
+            idempotency_key=GUEST_IDEMPOTENCY_KEY, reply_text=(guest_replacement)["messages"][-1]["text"], recipient_user_ids=([(guest_replacement)["ownerUserId"]] + [entry["userId"] for entry in (guest_replacement).get("participants", [])]) if "ownerUserId" in (guest_replacement) else [], command_transport=self.client.transport,
         )
         self.assertEqual(appended.get("status"), "ok", appended)
         reloaded = redis_store._load_v2_thread(canonical["collaborationId"], command_transport=self.client.transport)
@@ -7581,7 +7586,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                     canonical_for_failures["updatedAt"],
                     session_context=capability,
                     now=SEC + 103,
-                    command_transport=self._transport_mutating_eval(
+                    idempotency_key=GUEST_IDEMPOTENCY_KEY, reply_text=(guest_candidate)["messages"][-1]["text"], recipient_user_ids=([(guest_candidate)["ownerUserId"]] + [entry["userId"] for entry in (guest_candidate).get("participants", [])]) if "ownerUserId" in (guest_candidate) else [], command_transport=self._transport_mutating_eval(
                         redis_store._APPEND_V2_GUEST_REPLY_LUA,
                         lambda command, start, ref=malformed_ref: replace_source_json(
                             command, start, 1, ref
@@ -7668,7 +7673,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                     canonical_for_failures["updatedAt"],
                     session_context=capability,
                     now=SEC + 103,
-                    command_transport=self._transport_mutating_eval(
+                    idempotency_key=GUEST_IDEMPOTENCY_KEY, reply_text=(guest_candidate)["messages"][-1]["text"], recipient_user_ids=([(guest_candidate)["ownerUserId"]] + [entry["userId"] for entry in (guest_candidate).get("participants", [])]) if "ownerUserId" in (guest_candidate) else [], command_transport=self._transport_mutating_eval(
                         redis_store._APPEND_V2_GUEST_REPLY_LUA,
                         lambda command, start, ref=different_ref: replace_source_json(
                             command, start, 1, ref
@@ -8157,7 +8162,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                 base["updatedAt"],
                 session_context=capability,
                 now=SEC + 102,
-                command_transport=self.client.transport,
+                idempotency_key=GUEST_IDEMPOTENCY_KEY, reply_text=(guest_replacement)["messages"][-1]["text"], recipient_user_ids=([(guest_replacement)["ownerUserId"]] + [entry["userId"] for entry in (guest_replacement).get("participants", [])]) if "ownerUserId" in (guest_replacement) else [], command_transport=self.client.transport,
             ),
         )
 
@@ -8171,7 +8176,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                 base["updatedAt"],
                 session_context=capability,
                 now=SEC + 102,
-                command_transport=self.client.transport,
+                idempotency_key=GUEST_IDEMPOTENCY_KEY, reply_text=(guest_replacement)["messages"][-1]["text"], recipient_user_ids=([(guest_replacement)["ownerUserId"]] + [entry["userId"] for entry in (guest_replacement).get("participants", [])]) if "ownerUserId" in (guest_replacement) else [], command_transport=self.client.transport,
             ),
         )
 
@@ -8185,7 +8190,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                 base["updatedAt"],
                 session_context=capability,
                 now=SEC + 102,
-                command_transport=self.client.transport,
+                idempotency_key=GUEST_IDEMPOTENCY_KEY, reply_text=(guest_replacement)["messages"][-1]["text"], recipient_user_ids=([(guest_replacement)["ownerUserId"]] + [entry["userId"] for entry in (guest_replacement).get("participants", [])]) if "ownerUserId" in (guest_replacement) else [], command_transport=self.client.transport,
             ),
         )
 
@@ -8199,7 +8204,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                 base["updatedAt"],
                 session_context=capability,
                 now=SEC + 102,
-                command_transport=self.client.transport,
+                idempotency_key=GUEST_IDEMPOTENCY_KEY, reply_text=(guest_replacement)["messages"][-1]["text"], recipient_user_ids=([(guest_replacement)["ownerUserId"]] + [entry["userId"] for entry in (guest_replacement).get("participants", [])]) if "ownerUserId" in (guest_replacement) else [], command_transport=self.client.transport,
             ),
         )
 
@@ -8424,7 +8429,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                 base["updatedAt"],
                 session_context=capability,
                 now=SEC + 102,
-                command_transport=self.client.transport,
+                idempotency_key=GUEST_IDEMPOTENCY_KEY, reply_text=(guest_replacement)["messages"][-1]["text"], recipient_user_ids=([(guest_replacement)["ownerUserId"]] + [entry["userId"] for entry in (guest_replacement).get("participants", [])]) if "ownerUserId" in (guest_replacement) else [], command_transport=self.client.transport,
             ),
         )
 
@@ -8438,7 +8443,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
                 base["updatedAt"],
                 session_context=capability,
                 now=SEC + 102,
-                command_transport=self.client.transport,
+                idempotency_key=GUEST_IDEMPOTENCY_KEY, reply_text=(guest_replacement)["messages"][-1]["text"], recipient_user_ids=([(guest_replacement)["ownerUserId"]] + [entry["userId"] for entry in (guest_replacement).get("participants", [])]) if "ownerUserId" in (guest_replacement) else [], command_transport=self.client.transport,
             ),
         )
 
@@ -8622,7 +8627,7 @@ class ProductionLuaRedisIntegrationTests(unittest.TestCase):
         ):
             reply = invoke(
                 post(
-                    {"operation": "reply", "text": "Guest shared reply"},
+                    {"operation": "reply", "text": "Guest shared reply", "idempotencyKey": GUEST_IDEMPOTENCY_KEY},
                     cookie=cookie_pair,
                     csrf=csrf_token,
                 ),
@@ -11518,7 +11523,7 @@ end
                                 with patch.object(mutations.time, "time", return_value=SEC + 104), patch.object(
                                     mutations.time, "time_ns", return_value=(SEC + 104) * 1_000_000_000,
                                 ):
-                                    denied_reply = mutations.append_guest_v2_reply(prior_capabilities[0], "Revoked session cannot reply", command_transport=transport)
+                                    denied_reply = mutations.append_guest_v2_reply(prior_capabilities[0], "Revoked session cannot reply", idempotency_key=GUEST_IDEMPOTENCY_KEY, command_transport=transport)
                                 expected_reply_code = "session_revoked" if hmac_mode == "current" else "storage_protocol_error"
                                 self.assertEqual(denied_reply, {"status": "error", "error": {"code": expected_reply_code}})
                             self._assert_v2_state_unchanged(before_denied_access)

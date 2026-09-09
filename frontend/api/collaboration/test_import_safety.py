@@ -781,29 +781,34 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             guest_context, "Guest reply", _created_at=milliseconds + 101
         ))
 
+        guest_idempotency_key = "I" * 42 + "A"
         with patch.object(mutations.time, "time", return_value=seconds + 101), patch.object(
             mutations.time, "time_ns", return_value=(milliseconds + 101) * 1_000_000
         ):
             guest_mutation_result = mutations.append_guest_v2_reply(
                 guest_context,
                 "Guest reply",
+                idempotency_key=guest_idempotency_key,
                 thread_loader=lambda *_args, **_kwargs: {"status": "ok", "record": thread},
-                thread_saver=lambda record, _expected, **_kwargs: {
-                    "status": "ok", "record": record,
-                },
+                thread_saver=lambda record, _expected, **_kwargs: redis_store._V2RecordResult(record),
             )
         self.assertEqual(guest_mutation_result["status"], "ok")
 
         with patch.object(
             redis_store, "resolve_v2_index_hmac_keys", return_value=(b"k" * 32, None)
         ), patch.object(
-            redis_store, "_v2_eval", return_value={"status": "saved"}
+            redis_store, "_v2_eval", return_value={
+                "status": "saved", "record": redis_store._v2_wire_json(thread, "thread"),
+            }
         ) as redis_eval:
             redis_result = redis_store._append_v2_guest_reply_if_expected(
                 thread,
                 thread["updatedAt"],
                 session_context=guest_context,
                 now=seconds + 101,
+                idempotency_key=guest_idempotency_key,
+                reply_text="Guest reply",
+                recipient_user_ids=[],
             )
         self.assertEqual(redis_result["status"], "ok")
         redis_eval.assert_called_once()
@@ -841,6 +846,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             mutations.append_guest_v2_reply(
                 copied_guest,
                 "Guest reply",
+                idempotency_key=guest_idempotency_key,
                 thread_loader=lambda *_args, **_kwargs: self.fail("copy reached storage"),
             )["error"]["code"],
             "session_revoked",
@@ -851,6 +857,9 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
                 thread["updatedAt"],
                 session_context=copied_guest,
                 now=seconds + 101,
+                idempotency_key=guest_idempotency_key,
+                reply_text="Guest reply",
+                recipient_user_ids=[],
             )
         self.assertEqual(rejected["error"]["code"], "invalid_request")
         redis_eval.assert_not_called()

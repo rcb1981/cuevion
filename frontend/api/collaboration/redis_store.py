@@ -69,6 +69,7 @@ else:
         MAX_V2_SUMMARY_PAGE_SIZE,
         normalize_v2_thread_record,
         normalize_v2_user_id,
+        _v2_free_text,
     )
 
     MAX_COLLABORATION_THREAD_BATCH_SIZE = 200
@@ -2384,7 +2385,23 @@ else:
     """
 
 
-    _CREATE_V2_THREAD_LUA = _V2_DISCOVERY_LUA + r"""
+    from api.notifications.store import NOTIFICATION_LUA_HELPERS
+
+    _V2_NOTIFICATION_MUTATION_LUA = _V2_DISCOVERY_LUA + NOTIFICATION_LUA_HELPERS + r"""
+    local function notificationRecipientListValid(values, raw)
+      if type(raw) ~= 'string' or string.sub(raw, 1, 1) ~= '[' or string.sub(raw, -1) ~= ']'
+        or type(values) ~= 'table' or #values > 16 then return false end
+      local count = 0
+      for index, value in pairs(values) do
+        if type(index) ~= 'number' or index < 1 or index > #values
+          or index ~= math.floor(index) or not canonicalUserId(value) then return false end
+        count = count + 1
+      end
+      return count == #values
+    end
+    """
+
+    _CREATE_V2_THREAD_LUA = _V2_NOTIFICATION_MUTATION_LUA + r"""
     if #ARGV[1] > 262144 or not positiveInteger(ARGV[3]) then return cjson.encode({status='malformed'}) end
     local proposedOk, proposed = decodeWire(ARGV[1])
     if not proposedOk or not rawTopLevelArray(ARGV[1], 'messages') or not threadValid(proposed) or proposed.collaborationId ~= ARGV[2] then
@@ -2429,6 +2446,15 @@ else:
     if redis.call('EXISTS', KEYS[1]) == 1 then return cjson.encode({status='conflict'}) end
     local discoveryPlan, discoveryError = discoveryPrepare(proposed, KEYS[1], integerValue(ARGV[3]) * 1000, ARGV[1])
     if discoveryError then return cjson.encode({status=discoveryError}) end
+    local notificationPlan = {}
+    if proposed.ownerUserId ~= nil then
+      local actor = {type='cuevion_user', userId=proposed.ownerUserId, displayName=proposed.ownerDisplayName}
+      local notificationError
+      notificationPlan, notificationError = notificationPrepare(proposed, 'collaboration_started', actor,
+        nil, notificationRecipients(proposed, actor.userId), integerValue(ARGV[3]) * 1000, proposed.createdAt)
+      if notificationError then return cjson.encode({status='malformed'}) end
+    end
+    notificationCommit(notificationPlan)
     discoveryCommit(discoveryPlan)
     redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
     redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
@@ -2881,7 +2907,7 @@ else:
         return result
 
 
-    _APPEND_V2_GUEST_REPLY_LUA = _V2_DISCOVERY_LUA + r"""
+    _APPEND_V2_GUEST_REPLY_LUA = _V2_NOTIFICATION_MUTATION_LUA + r"""
     if not positiveInteger(ARGV[3]) then return cjson.encode({status='malformed'}) end
     local threadState, raw = readString(KEYS[1], 262144)
     if threadState == 'missing' then return cjson.encode({status='missing'}) end
@@ -2909,21 +2935,6 @@ else:
       or not sourceMessageEqual(current.sourceMessage, replacement.sourceMessage)
       or not participantAuthorityEqual(current, replacement) then
       return cjson.encode({status='invalid_scope'})
-    end
-    if not timestampMilliseconds(ARGV[1]) or current.updatedAt ~= ARGV[1] then
-      return cjson.encode({status='stale'})
-    end
-    if integerValue(replacement.updatedAt) <= integerValue(current.updatedAt) then return cjson.encode({status='nonadvancing'}) end
-    if #replacement.messages ~= #current.messages + 1 then return cjson.encode({status='invalid_messages'}) end
-    for index = 1, #current.messages do
-      if not messageEqual(current.messages[index], replacement.messages[index]) then
-        return cjson.encode({status='invalid_messages'})
-      end
-    end
-    local appended = replacement.messages[#replacement.messages]
-    if appended.authorKind ~= 'guest' or appended.visibility ~= 'shared'
-      or appended.authorDisplayName ~= ARGV[12] or appended.createdAt ~= replacement.updatedAt then
-      return cjson.encode({status='invalid_messages'})
     end
     if not timestampSeconds(ARGV[4]) or not timestampSeconds(ARGV[11]) then
       return cjson.encode({status='malformed'})
@@ -2968,13 +2979,67 @@ else:
       or redis.call('PTTL', KEYS[3]) <= 0 or redis.call('PTTL', KEYS[4]) <= 0 then
       return cjson.encode({status='session_invalid'})
     end
-    local discoveryPlan, discoveryError = discoveryPrepare(replacement, KEYS[1], integerValue(ARGV[3]) * 1000, ARGV[2])
+    if not opaqueId(ARGV[13]) or not freeText(ARGV[14], 16384) then
+      return cjson.encode({status='malformed'})
+    end
+    local matched = nil
+    for _, message in ipairs(current.messages) do
+      if message.id == ARGV[13] then
+        if matched then return cjson.encode({status='malformed'}) end
+        matched = message
+      end
+    end
+    if matched then
+      if matched.authorKind ~= 'guest' or matched.visibility ~= 'shared'
+        or matched.authorDisplayName ~= ARGV[12] or matched.text ~= ARGV[14] then
+        return cjson.encode({status='idempotency_conflict'})
+      end
+      return cjson.encode({status='recovered', record=raw})
+    end
+    if not timestampMilliseconds(ARGV[1]) or current.updatedAt ~= ARGV[1] then
+      return cjson.encode({status='stale'})
+    end
+    if integerValue(replacement.updatedAt) <= integerValue(current.updatedAt) then return cjson.encode({status='nonadvancing'}) end
+    if #replacement.messages ~= #current.messages + 1 then return cjson.encode({status='invalid_messages'}) end
+    for index = 1, #current.messages do
+      if not messageEqual(current.messages[index], replacement.messages[index]) then
+        return cjson.encode({status='invalid_messages'})
+      end
+    end
+    local appended = replacement.messages[#replacement.messages]
+    if appended.id ~= ARGV[13] or appended.text ~= ARGV[14] then return cjson.encode({status='invalid_messages'}) end
+    if appended.authorKind ~= 'guest' or appended.visibility ~= 'shared'
+      or appended.authorDisplayName ~= ARGV[12] or appended.createdAt ~= replacement.updatedAt then
+      return cjson.encode({status='invalid_messages'})
+    end
+    local discoveryPlan, discoveryError = discoveryPrepare(replacement, KEYS[1], redis.call('PTTL', KEYS[1]), ARGV[2])
     if discoveryError then return cjson.encode({status=discoveryError}) end
+    local notificationPlan = {}
+    if current.ownerUserId ~= nil then
+      local actor = {type='external_guest', displayName=ARGV[12]}
+      local recipientsOk, intendedRecipients = decodeWire(ARGV[15])
+      if not recipientsOk or not notificationRecipientListValid(intendedRecipients, ARGV[15]) then
+        return cjson.encode({status='malformed'})
+      end
+      local notificationError
+      notificationPlan, notificationError = notificationPrepare(replacement, 'shared_message', actor,
+        appended.id, intendedRecipients, redis.call('PTTL', KEYS[1]), appended.createdAt, nil, KEYS[1])
+      if notificationError then return cjson.encode({status='malformed'}) end
+    end
+    notificationCommit(notificationPlan)
     discoveryCommit(discoveryPlan)
-    redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
-    redis.call('EXPIRE', KEYS[2], ARGV[3])
-    return cjson.encode({status='saved'})
+    redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')
+    return cjson.encode({status='saved', record=ARGV[2]})
     """.strip()
+
+
+    def build_v2_guest_reply_message_id(session_hash: object, idempotency_key: object) -> str | None:
+        if (type(session_hash) is not str or re.fullmatch(r"[0-9a-f]{64}", session_hash) is None
+            or normalize_v2_owner_idempotency_key(idempotency_key) is None):
+            return None
+        # Session hash and strong logical-send key are never stored in a notification.
+        digest = hashlib.sha256(("cuevion/guest-reply/v1\0" + session_hash + "\0" + idempotency_key).encode("ascii")).digest()
+        return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
     def _append_v2_guest_reply_if_expected(
@@ -2983,6 +3048,9 @@ else:
         *,
         session_context: object,
         now: int,
+        idempotency_key: object = None,
+        reply_text: object = None,
+        recipient_user_ids: list[str] | None = None,
         command_transport=None,
     ) -> dict:
         from .guest_session import _is_guest_mutation_capability
@@ -2997,6 +3065,10 @@ else:
             or type(now) is not int
             or not MIN_V2_TIMESTAMP_SECONDS <= now <= MAX_V2_TIMESTAMP_SECONDS
             or not _is_guest_mutation_capability(session_context)
+            or normalize_v2_owner_idempotency_key(idempotency_key) is None
+            or type(reply_text) is not str
+            or _v2_free_text(reply_text, max_length=16384) != reply_text
+            or ("ownerUserId" in thread and recipient_user_ids is None)
         ):
             return {"status": "malformed", "error": {"code": "invalid_request"}}
 
@@ -3031,11 +3103,14 @@ else:
                 thread["collaborationId"], thread["ownerEmail"], thread["workspaceId"],
                 thread["mailboxId"], session_context.invite_id, session_context.session_hash,
                 str(session_context.expires_at), session_context.guest_display_name,
+                build_v2_guest_reply_message_id(session_context.session_hash, idempotency_key), reply_text,
+                json.dumps(recipient_user_ids if recipient_user_ids is not None else [], separators=(",", ":")),
             ],
             command_transport,
             response_shapes={
                 "discovery_capacity_reached": set(),
-                "saved": set(), "missing": set(), "stale": set(), "malformed": set(),
+                "saved": {"record"}, "recovered": {"record"},
+                "idempotency_conflict": set(), "missing": set(), "stale": set(), "malformed": set(),
                 "invalid_scope": set(), "nonadvancing": set(), "source_pointer_conflict": set(),
                 "oversized": set(), "invalid_messages": set(), "invite_missing": set(),
                 "invite_invalid": set(), "invite_revoked": set(), "invite_expired": set(),
@@ -3044,8 +3119,13 @@ else:
             },
         )
         status = result.get("status")
-        if status == "saved":
-            return _V2RecordResult(thread)
+        if status in {"saved", "recovered"}:
+            record = _v2_json_from_wire(result.get("record"), "thread")
+            if record is None:
+                return {"status": "malformed", "error": {"code": "storage_protocol_error"}}
+            return _V2RecordResult(record)
+        if status == "idempotency_conflict":
+            return {"status": "conflict", "error": {"code": "idempotency_conflict"}}
         if status == "missing":
             return {"status": "missing", "error": {"code": "collaboration_not_found"}}
         if status in {"stale", "nonadvancing"}:
@@ -3402,7 +3482,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         return result
 
 
-    _SAVE_V2_PARTICIPANTS_CAS_LUA = _V2_DISCOVERY_LUA + r"""
+    _SAVE_V2_PARTICIPANTS_CAS_LUA = _V2_NOTIFICATION_MUTATION_LUA + r"""
     local function findParticipant(values, userId)
       if type(values) ~= 'table' then return nil end
       for index = 1, #values do
@@ -3481,11 +3561,15 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     if redis.call('PTTL', KEYS[1]) <= 0 or redis.call('PTTL', KEYS[2]) <= 0 then
       return cjson.encode({status='malformed'})
     end
-    local discoveryPlan, discoveryError = discoveryPrepare(replacement, KEYS[1], integerValue(ARGV[3]) * 1000, ARGV[2])
+    local discoveryPlan, discoveryError = discoveryPrepare(replacement, KEYS[1], redis.call('PTTL', KEYS[1]), ARGV[2])
     if discoveryError then return cjson.encode({status=discoveryError}) end
+    local actor = {type='cuevion_user', userId=ARGV[5], displayName=ARGV[6]}
+    local notificationPlan, notificationError = notificationPrepare(replacement, 'participant_added', actor,
+      nil, {ARGV[4]}, redis.call('PTTL', KEYS[1]), replacement.updatedAt, ARGV[7], KEYS[1])
+    if notificationError then return cjson.encode({status='malformed'}) end
+    notificationCommit(notificationPlan)
     discoveryCommit(discoveryPlan)
-    redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
-    redis.call('EXPIRE', KEYS[2], ARGV[3])
+    redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')
     return cjson.encode({status='saved'})
     """.strip()
 
@@ -3587,7 +3671,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         return result
 
 
-    _APPEND_V2_OWNER_IDEMPOTENT_LUA = _V2_DISCOVERY_LUA + r"""
+    _APPEND_V2_OWNER_IDEMPOTENT_LUA = _V2_NOTIFICATION_MUTATION_LUA + r"""
     local IDEMPOTENCY_RECORD_MAX = 1024
     local RETENTION_MAX = 15552000
 
@@ -3644,6 +3728,16 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     end
     if redis.call('PTTL', KEYS[1]) <= 0 or redis.call('PTTL', KEYS[2]) <= 0 then
       return cjson.encode({status='malformed'})
+    end
+
+    if current.ownerUserId ~= nil then
+      local actorValid = (ARGV[15] == 'owner' and ARGV[16] == current.ownerUserId)
+      if ARGV[15] == 'internal' then
+        for _, participant in ipairs(current.participants) do
+          if participant.userId == ARGV[16] then actorValid = true end
+        end
+      end
+      if not actorValid then return cjson.encode({status='invalid_scope'}) end
     end
 
     local currentIdState, currentIdRaw = readString(KEYS[3], IDEMPOTENCY_RECORD_MAX)
@@ -3744,12 +3838,25 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
       return cjson.encode({status='idempotency_malformed'})
     end
 
-    local discoveryPlan, discoveryError = discoveryPrepare(replacement, KEYS[1], integerValue(ARGV[3]) * 1000, ARGV[2])
+    local discoveryPlan, discoveryError = discoveryPrepare(replacement, KEYS[1], redis.call('PTTL', KEYS[1]), ARGV[2])
     if discoveryError then return cjson.encode({status=discoveryError}) end
+    local notificationPlan = {}
+    if current.ownerUserId ~= nil then
+      local actor = {type='cuevion_user', userId=ARGV[16], displayName=ARGV[13]}
+      local recipientsOk, intendedRecipients = decodeWire(ARGV[17])
+      if not recipientsOk or not notificationRecipientListValid(intendedRecipients, ARGV[17]) then
+        return cjson.encode({status='malformed'})
+      end
+      local notificationError
+      notificationPlan, notificationError = notificationPrepare(replacement,
+        ARGV[11] == 'reply' and 'shared_message' or 'internal_note', actor, appended.id,
+        intendedRecipients, redis.call('PTTL', KEYS[1]), appended.createdAt, nil, KEYS[1])
+      if notificationError then return cjson.encode({status='malformed'}) end
+    end
+    notificationCommit(notificationPlan)
     discoveryCommit(discoveryPlan)
-    redis.call('PSETEX', KEYS[3], tostring(idempotencyRetention * 1000), ARGV[6])
-    redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
-    redis.call('EXPIRE', KEYS[2], ARGV[3])
+    redis.call('PSETEX', KEYS[3], tostring(math.min(idempotencyRetention * 1000, redis.call('PTTL', KEYS[1]), redis.call('PTTL', KEYS[2]))), ARGV[6])
+    redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')
     return cjson.encode({status='saved', message=appended, updatedAt=record.updatedAt})
     """.strip()
 
@@ -3792,6 +3899,8 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         fingerprint: str,
         action: str,
         author_kind: str = "owner",
+        actor_user_id: str | None = None,
+        recipient_user_ids: list[str] | None = None,
         command_transport=None,
     ) -> dict:
         thread = normalize_v2_thread_record(thread_record)
@@ -3810,6 +3919,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
             or action not in {"reply", "internal_note"}
             or author_kind not in {"owner", "internal"}
             or not thread["messages"]
+            or ("ownerUserId" in thread and recipient_user_ids is None)
         ):
             return {"status": "malformed", "error": {"code": "invalid_request"}}
         appended = thread["messages"][-1]
@@ -3898,6 +4008,8 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
                 appended["authorDisplayName"],
                 appended["text"],
                 author_kind,
+                actor_user_id or (thread.get("ownerUserId", "") if author_kind == "owner" else ""),
+                json.dumps(recipient_user_ids if recipient_user_ids is not None else [], separators=(",", ":")),
             ],
             command_transport,
             response_shapes={

@@ -2,6 +2,7 @@ export const COLLABORATION_GUEST_ENDPOINT = "/api/collaboration/guest";
 export const COLLABORATION_GUEST_CSRF_HEADER = "X-Cuevion-CSRF";
 
 const BEARER_PATTERN = /^[A-Za-z0-9_-]{43,128}$/;
+const REPLY_IDEMPOTENCY_PATTERN = /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/;
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9_-]{22,128}$/;
 const UNSAFE_BOUNDED_STRING_PATTERN = /[\p{Cc}\p{Cf}\p{Cs}]/u;
 const UNSAFE_FREE_TEXT_PATTERN = /[\p{Cf}\p{Cs}\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/u;
@@ -142,6 +143,20 @@ export function isValidCollaborationGuestReply(value: unknown): value is string 
     typeof value === "string" &&
     value.trim().length > 0
   );
+}
+
+export function createCollaborationGuestReplyIdempotencyKey(): string | null {
+  try {
+    const bytes = new Uint8Array(32);
+    globalThis.crypto.getRandomValues(bytes);
+    return btoa(String.fromCharCode(...bytes))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+  } catch {
+    // A logical send requires strong randomness; do not downgrade its identity.
+    return null;
+  }
 }
 
 export function parseCollaborationGuestSession(
@@ -451,12 +466,18 @@ export async function readGuestCollaboration(): Promise<CollaborationGuestReadRe
 export async function replyToGuestCollaboration(
   text: string,
   csrfToken: string,
+  idempotencyKey: string,
 ): Promise<CollaborationGuestReadResult> {
-  if (!isValidCollaborationGuestReply(text) || !BEARER_PATTERN.test(csrfToken)) {
+  if (
+    !isValidCollaborationGuestReply(text) ||
+    !BEARER_PATTERN.test(csrfToken) ||
+    typeof idempotencyKey !== "string" ||
+    !REPLY_IDEMPOTENCY_PATTERN.test(idempotencyKey)
+  ) {
     return { status: "invalid_request" };
   }
   const result = await performRequest(
-    jsonPost({ operation: "reply", text }, csrfToken),
+    jsonPost({ operation: "reply", text, idempotencyKey }, csrfToken),
   );
   return result.status === "response" ? parseReadSuccess(result.payload) : result;
 }
