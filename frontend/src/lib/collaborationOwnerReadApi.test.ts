@@ -45,6 +45,7 @@ const collaboration = {
       id: MESSAGE_ID,
       authorDisplayName: "Workspace Owner",
       authorRole: "Cuevion user",
+      authorUserId: OWNER_USER_ID,
       text: "Please review",
       visibility: "shared",
       timestamp: NOW_MS - 1_000,
@@ -342,6 +343,123 @@ async function run() {
         viewerAccess: "participant",
       };
       assert.deepEqual(parseCollaborationOwnerReadDto(dto), dto);
+    });
+
+    await test("preserves canonical owner and Team author IDs for both internal viewer roles", async () => {
+      const { externalGuests: _externalGuests, ...participantBase } = collaboration;
+      for (const viewerAccess of ["owner", "participant"] as const) {
+        for (const authorUserId of [OWNER_USER_ID, PARTICIPANT_USER_ID]) {
+          for (const visibility of ["shared", "internal"] as const) {
+            const message = { ...collaboration.messages[0], authorUserId, visibility };
+            const dto = {
+              ...(viewerAccess === "owner" ? collaboration : participantBase),
+              viewerAccess,
+              messages: [message],
+            };
+            const parsed = parseCollaborationOwnerReadDto(dto);
+            assert.deepEqual(parsed, dto);
+            assert.equal(parsed?.messages[0].id, MESSAGE_ID);
+            assert.equal(parsed?.messages[0].authorUserId, authorUserId);
+          }
+        }
+      }
+    });
+
+    await test("keeps historical Cuevion identity null despite matching owner display name", async () => {
+      const dto = {
+        ...collaboration,
+        messages: [{ ...collaboration.messages[0], authorUserId: null }],
+      };
+      assert.deepEqual(parseCollaborationOwnerReadDto(dto), dto);
+      assert.equal(parseCollaborationOwnerReadDto(dto)?.messages[0].authorUserId, null);
+    });
+
+    await test("accepts guest and system activities only with null canonical identity", async () => {
+      for (const authorRole of ["Guest reviewer", "System"] as const) {
+        const dto = {
+          ...collaboration,
+          messages: [{ ...collaboration.messages[0], authorRole, authorUserId: null }],
+        };
+        assert.deepEqual(parseCollaborationOwnerReadDto(dto), dto);
+      }
+    });
+
+    await test("preserves mixed historical and current activities on resolved Collaboration", async () => {
+      const dto = {
+        ...collaboration,
+        state: "resolved",
+        messages: [
+          { ...collaboration.messages[0], id: "H".repeat(22), authorUserId: null },
+          collaboration.messages[0],
+          {
+            ...collaboration.messages[0],
+            id: "T".repeat(22),
+            authorUserId: PARTICIPANT_USER_ID,
+            visibility: "internal",
+          },
+          {
+            ...collaboration.messages[0],
+            id: "G".repeat(22),
+            authorRole: "Guest reviewer",
+            authorUserId: null,
+          },
+        ],
+      };
+      assert.deepEqual(parseCollaborationOwnerReadDto(dto), dto);
+    });
+
+    await test("rejects malformed author IDs using the exact canonical user-ID contract", async () => {
+      for (const authorUserId of [
+        undefined,
+        "",
+        "usr_short",
+        "owner@example.test",
+        `usr_${"A".repeat(21)}B`,
+        `usr_${"A".repeat(23)}`,
+        ` ${OWNER_USER_ID}`,
+        `${OWNER_USER_ID} `,
+        OWNER_USER_ID.toUpperCase(),
+        42,
+        { userId: OWNER_USER_ID },
+        [OWNER_USER_ID],
+      ]) {
+        assert.equal(
+          parseCollaborationOwnerReadDto({
+            ...collaboration,
+            messages: [{ ...collaboration.messages[0], authorUserId }],
+          }),
+          null,
+        );
+      }
+    });
+
+    await test("rejects guest and system claims to canonical Cuevion identity", async () => {
+      for (const authorRole of ["Guest reviewer", "System"] as const) {
+        assert.equal(
+          parseCollaborationOwnerReadDto({
+            ...collaboration,
+            messages: [{ ...collaboration.messages[0], authorRole }],
+          }),
+          null,
+        );
+      }
+    });
+
+    await test("requires explicit wire identity and rejects alternate author authority shapes", async () => {
+      const { authorUserId: _authorUserId, ...missingIdentity } = collaboration.messages[0];
+      const malformedMessages = [
+        missingIdentity,
+        { ...collaboration.messages[0], userId: OWNER_USER_ID },
+        { ...collaboration.messages[0], actorUserId: OWNER_USER_ID },
+        { ...collaboration.messages[0], authorType: "cuevion_user" },
+        { ...collaboration.messages[0], author: { userId: OWNER_USER_ID } },
+      ];
+      for (const message of malformedMessages) {
+        assert.equal(
+          parseCollaborationOwnerReadDto({ ...collaboration, messages: [message] }),
+          null,
+        );
+      }
     });
 
     await test("strictly parses the canonical owner external guest projection", async () => {

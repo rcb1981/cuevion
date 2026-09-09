@@ -69,6 +69,7 @@ function collaboration(
         id: "M".repeat(22),
         authorDisplayName: "Owner",
         authorRole: "Cuevion user",
+        authorUserId: OWNER_USER_ID,
         text: "Please review",
         visibility: "internal",
         timestamp: NOW_MS - 1_500,
@@ -113,6 +114,7 @@ function appendedMessage(
     id: "N".repeat(22),
     authorDisplayName: "Owner",
     authorRole: "Cuevion user",
+    authorUserId: OWNER_USER_ID,
     text,
     timestamp: NOW_MS,
     visibility,
@@ -1210,6 +1212,99 @@ async function run() {
         "csrf-token",
         key,
       );
+    });
+
+    await test("preserves server-returned owner and Team author identity for Shared and Internal writes", reset, async () => {
+      for (const authorUserId of [OWNER_USER_ID, PARTICIPANT_USER_ID]) {
+        for (const visibility of ["shared", "internal"] as const) {
+          reset();
+          const calls: FetchCall[] = [];
+          const text = "Canonical author response";
+          const message = { ...appendedMessage(visibility, text), authorUserId };
+          installFetch([
+            csrfResponse("token"),
+            response(200, { ok: true, data: { message, updatedAt: NOW_MS } }),
+          ], calls);
+          const prepare = visibility === "shared"
+            ? writeApi.prepareSharedCollaborationMessageForOwner
+            : writeApi.prepareInternalCollaborationMessageForOwner;
+          assert.deepEqual(await requireReadyOperation(prepare(COLLABORATION_ID, text)).execute(), {
+            status: "success",
+            message,
+            updatedAt: NOW_MS,
+          });
+          assertExactRequest(calls[1], {
+            operation: visibility === "shared" ? "append_shared" : "append_internal",
+            collaborationId: COLLABORATION_ID,
+            text,
+          }, "token", idempotencyKeyFrom(calls[1]));
+          assert.equal(message.id, "N".repeat(22));
+        }
+      }
+    });
+
+    await test("accepts null author identity for a historical idempotent append response", reset, async () => {
+      for (const visibility of ["shared", "internal"] as const) {
+        reset();
+        const calls: FetchCall[] = [];
+        const text = "Historical retry";
+        const message = { ...appendedMessage(visibility, text), authorUserId: null };
+        installFetch([
+          csrfResponse("token"),
+          response(200, { ok: true, data: { message, updatedAt: NOW_MS } }),
+        ], calls);
+        const prepare = visibility === "shared"
+          ? writeApi.prepareSharedCollaborationMessageForOwner
+          : writeApi.prepareInternalCollaborationMessageForOwner;
+        assert.deepEqual(await requireReadyOperation(prepare(COLLABORATION_ID, text)).execute(), {
+          status: "success",
+          message,
+          updatedAt: NOW_MS,
+        });
+      }
+    });
+
+    await test("rejects malformed, missing, and alternate author identity in append responses", reset, async () => {
+      const text = "Reject impersonation shape";
+      for (const visibility of ["shared", "internal"] as const) {
+        const message = appendedMessage(visibility, text);
+        const { authorUserId: _authorUserId, ...missingIdentity } = message;
+        const malformedMessages = [
+          missingIdentity,
+          ...[
+            undefined,
+            "",
+            "usr_short",
+            "owner@example.test",
+            `usr_${"A".repeat(21)}B`,
+            `usr_${"A".repeat(23)}`,
+            ` ${OWNER_USER_ID}`,
+            `${OWNER_USER_ID} `,
+            OWNER_USER_ID.toUpperCase(),
+            42,
+            { userId: OWNER_USER_ID },
+            [OWNER_USER_ID],
+          ].map((authorUserId) => ({ ...message, authorUserId })),
+          { ...message, userId: OWNER_USER_ID },
+          { ...message, actorUserId: OWNER_USER_ID },
+          { ...message, author: { userId: OWNER_USER_ID } },
+          { ...message, authorRole: "Guest reviewer", authorUserId: null },
+        ];
+        for (const malformed of malformedMessages) {
+          reset();
+          const calls: FetchCall[] = [];
+          installFetch([
+            csrfResponse("token"),
+            response(200, { ok: true, data: { message: malformed, updatedAt: NOW_MS } }),
+          ], calls);
+          const prepare = visibility === "shared"
+            ? writeApi.prepareSharedCollaborationMessageForOwner
+            : writeApi.prepareInternalCollaborationMessageForOwner;
+          assert.deepEqual(await requireReadyOperation(prepare(COLLABORATION_ID, text)).execute(), {
+            status: "invalid_response",
+          });
+        }
+      }
     });
 
     await test("reuses one key for the same logical append and payload", reset, async () => {

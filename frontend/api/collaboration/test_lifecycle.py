@@ -54,7 +54,9 @@ class LifecycleContractTests(unittest.TestCase):
     def test_owner_only_and_legacy_schema_and_guest_projection(self):
         for legacy in (False, True):
             thread = thread_record(legacy=legacy)
-            self.assertEqual(models.normalize_v2_thread_record(thread), thread)
+            self.assertEqual(models.normalize_v2_thread_record(thread), {
+                **thread, "messages": [{**row, "authorUserId": None} for row in thread["messages"]],
+            })
             guest = models.build_v2_guest_thread_dto(thread)
             self.assertIsNotNone(guest)
             for field in ("ownerUserId", "ownerDisplayName", "ownerEmail", "participants", "workspaceId", "mailboxId"):
@@ -291,7 +293,7 @@ class LifecycleRedisTests(unittest.TestCase):
                     self.assertEqual(current["state"], "resolved")
                     self.assertGreater(current["updatedAt"], original["updatedAt"])
                     for field in set(original) - {"state", "updatedAt"}:
-                        self.assertEqual(current[field], original[field])
+                        self.assertEqual(current[field], models.normalize_v2_thread_record(original)[field])
                     for key in self.keys[:2]:
                         self.client.command(["PEXPIRE", key, 600_000])
                     before = self.snapshot()
@@ -316,7 +318,7 @@ class LifecycleRedisTests(unittest.TestCase):
         original = thread_record(legacy=True)
         self.seed(original)
         before = self.snapshot()
-        self.assertEqual(self.stored(), original)
+        self.assertEqual(self.stored(), models.normalize_v2_thread_record(original))
         self.assertFalse(self.transition(original, "reopen")["changed"])
         self.assert_unchanged(before)
         result = self.transition(original)
@@ -324,7 +326,7 @@ class LifecycleRedisTests(unittest.TestCase):
         self.assertEqual(self.stored()["ownerUserId"], OWNER_ID)
         self.assertEqual(self.stored()["participants"], [])
         for field in set(original) - {"state", "updatedAt"}:
-            self.assertEqual(self.stored()[field], original[field])
+            self.assertEqual(self.stored()[field], models.normalize_v2_thread_record(original)[field])
 
     def test_expected_state_timestamp_malformed_and_scope_rejections_are_zero_write(self):
         original = thread_record(legacy=True)
@@ -388,7 +390,7 @@ class LifecycleRedisTests(unittest.TestCase):
         result = self.transition(resolved, "reopen", thread_loader=lambda *_a, **_k: redis_store._V2RecordResult(resolved))
         self.assertEqual(result["error"]["code"], "stale_thread")
         self.assert_unchanged(before)
-        self.assertEqual(self.stored()["messages"], advanced["messages"])
+        self.assertEqual(self.stored()["messages"], models.normalize_v2_thread_record(advanced)["messages"])
 
     def test_owner_appends_and_participant_add_preserve_guest_only_owner_identity(self):
         self.seed(thread_record())

@@ -137,6 +137,7 @@ _OWNER_MUTATION_MESSAGE_FIELDS = frozenset(
         "id",
         "authorDisplayName",
         "authorRole",
+        "authorUserId",
         "text",
         "timestamp",
         "visibility",
@@ -377,6 +378,7 @@ def _build_owner_thread_dto(thread: dict[str, Any]) -> dict[str, Any]:
                 "id": message["id"],
                 "authorDisplayName": message["authorDisplayName"],
                 "authorRole": _AUTHOR_ROLE_BY_KIND[message["authorKind"]],
+                "authorUserId": message.get("authorUserId"),
                 "text": message["text"],
                 "visibility": message["visibility"],
                 "timestamp": message["createdAt"],
@@ -739,6 +741,7 @@ def _owner_mutation_dto(
         message.get("authorDisplayName") if type(message) is dict else None
     )
     author_role = message.get("authorRole") if type(message) is dict else None
+    author_user_id = message.get("authorUserId") if type(message) is dict else None
     message_text = message.get("text") if type(message) is dict else None
     message_visibility = (
         message.get("visibility") if type(message) is dict else None
@@ -752,6 +755,13 @@ def _owner_mutation_dto(
         or author_display_name != capability.actor_display_name
         or type(author_role) is not str
         or author_role != "Cuevion user"
+        or (
+            author_user_id is not None
+            and (
+                normalize_v2_user_id(author_user_id) != author_user_id
+                or author_user_id != capability.actor_user_id
+            )
+        )
         or type(message_text) is not str
         or message_text != text
         or type(message_visibility) is not str
@@ -769,6 +779,7 @@ def _owner_mutation_dto(
             "id": message["id"],
             "authorDisplayName": message["authorDisplayName"],
             "authorRole": message["authorRole"],
+            "authorUserId": author_user_id,
             "text": message["text"],
             "timestamp": message["timestamp"],
             "visibility": message["visibility"],

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from unittest.mock import patch
 import os
@@ -128,6 +128,8 @@ class CollaborationV2MutationTests(unittest.TestCase):
             )
         self.assertEqual(result["status"], "ok")
         self.assertEqual(saved[0][0]["messages"][0]["visibility"], "shared")
+        self.assertIsNone(saved[0][0]["messages"][0]["authorUserId"])
+        self.assertNotIn("authorUserId", result["message"])
         self.assertIs(saved[0][2]["session_context"], session)
         self.assertEqual(saved[0][2]["now"], SEC + 101)
         self.assertEqual(saved[0][2]["idempotency_key"], GUEST_IDEMPOTENCY_KEY)
@@ -620,6 +622,72 @@ class CollaborationV2ParticipantMutationTests(unittest.TestCase):
             "membershipRef": provenance,
             "displayName": "New Participant",
         }
+
+    def test_owner_and_team_shared_and_internal_use_exact_authenticated_identity(self):
+        for participant in (False, True):
+            for action, visibility in (("reply", "shared"), ("internal_note", "internal")):
+                context = self.capability(action, participant=participant)
+                thread = self.thread() if participant else self.thread([])
+                captured = []
+
+                def save(record, _expected, **kwargs):
+                    captured.append((record, kwargs))
+                    message = record["messages"][-1]
+                    return redis_store._V2OwnerAppendResult(message, message["createdAt"], False)
+
+                with self.subTest(participant=participant, visibility=visibility):
+                    result = mutations.append_owner_v2_message_idempotently(
+                        context, "Same display names cannot establish ownership", visibility=visibility,
+                        idempotency_key="i" * 42 + "A",
+                        thread_loader=lambda *_args, **_kwargs: redis_store._V2RecordResult(thread),
+                        thread_saver=save,
+                    )
+                    self.assertEqual(result["status"], "ok")
+                    self.assertEqual(captured[0][0]["messages"][-1]["authorUserId"], context.actor_user_id)
+                    self.assertEqual(captured[0][1]["actor_user_id"], context.actor_user_id)
+                    self.assertEqual(result["message"]["authorUserId"], context.actor_user_id)
+
+    def test_canonical_workspace_cannot_write_without_canonical_actor(self):
+        for participant in (False, True):
+            for missing_or_bad in (None, "usr_short", "usr_" + "A" * 21 + "B"):
+                context = replace(self.capability("reply", participant=participant), actor_user_id=missing_or_bad)
+                result = mutations.append_owner_v2_message_idempotently(
+                    context, "Cannot silently drop authority", visibility="shared",
+                    idempotency_key="i" * 42 + "A",
+                    thread_loader=lambda *_args, **_kwargs: redis_store._V2RecordResult(self.thread()),
+                    thread_saver=lambda *_args, **_kwargs: self.fail("invalid actor must never write"),
+                )
+                self.assertEqual(result["status"], "error")
+
+    def test_committed_identity_must_match_actor_except_unproven_historical_retry(self):
+        context = self.capability("reply", participant=True)
+        for recovered, author_user_id, allowed in (
+            (False, self.participant_user_id, True),
+            (True, self.participant_user_id, True),
+            (False, None, False),
+            (True, None, True),
+            (False, self.owner_user_id, False),
+            (True, self.owner_user_id, False),
+        ):
+            def save(record, _expected, **_kwargs):
+                committed = dict(record["messages"][-1])
+                if author_user_id is None:
+                    committed.pop("authorUserId")
+                else:
+                    committed["authorUserId"] = author_user_id
+                return redis_store._V2OwnerAppendResult(committed, committed["createdAt"], recovered)
+
+            with self.subTest(recovered=recovered, author_user_id=author_user_id):
+                result = mutations.append_owner_v2_message_idempotently(
+                    context, "Original reply", visibility="shared", idempotency_key="i" * 42 + "A",
+                    thread_loader=lambda *_args, **_kwargs: redis_store._V2RecordResult(self.thread()),
+                    thread_saver=save,
+                )
+                self.assertEqual(result["status"] == "ok", allowed)
+                if allowed:
+                    self.assertEqual(result["message"]["authorUserId"], author_user_id)
+                else:
+                    self.assertEqual(result["error"], {"code": "storage_protocol_error"})
 
     def test_duplicate_add_is_noop_and_new_provenance_reactivates_explicitly(self):
         context = self.capability("manage_participants")

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import copy
+import json
 import unittest
 
 from .models import (
     MAX_V2_EXTERNAL_GUESTS,
+    MAX_V2_THREAD_BYTES,
     build_v2_guest_thread_dto,
     generate_v2_bearer_secret,
     generate_v2_opaque_id,
@@ -15,6 +17,7 @@ from .models import (
     normalize_v2_external_guest_projection,
     normalize_v2_external_guest_projection_item,
     normalize_v2_thread_record,
+    normalize_v2_message_record,
     build_v2_guest_shared_reply,
     build_v2_owner_internal_message,
 )
@@ -109,6 +112,64 @@ def sample_participant_thread() -> dict:
 
 
 class CollaborationV2ModelTests(unittest.TestCase):
+    def test_author_identity_accepts_exact_canonical_users_and_round_trips(self):
+        for kind in ("owner", "internal"):
+            for final_character in "AQgw":
+                with self.subTest(kind=kind, final_character=final_character):
+                    thread = sample_thread()
+                    message = thread["messages"][0]
+                    message["authorKind"] = kind
+                    message["authorUserId"] = "usr_" + "B" * 21 + final_character
+                    canonical = normalize_v2_thread_record(thread)
+                    self.assertEqual(canonical["messages"][0]["authorUserId"], message["authorUserId"])
+                    self.assertEqual(
+                        decode_v2_wire_record(encode_v2_wire_record(canonical, "thread"), "thread"),
+                        canonical,
+                    )
+
+    def test_author_identity_null_and_missing_remain_unproven_for_every_kind(self):
+        for kind in ("owner", "internal", "guest", "system"):
+            with self.subTest(kind=kind):
+                message = {**sample_thread()["messages"][0], "authorKind": kind}
+                self.assertNotIn("authorUserId", message)
+                self.assertIsNone(normalize_v2_message_record(message)["authorUserId"])
+                message["authorUserId"] = None
+                self.assertIsNone(normalize_v2_message_record(message)["authorUserId"])
+
+    def test_author_identity_rejects_malformed_ids_and_nonuser_claims(self):
+        for invalid in (
+            "", "usr_short", "usr_" + "A" * 21, "usr_" + "A" * 23,
+            "usr_" + "A" * 21 + "B", "usr_" + "A" * 21 + "=",
+            "usr_" + "A" * 21 + "é", " usr_" + "A" * 22,
+            "usr_" + "A" * 22 + "\n", True, 7, {}, [],
+        ):
+            with self.subTest(invalid=invalid):
+                message = {**sample_thread()["messages"][0], "authorUserId": invalid}
+                self.assertIsNone(normalize_v2_message_record(message))
+        for kind in ("guest", "system"):
+            message = {**sample_thread()["messages"][0], "authorKind": kind, "authorUserId": "usr_" + "A" * 22}
+            self.assertIsNone(normalize_v2_message_record(message))
+        for field in ("userId", "actorUserId", "author"):
+            message = {**sample_thread()["messages"][0], field: "usr_" + "A" * 22}
+            self.assertIsNone(normalize_v2_message_record(message))
+
+    def test_mixed_resolved_history_never_infers_author_from_owner_or_name(self):
+        thread = sample_participant_thread()
+        thread["state"] = "resolved"
+        new = {**thread["messages"][0], "id": "D" * 22, "authorUserId": thread["ownerUserId"]}
+        thread["messages"].append(new)
+        canonical = normalize_v2_thread_record(thread)
+        self.assertEqual([message["authorUserId"] for message in canonical["messages"]], [None, None, thread["ownerUserId"]])
+        self.assertNotIn("authorUserId", thread["messages"][0])
+
+    def test_guest_projection_omits_canonical_cuevion_author_identity(self):
+        thread = sample_thread()
+        thread["messages"][0].update(visibility="shared", authorUserId="usr_" + "A" * 22)
+        dto = build_v2_guest_thread_dto(thread)
+        self.assertEqual(len(dto["messages"]), 2)
+        self.assertNotIn("authorUserId", repr(dto))
+        self.assertNotIn("usr_", repr(dto))
+
     def test_external_guest_projection_normalizes_pending_and_active(self):
         pending = {
             "inviteId": "P" * 22,
@@ -445,6 +506,39 @@ class CollaborationV2ModelTests(unittest.TestCase):
             }
         )
         self.assertIsNone(normalize_v2_thread_record(aggregate))
+
+    def test_historical_identity_null_normalization_preserves_exact_wire_size_limit(self):
+        historical = sample_thread()
+        message = historical["messages"][0]
+        historical["messages"] = [
+            {**message, "id": f"{index:022d}", "text": "x" * 16_384}
+            for index in range(16)
+        ]
+
+        def wire_size(value):
+            return len(json.dumps(
+                encode_v2_wire_record(value, "thread"), ensure_ascii=False,
+                allow_nan=False, separators=(",", ":"), sort_keys=True,
+            ).encode("utf-8"))
+
+        excess = wire_size(historical) - MAX_V2_THREAD_BYTES
+        historical["messages"][-1]["text"] = historical["messages"][-1]["text"][:-excess]
+        self.assertEqual(wire_size(historical), MAX_V2_THREAD_BYTES)
+        self.assertTrue(all("authorUserId" not in message for message in historical["messages"]))
+        normalized = normalize_v2_thread_record(historical)
+        self.assertIsNotNone(normalized)
+        self.assertTrue(all(message["authorUserId"] is None for message in normalized["messages"]))
+        self.assertEqual(normalize_v2_thread_record(normalized), normalized)
+        self.assertEqual(wire_size(normalized), MAX_V2_THREAD_BYTES)
+
+        oversized = copy.deepcopy(historical)
+        oversized["messages"][-1]["text"] += "x"
+        self.assertEqual(wire_size(oversized), MAX_V2_THREAD_BYTES + 1)
+        self.assertIsNone(normalize_v2_thread_record(oversized))
+        with_proof = copy.deepcopy(historical)
+        with_proof["messages"][0]["authorUserId"] = "usr_" + "A" * 22
+        self.assertGreater(wire_size(with_proof), MAX_V2_THREAD_BYTES)
+        self.assertIsNone(normalize_v2_thread_record(with_proof))
 
     def test_revocation_actor_is_exactly_the_canonical_owner(self):
         for actor, accepted in (

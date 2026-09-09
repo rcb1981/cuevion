@@ -803,6 +803,24 @@ class OwnerHttpBoundaryTests(unittest.TestCase):
             IDEMPOTENCY_KEY,
         )
 
+    def test_shared_and_internal_requests_cannot_choose_any_author_identity(self):
+        for operation, service_name in (
+            ("append_shared", "append_v2_shared_message_for_verified_owner"),
+            ("append_internal", "append_v2_internal_note_for_verified_owner"),
+        ):
+            for field in ("authorUserId", "userId", "actorUserId"):
+                for claimed_user_id in (OWNER_USER_ID, PARTICIPANT_USER_ID):
+                    with self.subTest(operation=operation, field=field, claim=claimed_user_id), mock.patch.object(
+                        owner_http.application, service_name,
+                    ) as service:
+                        response = _invoke(_request(
+                            {"operation": operation, "collaborationId": COLLABORATION_ID,
+                             "text": "Cannot impersonate", field: claimed_user_id},
+                            csrf=self._csrf(), idempotency_key=IDEMPOTENCY_KEY,
+                        ))
+                    self.assertEqual(response.status, 400)
+                    service.assert_not_called()
+
     def test_owner_append_requires_one_canonical_idempotency_header(self):
         payload = {
             "operation": "append_internal",

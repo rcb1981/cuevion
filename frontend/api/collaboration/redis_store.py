@@ -1931,15 +1931,26 @@ else:
       return a.subject == b.subject and a.senderDisplay == b.senderDisplay
         and a.fromDisplay == b.fromDisplay and a.timestamp == b.timestamp and a.bodyText == b.bodyText
     end
+    local function messageAuthorUserId(message)
+      -- Old records and hosted decoders that omit JSON nulls carry no proof.
+      local value = message.authorUserId
+      if value == JSON_NULL then return nil end
+      return value
+    end
     local function messageValid(message)
-      return type(message) == 'table' and keyCount(message) == 6 and opaqueId(message.id)
+      return type(message) == 'table'
+        and keyCount(message) == (message.authorUserId == nil and 6 or 7) and opaqueId(message.id)
         and (message.authorKind == 'owner' or message.authorKind == 'internal' or message.authorKind == 'guest' or message.authorKind == 'system')
+        and (messageAuthorUserId(message) == nil
+          or ((message.authorKind == 'owner' or message.authorKind == 'internal')
+            and canonicalUserId(messageAuthorUserId(message))))
         and displayString(message.authorDisplayName, 256, false) and freeText(message.text, 16384)
         and (message.visibility == 'internal' or message.visibility == 'shared')
         and timestampMilliseconds(message.createdAt)
     end
     local function messageEqual(a, b)
       return a.id == b.id and a.authorKind == b.authorKind and a.authorDisplayName == b.authorDisplayName
+        and messageAuthorUserId(a) == messageAuthorUserId(b)
         and a.text == b.text and a.visibility == b.visibility and a.createdAt == b.createdAt
     end
     local function messagesValid(messages)
@@ -3775,6 +3786,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         end
       end
       if matchCount ~= 1 or matched.authorKind ~= ARGV[15]
+        or (messageAuthorUserId(matched) ~= nil and messageAuthorUserId(matched) ~= ARGV[16])
         or matched.authorDisplayName ~= ARGV[13] or matched.text ~= ARGV[14]
         or matched.visibility ~= ARGV[12] or matched.createdAt ~= record.updatedAt
         or integerValue(current.updatedAt) < integerValue(record.updatedAt) then
@@ -3830,6 +3842,8 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     end
     local appended = replacement.messages[#replacement.messages]
     if appended.authorKind ~= ARGV[15] or appended.authorDisplayName ~= ARGV[13]
+      or (ARGV[16] ~= '' and messageAuthorUserId(appended) ~= ARGV[16])
+      or (ARGV[16] == '' and messageAuthorUserId(appended) ~= nil)
       or appended.text ~= ARGV[14] or appended.visibility ~= ARGV[12]
       or appended.createdAt ~= replacement.updatedAt
       or record.fingerprint ~= ARGV[5] or record.collaborationId ~= ARGV[7]
@@ -3867,7 +3881,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     ) -> tuple[dict, int] | None:
         if (
             type(value) is not dict
-            or set(value)
+            or set(value) - {"authorUserId"}
             != {
                 "id",
                 "authorKind",

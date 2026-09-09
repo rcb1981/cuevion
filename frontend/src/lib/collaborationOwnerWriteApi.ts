@@ -311,6 +311,7 @@ function parseAppendMessage(
       "id",
       "authorDisplayName",
       "authorRole",
+      "authorUserId",
       "text",
       "timestamp",
       "visibility",
@@ -319,6 +320,8 @@ function parseAppendMessage(
     typeof value.authorDisplayName !== "string" ||
     value.authorDisplayName.length === 0 ||
     value.authorRole !== "Cuevion user" ||
+    (value.authorUserId !== null &&
+      !isValidCollaborationParticipantUserId(value.authorUserId)) ||
     value.text !== text ||
     value.visibility !== visibility ||
     !isSafeAppendTimestamp(value.timestamp)
@@ -330,6 +333,7 @@ function parseAppendMessage(
     id: value.id,
     authorDisplayName: value.authorDisplayName,
     authorRole: value.authorRole,
+    authorUserId: value.authorUserId,
     text: value.text,
     timestamp: value.timestamp,
     visibility,

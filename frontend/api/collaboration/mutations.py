@@ -276,6 +276,7 @@ def _append_message(
             "id": message["id"],
             "authorDisplayName": message["authorDisplayName"],
             "authorRole": "Guest reviewer" if message["authorKind"] == "guest" else "Cuevion user",
+            "authorUserId": message["authorUserId"],
             "text": message["text"],
             "timestamp": message["createdAt"],
             "visibility": message["visibility"],
@@ -458,7 +459,12 @@ def append_owner_v2_message_idempotently(
     committed_message = normalize_v2_message_record(saved.message)
     if (
         committed_message is None
-        or committed_message != saved.message
+        or committed_message != {**saved.message, "authorUserId": saved.message.get("authorUserId")}
+        or type(saved.recovered) is not bool
+        or (
+            committed_message["authorUserId"] != context.actor_user_id
+            and not (saved.recovered and committed_message["authorUserId"] is None)
+        )
         or committed_message["authorKind"] != context.actor_kind
         or committed_message["authorDisplayName"] != context.actor_display_name
         or committed_message["text"] != message["text"]
@@ -472,6 +478,7 @@ def append_owner_v2_message_idempotently(
             "id": committed_message["id"],
             "authorDisplayName": committed_message["authorDisplayName"],
             "authorRole": "Cuevion user",
+            "authorUserId": committed_message["authorUserId"],
             "text": committed_message["text"],
             "timestamp": committed_message["createdAt"],
             "visibility": committed_message["visibility"],

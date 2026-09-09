@@ -290,7 +290,7 @@ class SummaryRedisTests(unittest.TestCase):
         self.create(value)
         key = store.build_v2_thread_key(value['collaborationId'])
         self.assertEqual(self.page()['summaries'], [])
-        self.assertEqual(store._load_v2_thread(value['collaborationId'], command_transport=self.transport).record, value)
+        self.assertEqual(store._load_v2_thread(value['collaborationId'], command_transport=self.transport).record, models.normalize_v2_thread_record(value))
         self.client.command(['PEXPIRE', key, 100_000])
         before = self.client.command(['PTTL', key])
         result = store._enrich_v2_discovery(value, capability(value), command_transport=self.transport)
@@ -298,7 +298,7 @@ class SummaryRedisTests(unittest.TestCase):
         self.assertLessEqual(self.client.command(['PTTL', key]), before)
         self.assertLessEqual(self.client.command(['PTTL', self.index()]), before)
         current = store._load_v2_thread(value['collaborationId'], command_transport=self.transport).record
-        self.assertEqual({k: current[k] for k in value}, value)
+        self.assertEqual({k: current[k] for k in value}, models.normalize_v2_thread_record(value))
         self.assertEqual(current['ownerUserId'], OWNER)
         self.assertEqual(current['participants'], [])
         self.assertEqual(len(self.page()['summaries']), 1)

@@ -609,6 +609,10 @@ else:
                 if not 0 <= created_at <= MAX_V2_SAFE_INTEGER:
                     return None
                 message["createdAt"] = str(created_at)
+                # Null carries no stored proof. Keep its historical wire form
+                # compact so normalization preserves valid old record byte limits.
+                if message.get("authorUserId") is None:
+                    message.pop("authorUserId", None)
         return encoded
 
 
@@ -643,6 +647,7 @@ else:
                 if parsed is None:
                     return None
                 message["createdAt"] = parsed
+                message.setdefault("authorUserId", None)
         return decoded
 
 
@@ -836,7 +841,7 @@ else:
 
     def normalize_v2_message_record(value: Any) -> dict | None:
         required = {"id", "authorKind", "authorDisplayName", "text", "visibility", "createdAt"}
-        if not isinstance(value, dict) or not _v2_exact_keys(value, required):
+        if not isinstance(value, dict) or not _v2_exact_keys(value, required, {"authorUserId"}):
             return None
         message_id = value.get("id")
         author_kind = _v2_bounded_string(value.get("authorKind"), max_length=16)
@@ -846,6 +851,8 @@ else:
         text = _v2_free_text(value.get("text"), max_length=MAX_V2_MESSAGE_TEXT)
         created_at = _v2_timestamp_milliseconds(value.get("createdAt"))
         visibility = _v2_bounded_string(value.get("visibility"), max_length=16)
+        # Missing identity is historical absence of proof, never owner inference.
+        author_user_id = value.get("authorUserId")
         if (
             not is_v2_opaque_id(message_id)
             or author_kind not in {"owner", "internal", "guest", "system"}
@@ -853,12 +860,20 @@ else:
             or text is None
             or created_at is None
             or visibility not in {"internal", "shared"}
+            or (
+                author_user_id is not None
+                and (
+                    author_kind not in {"owner", "internal"}
+                    or normalize_v2_user_id(author_user_id) != author_user_id
+                )
+            )
         ):
             return None
         return {
             "id": message_id,
             "authorKind": author_kind,
             "authorDisplayName": author_display_name,
+            "authorUserId": author_user_id,
             "text": text,
             "visibility": visibility,
             "createdAt": created_at,
@@ -1310,6 +1325,7 @@ else:
         *,
         author_kind: str,
         author_display_name: Any,
+        author_user_id: str | None = None,
         visibility: str,
         created_at: int | None = None,
     ) -> dict | None:
@@ -1333,6 +1349,7 @@ else:
                 "id": generate_v2_opaque_id(),
                 "authorKind": normalized_author_kind,
                 "authorDisplayName": display_name,
+                "authorUserId": author_user_id,
                 "text": normalized_text,
                 "visibility": normalized_visibility,
                 "createdAt": timestamp,
@@ -1367,10 +1384,16 @@ else:
         from .authorization import _is_internal_capability
         if not _is_internal_capability(context, actions={"reply", "internal_note"}):
             return None
+        if (
+            normalize_v2_workspace_id(context.workspace_id) is not None
+            and normalize_v2_user_id(context.actor_user_id) is None
+        ):
+            return None
         return _build_v2_server_message(
             text,
             author_kind=author_kind,
             author_display_name=context.actor_display_name,
+            author_user_id=context.actor_user_id,
             visibility=visibility,
             created_at=created_at,
         )

@@ -11,6 +11,7 @@ from . import application, authorization, models, mutations, redis_store
 MS = 1_800_000_000_000
 COLLABORATION_ID = "A" * 22
 WORKSPACE_ID = "wsp_" + ("w" * 22)
+AUTHOR_ID = "usr_" + "A" * 22
 IDEMPOTENCY_KEY = base64.urlsafe_b64encode(b"i" * 32).decode("ascii").rstrip("=")
 
 
@@ -25,6 +26,7 @@ def _capability(action: str = "reply"):
         action,
         "owner",
         "Owner Person",
+        AUTHOR_ID,
     )
 
 
@@ -103,6 +105,7 @@ class OwnerIdempotencyContractTests(unittest.TestCase):
             "id": "M" * 22,
             "authorKind": "owner",
             "authorDisplayName": "Owner Person",
+            "authorUserId": AUTHOR_ID,
             "text": "Canonical text",
             "visibility": "shared",
             "createdAt": MS + 1,
@@ -184,6 +187,7 @@ class OwnerIdempotencyContractTests(unittest.TestCase):
                 "id": "M" * 22,
                 "authorDisplayName": "Owner Person",
                 "authorRole": "Cuevion user",
+                "authorUserId": AUTHOR_ID,
                 "text": "Canonical text",
                 "timestamp": MS + 1,
                 "visibility": "shared",

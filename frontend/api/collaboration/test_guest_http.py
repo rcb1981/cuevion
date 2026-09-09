@@ -407,6 +407,10 @@ class GuestHttpBoundaryTests(unittest.TestCase):
             {"operation": "reply", "text": "Hello", "idempotencyKey": IDEMPOTENCY_KEY, "displayName": "Spoof"},
             {"operation": "reply", "text": "Hello", "idempotencyKey": IDEMPOTENCY_KEY, "visibility": "internal"},
             {"operation": "reply", "text": "Hello", "idempotencyKey": IDEMPOTENCY_KEY, "ownerEmail": "owner@example.com"},
+            *(
+                {"operation": "reply", "text": "Hello", "idempotencyKey": IDEMPOTENCY_KEY, field: "usr_" + "A" * 22}
+                for field in ("authorUserId", "userId", "actorUserId")
+            ),
         )
         with mock.patch.object(guest_http.application, "append_v2_shared_reply_for_guest") as append:
             for payload in forbidden_payloads:

@@ -131,7 +131,7 @@ class DiscoveryMigrationTests(unittest.TestCase):
         self.assertEqual(self.snapshot([self.keys[0], pointer]), before)
         self.assertEqual(self.one()['enrolled'], 1)
         current = store._load_v2_thread(value['collaborationId'], command_transport=self.client.transport).record
-        self.assertEqual({k: current[k] for k in value}, value)
+        self.assertEqual({k: current[k] for k in value}, models.normalize_v2_thread_record(value))
         self.assertEqual(current['ownerUserId'], summary.OWNER)
         self.assertEqual(current['participants'], [])
         after = self.snapshot([self.keys[0], pointer])

@@ -156,7 +156,7 @@ class DiscoveryRepairRedisTests(unittest.TestCase):
                 expiry, records = self.expiry(keys), self.snapshot(keys)
                 repeated = self.create({**value, "collaborationId": f"{index + 100:022d}"})
                 self.assertFalse(repeated.created)
-                self.assertEqual(repeated.record, value)
+                self.assertEqual(repeated.record, models.normalize_v2_thread_record(value))
                 self.assertEqual(self.expiry(keys), expiry)
                 self.assertEqual(self.snapshot(keys), records)
 
@@ -273,7 +273,7 @@ class DiscoveryRepairRedisTests(unittest.TestCase):
                 result = self.read(value)
                 self.assertEqual(result.get("status"), "ok", result)
                 current = store._load_v2_thread(value["collaborationId"], command_transport=self.transport).record
-                self.assertEqual({field: current[field] for field in value}, value)
+                self.assertEqual({field: current[field] for field in value}, models.normalize_v2_thread_record(value))
                 self.assertEqual(current["ownerUserId"], summaries.OWNER)
                 self.assertEqual(current["participants"], [])
                 self.assertEqual(self.expiry(keys), expiry)
@@ -406,7 +406,7 @@ class DiscoveryRepairRedisTests(unittest.TestCase):
                 self.assertIs(result.get("created"), False, result)
                 self.assertEqual(result["collaboration"]["collaborationId"], value["collaborationId"])
                 current = store._load_v2_thread(value["collaborationId"], command_transport=self.transport).record
-                self.assertEqual({key: current[key] for key in value}, value)
+                self.assertEqual({key: current[key] for key in value}, models.normalize_v2_thread_record(value))
                 self.assertEqual(current["ownerUserId"], summaries.OWNER)
                 self.assertEqual(current["participants"], [])
                 self.assertEqual(self.expiry(keys), expiry)

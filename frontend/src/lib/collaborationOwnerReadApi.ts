@@ -32,6 +32,7 @@ export type CollaborationOwnerReadMessage = {
   id: string;
   authorDisplayName: string;
   authorRole: "Cuevion user" | "Guest reviewer" | "System";
+  authorUserId: string | null;
   text: string;
   visibility: "internal" | "shared";
   timestamp: number;
@@ -235,6 +236,7 @@ function parseMessage(value: unknown): CollaborationOwnerReadMessage | null {
       "id",
       "authorDisplayName",
       "authorRole",
+      "authorUserId",
       "text",
       "visibility",
       "timestamp",
@@ -245,6 +247,9 @@ function parseMessage(value: unknown): CollaborationOwnerReadMessage | null {
     (value.authorRole !== "Cuevion user" &&
       value.authorRole !== "Guest reviewer" &&
       value.authorRole !== "System") ||
+    (value.authorUserId !== null &&
+      (value.authorRole !== "Cuevion user" ||
+        !isValidCollaborationParticipantUserId(value.authorUserId))) ||
     typeof value.text !== "string" ||
     (value.visibility !== "internal" && value.visibility !== "shared") ||
     !isSafeTimestamp(value.timestamp)
@@ -256,6 +261,7 @@ function parseMessage(value: unknown): CollaborationOwnerReadMessage | null {
     id: value.id,
     authorDisplayName: value.authorDisplayName,
     authorRole: value.authorRole,
+    authorUserId: value.authorUserId,
     text: value.text,
     visibility: value.visibility,
     timestamp: value.timestamp,
