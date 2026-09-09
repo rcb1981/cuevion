@@ -19,6 +19,12 @@ import {
   type SetStateAction,
 } from "react";
 import { createPortal, flushSync } from "react-dom";
+import { ServerNotifications, type ServerNotificationsProps } from "./ServerNotifications";
+import { useWorkspaceNotifications } from "../../lib/useWorkspaceNotifications";
+import { notificationScopeKey, type ServerNotification } from "../../lib/notificationsApi";
+import { buildExactNotificationMessageIndex, exactNotificationSourceKey, createNotificationNavigator, type NotificationDisplayRequest, type NotificationNavigationPorts, type ExactNotificationTarget } from "../../lib/notificationNavigation";
+import { matchesExactMailboxMessageIdentity } from "../../lib/exactMailboxMessageApi";
+import { buildExactMailboxMessageSeed, captureExactMailboxMessageTicket, reduceExactMailboxMessagePublication } from "../../lib/exactMailboxMessageStore";
 import { onboardingText } from "../../copy/onboardingCopy";
 import {
   ReviewDetailView as ReviewModuleDetailView,
@@ -3517,20 +3523,6 @@ function useIsMobileWorkspaceViewport() {
   return isMobileViewport;
 }
 
-type VisibleNotificationItem = {
-  id: string;
-  sourceIds: string[];
-  kind: "collaboration" | "reply" | "mention";
-  mailboxId: InboxId;
-  messageId: string;
-  collaborationMessageId?: string;
-  actorName?: string;
-  title: string;
-  detail: string;
-  time: string;
-  sortTimestamp: number;
-  action: () => void;
-};
 type VisibleActivityItem = {
   id: string;
   type: string;
@@ -3711,7 +3703,6 @@ const AI_SUGGESTIONS_STORAGE_KEY = "cuevion-ai-suggestions-enabled";
 const INBOX_CHANGES_STORAGE_KEY = "cuevion-inbox-changes-enabled";
 const TEAM_ACTIVITY_STORAGE_KEY = "cuevion-team-activity-enabled";
 const CUEVION_AUTH_STORAGE_KEY = "label-inbox-ai-auth-user";
-const CUEVION_NOTIFICATION_READ_STORAGE_KEY = "cuevion-notification-read";
 const buildTeamMembersStorageKey = (workspaceKey: string) =>
   `cuevion-team-members:${workspaceKey}`;
 const buildTeamPendingInvitationStorageKey = (workspaceKey: string) =>
@@ -3894,10 +3885,6 @@ function buildSpamSuppressionStorageKey(
   orderedMailboxKey: string,
 ) {
   return `${CUEVION_SPAM_SUPPRESSION_STORAGE_KEY}:${workspaceUserId}:${orderedMailboxKey}`;
-}
-
-function buildNotificationReadStorageKey(workspaceUserId: string) {
-  return `${CUEVION_NOTIFICATION_READ_STORAGE_KEY}:${workspaceUserId}`;
 }
 
 function buildMailboxFocusPreferenceOverridesStorageKey(workspaceUserId: string) {
@@ -16515,345 +16502,6 @@ function TopCards({
   );
 }
 
-export function buildVisibleNotificationItems({
-  mailboxStore,
-  orderedMailboxes,
-  authenticatedUser,
-  collaborationLastSeenByKey,
-  currentUserId,
-  currentUserEmail,
-  currentViewerPersistenceKey,
-  currentUserName,
-  teamActivityEnabled,
-  onOpenNotificationNavigation,
-}: {
-  mailboxStore: MailboxStore;
-  orderedMailboxes: OrderedMailbox[];
-  authenticatedUser?: AuthenticatedCuevionUser | null;
-  collaborationLastSeenByKey: Record<string, number>;
-  currentUserId: string;
-  currentUserEmail: string;
-  currentViewerPersistenceKey: string;
-  currentUserName: string;
-  teamActivityEnabled: boolean;
-  onOpenNotificationNavigation: (
-    request: Omit<NotificationNavigationRequest, "requestKey">,
-  ) => void;
-}): VisibleNotificationItem[] {
-  if (!teamActivityEnabled) {
-    return [];
-  }
-
-  const viewerType = authenticatedUser?.userType === "guest" ? "external" : "workspace";
-  const operationalViewerKey = normalizeSenderLearningKey(
-    currentUserEmail || currentUserId,
-  );
-  const persistenceViewerKey = normalizeSenderLearningKey(
-    currentViewerPersistenceKey,
-  );
-  const seenItemIds = new Set<string>();
-  const sharedNavigationMailboxId = orderedMailboxes[0]?.id ?? null;
-  const sharedCollaborationMessages =
-    sharedNavigationMailboxId === null
-      ? []
-      : mailboxStore[sharedCollaborationMailboxId]?.Inbox ?? [];
-  const messageSources = [
-    ...orderedMailboxes.flatMap((mailbox) =>
-      (["Inbox", "Filtered"] as const).flatMap((folder) =>
-        (mailboxStore[mailbox.id]?.[folder] ?? []).map((message) => ({
-          message,
-          mailboxId: mailbox.id,
-          navigationMailboxId: mailbox.id,
-          sourceMailboxId: mailbox.id,
-          sharedProjectionOnly: false,
-        })),
-      ),
-    ),
-    ...sharedCollaborationMessages.map((message) => ({
-      message,
-      mailboxId: sharedCollaborationMailboxId,
-      navigationMailboxId: sharedNavigationMailboxId as InboxId,
-      sourceMailboxId: sharedCollaborationMailboxId,
-      sharedProjectionOnly: true,
-    })),
-  ];
-
-  return messageSources
-    .flatMap(
-      ({
-        message,
-        mailboxId,
-        navigationMailboxId,
-        sourceMailboxId,
-        sharedProjectionOnly,
-      }) => {
-          if (!message.collaboration) {
-            return [];
-          }
-
-          if (
-            sharedProjectionOnly &&
-            !hasUnreadCollaborationUpdateForViewer(
-              message,
-              mailboxId,
-              collaborationLastSeenByKey,
-              persistenceViewerKey,
-              currentUserId,
-            )
-          ) {
-            return [];
-          }
-
-          const subjectDetail = message.subject;
-          const items: VisibleNotificationItem[] = [];
-          const isOwnCollaborationStart =
-            message.collaboration.requestedBy === currentUserName;
-          const collaborationSeenKey = buildCollaborationLastSeenKey(
-            message,
-            mailboxId,
-            persistenceViewerKey,
-            currentUserId,
-          );
-          const collaborationSeenAt = collaborationSeenKey
-            ? collaborationLastSeenByKey[collaborationSeenKey] ?? 0
-            : 0;
-          const collaborationIdentityKey = getCollaborationMailboxIdentityKey(
-            mailboxId,
-            message,
-            currentUserId,
-          );
-          const messageNotificationKey =
-            collaborationSeenKey ?? `${persistenceViewerKey}::${collaborationIdentityKey}`;
-          const openRequestBase = {
-            mailboxId: navigationMailboxId,
-            messageId: message.id,
-            sourceMailboxId,
-          };
-
-          if (
-            !isOwnCollaborationStart &&
-            (!sharedProjectionOnly || message.collaboration.createdAt > collaborationSeenAt)
-          ) {
-            items.push({
-              id: `notification:created:${messageNotificationKey}:${message.collaboration.createdAt}`,
-              sourceIds: [
-                `notification:created:${collaborationIdentityKey}:${message.collaboration.createdAt}`,
-              ],
-              kind: "collaboration",
-              mailboxId,
-              messageId: message.id,
-              actorName: message.collaboration.requestedBy,
-              title: sharedProjectionOnly
-                ? `${message.collaboration.requestedBy} shared an email with you`
-                : `${message.collaboration.requestedBy} started a collaboration`,
-              detail: subjectDetail,
-              time: formatVisibleActivityTimestamp(message.collaboration.createdAt),
-              sortTimestamp: message.collaboration.createdAt,
-              action: () =>
-                onOpenNotificationNavigation({
-                  ...openRequestBase,
-                  type: "reply",
-                }),
-            });
-          }
-
-          if (
-            message.collaboration.resolvedAt &&
-            message.collaboration.resolvedByUserName &&
-            message.collaboration.resolvedByUserId !== operationalViewerKey &&
-            message.collaboration.resolvedByUserName !== currentUserName
-          ) {
-            items.push({
-              id: `notification:resolved:${messageNotificationKey}:${message.collaboration.resolvedAt}`,
-              sourceIds: [
-                `notification:resolved:${collaborationIdentityKey}:${message.collaboration.resolvedAt}`,
-              ],
-              kind: "collaboration",
-              mailboxId,
-              messageId: message.id,
-              actorName: message.collaboration.resolvedByUserName,
-              title: `${message.collaboration.resolvedByUserName} marked this as done`,
-              detail: subjectDetail,
-              time: formatVisibleActivityTimestamp(message.collaboration.resolvedAt),
-              sortTimestamp: message.collaboration.resolvedAt,
-              action: () =>
-                onOpenNotificationNavigation({
-                  ...openRequestBase,
-                  type: "reply",
-                }),
-            });
-          }
-
-          message.collaboration.messages
-            .filter((entry) => canViewerSeeCollaborationMessage(entry, viewerType))
-            .filter(
-              (entry) =>
-                entry.authorId !== operationalViewerKey &&
-                entry.authorName !== currentUserName,
-            )
-            .filter((entry) => entry.timestamp !== message.collaboration?.createdAt)
-            .filter((entry) => !sharedProjectionOnly || entry.timestamp > collaborationSeenAt)
-            .forEach((entry) => {
-              const mentionsCurrentUser = (entry.mentions ?? []).filter(
-                (mention) =>
-                  mention.notify &&
-                  (mention.id === operationalViewerKey ||
-                    normalizeSenderLearningKey(mention.email) ===
-                      operationalViewerKey),
-              );
-
-              if (mentionsCurrentUser.length > 0) {
-                items.push({
-                  id: `notification:mention:${messageNotificationKey}:${entry.id}:${persistenceViewerKey}`,
-                  sourceIds: [
-                    `notification:mention:${collaborationIdentityKey}:${entry.id}:${persistenceViewerKey}`,
-                  ],
-                  kind: "mention",
-                  mailboxId,
-                  messageId: message.id,
-                  collaborationMessageId: entry.id,
-                  actorName: entry.authorName,
-                  title: `${entry.authorName} mentioned you`,
-                  detail: subjectDetail,
-                  time: formatVisibleActivityTimestamp(entry.timestamp),
-                  sortTimestamp: entry.timestamp,
-                  action: () =>
-                    onOpenNotificationNavigation({
-                      ...openRequestBase,
-                      type: "mention",
-                      collaborationMessageId: entry.id,
-                    }),
-                });
-                return;
-              }
-
-              items.push({
-                id: `notification:reply:${messageNotificationKey}:${entry.id}`,
-                sourceIds: [
-                  `notification:reply:${collaborationIdentityKey}:${entry.id}`,
-                ],
-                kind: "reply",
-                mailboxId,
-                messageId: message.id,
-                collaborationMessageId: entry.id,
-                actorName: entry.authorName,
-                title:
-                  getCollaborationMessageVisibility(entry) === "internal"
-                    ? `${entry.authorName} replied internally`
-                    : `${entry.authorName} replied`,
-                detail: subjectDetail,
-                time: formatVisibleActivityTimestamp(entry.timestamp),
-                sortTimestamp: entry.timestamp,
-                action: () =>
-                  onOpenNotificationNavigation({
-                    ...openRequestBase,
-                    type: "reply",
-                    collaborationMessageId: entry.id,
-                  }),
-              });
-            });
-
-          return items;
-      },
-    )
-    .sort((firstItem, secondItem) => secondItem.sortTimestamp - firstItem.sortTimestamp)
-    .filter((item) => {
-      if (seenItemIds.has(item.id)) {
-        return false;
-      }
-
-      seenItemIds.add(item.id);
-      return true;
-    })
-    .slice(0, 24);
-}
-
-function buildGroupedNotificationItems(items: VisibleNotificationItem[]) {
-  const groupedItems: VisibleNotificationItem[] = [];
-  const groupingWindowMs = 15 * 60 * 1000;
-  let index = 0;
-
-  while (index < items.length) {
-    const currentItem = items[index];
-
-    if (
-      currentItem.kind === "collaboration" ||
-      currentItem.kind === "mention"
-    ) {
-      groupedItems.push(currentItem);
-      index += 1;
-      continue;
-    }
-
-    const relatedItems = [currentItem];
-    let nextIndex = index + 1;
-
-    while (nextIndex < items.length) {
-      const candidate = items[nextIndex];
-
-      if (
-        candidate.kind !== currentItem.kind ||
-        candidate.mailboxId !== currentItem.mailboxId ||
-        candidate.messageId !== currentItem.messageId ||
-        currentItem.sortTimestamp - candidate.sortTimestamp > groupingWindowMs
-      ) {
-        break;
-      }
-
-      relatedItems.push(candidate);
-      nextIndex += 1;
-    }
-
-    if (relatedItems.length === 1) {
-      groupedItems.push(currentItem);
-      index += 1;
-      continue;
-    }
-
-    const leadActor = relatedItems[0]?.actorName ?? "Someone";
-    const otherCount = relatedItems.length - 1;
-    groupedItems.push({
-      ...currentItem,
-      id: `group:${currentItem.kind}:${currentItem.mailboxId}:${currentItem.messageId}:${relatedItems
-        .map((item) => item.id)
-        .join("|")}`,
-      sourceIds: relatedItems.flatMap((item) => item.sourceIds),
-      title:
-        otherCount === 1
-          ? `${leadActor} and 1 other replied`
-          : `${leadActor} and ${otherCount} others replied`,
-    });
-    index = nextIndex;
-  }
-
-  return groupedItems;
-}
-
-function getNotificationPriorityScore(item: VisibleNotificationItem) {
-  switch (item.kind) {
-    case "mention":
-      return 3;
-    case "reply":
-      return 2;
-    case "collaboration":
-    default:
-      return 1;
-  }
-}
-
-function buildPrioritizedNotificationItems(items: VisibleNotificationItem[]) {
-  return [...items].sort((firstItem, secondItem) => {
-    const priorityDelta =
-      getNotificationPriorityScore(secondItem) - getNotificationPriorityScore(firstItem);
-
-    if (priorityDelta !== 0) {
-      return priorityDelta;
-    }
-
-    return secondItem.sortTimestamp - firstItem.sortTimestamp;
-  });
-}
-
 function formatVisibleActivityTimestamp(timestamp: number) {
   const diffMs = Date.now() - timestamp;
   const minuteMs = 60 * 1000;
@@ -17206,56 +16854,11 @@ function isTeamActivityItem(item: VisibleActivityItem) {
   return teamActivityKeywords.some((keyword) => searchableText.includes(keyword));
 }
 
-function NotificationsPreviewBlock({
-  items,
-}: {
-  items: VisibleNotificationItem[];
-}) {
-  return (
-    <section className="rounded-[30px] border border-[var(--workspace-border)] bg-[var(--workspace-card)] p-6 shadow-panel">
-      <div className="mb-5 flex items-center justify-between">
-        <h2 className="text-xl font-semibold tracking-tight text-[var(--workspace-text)]">
-          Notifications
-        </h2>
-        <div className="h-2 w-14 rounded-full bg-[var(--workspace-accent-soft)]" />
-      </div>
-      {items.length > 0 ? (
-        <div className="space-y-2.5">
-          {items.slice(0, 5).map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={item.action}
-              className="flex w-full items-start justify-between gap-4 rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3.5 text-left transition-[background-color,background-image,border-color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] focus-visible:border-[var(--workspace-border-hover)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] focus-visible:outline-none"
-            >
-              <div className="min-w-0 space-y-1">
-                <div className="truncate text-[0.95rem] font-medium tracking-[-0.012em] text-[var(--workspace-text)]">
-                  {item.title}
-                </div>
-                <div className="truncate text-[0.82rem] leading-6 text-[var(--workspace-text-soft)]">
-                  {item.detail}
-                </div>
-              </div>
-              <div className="flex-none pt-0.5 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                {item.time}
-              </div>
-            </button>
-          ))}
-        </div>
-      ) : (
-        <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-6 text-[0.88rem] leading-7 text-[var(--workspace-text-soft)]">
-          No notifications yet.
-        </div>
-      )}
-    </section>
-  );
-}
-
 function DashboardView({
   onOpenPriority,
   onOpenUnread,
   onOpenInboxes,
-  notificationPreviewItems,
+  notifications,
   unreadMessagesCount,
   unreadMessagesContext,
   priorityInboxCount,
@@ -17266,7 +16869,7 @@ function DashboardView({
   onOpenPriority: () => void;
   onOpenUnread: () => void;
   onOpenInboxes: () => void;
-  notificationPreviewItems: VisibleNotificationItem[];
+  notifications: ServerNotificationsProps;
   unreadMessagesCount: number | null;
   unreadMessagesContext: string;
   priorityInboxCount: number | null;
@@ -17324,7 +16927,7 @@ function DashboardView({
       />
 
       <div className="grid gap-6">
-        <NotificationsPreviewBlock items={notificationPreviewItems} />
+        <section className="rounded-[30px] border border-[var(--workspace-border)] bg-[var(--workspace-card)] p-6 shadow-panel"><ServerNotifications {...notifications} preview /></section>
       </div>
     </div>
   );
@@ -17672,6 +17275,7 @@ function MailboxView({
   themeMode,
   aiSuggestionsEnabled,
   notificationNavigationRequest,
+  serverNotificationDisplay,
   onConsumeNotificationNavigation,
   manualPriorityOverrides,
   strictNormalPriorityAllowedMessageKeys,
@@ -17782,6 +17386,7 @@ function MailboxView({
   themeMode: "light" | "dark";
   aiSuggestionsEnabled: boolean;
   notificationNavigationRequest?: NotificationNavigationRequest | null;
+  serverNotificationDisplay?: NotificationDisplayRequest<MailMessage> | null;
   onConsumeNotificationNavigation?: (requestKey: number) => void;
   manualPriorityOverrides: ManualPriorityOverrideStore;
   strictNormalPriorityAllowedMessageKeys: ReadonlySet<string>;
@@ -18209,6 +17814,7 @@ function MailboxView({
   const [activeCollaborationSourceMailboxId, setActiveCollaborationSourceMailboxId] =
     useState<InboxId | null>(null);
   const collaborationOverlayOpenerRef = useRef<HTMLElement | null>(null);
+  const exactNotificationProjectionRef = useRef<HTMLElement | null>(null);
   const [collaborationOwnerProjection, setCollaborationOwnerProjection] =
     useState<CollaborationOwnerProjectionState>({
       status: "idle",
@@ -21545,6 +21151,63 @@ function MailboxView({
     visibleMessages,
   ]);
 
+  useLayoutEffect(() => {
+    const request = serverNotificationDisplay;
+    if (!request || !request.ticket.isCurrent() || request.ticket.notification.mailboxId !== mailbox.id) return;
+    const { ticket, target, collaboration } = request;
+    const row = ticket.notification;
+    if (!matchesExactMailboxMessageIdentity(target.message, row.mailboxId, row.sourceRef)) { request.complete(false); return; }
+    setActiveSmartFolderId(null);
+    setActiveFolder(target.folder);
+    setIsSharedView(false);
+    setSelectionState([target.message.id], target.message.id, target.message.id, { sourceMailboxId: mailbox.id, sourceMessage: target.message, sourceFolder: target.folder });
+    if (!collaboration) {
+      closeCollaborationOverlay();
+      resetFullMessageModalSize();
+      setIsFullMessageOpen(true);
+      return;
+    }
+    const locator = deriveCollaborationOwnerSourceLocator({ workspaceDataMode, hasAuthenticatedMemberAuthority,
+      managedMailbox: managedInboxes.find(inbox => inbox.id === row.mailboxId) ?? null,
+      sourceMailboxId: row.mailboxId, trustedFolder: row.sourceRef.provider === "custom_imap" ? "INBOX" : target.folder, message: target.message });
+    if (!locator || collaboration.collaborationId !== row.collaborationId || collaboration.mailboxId !== row.mailboxId) { request.complete(false); return; }
+    setIsFullMessageOpen(false);
+    openCollaborationOverlay(target.message.id, { sourceMailboxId: mailbox.id, sourceMessage: target.message, exactNotification: true });
+    const identityKey = JSON.stringify([ticket.scope, row.notificationId, row.collaborationId, ticket.generation]);
+    const requestId = ++collaborationOwnerProjectionGenerationRef.current;
+    collaborationOwnerProjectionRequestRef.current = { identityKey, requestId, inFlight: false, operation: "read", messageId: target.message.id, sourceMailboxId: mailbox.id, locator };
+    setCollaborationOwnerProjection({ status: "success", identityKey, requestId, collaboration });
+    setHighlightedCollaborationMessageId(row.activityId);
+    setCollaborationHistoryExpanded(true);
+  }, [serverNotificationDisplay, mailbox.id]);
+
+  useEffect(() => {
+    const request = serverNotificationDisplay;
+    if (!request || !request.ticket.isCurrent()) return;
+    let frame = requestAnimationFrame(() => {
+      if (!request.ticket.isCurrent()) return;
+      const { notification: row } = request.ticket;
+      if (!request.collaboration) {
+        if (fullMessageModalMessage && matchesExactMailboxMessageIdentity(fullMessageModalMessage, row.mailboxId, row.sourceRef) &&
+          fullMessageModalDialogRef.current?.dataset.fullMessageModalMessageId === request.target.message.id && fullMessageModalDialogRef.current.getClientRects().length > 0) request.complete(true);
+        return;
+      }
+      const projection = exactNotificationProjectionRef.current;
+      if (activeCollaborationMessageId !== request.target.message.id || activeCollaborationSourceMailboxId !== row.mailboxId ||
+        activeCollaborationOwnerProjection?.collaborationId !== row.collaborationId || !activeCollaborationMessage ||
+        !matchesExactMailboxMessageIdentity(activeCollaborationMessage, row.mailboxId, row.sourceRef) || !projection || projection.getClientRects().length === 0) return;
+      if (row.activityId !== null) {
+        const activity = collaborationMessageRefs.current[row.activityId];
+        if (!activity || !projection.contains(activity) || activity.getClientRects().length === 0) { request.complete(false); return; }
+        activity.scrollIntoView({ block: "center", behavior: "auto" });
+        activity.focus({ preventScroll: true });
+        if (document.activeElement !== activity) { request.complete(false); return; }
+      }
+      frame = requestAnimationFrame(() => { if (request.ticket.isCurrent() && projection.isConnected && projection.getClientRects().length > 0) request.complete(true); });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [serverNotificationDisplay, fullMessageModalMessage, activeCollaborationOwnerProjection, activeCollaborationMessage, activeCollaborationMessageId, activeCollaborationSourceMailboxId]);
+
   // Mobile compose handoff: when WorkspaceShell sets a mobileComposeRequest
   // targeting this mailbox, open compose through the existing MailboxView paths.
   useEffect(() => {
@@ -23936,6 +23599,7 @@ function MailboxView({
       sourceMailboxId?: InboxId;
       sourceMessage?: MailMessage | null;
       loadOwnerProjection?: boolean;
+      exactNotification?: boolean;
       expectedBinding?: CollaborationOpenBinding;
     },
   ) => {
@@ -23957,8 +23621,10 @@ function MailboxView({
       messageId,
       sourceMailboxId,
     );
-    syncMessageFromLiveSnapshot(messageId, sourceMailboxId);
-    markCollaborationSeen(messageId, sourceMailboxId);
+    if (!options?.exactNotification) {
+      syncMessageFromLiveSnapshot(messageId, sourceMailboxId);
+      markCollaborationSeen(messageId, sourceMailboxId);
+    }
     const message =
       getMessageById(messageId, sourceMailboxId) ?? options?.sourceMessage ?? null;
     const authoritativeLocation = message
@@ -31082,6 +30748,7 @@ function MailboxView({
                       ) : hasActiveCollaborationOwnerProjection &&
                         activeCollaborationOwnerProjection ? (
                         <section
+                          ref={exactNotificationProjectionRef}
                           data-collaboration-owner-read-projection
                           data-collaboration-owner-internal-note-enabled="true"
                           data-collaboration-owner-shared-message-enabled="true"
@@ -31131,7 +30798,11 @@ function MailboxView({
                                 {activeCollaborationOwnerProjection.messages.map((entry) => (
                                   <div
                                     key={entry.id}
-                                    className="rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3.5 py-2.5"
+                                    ref={node => { collaborationMessageRefs.current[entry.id] = node; }}
+                                    tabIndex={-1}
+                                    data-collaboration-activity-id={entry.id}
+                                    data-notification-highlighted={highlightedCollaborationMessageId === entry.id ? "true" : undefined}
+                                    className={`rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3.5 py-2.5 ${highlightedCollaborationMessageId === entry.id ? "outline outline-2 outline-[var(--workspace-accent-text)]" : ""}`}
                                   >
                                     <div className="flex flex-wrap items-start justify-between gap-2">
                                       <div>
@@ -32263,10 +31934,8 @@ function WorkbenchView({
   onOpenLearningRequest,
   onOpenSenderContext,
   activityItems,
-  notificationItems,
+  notifications,
   collaborationItems,
-  unreadNotificationIds,
-  onOpenNotificationItem,
   aiSuggestionsEnabled,
   inboxChangesEnabled,
   teamActivityEnabled,
@@ -32292,10 +31961,8 @@ function WorkbenchView({
   onOpenLearningRequest: (request: NonNullable<LearningLaunchRequest>) => void;
   onOpenSenderContext: () => void;
   activityItems: VisibleActivityItem[];
-  notificationItems: VisibleNotificationItem[];
+  notifications: ServerNotificationsProps;
   collaborationItems: TeamCollaborationItem[];
-  unreadNotificationIds: Set<string>;
-  onOpenNotificationItem: (item: VisibleNotificationItem) => void;
   aiSuggestionsEnabled: boolean;
   inboxChangesEnabled: boolean;
   teamActivityEnabled: boolean;
@@ -32342,7 +32009,6 @@ function WorkbenchView({
 
   const view = content[section];
   const visibleTeamActivityItems = activityItems.filter(isTeamActivityItem);
-  const visibleNotificationItems = notificationItems;
   const visibleTeamCollaborationItems = collaborationItems;
   const teamMembersStorageKey = buildTeamMembersStorageKey(workspacePersistenceKey);
   const [teamMembers, setTeamMembers] = useState<TeamMemberEntry[]>(() =>
@@ -32980,39 +32646,7 @@ function WorkbenchView({
 
       <section className="rounded-[30px] border border-[var(--workspace-border)] bg-[var(--workspace-card)] p-6 shadow-panel">
         {section === "Notifications" ? (
-          visibleNotificationItems.length > 0 ? (
-            <div className="divide-y divide-[var(--workspace-divider)]">
-              {visibleNotificationItems.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => onOpenNotificationItem(item)}
-                  className="flex w-full items-start justify-between gap-4 rounded-[18px] px-2 py-3 text-left transition-colors duration-200 first:mt-[-0.25rem] first:pt-3 last:mb-[-0.25rem] hover:bg-[var(--workspace-surface-hover)] focus-visible:bg-[var(--workspace-surface-selected)] focus-visible:outline-none"
-                >
-                  <div className="min-w-0 space-y-0.5">
-                    <div className="flex items-center gap-2">
-                      {unreadNotificationIds.has(item.id) ? (
-                        <span className="inline-flex h-2 w-2 flex-none rounded-full bg-[var(--workspace-accent-text)]" />
-                      ) : null}
-                      <div className="text-[0.92rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
-                        {item.title}
-                      </div>
-                    </div>
-                    <div className="text-[0.78rem] leading-6 text-[var(--workspace-text-soft)]">
-                      {item.detail}
-                    </div>
-                  </div>
-                  <div className="flex-none pt-0.5 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                    {item.time}
-                  </div>
-                </button>
-              ))}
-            </div>
-          ) : (
-            <div className="text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
-              No notifications yet.
-            </div>
-          )
+          <ServerNotifications {...notifications} />
         ) : section === "Team" ? (
           <div className="space-y-6">
             <div
@@ -43341,6 +42975,12 @@ export function WorkspaceShell({
   );
   const hasAuthenticatedMemberAuthority =
     authenticationContext === "auth0" && authenticatedUser?.userType === "member";
+  const notifications = useWorkspaceNotifications(
+    workspaceDataMode === "live" && hasAuthenticatedMemberAuthority && authenticatedUser?.userId && authenticatedUser?.workspaceId
+      ? { accountId: authenticatedUser.userId, workspaceId: authenticatedUser.workspaceId } : null,
+  );
+  const notificationScopeRef = useRef(notifications.state.scope);
+  notificationScopeRef.current = notifications.state.scope;
   const collaborationSummaries = useCollaborationSummaries(
     workspaceDataMode === "live" && hasAuthenticatedMemberAuthority ? authenticatedUser?.workspaceId ?? null : null,
     workspaceDataMode === "live" && hasAuthenticatedMemberAuthority ? authenticatedUser?.userId ?? null : null,
@@ -44301,7 +43941,6 @@ export function WorkspaceShell({
     workspacePersistenceScope,
     mailboxOrderKey,
   );
-  const notificationReadStorageKey = buildNotificationReadStorageKey(workspacePersistenceScope);
   const collaborationLastSeenStorageKey = buildCollaborationLastSeenStorageKey(
     viewerPersistenceScope,
   );
@@ -44432,6 +44071,9 @@ export function WorkspaceShell({
     },
     [learningStorageKey],
   );
+  const exactNotificationMessageIndex = useMemo(() => buildExactNotificationMessageIndex(mailboxStore), [mailboxStore]);
+  const exactNotificationMessageIndexRef = useRef(exactNotificationMessageIndex);
+  exactNotificationMessageIndexRef.current = exactNotificationMessageIndex;
   const mailboxStoreRef = useRef(mailboxStore);
   mailboxStoreRef.current = mailboxStore;
   const providerArchiveFetchMailboxIdsRef = useRef<Set<InboxId>>(new Set());
@@ -44611,24 +44253,6 @@ export function WorkspaceShell({
       }
     });
   const lastServerCollaborationOverlayKeyRef = useRef<string>("");
-  const [readNotificationIds, setReadNotificationIds] = useState<string[]>(() => {
-    if (typeof window === "undefined") {
-      return [];
-    }
-
-    const storedValue = window.localStorage.getItem(notificationReadStorageKey);
-
-    if (!storedValue) {
-      return [];
-    }
-
-    try {
-      const parsed = JSON.parse(storedValue) as string[];
-      return Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
-    } catch {
-      return [];
-    }
-  });
   const [collaborationLastSeenByKey, setCollaborationLastSeenByKey] = useState<
     Record<string, number>
   >(() => {
@@ -52778,6 +52402,81 @@ export function WorkspaceShell({
     openMailboxFromContext(primaryMailbox);
   };
 
+  const [serverNotificationDisplay, setServerNotificationDisplay] = useState<NotificationDisplayRequest<MailMessage> | null>(null);
+  const [notificationFeedback, setNotificationFeedback] = useState<{ scopeKey: string; message: string | null } | null>(null);
+  const notificationMailboxMap = useMemo(() => new Map(orderedMailboxes.flatMap(mailbox => {
+    const inbox = savedManagedInboxes.find(candidate => candidate.id === mailbox.id);
+    return inbox?.connected && inbox.connectionStatus === "connected" ? [[mailbox.id as string, { ...inbox, id: mailbox.id }] as const] : [];
+  })), [savedManagedInboxes, orderedMailboxes]);
+  const notificationMailboxMapRef = useRef(notificationMailboxMap);
+  notificationMailboxMapRef.current = notificationMailboxMap;
+  const notificationPortsRef = useRef<NotificationNavigationPorts<MailMessage>>(null!);
+  notificationPortsRef.current = {
+    getScope: () => notificationScopeRef.current,
+    getMailbox: id => {
+      const inbox = notificationMailboxMapRef.current.get(id);
+      return inbox?.provider ? { provider: inbox.provider, configRevision: providerArchiveConnectionEpochsRef.current[inbox.id] ?? 0 } : null;
+    },
+    lookup: (id, source) => exactNotificationMessageIndexRef.current.get(exactNotificationSourceKey(id, source)),
+    augment: (ticket, response) => {
+      let selected: ExactNotificationTarget<MailMessage> | null = null;
+      const scope = { ...ticket.scope, mailboxId: ticket.notification.mailboxId, provider: ticket.notification.sourceRef.provider, configRevision: ticket.configRevision, generation: ticket.generation };
+      const publicationTicket = captureExactMailboxMessageTicket(scope, ticket.notification.sourceRef, ticket.signal);
+      const inbox = notificationMailboxMapRef.current.get(ticket.notification.mailboxId);
+      if (!inbox || !ticket.isCurrent()) return null;
+      const normalized = normalizeMailMessage(buildExactMailboxMessageSeed(response), inbox.id, senderCategoryLearning, messageOwnershipInteractions, currentWorkspaceUserId, mailboxStoreRef.current, aiSuggestionsEnabled);
+      flushSync(() => setMailboxStore(current => {
+        if (!ticket.isCurrent()) return current;
+        const projection = { scope, mailboxes: current, selection: null };
+        const next = reduceExactMailboxMessagePublication(projection, publicationTicket, response, normalized);
+        if (next.selection) {
+          const message = next.mailboxes[scope.mailboxId][next.selection.folder].find(candidate => matchesExactMailboxMessageIdentity(candidate, scope.mailboxId, ticket.notification.sourceRef));
+          if (message) selected = { message, folder: next.selection.folder };
+        }
+        return next.mailboxes;
+      }));
+      return selected;
+    },
+    display: request => new Promise(resolve => {
+      if (!request.ticket.isCurrent()) { resolve(false); return; }
+      const targetMailbox = orderedMailboxes.find(mailbox => mailbox.id === request.ticket.notification.mailboxId);
+      if (!targetMailbox) { resolve(false); return; }
+      let settled = false;
+      const complete = (displayed: boolean) => {
+        if (settled) return;
+        settled = true;
+        request.ticket.signal.removeEventListener("abort", abortDisplay);
+        setServerNotificationDisplay(current => current?.ticket === request.ticket && current.collaboration === request.collaboration ? null : current);
+        resolve(displayed && request.ticket.isCurrent());
+      };
+      const abortDisplay = () => complete(false);
+      request.ticket.signal.addEventListener("abort", abortDisplay, { once: true });
+      openMailboxFromContextWithoutGuard(targetMailbox);
+      setServerNotificationDisplay({ ...request, complete });
+    }),
+    markRead: (id, current, signal) => notifications.store.markRead(id, current, signal),
+    feedback: message => setNotificationFeedback({ scopeKey: notificationScopeKey(notificationScopeRef.current), message }),
+  };
+  const notificationNavigator = useMemo(() => createNotificationNavigator<MailMessage>({
+    getScope: () => notificationPortsRef.current.getScope(),
+    getMailbox: id => notificationPortsRef.current.getMailbox(id),
+    lookup: (id, source) => notificationPortsRef.current.lookup(id, source),
+    augment: (ticket, response) => notificationPortsRef.current.augment(ticket, response),
+    display: request => notificationPortsRef.current.display(request),
+    markRead: (id, current, signal) => notificationPortsRef.current.markRead(id, current, signal),
+    feedback: message => notificationPortsRef.current.feedback(message),
+  }), [notifications.store]);
+  const currentNotificationNavigator = useRef(notificationNavigator);
+  if (currentNotificationNavigator.current !== notificationNavigator) {
+    currentNotificationNavigator.current.cancel();
+    currentNotificationNavigator.current = notificationNavigator;
+  }
+  useEffect(() => () => notificationNavigator.cancel(), [notificationNavigator]);
+  const handleOpenServerNotification = (row: ServerNotification) => {
+    requestNavigationAwayFromDirtyManagedInboxes(() => { void notificationNavigator.open(row); });
+  };
+  const sharedNotificationProps: ServerNotificationsProps = { ...notifications, onOpen: handleOpenServerNotification };
+
   const handleOpenNotificationNavigation = (
     request: Omit<NotificationNavigationRequest, "requestKey">,
   ) => {
@@ -52820,61 +52519,6 @@ export function WorkspaceShell({
       });
     });
   };
-  const liveNotificationItems = buildVisibleNotificationItems({
-    mailboxStore,
-    orderedMailboxes,
-    authenticatedUser,
-    collaborationLastSeenByKey,
-    currentUserId: currentWorkspaceUserId,
-    currentUserEmail: activeCollaborationViewerEmail,
-    currentViewerPersistenceKey: viewerPersistenceScope,
-    currentUserName: authenticatedUser?.name ?? "You",
-    teamActivityEnabled,
-    onOpenNotificationNavigation: handleOpenNotificationNavigation,
-  });
-  const groupedNotificationItems = useMemo(
-    () => buildGroupedNotificationItems(liveNotificationItems),
-    [liveNotificationItems],
-  );
-  const prioritizedNotificationItems = useMemo(
-    () => buildPrioritizedNotificationItems(groupedNotificationItems),
-    [groupedNotificationItems],
-  );
-  const markNotificationSourceIdsRead = useCallback((sourceIds: string[]) => {
-    setReadNotificationIds((current) => {
-      const readIds = new Set(current);
-
-      if (sourceIds.every((sourceId) => readIds.has(sourceId))) {
-        return current;
-      }
-
-      return Array.from(new Set([...current, ...sourceIds]));
-    });
-  }, []);
-
-  useEffect(() => {
-    if (activeSection !== "Notifications") {
-      return;
-    }
-
-    markNotificationSourceIdsRead(
-      prioritizedNotificationItems.flatMap((item) => item.sourceIds),
-    );
-  }, [activeSection, markNotificationSourceIdsRead, prioritizedNotificationItems]);
-
-  const unreadNotificationIds = useMemo(
-    () =>
-      new Set(
-        prioritizedNotificationItems
-          .filter((item) => item.sourceIds.some((sourceId) => !readNotificationIds.includes(sourceId)))
-          .map((item) => item.id),
-      ),
-    [prioritizedNotificationItems, readNotificationIds],
-  );
-  const notificationUnreadCount = useMemo(
-    () => unreadNotificationIds.size,
-    [unreadNotificationIds],
-  );
   const liveActivityItems = buildVisibleActivityItems({
     mailboxStore,
     orderedMailboxes,
@@ -52905,11 +52549,6 @@ export function WorkspaceShell({
     activeWorkspaceUserName,
     handleOpenNotificationNavigation,
   ]);
-  const handleOpenNotificationItem = (item: VisibleNotificationItem) => {
-    markNotificationSourceIdsRead(item.sourceIds);
-    item.action();
-  };
-
   const openReviewItemInInbox = (
     reviewItem: ReviewItem,
     options?: {
@@ -55541,38 +55180,7 @@ export function WorkspaceShell({
     );
   }, [spamSuppressionKeys, spamSuppressionStorageKey]);
 
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
 
-    const storedValue = window.localStorage.getItem(notificationReadStorageKey);
-
-    if (!storedValue) {
-      setReadNotificationIds([]);
-      return;
-    }
-
-    try {
-      const parsed = JSON.parse(storedValue) as string[];
-      setReadNotificationIds(
-        Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [],
-      );
-    } catch {
-      setReadNotificationIds([]);
-    }
-  }, [notificationReadStorageKey]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem(
-      notificationReadStorageKey,
-      JSON.stringify(readNotificationIds),
-    );
-  }, [notificationReadStorageKey, readNotificationIds]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -57111,7 +56719,7 @@ export function WorkspaceShell({
         activeMailboxId={activeMailbox?.id ?? null}
         activeSmartFolderId={activeSmartFolderId}
         hasPendingTeamInvitation={Boolean(visiblePendingTeamInvitation)}
-        notificationUnreadCount={notificationUnreadCount}
+        notificationUnreadCount={notifications.state.unreadCount}
         priorityCount={livePriorityInboxEntries.length}
         mailboxUnreadCounts={sidebarMailboxUnreadCounts}
         showMailboxUnreadCounts={areMailboxCountsHydrated}
@@ -57136,6 +56744,7 @@ export function WorkspaceShell({
             className="pointer-events-none fixed inset-0 z-[190]"
           />
           <div className={`flex h-full min-h-0 flex-col ${workspaceShellPaddingClass}`}>
+            {notificationFeedback?.scopeKey === notificationScopeKey(notifications.state.scope) && notificationFeedback.message ? createPortal(<div data-theme={resolvedTheme} role="alert" className="fixed inset-x-4 bottom-6 z-[400] mx-auto flex max-w-lg items-start gap-3 rounded-xl border border-[var(--workspace-border)] bg-[var(--workspace-card)] p-4 shadow-panel"><p className="min-w-0 flex-1">{notificationFeedback.message}</p><button type="button" aria-label="Dismiss notification feedback" onClick={() => setNotificationFeedback(null)} className="rounded px-2 focus-visible:outline focus-visible:outline-2">Close</button></div>, document.body) : null}
             <div className="mb-8 flex items-center justify-between md:hidden">
               <CuevionMark />
 	              <span className="rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-card)] px-4 py-2 text-xs uppercase tracking-[0.24em] text-[var(--workspace-text-faint)]">
@@ -57210,6 +56819,7 @@ export function WorkspaceShell({
                   inboxSignatures={inboxSignatures}
                   themeMode={resolvedTheme}
                   aiSuggestionsEnabled={aiSuggestionsEnabled}
+                  serverNotificationDisplay={serverNotificationDisplay?.ticket.isCurrent() ? serverNotificationDisplay : null}
                   notificationNavigationRequest={notificationNavigationRequest}
                   onConsumeNotificationNavigation={(requestKey) =>
                     setNotificationNavigationRequest((current) =>
@@ -57337,7 +56947,7 @@ export function WorkspaceShell({
                   onOpenPriority={() => handleOpenPriority("Priority")}
                   onOpenUnread={handleOpenSenderContext}
                   onOpenInboxes={() => handleOpenInboxes("Connected")}
-                  notificationPreviewItems={prioritizedNotificationItems}
+                  notifications={sharedNotificationProps}
                   unreadMessagesCount={
                     areMailboxCountsHydrated ? unreadMessagesCount : null
                   }
@@ -57403,10 +57013,8 @@ export function WorkspaceShell({
                   onOpenLearningRequest={handleOpenLearningRequest}
                   onOpenSenderContext={handleOpenSenderContext}
                   activityItems={liveActivityItems}
-                  notificationItems={prioritizedNotificationItems}
+                  notifications={sharedNotificationProps}
                   collaborationItems={liveTeamCollaborationItems}
-                  unreadNotificationIds={unreadNotificationIds}
-                  onOpenNotificationItem={handleOpenNotificationItem}
                   aiSuggestionsEnabled={aiSuggestionsEnabled}
                   inboxChangesEnabled={inboxChangesEnabled}
                   teamActivityEnabled={teamActivityEnabled}

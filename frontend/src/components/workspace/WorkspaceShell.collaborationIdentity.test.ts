@@ -7,7 +7,6 @@ const {
   buildCollaborationLocalStateKey,
   buildMailboxScopedMessageSelection,
   buildSharedCollaborationProjection,
-  buildVisibleNotificationItems,
   buildVisibleActivityItems,
   buildVisibleTeamCollaborationItems,
   getCollaborationThreadIdentityKey,
@@ -218,38 +217,12 @@ assert.deepEqual(
   "each Activity event must navigate through its owning mailbox",
 );
 
-const notificationNavigationRequests: Array<{
-  mailboxId: string;
-  messageId: string;
-  sourceMailboxId?: string;
-}> = [];
-const notificationItems = buildVisibleNotificationItems({
-  mailboxStore: mailboxStore as never,
-  orderedMailboxes: orderedMailboxes as never,
-  authenticatedUser: {
-    email: "viewer@example.test",
-    name: "Current User",
-    userType: "member",
-  },
-  collaborationLastSeenByKey: {},
-  currentUserId: "workspace-1",
-  currentUserEmail: "viewer@example.test",
-  currentViewerPersistenceKey: "viewer@example.test",
-  currentUserName: "Current User",
-  teamActivityEnabled: true,
-  onOpenNotificationNavigation: (request) => {
-    notificationNavigationRequests.push(request);
-  },
-});
-
-assert.equal(notificationItems.length, 4);
-assert.equal(new Set(notificationItems.map((item) => item.id)).size, 4);
-assert.equal(new Set(notificationItems.flatMap((item) => item.sourceIds)).size, 4);
-notificationItems.forEach((item) => item.action());
-assert.deepEqual(
-  [...new Set(notificationNavigationRequests.map((request) => request.sourceMailboxId))].sort(),
-  ["mailbox-a", "mailbox-b"],
-  "Notifications must navigate through the source mailbox that created each event",
+// C3D removes local snapshot notification synthesis. Team Activity and canonical
+// Collaboration identity tests above and below retain their existing coverage.
+assert.equal(
+  (require("./WorkspaceShell.tsx") as Record<string, unknown>).buildVisibleNotificationItems,
+  undefined,
+  "Local Collaboration snapshots cannot create visible notification rows",
 );
 
 const threadA = buildThread("mailbox-a", "A");

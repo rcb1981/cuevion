@@ -7,6 +7,7 @@ import {
   COLLABORATION_OWNER_ENDPOINT,
   performAuthenticatedCollaborationOwnerRequest,
   type CollaborationOwnerTransportFailure,
+  type CollaborationOwnerAuthenticatedRequestOptions,
 } from "./collaborationOwnerApiTransport";
 
 export const COLLABORATION_OWNER_READ_ENDPOINT = COLLABORATION_OWNER_ENDPOINT;
@@ -440,8 +441,9 @@ function mapTransportFailure(
 
 async function performAuthenticatedOwnerOperation(
   body: Record<string, unknown>,
+  options?: CollaborationOwnerAuthenticatedRequestOptions,
 ): Promise<{ status: "success"; payload: unknown } | OwnerOperationFailure> {
-  const result = await performAuthenticatedCollaborationOwnerRequest(body);
+  const result = await performAuthenticatedCollaborationOwnerRequest(body, options);
   return result.status === "response"
     ? { status: "success", payload: result.payload }
     : mapTransportFailure(result);
@@ -480,6 +482,7 @@ export async function lookupCollaborationForOwner(
 
 export async function readCollaborationForOwner(
   collaborationId: string,
+  options?: CollaborationOwnerAuthenticatedRequestOptions,
 ): Promise<CollaborationOwnerReadResult> {
   if (!isValidCollaborationOwnerReadId(collaborationId)) {
     return { status: "invalid_collaboration_id" };
@@ -488,7 +491,7 @@ export async function readCollaborationForOwner(
   const result = await performAuthenticatedOwnerOperation({
     operation: "read",
     collaborationId,
-  });
+  }, options);
   if (result.status !== "success") {
     return result;
   }

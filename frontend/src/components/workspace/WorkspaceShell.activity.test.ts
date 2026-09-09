@@ -118,8 +118,8 @@ assert.match(teamActivitySource, /\{item\.time\}/);
 
 assert.match(
   workbenchViewSource,
-  /section === "Notifications"[\s\S]*?onClick=\{\(\) => onOpenNotificationItem\(item\)\}/,
-  "Notifications must retain its independent renderer and navigation action",
+  /section === "Notifications"[\s\S]*?<ServerNotifications \{\.\.\.notifications\} \/>/,
+  "Notifications must use the shared server renderer and its navigation action",
 );
 assert.match(
   workspaceShellSource,

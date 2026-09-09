@@ -29,8 +29,11 @@ type CsrfResult =
   | { status: "success"; csrf: CsrfState }
   | CollaborationOwnerTransportFailure;
 
-type CollaborationOwnerAuthenticatedRequestOptions = {
+export type CollaborationOwnerAuthenticatedRequestOptions = {
   idempotencyKey?: string;
+  signal?: AbortSignal;
+  isCurrent?: () => boolean;
+  retryForbidden?: boolean;
 };
 
 let csrfState: CsrfState | null = null;
@@ -176,6 +179,7 @@ async function executeOwnerOperation(
         : { "X-Cuevion-Idempotency-Key": options.idempotencyKey }),
     },
     body: JSON.stringify(body),
+    signal: options.signal,
   });
   return { response, payload: await readJson(response) };
 }
@@ -184,12 +188,16 @@ export async function performAuthenticatedCollaborationOwnerRequest(
   body: Readonly<Record<string, unknown>>,
   options: CollaborationOwnerAuthenticatedRequestOptions = {},
 ): Promise<CollaborationOwnerAuthenticatedResponse> {
+  const isCurrent = () => !options.signal?.aborted && (options.isCurrent?.() ?? true);
+  if (!isCurrent()) return { status: "network_failure" };
   let csrfResult = await bootstrapCsrf();
+  if (!isCurrent()) return { status: "network_failure" };
   if (csrfResult.status !== "success") {
     return csrfResult;
   }
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (!isCurrent()) return { status: "network_failure" };
     let operationResult: { response: Response; payload: unknown };
     try {
       operationResult = await executeOwnerOperation(
@@ -201,7 +209,8 @@ export async function performAuthenticatedCollaborationOwnerRequest(
       return { status: "network_failure" };
     }
 
-    if (operationResult.response.status === 403 && attempt === 0) {
+    if (!isCurrent()) return { status: "network_failure" };
+    if (operationResult.response.status === 403 && attempt === 0 && options.retryForbidden !== false) {
       csrfState = null;
       csrfResult = await bootstrapCsrf();
       if (csrfResult.status !== "success") {
