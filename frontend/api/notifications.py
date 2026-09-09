@@ -3,7 +3,7 @@
 from http.server import BaseHTTPRequestHandler
 
 from api.auth.http import send_public_response
-from api.notifications.http import notifications_response
+from api.notification_service.http import notifications_response
 
 
 class handler(BaseHTTPRequestHandler):

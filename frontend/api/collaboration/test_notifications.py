@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from . import authorization, guest_session, models, mutations, redis_store
 from . import test_lua_redis_integration as harness
-from api.notifications import store
+from api.notification_service import store
 
 OWNER = 'usr_' + 'A' * 22
 FIRST = 'usr_' + 'B' * 21 + 'A'

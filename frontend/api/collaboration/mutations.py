@@ -415,7 +415,7 @@ def append_owner_v2_message_idempotently(
     )
     if error:
         return error
-    from api.notifications.recipients import resolve_notification_recipients
+    from api.notification_service.recipients import resolve_notification_recipients
     intended = resolve_notification_recipients(thread, context.actor_user_id)
     if intended.get("status") != "ok":
         return _failure(intended.get("error", {}).get("code", "storage_unavailable"))
@@ -602,7 +602,7 @@ def append_guest_v2_reply(
     )
     if error:
         return error
-    from api.notifications.recipients import resolve_notification_recipients
+    from api.notification_service.recipients import resolve_notification_recipients
     intended = resolve_notification_recipients(thread, None)
     if intended.get("status") != "ok":
         return _failure(intended.get("error", {}).get("code", "storage_unavailable"))

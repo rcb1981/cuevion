@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 
 from . import redis_store, test_notifications as fixture
-from api.notifications import store
+from api.notification_service import store
 
 
 def baseline_scripts(path: str) -> tuple[dict[str, str], str]:

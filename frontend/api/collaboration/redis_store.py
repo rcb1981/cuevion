@@ -2385,7 +2385,7 @@ else:
     """
 
 
-    from api.notifications.store import NOTIFICATION_LUA_HELPERS
+    from api.notification_service.store import NOTIFICATION_LUA_HELPERS
 
     _V2_NOTIFICATION_MUTATION_LUA = _V2_DISCOVERY_LUA + NOTIFICATION_LUA_HELPERS + r"""
     local function notificationRecipientListValid(values, raw)
