@@ -567,15 +567,15 @@ export function CollaborationAccessPanel({
   const secureLinkPanel = secureLink ? (
     <section
       data-collaboration-secure-link
-      className="space-y-3 rounded-[18px] border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] p-4"
+      className="space-y-2 rounded-[14px] border border-[var(--workspace-accent-border)] bg-[var(--workspace-card-subtle)] p-3"
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h3 className="text-[0.9rem] font-medium text-[var(--workspace-text)]">
             Secure guest link
           </h3>
-          <p className="mt-1 text-[0.76rem] leading-5 text-[var(--workspace-text-faint)]">
-            This link is shown only now. Cuevion does not store the invitation link.
+          <p className="mt-1 text-[0.76rem] leading-5 text-[var(--workspace-text-muted)]">
+            This link is shown once. Save it before closing.
           </p>
         </div>
         <button
@@ -587,7 +587,7 @@ export function CollaborationAccessPanel({
         </button>
       </div>
       <label className="block space-y-1.5">
-        <span className="text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+        <span className="sr-only">
           Secure guest link
         </span>
         <input
@@ -601,7 +601,7 @@ export function CollaborationAccessPanel({
         <button type="button" onClick={copySecureLink} className={primaryButtonClass}>
           Copy secure link
         </button>
-        <div aria-live="polite" className="text-[0.76rem] leading-5 text-[var(--workspace-text-faint)]">
+        <div aria-live="polite" className="text-[0.76rem] leading-5 text-[var(--workspace-text-muted)]">
           {copyFeedback}
         </div>
       </div>
@@ -645,19 +645,19 @@ export function CollaborationAccessPanel({
         className="space-y-4"
         onSubmit={submitStart}
       >
-        <section className="space-y-3 rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,var(--workspace-card),var(--workspace-card-subtle))] px-4 py-5 sm:px-5">
+        <section className="space-y-3">
           <div>
             <h3 className="text-[1rem] font-medium tracking-tight text-[var(--workspace-text)]">
               Start collaboration
             </h3>
-            <p className="mt-1.5 text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
-              Choose who should have access to this email’s Collaboration.
+            <p className="mt-1.5 text-[0.82rem] leading-6 text-[var(--workspace-text-muted)]">
+              Choose a collaborator.
             </p>
           </div>
 
-          <fieldset className="grid gap-3 sm:grid-cols-2">
+          <fieldset className="grid grid-cols-2 gap-2">
             <legend className="sr-only">Participant type</legend>
-            <label className={`flex cursor-pointer gap-3 rounded-[16px] border p-3.5 ${participantType === "team" ? "border-[var(--workspace-accent-border)] bg-[var(--workspace-card-featured-start)]" : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)]"} ${eligibleTeamMembers.length === 0 ? "cursor-not-allowed opacity-65" : ""}`}>
+            <label className={`flex cursor-pointer gap-2 rounded-[14px] border p-3 ${participantType === "team" ? "border-[var(--workspace-accent-border)] bg-[var(--workspace-card-featured-start)]" : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)]"} ${eligibleTeamMembers.length === 0 ? "cursor-not-allowed opacity-65" : ""}`}>
               <input
                 ref={firstParticipantTypeRef}
                 type="radio"
@@ -673,12 +673,12 @@ export function CollaborationAccessPanel({
               />
               <span className="min-w-0">
                 <span className="block text-[0.86rem] font-medium text-[var(--workspace-text)]">Team member</span>
-                <span className="mt-1 block text-[0.76rem] leading-5 text-[var(--workspace-text-faint)]">
-                  Collaborate with someone in your Cuevion Team. Team members can see shared messages and internal notes.
+                <span className="mt-1 block text-[0.76rem] leading-5 text-[var(--workspace-text-muted)]">
+                  Shared messages & internal notes.
                 </span>
               </span>
             </label>
-            <label className={`flex cursor-pointer gap-3 rounded-[16px] border p-3.5 ${participantType === "external" ? "border-[var(--workspace-accent-border)] bg-[var(--workspace-card-featured-start)]" : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)]"}`}>
+            <label className={`flex cursor-pointer gap-2 rounded-[14px] border p-3 ${participantType === "external" ? "border-[var(--workspace-accent-border)] bg-[var(--workspace-card-featured-start)]" : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)]"}`}>
               <input
                 ref={externalParticipantTypeRef}
                 type="radio"
@@ -693,8 +693,8 @@ export function CollaborationAccessPanel({
               />
               <span className="min-w-0">
                 <span className="block text-[0.86rem] font-medium text-[var(--workspace-text)]">External guest</span>
-                <span className="mt-1 block text-[0.76rem] leading-5 text-[var(--workspace-text-faint)]">
-                  Invite someone without a Cuevion account. External guests can only see shared collaboration messages.
+                <span className="mt-1 block text-[0.76rem] leading-5 text-[var(--workspace-text-muted)]">
+                  Shared messages only.
                 </span>
               </span>
             </label>
@@ -702,7 +702,7 @@ export function CollaborationAccessPanel({
 
           {participantType === "team" ? (
             <fieldset className="space-y-2">
-              <legend className="text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">Team member</legend>
+              <legend className="text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-muted)]">Team member</legend>
               {eligibleTeamMembers.map((member) => (
                 <label key={member.memberUserId} className="flex cursor-pointer items-start gap-3 rounded-[14px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] p-3">
                   <input
@@ -715,7 +715,7 @@ export function CollaborationAccessPanel({
                   />
                   <span className="min-w-0">
                     <span className="block break-words text-[0.84rem] font-medium text-[var(--workspace-text)]">{member.displayName}</span>
-                    <span className="block break-all text-[0.74rem] text-[var(--workspace-text-faint)]">{member.email}</span>
+                    <span className="block break-all text-[0.74rem] text-[var(--workspace-text-muted)]">{member.email}</span>
                   </span>
                 </label>
               ))}
@@ -723,7 +723,7 @@ export function CollaborationAccessPanel({
           ) : null}
 
           {eligibleTeamMembers.length === 0 ? (
-            <div className="rounded-[14px] bg-[var(--workspace-card)] px-3.5 py-3 text-[0.78rem] leading-5 text-[var(--workspace-text-faint)]">
+            <div className="rounded-[14px] bg-[var(--workspace-card)] px-3.5 py-3 text-[0.78rem] leading-5 text-[var(--workspace-text-muted)]">
               <div className="font-medium text-[var(--workspace-text-soft)]">No other eligible Team members yet.</div>
               <div>Add a Team member in Team Settings first. External guest access remains available.</div>
             </div>
@@ -731,7 +731,7 @@ export function CollaborationAccessPanel({
 
           {participantType === "external" ? (
             <label className="block space-y-1.5">
-              <span className="text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">Email (optional)</span>
+              <span className="text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-muted)]">Email (optional)</span>
               <input
                 type="email"
                 value={startExternalEmail}
@@ -742,14 +742,14 @@ export function CollaborationAccessPanel({
                 placeholder="guest@example.com"
                 className={fieldClass}
               />
-              <span className="block text-[0.74rem] leading-5 text-[var(--workspace-text-faint)]">
-                Email is optional and only helps identify the guest. Access is controlled by the secure link, which you’ll share yourself.
+              <span className="block text-[0.74rem] leading-5 text-[var(--workspace-text-muted)]">
+                Optional label. Share the secure link yourself to give access.
               </span>
             </label>
           ) : null}
 
           <fieldset className="space-y-2">
-            <legend className="text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">Reason</legend>
+            <legend className="text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-muted)]">Reason</legend>
             <div className="grid gap-2 sm:grid-cols-3">
               {([
                 ["needs_review", "Needs input"],
@@ -765,7 +765,7 @@ export function CollaborationAccessPanel({
           </fieldset>
 
           {startMutation.status === "failure" ? (
-            <div role="alert" data-collaboration-owner-create-feedback className="rounded-[14px] bg-[var(--workspace-card)] px-3.5 py-3 text-[0.78rem] leading-5 text-[var(--workspace-text-faint)]">
+            <div role="alert" data-collaboration-owner-create-feedback className="rounded-[14px] bg-[var(--workspace-card)] px-3.5 py-3 text-[0.78rem] leading-5 text-[var(--workspace-text-muted)]">
               {startMutation.message}
             </div>
           ) : null}
@@ -791,42 +791,42 @@ export function CollaborationAccessPanel({
   const guestLimitReached = externalGuests.length >= 16;
 
   return (
-    <section data-collaboration-access-panel className="space-y-3">
+    <section data-collaboration-access-panel className="space-y-3 border-t border-[var(--workspace-border-soft)] pt-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">Access</h3>
-          <p className="mt-1 text-[0.76rem] leading-5 text-[var(--workspace-text-faint)]">Team members can see Shared messages and Internal Notes. External guests can see Shared messages only.</p>
+          <h3 className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-muted)]">Participants &amp; access</h3>
         </div>
       </div>
 
-      <div className="grid gap-3">
-        <section className="space-y-2 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] p-4">
+      <div className="grid gap-4 sm:grid-cols-2">
+        <section className="min-w-0 space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h4 className="text-[0.84rem] font-medium text-[var(--workspace-text)]">Team members</h4>
             {isOwner ? (
               <button type="button" onClick={() => setIsAddTeamOpen((current) => !current)} disabled={teamLimitReached || eligibleTeamMembers.length === 0 || mutationInFlight} className={secondaryButtonClass}>Add Team member</button>
             ) : null}
           </div>
-          <div className="space-y-2">
+          <p className="text-[0.74rem] text-[var(--workspace-text-muted)]">Shared messages &amp; internal notes</p>
+          <div className="divide-y divide-[var(--workspace-border-soft)]">
             {collaboration.participants.map((participant) => (
-              <div key={participant.userId} className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded-[12px] bg-[var(--workspace-card-subtle)] px-3 py-2.5">
+              <div key={participant.userId} className="flex min-w-0 flex-wrap items-center justify-between gap-2 py-2">
                 <span className="min-w-0 break-words text-[0.82rem] font-medium text-[var(--workspace-text)]">{participant.displayName}</span>
-                <span className="text-[0.62rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">{participant.access === "owner" ? "Owner" : "Team member"}</span>
+                <span className="text-[0.62rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-muted)]">{participant.access === "owner" ? "Owner" : "Team member"}</span>
               </div>
             ))}
           </div>
-          {teamLimitReached ? <p className="text-[0.76rem] text-[var(--workspace-text-faint)]">Team participant limit reached.</p> : null}
-          {isOwner && eligibleTeamMembers.length === 0 && !teamLimitReached ? <p className="text-[0.76rem] leading-5 text-[var(--workspace-text-faint)]">No other eligible Team members yet. Add a Team member in Team Settings first.</p> : null}
+          {teamLimitReached ? <p className="text-[0.76rem] text-[var(--workspace-text-muted)]">Team participant limit reached.</p> : null}
+          {isOwner && eligibleTeamMembers.length === 0 && !teamLimitReached ? <p className="text-[0.76rem] leading-5 text-[var(--workspace-text-muted)]">No other eligible Team members yet. Add a Team member in Team Settings first.</p> : null}
           {isOwner && isAddTeamOpen && !teamLimitReached ? (
             <form onSubmit={submitAddTeamMember} className="space-y-2 rounded-[14px] bg-[var(--workspace-card-subtle)] p-3">
               <label className="block space-y-1.5">
-                <span className="text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">Team member</span>
+                <span className="text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-muted)]">Team member</span>
                 <select value={addTeamMemberId} onChange={(event) => { setAddTeamMemberId(event.target.value); setAddTeamMutation({ status: "idle" }); }} className={fieldClass}>
                   <option value="">Select one Team member</option>
                   {eligibleTeamMembers.map((member) => <option key={member.memberUserId} value={member.memberUserId ?? ""}>{member.displayName} — {member.email}</option>)}
                 </select>
               </label>
-              {addTeamMutation.status === "failure" ? <div role="alert" className="text-[0.76rem] leading-5 text-[var(--workspace-text-faint)]">{addTeamMutation.message}</div> : null}
+              {addTeamMutation.status === "failure" ? <div role="alert" className="text-[0.76rem] leading-5 text-[var(--workspace-text-muted)]">{addTeamMutation.message}</div> : null}
               <div className="flex flex-wrap justify-end gap-2">
                 <button type="button" onClick={() => setIsAddTeamOpen(false)} className={secondaryButtonClass}>Cancel</button>
                 <button type="submit" disabled={!addTeamMemberId || mutationInFlight} className={primaryButtonClass}>{addTeamMutation.status === "loading" ? "Adding…" : "Add Team member"}</button>
@@ -836,36 +836,37 @@ export function CollaborationAccessPanel({
         </section>
 
         {isOwner ? (
-          <section className="space-y-2 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] p-4">
+          <section className="min-w-0 space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h4 className="text-[0.84rem] font-medium text-[var(--workspace-text)]">External guests</h4>
               <button type="button" onClick={() => setIsInviteGuestOpen((current) => !current)} disabled={guestLimitReached || mutationInFlight} className={secondaryButtonClass}>Invite external guest</button>
             </div>
+            <p className="text-[0.74rem] text-[var(--workspace-text-muted)]">Shared messages only</p>
             {externalGuests.length > 0 ? (
               <div className="space-y-2">
                 {externalGuests.map((guest) => {
                   const canRevoke = guest.status === "pending" || guest.status === "active";
                   const visibleName = guest.displayName ?? guest.invitedEmail ?? "Secure-link guest";
                   return (
-                    <div key={guest.inviteId} className="space-y-2 rounded-[12px] bg-[var(--workspace-card-subtle)] px-3 py-2.5">
+                    <div key={guest.inviteId} data-guest-status={guest.status} className={`space-y-2 border-b border-[var(--workspace-border-soft)] py-2 ${canRevoke ? "" : "text-[var(--workspace-text-muted)]"}`}>
                       <div className="flex min-w-0 flex-wrap items-start justify-between gap-2">
                         <div className="min-w-0">
-                          <div className="break-words text-[0.82rem] font-medium text-[var(--workspace-text)]">{visibleName}</div>
-                          {guest.displayName && guest.invitedEmail ? <div className="break-all text-[0.72rem] text-[var(--workspace-text-faint)]">{guest.invitedEmail}</div> : null}
-                          {(guest.status === "pending" || guest.status === "active") ? <div className="text-[0.7rem] text-[var(--workspace-text-faint)]">Expires {formatExpiry(guest.expiresAt)}</div> : null}
+                          <div className={`break-all text-[0.82rem] ${canRevoke ? "font-medium text-[var(--workspace-text)]" : "text-[var(--workspace-text-muted)]"}`}>{visibleName}</div>
+                          {guest.displayName && guest.invitedEmail ? <div className="break-all text-[0.72rem] text-[var(--workspace-text-muted)]">{guest.invitedEmail}</div> : null}
+                          {(guest.status === "pending" || guest.status === "active") ? <div className="text-[0.7rem] text-[var(--workspace-text-muted)]">Expires {formatExpiry(guest.expiresAt)}</div> : null}
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-[0.62rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">{getExternalGuestStatusLabel(guest.status)}</span>
-                          {canRevoke ? <button type="button" disabled={mutationInFlight} onClick={() => { setPendingRevokeId(guest.inviteId); setRevokeMutation({ status: "idle" }); }} className={secondaryButtonClass}>Revoke access</button> : null}
+                          <span className="text-[0.62rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-muted)]">{getExternalGuestStatusLabel(guest.status)}</span>
+                          {canRevoke ? <button type="button" disabled={mutationInFlight} onClick={() => { setPendingRevokeId(guest.inviteId); setRevokeMutation({ status: "idle" }); }} className={secondaryButtonClass.replace("text-[var(--workspace-text-soft)]", "text-[color:rgba(138,76,67,0.98)] dark:text-[color:rgba(232,169,157,0.98)]").replace("border-[var(--workspace-border-soft)] bg-[var(--workspace-card)]", "border-transparent bg-transparent")}>Revoke access</button> : null}
                         </div>
                       </div>
                       {pendingRevokeId === guest.inviteId ? (
                         <div role="alertdialog" aria-modal="true" aria-labelledby="collaboration-revoke-guest-title" className="space-y-2 rounded-[12px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] p-3">
                           <div id="collaboration-revoke-guest-title" className="text-[0.78rem] font-medium text-[var(--workspace-text)]">Revoke this guest’s access?</div>
-                          {revokeMutation.status === "failure" ? <div role="alert" className="text-[0.74rem] leading-5 text-[var(--workspace-text-faint)]">{revokeMutation.message}</div> : null}
+                          {revokeMutation.status === "failure" ? <div role="alert" className="text-[0.74rem] leading-5 text-[var(--workspace-text-muted)]">{revokeMutation.message}</div> : null}
                           <div className="flex flex-wrap justify-end gap-2">
                             <button type="button" onClick={() => setPendingRevokeId(null)} className={secondaryButtonClass}>Back</button>
-                            <button type="button" onClick={() => confirmRevoke(guest.inviteId)} disabled={mutationInFlight} className={primaryButtonClass}>{revokeMutation.status === "loading" ? "Revoking…" : "Revoke access"}</button>
+                            <button type="button" onClick={() => confirmRevoke(guest.inviteId)} disabled={mutationInFlight} className={secondaryButtonClass.replace("text-[var(--workspace-text-soft)]", "text-[color:rgba(138,76,67,0.98)] dark:text-[color:rgba(232,169,157,0.98)]")}>{revokeMutation.status === "loading" ? "Revoking…" : "Revoke access"}</button>
                           </div>
                         </div>
                       ) : null}
@@ -873,17 +874,17 @@ export function CollaborationAccessPanel({
                   );
                 })}
               </div>
-            ) : <p className="text-[0.76rem] text-[var(--workspace-text-faint)]">No external guests.</p>}
-            {guestLimitReached ? <p className="text-[0.76rem] text-[var(--workspace-text-faint)]">External guest invitation limit reached.</p> : null}
-            {!isInviteGuestOpen && inviteMutation.status === "failure" ? <div role="alert" aria-live="polite" className="text-[0.76rem] leading-5 text-[var(--workspace-text-faint)]">{inviteMutation.message}</div> : null}
+            ) : <p className="text-[0.76rem] text-[var(--workspace-text-muted)]">No external guests.</p>}
+            {guestLimitReached ? <p className="text-[0.76rem] text-[var(--workspace-text-muted)]">External guest invitation limit reached.</p> : null}
+            {!isInviteGuestOpen && inviteMutation.status === "failure" ? <div role="alert" aria-live="polite" className="text-[0.76rem] leading-5 text-[var(--workspace-text-muted)]">{inviteMutation.message}</div> : null}
             {isInviteGuestOpen && !guestLimitReached ? (
               <form onSubmit={submitGuestInvitation} className="space-y-2 rounded-[14px] bg-[var(--workspace-card-subtle)] p-3">
                 <label className="block space-y-1.5">
-                  <span className="text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">Email (optional)</span>
+                  <span className="text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-muted)]">Email (optional)</span>
                   <input type="email" value={inviteEmail} onChange={(event) => { setInviteEmail(event.target.value); setInviteMutation({ status: "idle" }); }} placeholder="guest@example.com" className={fieldClass} />
-                  <span className="block text-[0.74rem] leading-5 text-[var(--workspace-text-faint)]">Email is optional and only helps identify the guest. Access is controlled by the secure link, which you’ll share yourself.</span>
+                  <span className="block text-[0.74rem] leading-5 text-[var(--workspace-text-muted)]">Optional label. Share the secure link yourself to give access.</span>
                 </label>
-                {inviteMutation.status === "failure" ? <div role="alert" aria-live="polite" className="text-[0.76rem] leading-5 text-[var(--workspace-text-faint)]">{inviteMutation.message}</div> : null}
+                {inviteMutation.status === "failure" ? <div role="alert" aria-live="polite" className="text-[0.76rem] leading-5 text-[var(--workspace-text-muted)]">{inviteMutation.message}</div> : null}
                 <div className="flex flex-wrap justify-end gap-2">
                   <button type="button" onClick={() => setIsInviteGuestOpen(false)} className={secondaryButtonClass}>Cancel</button>
                   <button type="submit" disabled={mutationInFlight} className={primaryButtonClass}>{inviteMutation.status === "loading" ? "Creating secure link…" : "Create secure link"}</button>

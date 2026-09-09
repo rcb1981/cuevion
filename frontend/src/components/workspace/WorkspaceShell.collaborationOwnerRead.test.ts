@@ -370,29 +370,28 @@ try {
   assert.equal(ownerSuccessRegion.includes("No server messages."), false);
   assert.equal(
     ownerSuccessRegion.includes(
-      "Visible to everyone in this collaboration. This does not email the",
+      "All participants · Does not send an email.",
     ),
     true,
   );
   assert.equal(
     ownerSuccessRegion.includes(
-      "Visible only to your Cuevion team. External reviewers won’t see it.",
+      "Team only · Never visible to external guests.",
     ),
     true,
   );
-  assert.equal(ownerSuccessRegion.includes('? "Internal" : "Shared"'), true);
   assert.equal(
-    ownerSuccessRegion.includes('? "Visible only to your Cuevion team."'),
+    ownerSuccessRegion.includes('? "Internal note · Team only"'),
     true,
   );
   assert.equal(
-    ownerSuccessRegion.includes(': "Visible to everyone in this collaboration."'),
+    ownerSuccessRegion.includes(': "Shared message · All participants"'),
     true,
   );
 
   assert.equal(
     accessPanelSource.includes(
-      "Choose who should have access to this email’s Collaboration.",
+      "Choose a collaborator.",
     ),
     true,
   );
@@ -511,7 +510,7 @@ try {
   assert.equal(ownerSharedMessageComposerRegion.includes("Retry Shared Message"), true);
   assert.equal(ownerSharedMessageComposerRegion.includes("Add Shared Message"), true);
   assert.equal(
-    ownerSharedMessageComposerRegion.includes("does not email the"),
+    ownerSharedMessageComposerRegion.includes("Does not send an email."),
     true,
   );
   assert.equal(
@@ -736,7 +735,7 @@ try {
   assert.equal(workspaceSource.includes("entry.authorRole"), true);
   assert.equal(workspaceSource.includes("entry.text"), true);
   assert.equal(workspaceSource.includes("entry.timestamp"), true);
-  assert.equal(workspaceSource.includes('? "Internal" : "Shared"'), true);
+  assert.equal(workspaceSource.includes('? "Internal note · Team only"'), true);
   assert.equal(workspaceSource.includes("Server collaboration · Read only"), false);
   assert.equal(workspaceSource.includes("Server projection is read only."), false);
 
