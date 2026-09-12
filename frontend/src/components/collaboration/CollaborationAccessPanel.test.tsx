@@ -156,8 +156,8 @@ try {
   assert.match(startMarkup, /Start collaboration/);
   assert.match(startMarkup, /Team member/);
   assert.match(startMarkup, /External guest/);
-  assert.match(startMarkup, /shared messages and internal notes/);
-  assert.match(startMarkup, /only see shared collaboration messages/);
+  assert.match(startMarkup, /Shared messages &amp; internal notes/);
+  assert.match(startMarkup, /Shared messages only/);
   assert.match(startMarkup, /Needs input/);
   assert.match(startMarkup, /Needs action/);
   assert.match(startMarkup, /Notes only/);
@@ -176,8 +176,8 @@ try {
     mode: "access",
     collaboration: baseCollaboration("owner"),
   });
-  assert.match(ownerMarkup, />Access</);
-  assert.match(ownerMarkup, /Team members/);
+  assert.match(ownerMarkup, />People</);
+  assert.match(ownerMarkup, /Cuevion Team/);
   assert.match(ownerMarkup, /Workspace Owner/);
   assert.match(ownerMarkup, />Owner</);
   assert.match(ownerMarkup, /Existing Member/);
@@ -287,7 +287,7 @@ try {
   assert.equal((source.match(/revokeGuestInvitationForOwner\(/g) ?? []).length, 1);
   assert.match(source, /Email \(optional\)/);
   assert.equal(
-    (source.match(/Email is optional and only helps identify the guest\. Access is controlled by the secure link, which you’ll share yourself\./g) ?? []).length,
+    (source.match(/Optional label\. Share the secure link yourself to give access\./g) ?? []).length,
     2,
   );
   assert.match(source, /createCollaborationForOwner\([\s\S]*?selectedTeamMemberId/);
@@ -310,7 +310,7 @@ try {
   assert.match(source, /setSecureLink\(\{ inviteId: invitation\.inviteId, url \}\)/);
   assert.match(source, /navigator\.clipboard\.writeText\(secureLink\.url\)/);
   assert.match(source, /Couldn’t copy automatically\. Select the link and copy it manually\./);
-  assert.match(source, /Cuevion does not store the invitation link/);
+  assert.match(source, /Cuevion does not store its secure link/);
   assert.match(source, /Cuevion doesn’t store this link\. Make sure you’ve copied it before closing/);
   assert.match(source, /invitationCreated \? result\.token : undefined/);
   assert.match(source, /An invitation for this guest already exists/);

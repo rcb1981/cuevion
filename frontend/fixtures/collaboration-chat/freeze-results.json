@@ -1,0 +1,62 @@
+[
+  {
+    "name": "Shared send handler",
+    "unchanged": true
+  },
+  {
+    "name": "Internal send handler",
+    "unchanged": true
+  },
+  {
+    "name": "Lifecycle handler",
+    "unchanged": true
+  },
+  {
+    "name": "Close protection",
+    "unchanged": true
+  },
+  {
+    "name": "Canonical access publication",
+    "unchanged": true
+  },
+  {
+    "name": "C3D display acknowledgement and focus order",
+    "unchanged": true
+  },
+  {
+    "name": "Existing highlight effects",
+    "unchanged": true
+  },
+  {
+    "name": "frontend/src/lib/collaborationOwnerReadApi.ts",
+    "unchanged": true
+  },
+  {
+    "name": "frontend/src/lib/collaborationOwnerWriteApi.ts",
+    "unchanged": true
+  },
+  {
+    "name": "frontend/src/lib/collaborationOwnerApiTransport.ts",
+    "unchanged": true
+  },
+  {
+    "name": "frontend/src/lib/notificationNavigation.ts",
+    "unchanged": true
+  },
+  {
+    "name": "frontend/src/lib/notificationsApi.ts",
+    "unchanged": true
+  },
+  {
+    "name": "frontend/src/lib/exactMailboxMessageApi.ts",
+    "unchanged": true
+  },
+  {
+    "name": "frontend/vercel.json",
+    "unchanged": true
+  },
+  {
+    "name": "AccessPanel behavior (only two heading labels changed)",
+    "unchanged": true
+  }
+]

@@ -25,6 +25,7 @@ try {
     path.resolve(__dirname, "../collaboration/CollaborationAccessPanel.tsx"),
     "utf8",
   );
+  const chatSource = fs.readFileSync(path.resolve(__dirname, "../collaboration/CollaborationChat.tsx"), "utf8");
   const ownerReadRegion = sourceBetween(
     workspaceSource,
     "const beginCollaborationOwnerRead = (",
@@ -55,11 +56,8 @@ try {
     "data-collaboration-owner-read-failure",
     ") : isPreStartCollaboration ? (",
   );
-  const ownerLifecycleFooterRegion = sourceBetween(
-    workspaceSource,
-    "hasActiveCollaborationOwnerLifecycle ? (",
-    ") : (\n                      <>\n                    <div>",
-  );
+  const ownerLifecycleFooterRegion = sourceBetween(workspaceSource,
+    '<span data-collaboration-lifecycle-status>', 'data-collaboration-scroll-body');
   const ownerStateLabelRegion = sourceBetween(
     workspaceSource,
     "function getCollaborationOwnerStateLabel(",
@@ -115,16 +113,8 @@ try {
     "const submitCollaborationOwnerInternalNote = () =>",
     "const sendCollaborationReply = (",
   );
-  const ownerInternalNoteComposerRegion = sourceBetween(
-    workspaceSource,
-    "data-collaboration-owner-internal-note-composer",
-    ") : isPreStartCollaboration ? (",
-  );
-  const ownerSharedMessageComposerRegion = sourceBetween(
-    workspaceSource,
-    "data-collaboration-owner-shared-message-composer",
-    "data-collaboration-owner-internal-note-composer",
-  );
+  const ownerInternalNoteComposerRegion = sourceBetween(workspaceSource, '                    internal={{', '                  /> : null}');
+  const ownerSharedMessageComposerRegion = sourceBetween(workspaceSource, '                    shared={{', '                    internal={{');
   const ownerAppendClientRegion = sourceBetween(
     ownerWriteSource,
     "async function executeAppendOperation(",
@@ -356,38 +346,12 @@ try {
     ownerSuccessRegion.includes("activeCollaborationOwnerProjection.state}"),
     false,
   );
-  for (const [rawState, productLabel] of [
-    ["needs_review", "Needs input"],
-    ["needs_action", "Needs action"],
-    ["note_only", "Notes only"],
-    ["resolved", "Ended"],
-  ]) {
-    assert.equal(ownerStateLabelRegion.includes(`case \"${rawState}\"`), true);
-    assert.equal(ownerStateLabelRegion.includes(`return \"${productLabel}\"`), true);
-  }
-  assert.equal(ownerStateLabelRegion.includes('return "Status unavailable"'), true);
-  assert.equal(ownerSuccessRegion.includes("No collaboration messages yet."), true);
-  assert.equal(ownerSuccessRegion.includes("No server messages."), false);
-  assert.equal(
-    ownerSuccessRegion.includes(
-      "All participants · Does not send an email.",
-    ),
-    true,
-  );
-  assert.equal(
-    ownerSuccessRegion.includes(
-      "Team only · Never visible to external guests.",
-    ),
-    true,
-  );
-  assert.equal(
-    ownerSuccessRegion.includes('? "Internal note · Team only"'),
-    true,
-  );
-  assert.equal(
-    ownerSuccessRegion.includes(': "Shared message · All participants"'),
-    true,
-  );
+  assert.equal(ownerStateLabelRegion.includes('state === "resolved" ? "Resolved" : "Active"'), true);
+  assert.equal(chatSource.includes("No messages yet."), true);
+  assert.equal(chatSource.includes("Only your Cuevion team can see this."), true);
+  assert.equal(chatSource.includes("Never visible to external guests"), false);
+  assert.equal(chatSource.includes("Team only"), false);
+  assert.equal(chatSource.includes("<CollaborationLock />Internal note"), true);
 
   assert.equal(
     accessPanelSource.includes(
@@ -507,10 +471,10 @@ try {
     "Double-click fencing must be installed before the shared operation executes",
   );
   assert.equal(ownerSharedMessageComposerRegion.includes('status === "sending"'), true);
-  assert.equal(ownerSharedMessageComposerRegion.includes("Retry Shared Message"), true);
-  assert.equal(ownerSharedMessageComposerRegion.includes("Add Shared Message"), true);
+  assert.equal(chatSource.includes('? "Retry" : "Send"'), true);
+  assert.equal(ownerSharedMessageComposerRegion.includes("onSend: submitCollaborationOwnerSharedMessage"), true);
   assert.equal(
-    ownerSharedMessageComposerRegion.includes("Does not send an email."),
+    chatSource.includes("Write a message…"),
     true,
   );
   assert.equal(
@@ -642,8 +606,8 @@ try {
   assert.equal(ownerInternalNoteRegion.includes("existingRequest?.inFlight"), true);
   assert.equal(ownerInternalNoteRegion.includes("request.inFlight = true"), true);
   assert.equal(ownerInternalNoteComposerRegion.includes('status === "sending"'), true);
-  assert.equal(ownerInternalNoteComposerRegion.includes("Retry Internal Note"), true);
-  assert.equal(ownerInternalNoteComposerRegion.includes("Add Internal Note"), true);
+  assert.equal(chatSource.includes('? "Retry" : "Send"'), true);
+  assert.equal(ownerInternalNoteComposerRegion.includes("onSend: submitCollaborationOwnerInternalNote"), true);
   assert.equal(
     ownerInternalNoteComposerRegion.includes(
       "collaborationOwnerInternalNoteRequestRef.current = null",
@@ -731,11 +695,11 @@ try {
   );
 
   assert.equal(ownerInternalNoteComposerRegion.includes("entry.authorDisplayName"), false);
-  assert.equal(workspaceSource.includes("entry.authorDisplayName"), true);
-  assert.equal(workspaceSource.includes("entry.authorRole"), true);
+  assert.equal(chatSource.includes("entry.authorDisplayName"), true);
+  assert.equal(chatSource.includes("entry.authorRole"), true);
   assert.equal(workspaceSource.includes("entry.text"), true);
   assert.equal(workspaceSource.includes("entry.timestamp"), true);
-  assert.equal(workspaceSource.includes('? "Internal note · Team only"'), true);
+  assert.equal(chatSource.includes("<CollaborationLock />Internal note"), true);
   assert.equal(workspaceSource.includes("Server collaboration · Read only"), false);
   assert.equal(workspaceSource.includes("Server projection is read only."), false);
 

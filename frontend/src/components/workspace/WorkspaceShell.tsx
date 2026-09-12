@@ -44,6 +44,7 @@ import {
   DesktopComposeBodyEditor,
   type DesktopComposeBodyEditorHandle,
 } from "./DesktopComposeBodyEditor";
+import { CollaborationChatTimeline, CollaborationChatComposer } from "../collaboration/CollaborationChat";
 import { CollaborationAccessPanel } from "../collaboration/CollaborationAccessPanel";
 import type { BundleOrganizerWorkspaceMessage } from "./BundleOrganizerSurface";
 import {
@@ -538,18 +539,7 @@ function getCollaborationOwnerReadFailureMessage(
 }
 
 function getCollaborationOwnerStateLabel(state: unknown) {
-  switch (state) {
-    case "needs_review":
-      return "Needs input";
-    case "needs_action":
-      return "Needs action";
-    case "note_only":
-      return "Notes only";
-    case "resolved":
-      return "Ended";
-    default:
-      return "Status unavailable";
-  }
+  return state === "resolved" ? "Resolved" : "Active";
 }
 
 function getCollaborationOwnerInternalNoteFailureMessage(
@@ -17817,6 +17807,10 @@ function MailboxView({
     useState<InboxId | null>(null);
   const collaborationOverlayOpenerRef = useRef<HTMLElement | null>(null);
   const exactNotificationProjectionRef = useRef<HTMLElement | null>(null);
+  const [isCollaborationPeopleOpen, setIsCollaborationPeopleOpen] = useState(false);
+  const [isCollaborationSourceOpen, setIsCollaborationSourceOpen] = useState(false);
+  const collaborationPeopleTriggerRef = useRef<HTMLButtonElement | null>(null);
+
   const [collaborationOwnerProjection, setCollaborationOwnerProjection] =
     useState<CollaborationOwnerProjectionState>({
       status: "idle",
@@ -21179,6 +21173,8 @@ function MailboxView({
     const requestId = ++collaborationOwnerProjectionGenerationRef.current;
     collaborationOwnerProjectionRequestRef.current = { identityKey, requestId, inFlight: false, operation: "read", messageId: target.message.id, sourceMailboxId: mailbox.id, locator };
     setCollaborationOwnerProjection({ status: "success", identityKey, requestId, collaboration });
+    setIsCollaborationPeopleOpen(false);
+    setIsCollaborationSourceOpen(false);
     setHighlightedCollaborationMessageId(row.activityId);
     setCollaborationHistoryExpanded(true);
   }, [serverNotificationDisplay, mailbox.id]);
@@ -23314,6 +23310,8 @@ function MailboxView({
   };
 
   const fenceCollaborationOwnerProjection = () => {
+    setIsCollaborationPeopleOpen(false);
+    setIsCollaborationSourceOpen(false);
     const requestId = collaborationOwnerProjectionGenerationRef.current + 1;
     collaborationOwnerProjectionGenerationRef.current = requestId;
     collaborationOwnerSharedMessageGenerationRef.current += 1;
@@ -23800,6 +23798,10 @@ function MailboxView({
     collaborationOverlayOpenerRef.current = null;
     collaborationOpener?.focus();
   };
+
+  useEffect(() => {
+    if (isCollaborationSecureLinkVisible) setIsCollaborationPeopleOpen(true);
+  }, [isCollaborationSecureLinkVisible]);
 
   const requestCloseCollaborationOverlay = () => {
     if (isCollaborationSecureLinkVisible) {
@@ -30695,7 +30697,7 @@ function MailboxView({
                   role="dialog"
                   aria-modal="true"
                   aria-labelledby="collaboration-dialog-title"
-                  className="flex max-h-[calc(100dvh-2rem)] w-full max-w-[880px] min-h-0 flex-col overflow-hidden rounded-[28px] border border-[var(--workspace-border)] bg-[var(--workspace-modal-bg)] p-4 shadow-[0_28px_80px_rgba(61,44,32,0.18),0_10px_26px_rgba(61,44,32,0.1)] sm:max-h-[calc(100dvh-3rem)] sm:p-5 md:max-h-[calc(100dvh-4rem)] md:p-5 [&_button]:min-h-10 [&_button:focus-visible]:outline [&_button:focus-visible]:outline-2 [&_button:focus-visible]:outline-offset-2 [&_button:focus-visible]:outline-[var(--workspace-accent-text)]"
+                  className="flex h-[min(820px,calc(100dvh-2rem))] max-h-[calc(100dvh-2rem)] w-full max-w-[880px] min-h-0 flex-col overflow-hidden rounded-[28px] border border-[var(--workspace-border)] bg-[var(--workspace-modal-bg)] p-4 shadow-[0_28px_80px_rgba(61,44,32,0.18),0_10px_26px_rgba(61,44,32,0.1)] sm:max-h-[calc(100dvh-3rem)] sm:p-5 md:max-h-[calc(100dvh-4rem)] md:p-5 [&_button]:min-h-10 [&_button:focus-visible]:outline [&_button:focus-visible]:outline-2 [&_button:focus-visible]:outline-offset-2 [&_button:focus-visible]:outline-[var(--workspace-accent-text)]"
                   onMouseDown={(event) => event.stopPropagation()}
                 >
                   <div className="flex shrink-0 items-start justify-between gap-4">
@@ -30703,25 +30705,38 @@ function MailboxView({
                       <h2 id="collaboration-dialog-title" className="text-[1.15rem] font-medium tracking-tight text-[var(--workspace-text)]">
                         Collaboration
                       </h2>
-                      {activeCollaborationOwnerProjection ? (
-                        <p data-collaboration-lifecycle-status className="text-[0.78rem] text-[var(--workspace-text-muted)]">
-                          {getCollaborationOwnerStateLabel(activeCollaborationOwnerProjection.state)}
-                        </p>
-                      ) : null}
                       <p className="truncate text-[0.82rem] leading-6 text-[var(--workspace-text-muted)]" title={activeCollaborationOwnerProjection?.source.subject ?? activeCollaborationMessage.subject}>
                         {activeCollaborationOwnerProjection?.source.subject ??
                           activeCollaborationMessage.subject}
                       </p>
                     </div>
+                    <div className="flex shrink-0 items-center gap-1">
+                      {activeCollaborationOwnerProjection ? <button
+                        ref={collaborationPeopleTriggerRef}
+                        type="button"
+                        aria-expanded={isCollaborationPeopleOpen}
+                        aria-controls="collaboration-people-panel"
+                        onClick={() => setIsCollaborationPeopleOpen(open => !open)}
+                        className="min-h-11 rounded-full px-3 text-sm text-[var(--workspace-text)] hover:bg-[var(--workspace-hover-surface)]"
+                      >People · {activeCollaborationOwnerProjection.participants.length + (activeCollaborationOwnerProjection.viewerAccess === "owner" ? activeCollaborationOwnerProjection.externalGuests.filter(guest => guest.status === "active" || guest.status === "pending").length : 0)}</button> : null}
                     <button
                       type="button"
                       onClick={requestCloseCollaborationOverlay}
                       aria-label="Close collaboration"
                       className="inline-flex min-h-10 shrink-0 items-center justify-center rounded-full px-3 text-[0.8rem] text-[var(--workspace-text-muted)] hover:bg-[var(--workspace-hover-surface)]"
                     >
-                      Close
+                      <span aria-hidden="true" className="text-xl">×</span>
                     </button>
+                    </div>
                   </div>
+                  {activeCollaborationOwnerProjection ? <div className="flex shrink-0 flex-wrap items-center gap-x-3 border-b border-[var(--workspace-border-soft)] pb-1 text-xs text-[var(--workspace-text-muted)]">
+                    <span data-collaboration-lifecycle-status>{getCollaborationOwnerStateLabel(activeCollaborationOwnerProjection.state)}</span>
+                    <button type="button" aria-expanded={isCollaborationSourceOpen} aria-controls="collaboration-source-email" onClick={() => { setIsCollaborationSourceOpen(open => !open); setIsCollaborationPeopleOpen(false); }} className="min-h-11 rounded-lg px-1 hover:text-[var(--workspace-text)]">View source email</button>
+                    {activeCollaborationOwnerProjection.viewerAccess === "owner" ? <button type="button" disabled={collaborationLifecycleStatus === "pending"} onClick={() => { void transitionCanonicalCollaboration(); }} className="min-h-11 rounded-lg px-1 hover:text-[var(--workspace-text)] disabled:opacity-45">
+                      {collaborationLifecycleStatus === "pending" ? "Updating…" : activeCollaborationOwnerProjection.state === "resolved" ? "Reopen collaboration" : "Resolve collaboration"}
+                    </button> : null}
+                    {collaborationLifecycleStatus === "failure" ? <span role="status">Collaboration could not be updated. Retry.</span> : null}
+                  </div> : null}
 
                   <div
                     data-collaboration-scroll-body
@@ -30739,13 +30754,13 @@ function MailboxView({
                         activeCollaborationOwnerProjection ? (
                         <section
                           ref={exactNotificationProjectionRef}
+                          hidden={isCollaborationPeopleOpen}
                           data-collaboration-owner-read-projection
                           data-collaboration-owner-internal-note-enabled="true"
                           data-collaboration-owner-shared-message-enabled="true"
                           className="space-y-4"
                         >
-                          <details className="text-[0.78rem] text-[var(--workspace-text-muted)]">
-                            <summary className="flex min-h-10 cursor-pointer items-center gap-2 rounded-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--workspace-accent-text)]">Source email <span aria-hidden="true">⌄</span></summary>
+                          <div id="collaboration-source-email" hidden={!isCollaborationSourceOpen} className="text-[0.78rem] text-[var(--workspace-text-muted)]">
                             <div className="min-w-0 break-words border-l border-[var(--workspace-border)] pl-3 py-2">
                               <div className="text-[0.95rem] font-medium text-[var(--workspace-text)]">
                                 {activeCollaborationOwnerProjection.source.subject}
@@ -30762,199 +30777,15 @@ function MailboxView({
                                   .join(" · ")}
                               </div>
                             </div>
-                          </details>
-
-                          <section className="space-y-3">
-                            <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-muted)]">
-                              Activity
-                            </div>
-                            {activeCollaborationOwnerProjection.messages.length > 0 ? (
-                              <div className="space-y-2">
-                                {activeCollaborationOwnerProjection.messages.map((entry) => (
-                                  <div
-                                    key={entry.id}
-                                    ref={node => { collaborationMessageRefs.current[entry.id] = node; }}
-                                    tabIndex={-1}
-                                    data-collaboration-activity-id={entry.id}
-                                    data-notification-highlighted={highlightedCollaborationMessageId === entry.id ? "true" : undefined}
-                                    className={`min-w-0 break-words rounded-[12px] border-l-2 border-[var(--workspace-border)] px-3 py-2 ${entry.visibility === "internal" ? "bg-[var(--workspace-card-subtle)]" : "bg-[var(--workspace-card)]"} ${highlightedCollaborationMessageId === entry.id ? "outline outline-2 outline-[var(--workspace-accent-text)]" : ""}`}
-                                  >
-                                    <div className="flex flex-wrap items-start justify-between gap-2">
-                                      <div>
-                                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.78rem] leading-5 text-[var(--workspace-text-muted)]">
-                                          <span className="font-medium text-[var(--workspace-text)]">
-                                            {entry.authorDisplayName}
-                                          </span>
-                                          <span>{entry.authorRole}</span>
-                                        </div>
-                                        <div className="mt-1 text-[0.72rem] leading-5 text-[var(--workspace-text-muted)]">
-                                          {entry.visibility === "internal"
-                                            ? "Internal note · Team only"
-                                            : "Shared message · All participants"}
-                                        </div>
-                                      </div>
-                                      <div className="flex flex-col items-end gap-1">
-                                      <span className="text-[0.72rem] text-[var(--workspace-text-muted)]">
-                                        {formatCollaborationStatusTimestamp(entry.timestamp)}
-                                      </span>
-                                      </div>
-                                    </div>
-                                    <div className="mt-1 whitespace-pre-wrap text-[0.88rem] leading-6 text-[var(--workspace-text-muted)]">
-                                      {entry.text}
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                            ) : (
-                              <div className="rounded-[16px] bg-[var(--workspace-card)] px-4 py-3 text-[0.84rem] text-[var(--workspace-text-muted)]">
-                                No collaboration messages yet.
-                              </div>
-                            )}
-                          </section>
-
-                          <div data-collaboration-composers className="grid gap-3 sm:grid-cols-2">
-                          <section
-                            data-collaboration-owner-shared-message-composer
-                            className="min-w-0 space-y-2"
-                          >
-                            <label className="block space-y-2">
-                              <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-muted)]">
-                                Shared Message
-                              </span>
-                              <textarea
-                                value={collaborationOwnerSharedMessageDraft}
-                                disabled={
-                                  collaborationOwnerSharedMessageState.status === "sending"
-                                }
-                                onChange={(event) => {
-                                  const pendingRequest =
-                                    collaborationOwnerSharedMessageRequestRef.current;
-                                  if (pendingRequest && !pendingRequest.inFlight) {
-                                    collaborationOwnerSharedMessageRequestRef.current = null;
-                                  }
-                                  setCollaborationOwnerSharedMessageDraft(event.target.value);
-                                  if (
-                                    collaborationOwnerSharedMessageState.status === "failure"
-                                  ) {
-                                    setCollaborationOwnerSharedMessageState({ status: "idle" });
-                                  }
-                                }}
-                                rows={3}
-                                placeholder="Add a message to this Cuevion collaboration"
-                                className="min-h-[5.5rem] w-full resize-y rounded-[14px] border border-[var(--workspace-border)] bg-[var(--workspace-card)] px-3 py-2 text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-muted)] focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:cursor-not-allowed disabled:opacity-60"
-                              />
-                            </label>
-                            <div className="text-[0.76rem] leading-5 text-[var(--workspace-text-muted)]">
-                              All participants · Does not send an email.
-                            </div>
-                            {collaborationOwnerSharedMessageState.status === "failure" ? (
-                              <div
-                                data-collaboration-owner-shared-message-feedback
-                                className="rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.78rem] leading-6 text-[var(--workspace-text-muted)]"
-                              >
-                                {getCollaborationOwnerSharedMessageFailureMessage(
-                                  collaborationOwnerSharedMessageState.failureStatus,
-                                  collaborationOwnerSharedMessageState.retryAfterSeconds,
-                                )}
-                              </div>
-                            ) : null}
-                            <div className="flex justify-end">
-                              <button
-                                type="button"
-                                data-collaboration-owner-shared-message-action
-                                onClick={submitCollaborationOwnerSharedMessage}
-                                disabled={
-                                  collaborationOwnerSharedMessageState.status === "sending" ||
-                                  !collaborationOwnerSharedMessageDraft.trim()
-                                }
-                                className={
-                                  collaborationOwnerSharedMessageState.status !== "sending" &&
-                                  collaborationOwnerSharedMessageDraft.trim()
-                                    ? collaborationCompactPrimaryActionButtonClass
-                                    : collaborationCompactDisabledActionButtonClass
-                                }
-                              >
-                                {collaborationOwnerSharedMessageState.status === "sending"
-                                  ? "Adding Shared Message…"
-                                  : collaborationOwnerSharedMessageState.status === "failure" &&
-                                      collaborationOwnerSharedMessageState.canRetry
-                                    ? "Retry Shared Message"
-                                    : "Add Shared Message"}
-                              </button>
-                            </div>
-                          </section>
-
-                          <section
-                            data-collaboration-owner-internal-note-composer
-                            className="min-w-0 space-y-2"
-                          >
-                            <label className="block space-y-2">
-                              <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-muted)]">
-                                Internal Note
-                              </span>
-                              <textarea
-                                value={collaborationOwnerInternalNoteDraft}
-                                disabled={
-                                  collaborationOwnerInternalNoteState.status === "sending"
-                                }
-                                onChange={(event) => {
-                                  const pendingRequest =
-                                    collaborationOwnerInternalNoteRequestRef.current;
-                                  if (pendingRequest && !pendingRequest.inFlight) {
-                                    collaborationOwnerInternalNoteRequestRef.current = null;
-                                  }
-                                  setCollaborationOwnerInternalNoteDraft(event.target.value);
-                                  if (
-                                    collaborationOwnerInternalNoteState.status === "failure"
-                                  ) {
-                                    setCollaborationOwnerInternalNoteState({ status: "idle" });
-                                  }
-                                }}
-                                rows={3}
-                                placeholder="Add a private note for your Cuevion collaboration"
-                                className="min-h-[5.5rem] w-full resize-y rounded-[14px] border border-[var(--workspace-border)] bg-[var(--workspace-card)] px-3 py-2 text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-muted)] focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:cursor-not-allowed disabled:opacity-60"
-                              />
-                            </label>
-                            <div className="text-[0.76rem] leading-5 text-[var(--workspace-text-muted)]">
-                              Team only · Never visible to external guests.
-                            </div>
-                            {collaborationOwnerInternalNoteState.status === "failure" ? (
-                              <div
-                                data-collaboration-owner-internal-note-feedback
-                                className="rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.78rem] leading-6 text-[var(--workspace-text-muted)]"
-                              >
-                                {getCollaborationOwnerInternalNoteFailureMessage(
-                                  collaborationOwnerInternalNoteState.failureStatus,
-                                  collaborationOwnerInternalNoteState.retryAfterSeconds,
-                                )}
-                              </div>
-                            ) : null}
-                            <div className="flex justify-end">
-                              <button
-                                type="button"
-                                data-collaboration-owner-internal-note-action
-                                onClick={submitCollaborationOwnerInternalNote}
-                                disabled={
-                                  collaborationOwnerInternalNoteState.status === "sending" ||
-                                  !collaborationOwnerInternalNoteDraft.trim()
-                                }
-                                className={
-                                  collaborationOwnerInternalNoteState.status !== "sending" &&
-                                  collaborationOwnerInternalNoteDraft.trim()
-                                    ? collaborationCompactPrimaryActionButtonClass
-                                    : collaborationCompactDisabledActionButtonClass
-                                }
-                              >
-                                {collaborationOwnerInternalNoteState.status === "sending"
-                                  ? "Adding Internal Note…"
-                                  : collaborationOwnerInternalNoteState.status === "failure" &&
-                                      collaborationOwnerInternalNoteState.canRetry
-                                    ? "Retry Internal Note"
-                                    : "Add Internal Note"}
-                              </button>
-                            </div>
-                          </section>
                           </div>
+
+                          <CollaborationChatTimeline
+                            messages={activeCollaborationOwnerProjection.messages}
+                            currentCanonicalUserId={currentMemberUserId}
+                            activityRefs={collaborationMessageRefs}
+                            highlightedId={highlightedCollaborationMessageId}
+                            formatTimestamp={formatCollaborationStatusTimestamp}
+                          />
                         </section>
                       ) : collaborationOwnerProjection.status === "not_found" ? null
                       : collaborationOwnerProjection.status === "retryable_failure" ||
@@ -31559,6 +31390,10 @@ function MailboxView({
                     </label>
                       </>
                     )}
+                      <div id="collaboration-people-panel" hidden={collaborationAccessPanelMode === "access" && !isCollaborationPeopleOpen}>
+                        {collaborationAccessPanelMode === "access" ? <div className="flex justify-end">
+                          <button type="button" onClick={() => { setIsCollaborationPeopleOpen(false); collaborationPeopleTriggerRef.current?.focus(); }} className="min-h-11 rounded-full px-3 text-sm text-[var(--workspace-text-muted)] hover:bg-[var(--workspace-hover-surface)]">Back to conversation</button>
+                        </div> : null}
                       <CollaborationAccessPanel
                         key={`${activeCollaborationMessage.id}:${activeCollaborationSourceMailboxId ?? "unknown"}`}
                         mode={collaborationAccessPanelMode}
@@ -31581,28 +31416,41 @@ function MailboxView({
                         onRequestOverlayClose={requestCloseCollaborationOverlay}
                         onSecureLinkVisibilityChange={setIsCollaborationSecureLinkVisible}
                       />
+                      </div>
                     </div>
                   </div>
 
-                  <div className="mt-3 flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-[var(--workspace-border-soft)] pt-2">
-                    {hasActiveCollaborationOwnerLifecycle ? (
-                      <div className="ml-auto flex flex-wrap items-center gap-2">
-                        {collaborationLifecycleStatus === "failure" ? (
-                          <span role="status" className="text-sm text-[var(--workspace-text-soft)]">Collaboration could not be updated. Retry.</span>
-                        ) : null}
-                        {activeCollaborationOwnerProjection?.viewerAccess === "owner" ? (
-                          <button
-                            type="button"
-                            disabled={collaborationLifecycleStatus === "pending"}
-                            onClick={() => { void transitionCanonicalCollaboration(); }}
-                            className={collaborationCompactTertiaryActionButtonClass.replace("text-[var(--workspace-text-faint)]", "text-[var(--workspace-text-muted)]")}
-                          >
-                            {collaborationLifecycleStatus === "pending" ? "Updating…" :
-                              activeCollaborationOwnerProjection.state === "resolved" ? "Reopen Collaboration" : "Resolve Collaboration"}
-                          </button>
-                        ) : null}
-                      </div>
-                    ) : (
+                  {activeCollaborationOwnerProjection ? <CollaborationChatComposer
+                    key={activeCollaborationOwnerContextKey}
+                    shared={{
+                      draft: collaborationOwnerSharedMessageDraft,
+                      sending: collaborationOwnerSharedMessageState.status === "sending",
+                      error: collaborationOwnerSharedMessageState.status === "failure" ? getCollaborationOwnerSharedMessageFailureMessage(collaborationOwnerSharedMessageState.failureStatus, collaborationOwnerSharedMessageState.retryAfterSeconds) : null,
+                      canRetry: collaborationOwnerSharedMessageState.status === "failure" && collaborationOwnerSharedMessageState.canRetry,
+                      onChange: (text) => {
+                        const pendingRequest = collaborationOwnerSharedMessageRequestRef.current;
+                        if (pendingRequest && !pendingRequest.inFlight) collaborationOwnerSharedMessageRequestRef.current = null;
+                        setCollaborationOwnerSharedMessageDraft(text);
+                        if (collaborationOwnerSharedMessageState.status === "failure") setCollaborationOwnerSharedMessageState({ status: "idle" });
+                      },
+                      onSend: submitCollaborationOwnerSharedMessage,
+                    }}
+                    internal={{
+                      draft: collaborationOwnerInternalNoteDraft,
+                      sending: collaborationOwnerInternalNoteState.status === "sending",
+                      error: collaborationOwnerInternalNoteState.status === "failure" ? getCollaborationOwnerInternalNoteFailureMessage(collaborationOwnerInternalNoteState.failureStatus, collaborationOwnerInternalNoteState.retryAfterSeconds) : null,
+                      canRetry: collaborationOwnerInternalNoteState.status === "failure" && collaborationOwnerInternalNoteState.canRetry,
+                      onChange: (text) => {
+                        const pendingRequest = collaborationOwnerInternalNoteRequestRef.current;
+                        if (pendingRequest && !pendingRequest.inFlight) collaborationOwnerInternalNoteRequestRef.current = null;
+                        setCollaborationOwnerInternalNoteDraft(text);
+                        if (collaborationOwnerInternalNoteState.status === "failure") setCollaborationOwnerInternalNoteState({ status: "idle" });
+                      },
+                      onSend: submitCollaborationOwnerInternalNote,
+                    }}
+                  /> : null}
+                  <div className={hasActiveCollaborationOwnerLifecycle ? "hidden" : "mt-3 flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-[var(--workspace-border-soft)] pt-2"}>
+                    {hasActiveCollaborationOwnerLifecycle ? null : (
                       <>
                     <div>
                       {!isPreStartCollaboration &&

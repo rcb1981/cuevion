@@ -1,0 +1,34 @@
+{
+  "passed": 23,
+  "tests": [
+    "page renders with one Shared composer and People closed",
+    "strict identity alignment and chronological DOM order",
+    "1600×1000: no overflow, one content scroll, reachable composer, aligned bubbles, People",
+    "1280×800: no overflow, one content scroll, reachable composer, aligned bubbles, People",
+    "768×1024: no overflow, one content scroll, reachable composer, aligned bubbles, People",
+    "375×812: no overflow, one content scroll, reachable composer, aligned bubbles, People",
+    "independent drafts and Internal-only privacy cue",
+    "Shared send uses existing handler and clears only Shared",
+    "Internal send uses existing handler and clears only Internal",
+    "failure retains draft, safe message, explicit retry keeps idempotency key",
+    "in-flight guards survive mode switch, drafts remain independent",
+    "Enter inserts a newline without sending; selector is keyboard accessible",
+    "Shared C3D exact ref, focus, highlight before displayed acknowledgement",
+    "Internal C3D exact ref, focus, highlight before displayed acknowledgement",
+    "Guest C3D exact ref, focus, highlight before displayed acknowledgement",
+    "missing activity refuses displayed acknowledgement",
+    "source context uses existing subject/sender/time data",
+    "Resolve and Reopen preserve existing handlers and status",
+    "People exposes historical guests and adds an eligible Team member",
+    "guest invitation produces transient secure link; Copy works",
+    "People toggling preserves link and overlay close protection",
+    "guest revoke retains history and clears matching transient link",
+    "no browser errors or external requests"
+  ],
+  "errors": [],
+  "network": [
+    "http://127.0.0.1:4175/",
+    "http://127.0.0.1:4175/fixture.css",
+    "http://127.0.0.1:4175/fixture.js"
+  ]
+}

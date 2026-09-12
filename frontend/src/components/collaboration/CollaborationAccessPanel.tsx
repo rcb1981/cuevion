@@ -794,14 +794,14 @@ export function CollaborationAccessPanel({
     <section data-collaboration-access-panel className="space-y-3 border-t border-[var(--workspace-border-soft)] pt-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-muted)]">Participants &amp; access</h3>
+          <h3 className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-muted)]">People</h3>
         </div>
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2">
         <section className="min-w-0 space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h4 className="text-[0.84rem] font-medium text-[var(--workspace-text)]">Team members</h4>
+            <h4 className="text-[0.84rem] font-medium text-[var(--workspace-text)]">Cuevion Team</h4>
             {isOwner ? (
               <button type="button" onClick={() => setIsAddTeamOpen((current) => !current)} disabled={teamLimitReached || eligibleTeamMembers.length === 0 || mutationInFlight} className={secondaryButtonClass}>Add Team member</button>
             ) : null}
