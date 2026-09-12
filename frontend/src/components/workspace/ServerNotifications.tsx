@@ -2,6 +2,9 @@ import { useEffect } from "react";
 import { notificationCopy, type ServerNotification } from "../../lib/notificationsApi";
 import type { NotificationStoreState, WorkspaceNotificationStore } from "../../lib/workspaceNotificationStore";
 
+const notificationSecondaryActionClassName =
+  "rounded-lg border border-[var(--workspace-border-hover)] bg-[var(--workspace-card)] px-3 py-2 text-sm text-[var(--workspace-text)] enabled:hover:bg-[var(--workspace-hover-surface)] enabled:hover:border-[var(--workspace-text-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--workspace-accent-text)] disabled:cursor-not-allowed disabled:text-[var(--workspace-text-muted)]";
+
 export type ServerNotificationsProps = {
   store: WorkspaceNotificationStore; state: NotificationStoreState;
   onOpen: (row: ServerNotification) => void; preview?: boolean;
@@ -12,10 +15,10 @@ export function ServerNotifications({ store, state, onOpen, preview = false }: S
   return <div className="min-w-0 space-y-3" data-server-notifications={preview ? "dashboard" : "workbench"}>
     <div className="flex items-center justify-between gap-3">
       {preview ? <h2 className="text-xl font-semibold text-[var(--workspace-text)]">Notifications</h2> : <span className="text-sm text-[var(--workspace-text-soft)]">Your collaboration updates</span>}
-      <button type="button" disabled={state.listLoading || state.loadMoreLoading} onClick={() => { void store.refresh(); }} className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2">Refresh</button>
+      <button type="button" disabled={state.listLoading || state.loadMoreLoading} onClick={() => { void store.refresh(); }} className={notificationSecondaryActionClassName}>Refresh</button>
     </div>
     {state.listLoading ? <p role="status">Loading notifications…</p> : null}
-    {state.listError ? <div role="alert">Notifications could not be loaded. <button type="button" onClick={() => { void store.refresh(); }} className="underline">Retry</button></div> : null}
+    {state.listError ? <div role="alert">Notifications could not be loaded. <button type="button" onClick={() => { void store.refresh(); }} className={notificationSecondaryActionClassName}>Retry</button></div> : null}
     {!state.listLoading && !state.listError && state.firstPageLoaded && ids.length === 0 ? <p>No notifications yet.</p> : null}
     <div className="divide-y divide-[var(--workspace-divider)]">
       {ids.map(id => {

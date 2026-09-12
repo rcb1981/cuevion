@@ -1,6 +1,7 @@
 // Build replaces markers with exact WorkspaceShell source. This file is not an app route.
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { getReturnedReplySenderAddress } from '../../src/lib/returnedReplyEvidence';
 import { CollaborationAccessPanel } from '../../src/components/collaboration/CollaborationAccessPanel';
 import { CollaborationChatTimeline, CollaborationChatComposer } from '../../src/components/collaboration/CollaborationChat';
 import { prepareSharedCollaborationMessageForOwner, prepareInternalCollaborationMessageForOwner, resolveCollaborationForOwner, reopenCollaborationForOwner } from '../../src/lib/collaborationOwnerWriteApi';
@@ -28,7 +29,7 @@ let canonical = {
 };
 const fixture = window.fixture = { requests: [], failNext: false, holdNext: false, release: null, marks: [], copied: '', refs: null, projection: null };
 const sourceMail = {
-  id: 'mail', sender: 'Alex Morgan', from: 'alex@example.test', to: 'Rutger <rutger@example.test>, Jamie <jamie@example.test>', cc: 'Dan <dan@example.test>', subject: canonical.source.subject,
+  id: 'mail', sender: 'Alex Morgan', from: new URLSearchParams(location.search).has('formatted-sender') ? 'Alex Morgan <alex@example.test>' : 'alex@example.test', to: 'Rutger <rutger@example.test>, Jamie <jamie@example.test>', cc: 'Dan <dan@example.test>', subject: canonical.source.subject,
   createdAt: new Date(now).toISOString(), timestamp: new Date(now).toISOString(), body: ['Hi Rutger,', 'Please review the final September master and artwork before Friday.', 'The WAV and release notes are attached.\nThanks, Alex'],
   bodyHtml: new URLSearchParams(location.search).has('plain') ? undefined : `<html><head><style>.release{max-width:600px;margin:auto;font-family:Arial,sans-serif;color:#243b30;background:#f7f5ed;padding:24px;}h1{font-size:26px;}p{line-height:1.6;}</style></head><body><div class="release"><p>SEPTEMBER RELEASE</p><h1>Ready for the final listen</h1><p>Hi Rutger,</p><p>Here’s the final master for our September release. Please check the transition into the second chorus and confirm the artwork with Dan.</p><img src="cid:artwork" alt="September artwork" width="80" height="80"><p>The WAV and release notes are attached. We’re aiming to deliver everything by Friday.</p><p><a href="https://example.test/release-notes">Read the release notes</a></p><p>Thanks,<br>Alex Morgan</p><script>window.fixtureUnsafe=true</script><img src="https://blocked.example.test/tracker.png" onerror="alert('unsafe')"></div></body></html>`,
   attachments: [{id:'cover',name:'artwork.png',contentId:'artwork',disposition:'inline',mimeType:'image/png',inlineSrc:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=='},{id:'master',name:'September-final-master.wav',mimeType:'audio/wav',size:24500000},{id:'notes',name:'Release-notes.pdf',mimeType:'application/pdf',size:138000}],

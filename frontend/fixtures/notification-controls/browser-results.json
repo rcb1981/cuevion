@@ -1,0 +1,89 @@
+{
+  "passed": 8,
+  "results": [
+    "light: Dashboard/page Refresh, Retry and disabled Refresh contrast",
+    "light: secondary hover and keyboard focus visible",
+    "light: Refresh and Retry keep existing single-call behavior",
+    "dark: Dashboard/page Refresh, Retry and disabled Refresh contrast",
+    "dark: secondary hover and keyboard focus visible",
+    "dark: Refresh and Retry keep existing single-call behavior",
+    "Actual Collaboration Email uses clean From and preserves tabs/body",
+    "No browser errors or external network requests"
+  ],
+  "ratios": {
+    "light": [
+      {
+        "mode": "ready",
+        "view": "dashboard",
+        "ratio": 14.74726643261438
+      },
+      {
+        "mode": "ready",
+        "view": "page",
+        "ratio": 14.74726643261438
+      },
+      {
+        "mode": "loading",
+        "view": "dashboard",
+        "ratio": 5.210823824649382
+      },
+      {
+        "mode": "loading",
+        "view": "page",
+        "ratio": 5.210823824649382
+      },
+      {
+        "mode": "retry",
+        "view": "dashboard",
+        "ratio": 14.74726643261438
+      },
+      {
+        "mode": "retry",
+        "view": "page",
+        "ratio": 14.74726643261438
+      }
+    ],
+    "dark": [
+      {
+        "mode": "ready",
+        "view": "dashboard",
+        "ratio": 12.238760808161702
+      },
+      {
+        "mode": "ready",
+        "view": "page",
+        "ratio": 12.238760808161702
+      },
+      {
+        "mode": "loading",
+        "view": "dashboard",
+        "ratio": 7.6351753136939795
+      },
+      {
+        "mode": "loading",
+        "view": "page",
+        "ratio": 7.6351753136939795
+      },
+      {
+        "mode": "retry",
+        "view": "dashboard",
+        "ratio": 12.238760808161702
+      },
+      {
+        "mode": "retry",
+        "view": "page",
+        "ratio": 12.238760808161702
+      }
+    ]
+  },
+  "errors": [],
+  "network": [
+    "http://127.0.0.1:4180/?theme=light",
+    "http://127.0.0.1:4180/fixture.css",
+    "http://127.0.0.1:4180/fixture.js",
+    "http://127.0.0.1:4180/?theme=dark",
+    "http://127.0.0.1:4176/?formatted-sender=1",
+    "http://127.0.0.1:4176/fixture.css",
+    "http://127.0.0.1:4176/fixture.js"
+  ]
+}

@@ -9240,6 +9240,16 @@ function formatCollaborationStatusTimestamp(timestamp: number) {
   })}`;
 }
 
+function formatCollaborationEmailSender(message: MailMessage) {
+  // sender is the canonical display field; from can already include that name.
+  const displayName = message.sender.trim().split("<", 1)[0].trim();
+  const address = getReturnedReplySenderAddress(message);
+  if (!address.includes("@")) return displayName || message.from.trim();
+  return !displayName || displayName.toLowerCase() === address
+    ? address
+    : `${displayName} <${address}>`;
+}
+
 function formatCollaborationSourceTimestamp(timestamp: string) {
   const parsedTimestamp = Date.parse(timestamp);
   return Number.isFinite(parsedTimestamp)
@@ -20510,7 +20520,7 @@ function MailboxView({
     const plainContentClassName = nativeBodyTextClass;
     const expandedMessageHeader = options?.context === "collaboration" ? (
       <dl className="col-span-2 grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 border-b border-[var(--workspace-border)] pb-4 text-sm [overflow-wrap:anywhere]">
-        <dt className="text-[var(--workspace-text-muted)]">From</dt><dd>{threadMessage.sender} &lt;{threadMessage.from}&gt;</dd>
+        <dt className="text-[var(--workspace-text-muted)]">From</dt><dd>{formatCollaborationEmailSender(threadMessage)}</dd>
         {threadMessage.to ? <><dt className="text-[var(--workspace-text-muted)]">To</dt><dd>{threadMessage.to}</dd></> : null}
         {threadMessage.cc ? <><dt className="text-[var(--workspace-text-muted)]">Cc</dt><dd>{threadMessage.cc}</dd></> : null}
         <dt className="text-[var(--workspace-text-muted)]">Date</dt><dd>{resolvedTimestamp.dateTime ? <time dateTime={resolvedTimestamp.dateTime} title={resolvedTimestamp.dateTime}>{formatCollaborationSourceTimestamp(resolvedTimestamp.dateTime)}</time> : timestamp}</dd>

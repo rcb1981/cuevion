@@ -1,0 +1,10 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
+import { build } from '../../../node_modules/esbuild/lib/main.js';
+const here=path.dirname(fileURLToPath(import.meta.url)), frontend=path.resolve(here,'../..'), out='/private/tmp/cuevion-notification-controls';
+fs.mkdirSync(out,{recursive:true});
+await build({entryPoints:[path.join(here,'harness.tsx')],bundle:true,outfile:path.join(out,'fixture.js'),jsx:'automatic',define:{'process.env.NODE_ENV':'"development"'}});
+execFileSync(process.execPath,[path.join(frontend,'node_modules/tailwindcss/lib/cli.js'),'-i',path.join(frontend,'src/index.css'),'-o',path.join(out,'fixture.css'),'--config',path.join(frontend,'tailwind.config.js'),'--content',[path.join(here,'harness.tsx'),path.join(frontend,'src/components/workspace/ServerNotifications.tsx')].join(',')],{cwd:frontend,stdio:'inherit'});
+fs.writeFileSync(path.join(out,'index.html'),'<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><link rel="stylesheet" href="/fixture.css"><title>Notification control fixture</title><body><div id="root"></div><script src="/fixture.js"></script></body></html>');
