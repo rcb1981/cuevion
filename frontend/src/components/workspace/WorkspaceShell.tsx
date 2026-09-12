@@ -44,6 +44,7 @@ import {
   DesktopComposeBodyEditor,
   type DesktopComposeBodyEditorHandle,
 } from "./DesktopComposeBodyEditor";
+import { CollaborationContextTabs, CollaborationLifecycleMenu, type CollaborationContextTab } from "../collaboration/CollaborationContextControls";
 import { CollaborationChatTimeline, CollaborationChatComposer } from "../collaboration/CollaborationChat";
 import { CollaborationAccessPanel } from "../collaboration/CollaborationAccessPanel";
 import type { BundleOrganizerWorkspaceMessage } from "./BundleOrganizerSurface";
@@ -17808,7 +17809,13 @@ function MailboxView({
   const collaborationOverlayOpenerRef = useRef<HTMLElement | null>(null);
   const exactNotificationProjectionRef = useRef<HTMLElement | null>(null);
   const [isCollaborationPeopleOpen, setIsCollaborationPeopleOpen] = useState(false);
-  const [isCollaborationSourceOpen, setIsCollaborationSourceOpen] = useState(false);
+  const [collaborationContextTab, setCollaborationContextTab] = useState<CollaborationContextTab>("conversation");
+  const [hasCollaborationEmailOpened, setHasCollaborationEmailOpened] = useState(false);
+  const selectCollaborationContextTab = (tab: CollaborationContextTab) => {
+    setCollaborationContextTab(tab);
+    if (tab === "email") setHasCollaborationEmailOpened(true);
+    setIsCollaborationPeopleOpen(false);
+  };
   const collaborationPeopleTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const [collaborationOwnerProjection, setCollaborationOwnerProjection] =
@@ -20312,6 +20319,7 @@ function MailboxView({
     density: "split" | "full",
     options?: {
       actions?: ReactNode;
+      context?: "collaboration";
       collapsed?: boolean;
       canCollapse?: boolean;
     },
@@ -20337,7 +20345,8 @@ function MailboxView({
         }`
       : null;
     const resolvedTimestamp = resolveDesktopThreadTimestamp(threadMessage);
-    const messageContentId = `thread-message-content-${density}-${threadMessage.id}`;
+    const contentContext = options?.context ?? density;
+    const messageContentId = `thread-message-content-${contentContext}-${threadMessage.id}`;
     const toggleMemberDisclosure = () => {
       setDesktopThreadDisclosureState((currentState) => {
         const reconciledState = reconcileDesktopThreadDisclosureState(
@@ -20359,7 +20368,7 @@ function MailboxView({
     ) : (
       <span>{resolvedTimestamp.label}</span>
     );
-    const messageBlockClassName =
+    const messageBlockClassName = options?.context === "collaboration" ? "min-w-0 w-full" :
       "w-full rounded-[14px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3.5 md:px-5 md:py-4";
 
     if (collapsed) {
@@ -20451,7 +20460,7 @@ function MailboxView({
       activeDesktopThreadDisclosureState.expandedQuoteMessageIds.includes(
         threadMessage.id,
       );
-    const quoteContentId = `thread-message-quote-${density}-${threadMessage.id}`;
+    const quoteContentId = `thread-message-quote-${contentContext}-${threadMessage.id}`;
     const quoteVisibilityClass =
       hasReliableQuote && !quoteExpanded
         ? "[&_[data-compose-quote='true']]:!hidden [&_[data-email-quote='true']]:!hidden [&_.gmail_quote]:!hidden"
@@ -20499,7 +20508,15 @@ function MailboxView({
       density === "full" ? "leading-[1.82]" : "leading-[1.72]"
     } ${nativeBodyTextClass}`;
     const plainContentClassName = nativeBodyTextClass;
-    const expandedMessageHeader = (
+    const expandedMessageHeader = options?.context === "collaboration" ? (
+      <dl className="col-span-2 grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 border-b border-[var(--workspace-border)] pb-4 text-sm [overflow-wrap:anywhere]">
+        <dt className="text-[var(--workspace-text-muted)]">From</dt><dd>{threadMessage.sender} &lt;{threadMessage.from}&gt;</dd>
+        {threadMessage.to ? <><dt className="text-[var(--workspace-text-muted)]">To</dt><dd>{threadMessage.to}</dd></> : null}
+        {threadMessage.cc ? <><dt className="text-[var(--workspace-text-muted)]">Cc</dt><dd>{threadMessage.cc}</dd></> : null}
+        <dt className="text-[var(--workspace-text-muted)]">Date</dt><dd>{resolvedTimestamp.dateTime ? <time dateTime={resolvedTimestamp.dateTime} title={resolvedTimestamp.dateTime}>{formatCollaborationSourceTimestamp(resolvedTimestamp.dateTime)}</time> : timestamp}</dd>
+        <dt className="text-[var(--workspace-text-muted)]">Subject</dt><dd className="font-medium">{threadMessage.subject}</dd>
+      </dl>
+    ) : (
       <>
         <div className="min-w-0">
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
@@ -20569,7 +20586,7 @@ function MailboxView({
             }
           >
             {hasHiddenRemoteImages ? (
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[color:rgba(129,144,122,0.08)] bg-[color:rgba(252,249,242,0.72)] px-3 py-2 text-[0.74rem] text-[var(--workspace-text-soft)] dark:border-[color:rgba(121,151,120,0.1)] dark:bg-[color:rgba(86,114,87,0.03)]">
+              <div style={options?.context === "collaboration" ? { background: "var(--workspace-card-subtle)", color: "var(--workspace-text-muted)", borderColor: "var(--workspace-border)" } : undefined} className="flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[color:rgba(129,144,122,0.08)] bg-[color:rgba(252,249,242,0.72)] px-3 py-2 text-[0.74rem] text-[var(--workspace-text-soft)] dark:border-[color:rgba(121,151,120,0.1)] dark:bg-[color:rgba(86,114,87,0.03)]">
                 <div>
                   {bodyRenderMode.remoteImageCount === 1
                     ? "This email contains a remote image."
@@ -21174,7 +21191,7 @@ function MailboxView({
     collaborationOwnerProjectionRequestRef.current = { identityKey, requestId, inFlight: false, operation: "read", messageId: target.message.id, sourceMailboxId: mailbox.id, locator };
     setCollaborationOwnerProjection({ status: "success", identityKey, requestId, collaboration });
     setIsCollaborationPeopleOpen(false);
-    setIsCollaborationSourceOpen(false);
+    setCollaborationContextTab("conversation");
     setHighlightedCollaborationMessageId(row.activityId);
     setCollaborationHistoryExpanded(true);
   }, [serverNotificationDisplay, mailbox.id]);
@@ -23310,8 +23327,9 @@ function MailboxView({
   };
 
   const fenceCollaborationOwnerProjection = () => {
+    setHasCollaborationEmailOpened(false);
     setIsCollaborationPeopleOpen(false);
-    setIsCollaborationSourceOpen(false);
+    setCollaborationContextTab("conversation");
     const requestId = collaborationOwnerProjectionGenerationRef.current + 1;
     collaborationOwnerProjectionGenerationRef.current = requestId;
     collaborationOwnerSharedMessageGenerationRef.current += 1;
@@ -30700,44 +30718,33 @@ function MailboxView({
                   className="flex h-[min(820px,calc(100dvh-2rem))] max-h-[calc(100dvh-2rem)] w-full max-w-[880px] min-h-0 flex-col overflow-hidden rounded-[28px] border border-[var(--workspace-border)] bg-[var(--workspace-modal-bg)] p-4 shadow-[0_28px_80px_rgba(61,44,32,0.18),0_10px_26px_rgba(61,44,32,0.1)] sm:max-h-[calc(100dvh-3rem)] sm:p-5 md:max-h-[calc(100dvh-4rem)] md:p-5 [&_button]:min-h-10 [&_button:focus-visible]:outline [&_button:focus-visible]:outline-2 [&_button:focus-visible]:outline-offset-2 [&_button:focus-visible]:outline-[var(--workspace-accent-text)]"
                   onMouseDown={(event) => event.stopPropagation()}
                 >
-                  <div className="flex shrink-0 items-start justify-between gap-4">
-                    <div className="min-w-0 space-y-1">
-                      <h2 id="collaboration-dialog-title" className="text-[1.15rem] font-medium tracking-tight text-[var(--workspace-text)]">
-                        Collaboration
-                      </h2>
-                      <p className="truncate text-[0.82rem] leading-6 text-[var(--workspace-text-muted)]" title={activeCollaborationOwnerProjection?.source.subject ?? activeCollaborationMessage.subject}>
-                        {activeCollaborationOwnerProjection?.source.subject ??
-                          activeCollaborationMessage.subject}
-                      </p>
+                  <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 pb-2">
+                    <h2 id="collaboration-dialog-title" className="text-base font-medium tracking-tight text-[var(--workspace-text)] sm:text-[1.15rem]">Collaboration</h2>
+                    <div className="flex items-center gap-0.5">
+                      {activeCollaborationOwnerProjection ? <>
+                        <button ref={collaborationPeopleTriggerRef} type="button" aria-expanded={isCollaborationPeopleOpen} aria-controls="collaboration-people-panel" onClick={() => setIsCollaborationPeopleOpen(open => !open)} className="min-h-10 rounded-full px-2 text-xs text-[var(--workspace-text)] hover:bg-[var(--workspace-hover-surface)] sm:px-3 sm:text-sm">
+                          People · {activeCollaborationOwnerProjection.participants.length + (activeCollaborationOwnerProjection.viewerAccess === "owner" ? activeCollaborationOwnerProjection.externalGuests.filter(guest => guest.status === "active" || guest.status === "pending").length : 0)}
+                        </button>
+                        {activeCollaborationOwnerProjection.viewerAccess === "owner" ? <CollaborationLifecycleMenu
+                          key={activeCollaborationOwnerContextKey}
+                          resolved={activeCollaborationOwnerProjection.state === "resolved"}
+                          pending={collaborationLifecycleStatus === "pending"}
+                          themeMode={themeMode}
+                          onTransition={() => { void transitionCanonicalCollaboration(); }}
+                        /> : null}
+                      </> : null}
+                      <button type="button" onClick={requestCloseCollaborationOverlay} aria-label="Close collaboration" className="inline-flex min-h-10 min-w-10 items-center justify-center rounded-full text-xl text-[var(--workspace-text-muted)] hover:bg-[var(--workspace-hover-surface)]"><span aria-hidden="true">×</span></button>
                     </div>
-                    <div className="flex shrink-0 items-center gap-1">
-                      {activeCollaborationOwnerProjection ? <button
-                        ref={collaborationPeopleTriggerRef}
-                        type="button"
-                        aria-expanded={isCollaborationPeopleOpen}
-                        aria-controls="collaboration-people-panel"
-                        onClick={() => setIsCollaborationPeopleOpen(open => !open)}
-                        className="min-h-11 rounded-full px-3 text-sm text-[var(--workspace-text)] hover:bg-[var(--workspace-hover-surface)]"
-                      >People · {activeCollaborationOwnerProjection.participants.length + (activeCollaborationOwnerProjection.viewerAccess === "owner" ? activeCollaborationOwnerProjection.externalGuests.filter(guest => guest.status === "active" || guest.status === "pending").length : 0)}</button> : null}
-                    <button
-                      type="button"
-                      onClick={requestCloseCollaborationOverlay}
-                      aria-label="Close collaboration"
-                      className="inline-flex min-h-10 shrink-0 items-center justify-center rounded-full px-3 text-[0.8rem] text-[var(--workspace-text-muted)] hover:bg-[var(--workspace-hover-surface)]"
-                    >
-                      <span aria-hidden="true" className="text-xl">×</span>
-                    </button>
+                    <p className="col-span-2 truncate text-sm text-[var(--workspace-text)]" title={activeCollaborationMessage.subject}>{activeCollaborationMessage.subject}</p>
+                    <div className="col-span-2 flex min-w-0 items-center justify-between gap-3 text-xs text-[var(--workspace-text-muted)]">
+                      <p className="min-w-0 truncate" title={activeCollaborationMessage.from}>From {activeCollaborationMessage.sender || activeCollaborationMessage.from}</p>
+                      {activeCollaborationOwnerProjection ? <span data-collaboration-lifecycle-status className="shrink-0 rounded-full bg-[var(--workspace-card-subtle)] px-2 py-1">{getCollaborationOwnerStateLabel(activeCollaborationOwnerProjection.state)}</span> : null}
                     </div>
+                    {collaborationLifecycleStatus === "failure" ? <p role="status" className="col-span-2 text-xs text-[var(--workspace-text-muted)]">Collaboration could not be updated. Retry.</p> : null}
                   </div>
-                  {activeCollaborationOwnerProjection ? <div className="flex shrink-0 flex-wrap items-center gap-x-3 border-b border-[var(--workspace-border-soft)] pb-1 text-xs text-[var(--workspace-text-muted)]">
-                    <span data-collaboration-lifecycle-status>{getCollaborationOwnerStateLabel(activeCollaborationOwnerProjection.state)}</span>
-                    <button type="button" aria-expanded={isCollaborationSourceOpen} aria-controls="collaboration-source-email" onClick={() => { setIsCollaborationSourceOpen(open => !open); setIsCollaborationPeopleOpen(false); }} className="min-h-11 rounded-lg px-1 hover:text-[var(--workspace-text)]">View source email</button>
-                    {activeCollaborationOwnerProjection.viewerAccess === "owner" ? <button type="button" disabled={collaborationLifecycleStatus === "pending"} onClick={() => { void transitionCanonicalCollaboration(); }} className="min-h-11 rounded-lg px-1 hover:text-[var(--workspace-text)] disabled:opacity-45">
-                      {collaborationLifecycleStatus === "pending" ? "Updating…" : activeCollaborationOwnerProjection.state === "resolved" ? "Reopen collaboration" : "Resolve collaboration"}
-                    </button> : null}
-                    {collaborationLifecycleStatus === "failure" ? <span role="status">Collaboration could not be updated. Retry.</span> : null}
-                  </div> : null}
+                  {activeCollaborationOwnerProjection ? <CollaborationContextTabs selected={collaborationContextTab} onSelect={selectCollaborationContextTab} /> : null}
 
+                  <div id="collaboration-panel-conversation" role="tabpanel" aria-labelledby="collaboration-tab-conversation" className="min-h-0 flex-1 flex-col" style={{ display: (collaborationContextTab !== "conversation" || isCollaborationPeopleOpen || collaborationAccessPanelMode === "start") ? "none" : "flex" }}>
                   <div
                     data-collaboration-scroll-body
                     className="mt-3 min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1"
@@ -30760,25 +30767,6 @@ function MailboxView({
                           data-collaboration-owner-shared-message-enabled="true"
                           className="space-y-4"
                         >
-                          <div id="collaboration-source-email" hidden={!isCollaborationSourceOpen} className="text-[0.78rem] text-[var(--workspace-text-muted)]">
-                            <div className="min-w-0 break-words border-l border-[var(--workspace-border)] pl-3 py-2">
-                              <div className="text-[0.95rem] font-medium text-[var(--workspace-text)]">
-                                {activeCollaborationOwnerProjection.source.subject}
-                              </div>
-                              <div className="mt-1 text-[0.78rem] leading-6 text-[var(--workspace-text-muted)]">
-                                {[
-                                  activeCollaborationOwnerProjection.source.senderDisplay,
-                                  activeCollaborationOwnerProjection.source.fromDisplay,
-                                  formatCollaborationSourceTimestamp(
-                                    activeCollaborationOwnerProjection.source.timestamp,
-                                  ),
-                                ]
-                                  .filter(Boolean)
-                                  .join(" · ")}
-                              </div>
-                            </div>
-                          </div>
-
                           <CollaborationChatTimeline
                             messages={activeCollaborationOwnerProjection.messages}
                             currentCanonicalUserId={currentMemberUserId}
@@ -31390,33 +31378,6 @@ function MailboxView({
                     </label>
                       </>
                     )}
-                      <div id="collaboration-people-panel" hidden={collaborationAccessPanelMode === "access" && !isCollaborationPeopleOpen}>
-                        {collaborationAccessPanelMode === "access" ? <div className="flex justify-end">
-                          <button type="button" onClick={() => { setIsCollaborationPeopleOpen(false); collaborationPeopleTriggerRef.current?.focus(); }} className="min-h-11 rounded-full px-3 text-sm text-[var(--workspace-text-muted)] hover:bg-[var(--workspace-hover-surface)]">Back to conversation</button>
-                        </div> : null}
-                      <CollaborationAccessPanel
-                        key={`${activeCollaborationMessage.id}:${activeCollaborationSourceMailboxId ?? "unknown"}`}
-                        mode={collaborationAccessPanelMode}
-                        contextKey={activeCollaborationOwnerContextKey}
-                        viewerIdentityKey={currentViewerPersistenceKey}
-                        locator={activeCollaborationOwnerLocator}
-                        collaboration={activeCollaborationOwnerProjection}
-                        teamMembers={teamMemberEntries
-                          .filter((member) => member.status === "Active")
-                          .map((member) => ({
-                            memberUserId: member.memberUserId ?? null,
-                            displayName: member.name,
-                            email: member.email,
-                            status: "active" as const,
-                          }))}
-                        currentMemberUserId={currentMemberUserId}
-                        currentUserEmail={currentUserEmail}
-                        onCanonicalCollaboration={applyCanonicalCollaborationAccessResult}
-                        onCanonicalCreation={onCanonicalCollaborationMutation}
-                        onRequestOverlayClose={requestCloseCollaborationOverlay}
-                        onSecureLinkVisibilityChange={setIsCollaborationSecureLinkVisible}
-                      />
-                      </div>
                     </div>
                   </div>
 
@@ -31449,6 +31410,43 @@ function MailboxView({
                       onSend: submitCollaborationOwnerInternalNote,
                     }}
                   /> : null}
+                  </div>
+                  {activeCollaborationOwnerProjection ? <section
+                    id="collaboration-panel-email"
+                    role="tabpanel"
+                    aria-labelledby="collaboration-tab-email"
+                    hidden={collaborationContextTab !== "email" || isCollaborationPeopleOpen}
+                    className="min-h-0 flex-1 overflow-y-auto overscroll-contain py-4 text-[var(--workspace-text)] [overflow-wrap:anywhere] [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-[var(--workspace-accent-border)]"
+                  >
+                    {hasCollaborationEmailOpened ? renderThreadMessage(activeCollaborationMessage, "full", { context: "collaboration" }) : null}
+                  </section> : null}
+                      <div id="collaboration-people-panel" hidden={collaborationAccessPanelMode !== "start" && !isCollaborationPeopleOpen} className="min-h-0 flex-1 overflow-y-auto overscroll-contain py-3">
+                        {collaborationAccessPanelMode === "access" ? <div className="flex justify-end">
+                          <button type="button" onClick={() => { setIsCollaborationPeopleOpen(false); collaborationPeopleTriggerRef.current?.focus(); }} className="min-h-11 rounded-full px-3 text-sm text-[var(--workspace-text-muted)] hover:bg-[var(--workspace-hover-surface)]">Back to {collaborationContextTab === "email" ? "email" : "conversation"}</button>
+                        </div> : null}
+                      <CollaborationAccessPanel
+                        key={`${activeCollaborationMessage.id}:${activeCollaborationSourceMailboxId ?? "unknown"}`}
+                        mode={collaborationAccessPanelMode}
+                        contextKey={activeCollaborationOwnerContextKey}
+                        viewerIdentityKey={currentViewerPersistenceKey}
+                        locator={activeCollaborationOwnerLocator}
+                        collaboration={activeCollaborationOwnerProjection}
+                        teamMembers={teamMemberEntries
+                          .filter((member) => member.status === "Active")
+                          .map((member) => ({
+                            memberUserId: member.memberUserId ?? null,
+                            displayName: member.name,
+                            email: member.email,
+                            status: "active" as const,
+                          }))}
+                        currentMemberUserId={currentMemberUserId}
+                        currentUserEmail={currentUserEmail}
+                        onCanonicalCollaboration={applyCanonicalCollaborationAccessResult}
+                        onCanonicalCreation={onCanonicalCollaborationMutation}
+                        onRequestOverlayClose={requestCloseCollaborationOverlay}
+                        onSecureLinkVisibilityChange={setIsCollaborationSecureLinkVisible}
+                      />
+                      </div>
                   <div className={hasActiveCollaborationOwnerLifecycle ? "hidden" : "mt-3 flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-[var(--workspace-border-soft)] pt-2"}>
                     {hasActiveCollaborationOwnerLifecycle ? null : (
                       <>

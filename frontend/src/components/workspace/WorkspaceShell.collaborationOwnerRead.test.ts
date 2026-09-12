@@ -57,7 +57,7 @@ try {
     ") : isPreStartCollaboration ? (",
   );
   const ownerLifecycleFooterRegion = sourceBetween(workspaceSource,
-    '<span data-collaboration-lifecycle-status>', 'data-collaboration-scroll-body');
+    '<span data-collaboration-lifecycle-status', 'data-collaboration-scroll-body');
   const ownerStateLabelRegion = sourceBetween(
     workspaceSource,
     "function getCollaborationOwnerStateLabel(",
@@ -285,7 +285,7 @@ try {
   assert.equal(workspaceSource.includes('data-collaboration-owner-write-controls="hidden"'), false);
   assert.equal(
     workspaceSource.includes(
-      "activeCollaborationOwnerProjection?.source.subject ??\n                          activeCollaborationMessage.subject",
+      "title={activeCollaborationMessage.subject}",
     ),
     true,
   );

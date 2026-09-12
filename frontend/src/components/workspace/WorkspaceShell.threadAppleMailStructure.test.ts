@@ -117,10 +117,10 @@ expectContract(
   "outgoing messages must not receive additional left indentation",
 );
 expectContract(
-  /const messageBlockClassName\s*=\s*"[^"]*rounded-\[14px\][^"]*border border-\[var\(--workspace-border-soft\)\][^"]*bg-\[var\(--workspace-card-subtle\)\][^"]*px-4 py-3\.5[^"]*md:px-5 md:py-4[^"]*"/.test(
+  /const messageBlockClassName\s*=\s*options\?\.context === "collaboration" \? "min-w-0 w-full" :\s*"[^"]*rounded-\[14px\][^"]*border border-\[var\(--workspace-border-soft\)\][^"]*bg-\[var\(--workspace-card-subtle\)\][^"]*px-4 py-3\.5[^"]*md:px-5 md:py-4[^"]*"/.test(
     threadMessageSource,
   ),
-  "physical messages must use one calm rounded, bordered, subtly tinted block style",
+  "normal physical messages must retain their block style; Collaboration context uses the unboxed surface",
 );
 expectContract(
   (threadMessageSource.match(/className=\{messageBlockClassName\}/g) ?? [])
