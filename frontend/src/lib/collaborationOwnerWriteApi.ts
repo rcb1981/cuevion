@@ -11,6 +11,7 @@ import {
   parseCollaborationMentions,
   parseCollaborationOwnerReadDto,
   type CollaborationExternalGuest,
+  type CollaborationMention,
   type CollaborationOwnerReadMessage,
   type CollaborationOwnerReadDto,
   type CollaborationOwnerViewerReadDto,
@@ -20,6 +21,7 @@ import {
   type CollaborationOwnerSourceLocator,
 } from "./collaborationOwnerSourceLocator";
 import { isValidCollaborationGuestBearer } from "./collaborationGuestInviteLink";
+import { orderCollaborationMentions } from "./collaborationMentions";
 
 export const COLLABORATION_OWNER_WRITE_ENDPOINT = COLLABORATION_OWNER_ENDPOINT;
 
@@ -354,6 +356,7 @@ async function executeAppendOperation(
   visibility: "internal" | "shared",
   text: string,
   idempotencyKey: string,
+  mentions: readonly Readonly<CollaborationMention>[],
 ): Promise<CollaborationOwnerAppendResult> {
   const result = await performAuthenticatedCollaborationOwnerRequest(
     {
@@ -361,6 +364,7 @@ async function executeAppendOperation(
         visibility === "internal" ? "append_internal" : "append_shared",
       collaborationId,
       text,
+      ...(mentions.length ? { mentions } : {}),
     },
     { idempotencyKey },
   );
@@ -391,6 +395,7 @@ function prepareAppendOperation(
   collaborationId: string,
   visibility: "internal" | "shared",
   text: string,
+  mentions: readonly Readonly<CollaborationMention>[] = [],
 ): CollaborationOwnerAppendPreparationResult {
   if (!isValidCollaborationOwnerReadId(collaborationId)) {
     return { status: "invalid_collaboration_id" };
@@ -400,6 +405,8 @@ function prepareAppendOperation(
   }
 
   const idempotencyKey = generateAppendIdempotencyKey();
+  // Explicit retries retain this clone and key, independent of later draft edits.
+  const mentionSnapshot = Object.freeze(orderCollaborationMentions(mentions).map(mention => Object.freeze(mention)));
   return {
     status: "ready",
     operation: Object.freeze({
@@ -409,6 +416,7 @@ function prepareAppendOperation(
           visibility,
           text,
           idempotencyKey,
+          mentionSnapshot,
         ),
     }),
   };
@@ -417,15 +425,17 @@ function prepareAppendOperation(
 export function prepareInternalCollaborationMessageForOwner(
   collaborationId: string,
   text: string,
+  mentions?: readonly Readonly<CollaborationMention>[],
 ): CollaborationOwnerAppendPreparationResult {
-  return prepareAppendOperation(collaborationId, "internal", text);
+  return prepareAppendOperation(collaborationId, "internal", text, mentions);
 }
 
 export function prepareSharedCollaborationMessageForOwner(
   collaborationId: string,
   text: string,
+  mentions?: readonly Readonly<CollaborationMention>[],
 ): CollaborationOwnerAppendPreparationResult {
-  return prepareAppendOperation(collaborationId, "shared", text);
+  return prepareAppendOperation(collaborationId, "shared", text, mentions);
 }
 
 export async function createCollaborationForOwner(

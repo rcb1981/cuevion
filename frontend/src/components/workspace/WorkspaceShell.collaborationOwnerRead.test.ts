@@ -449,17 +449,17 @@ try {
     );
   }
 
-  assert.equal(ownerSharedMessageRegion.includes("!collaborationOwnerSharedMessageDraft.trim()"), true);
+  assert.equal(ownerSharedMessageRegion.includes("!collaborationOwnerSharedMessageDraft.text.trim()"), true);
   assert.equal(
     ownerSharedMessageRegion.includes(
-      "projection.collaboration.collaborationId,\n        collaborationOwnerSharedMessageDraft,",
+      "projection.collaboration.collaborationId,\n        collaborationOwnerSharedMessageDraft.text,",
     ),
     true,
     "Shared preparation must receive the exact untrimmed draft",
   );
   assert.equal(
     ownerSharedMessageRegion.includes(
-      "existingRequest.text === collaborationOwnerSharedMessageDraft",
+      "existingRequest.draft === collaborationOwnerSharedMessageDraft",
     ),
     true,
   );
@@ -589,17 +589,17 @@ try {
     );
   }
 
-  assert.equal(ownerInternalNoteRegion.includes("!collaborationOwnerInternalNoteDraft.trim()"), true);
+  assert.equal(ownerInternalNoteRegion.includes("!collaborationOwnerInternalNoteDraft.text.trim()"), true);
   assert.equal(
     ownerInternalNoteRegion.includes(
-      "projection.collaboration.collaborationId,\n        collaborationOwnerInternalNoteDraft,",
+      "projection.collaboration.collaborationId,\n        collaborationOwnerInternalNoteDraft.text,",
     ),
     true,
     "Preparation must receive the exact untrimmed draft",
   );
   assert.equal(
     ownerInternalNoteRegion.includes(
-      "existingRequest.text === collaborationOwnerInternalNoteDraft",
+      "existingRequest.draft === collaborationOwnerInternalNoteDraft",
     ),
     true,
   );
@@ -663,7 +663,7 @@ try {
   }
   assert.equal(closeRegion.includes("fenceCollaborationOwnerProjection();"), true);
   assert.equal(
-    workspaceSource.includes("collaborationOwnerInternalNoteRequestRef.current = null;\n    setCollaborationOwnerInternalNoteDraft(\"\");"),
+    workspaceSource.includes("collaborationOwnerInternalNoteRequestRef.current = null;\n    setCollaborationOwnerInternalNoteDraft(EMPTY_COLLABORATION_MENTION_DRAFT);"),
     true,
   );
 

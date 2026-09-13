@@ -39,7 +39,7 @@ test('internal notes and guests have readable context without technical role str
 });
 test('one composer defaults Shared with no internal draft or privacy cue in markup', () => {
   const props = { sending: false, canRetry: false, error: null, onChange() {}, onSend() {} };
-  const html = renderToStaticMarkup(React.createElement(CollaborationChatComposer, { shared: { ...props, draft: 'Public draft' }, internal: { ...props, draft: 'Secret draft' } }));
+  const html = renderToStaticMarkup(React.createElement(CollaborationChatComposer, { mentionCandidates: [], shared: { ...props, draft: { text: 'Public draft', mentions: [] } }, internal: { ...props, draft: { text: 'Secret draft', mentions: [] } } }));
   assert.equal((html.match(/<textarea/g) ?? []).length, 1); assert.ok(html.includes('Public draft')); assert.ok(!html.includes('Secret draft')); assert.ok(!html.includes('Only your Cuevion team'));
   assert.ok(html.includes('data-collaboration-composer-mode="shared"'));
 });
@@ -53,8 +53,8 @@ test('an out-of-Date-range legacy timestamp does not crash the timeline', () => 
 });
 
 for (const canReopen of [true, false]) test(`resolved composer removes writable markup; owner permission ${canReopen}`, () => {
-  const channel = { draft: 'Local secret draft', sending: false, canRetry: true, error: 'Send failed', onChange() {}, onSend() {} };
-  const html = renderToStaticMarkup(React.createElement(CollaborationChatComposer, { shared: channel, internal: channel,
+  const channel = { draft: { text: 'Local secret draft', mentions: [] }, sending: false, canRetry: true, error: 'Send failed', onChange() {}, onSend() {} };
+  const html = renderToStaticMarkup(React.createElement(CollaborationChatComposer, { mentionCandidates: [], shared: channel, internal: channel,
     resolved: { canReopen, pending: false, error: null, onReopen() {} } }));
   assert.ok(html.includes('This collaboration is resolved.'));
   for (const text of ['<textarea', 'Message visibility', 'Local secret draft', '>Shared<', '>Internal<', '>Send<', 'Send failed']) assert.equal(html.includes(text), false, text);
@@ -62,8 +62,8 @@ for (const canReopen of [true, false]) test(`resolved composer removes writable 
   assert.equal(html.includes('Ask the collaboration owner'), !canReopen);
 });
 test('resolved Reopen exposes pending and failure states without a composer', () => {
-  const channel = { draft: '', sending: false, canRetry: false, error: null, onChange() {}, onSend() {} };
-  const html = renderToStaticMarkup(React.createElement(CollaborationChatComposer, { shared: channel, internal: channel,
+  const channel = { draft: { text: '', mentions: [] }, sending: false, canRetry: false, error: null, onChange() {}, onSend() {} };
+  const html = renderToStaticMarkup(React.createElement(CollaborationChatComposer, { mentionCandidates: [], shared: channel, internal: channel,
     resolved: { canReopen: true, pending: true, error: 'Collaboration could not be updated. Retry.', onReopen() {} } }));
   assert.ok(html.includes('disabled=""')); assert.ok(html.includes('Reopening…')); assert.ok(html.includes('role="status"'));
   assert.ok(!html.includes('<textarea'));

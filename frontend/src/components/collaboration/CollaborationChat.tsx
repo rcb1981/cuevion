@@ -1,5 +1,10 @@
-import { useState, type MutableRefObject } from "react";
+import { useId, useLayoutEffect, useRef, useState, type MutableRefObject } from "react";
 import type { CollaborationOwnerReadMessage } from "../../lib/collaborationOwnerReadApi";
+import {
+  collaborationMentionKey, collaborationMentionQuery, filterCollaborationMentionCandidates,
+  insertCollaborationMention, reconcileCollaborationMentionDraft, segmentCollaborationMentions,
+  MAX_COLLABORATION_MENTIONS, type CollaborationMentionCandidate, type CollaborationMentionDraft,
+} from "../../lib/collaborationMentions";
 
 export function isOwnCollaborationActivity(entry: CollaborationOwnerReadMessage, currentCanonicalUserId: string | null) {
   return entry.authorRole === "Cuevion user" && entry.authorUserId !== null && entry.authorUserId === currentCanonicalUserId;
@@ -38,7 +43,9 @@ export function CollaborationChatTimeline({ messages, currentCanonicalUserId, ac
             {entry.authorRole === "Guest reviewer" ? <span>Guest</span> : null}
             {internal ? <span className="inline-flex items-center gap-1"><CollaborationLock />Internal note</span> : null}
           </div>
-          <p className="whitespace-pre-wrap text-[0.88rem] leading-6">{entry.text}</p>
+          <p className="whitespace-pre-wrap text-[0.88rem] leading-6">{segmentCollaborationMentions(entry.text, entry.mentions).map((segment, index) => segment.mention
+            ? <span key={index} data-collaboration-mention className="rounded px-0.5 font-semibold ring-1 ring-inset ring-current/20">{segment.text}</span>
+            : segment.text)}</p>
           <time dateTime={Number.isFinite(timestamp.getTime()) ? timestamp.toISOString() : undefined} title={formatTimestamp(entry.timestamp)} className={`mt-1 block text-right text-[0.68rem] ${own && !internal ? "text-[#fbf8f2]/80" : "text-[var(--workspace-text-muted)]"}`}>
             {formatTimestamp(entry.timestamp)}
           </time>
@@ -49,17 +56,18 @@ export function CollaborationChatTimeline({ messages, currentCanonicalUserId, ac
 }
 
 export type CollaborationComposerChannel = {
-  draft: string;
+  draft: CollaborationMentionDraft;
   sending: boolean;
   error: string | null;
   canRetry: boolean;
-  onChange: (text: string) => void;
+  onChange: (draft: CollaborationMentionDraft) => void;
   onSend: () => void;
 };
 
-export function CollaborationChatComposer({ shared, internal, resolved }: {
+export function CollaborationChatComposer({ shared, internal, mentionCandidates, resolved }: {
   shared: CollaborationComposerChannel;
   internal: CollaborationComposerChannel;
+  mentionCandidates: readonly CollaborationMentionCandidate[];
   resolved?: {
     canReopen: boolean;
     pending: boolean;
@@ -68,6 +76,41 @@ export function CollaborationChatComposer({ shared, internal, resolved }: {
   };
 }) {
   const [mode, setMode] = useState<"shared" | "internal">("shared");
+  const [selection, setSelection] = useState<{ text: string; mode: typeof mode; start: number; end: number } | null>(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [composing, setComposing] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const highlightedOptionRef = useRef<HTMLButtonElement>(null);
+  const pendingCaret = useRef<number | null>(null);
+  const listboxId = useId();
+  const channel = mode === "shared" ? shared : internal;
+  useLayoutEffect(() => {
+    if (pendingCaret.current === null || !textareaRef.current || resolved) return;
+    textareaRef.current.focus();
+    textareaRef.current.setSelectionRange(pendingCaret.current, pendingCaret.current);
+    pendingCaret.current = null;
+  }, [channel.draft, resolved]);
+  const syncSelection = (input: HTMLTextAreaElement) => {
+    setSelection(current => current?.text === input.value && current.mode === mode && current.start === input.selectionStart && current.end === input.selectionEnd
+      ? current : { text: input.value, mode, start: input.selectionStart, end: input.selectionEnd });
+  };
+  const query = !resolved && !composing && !channel.sending && selection?.mode === mode && selection.text === channel.draft.text
+    ? collaborationMentionQuery(channel.draft.text, selection.start, selection.end) : null;
+  const atMentionLimit = channel.draft.mentions.length >= MAX_COLLABORATION_MENTIONS;
+  const suggestions = query && !atMentionLimit ? filterCollaborationMentionCandidates(mentionCandidates, query.query) : [];
+  const activeIndex = Math.min(mentionIndex, Math.max(0, suggestions.length - 1));
+  useLayoutEffect(() => {
+    highlightedOptionRef.current?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex, query?.query]);
+  const selectMention = (candidate: CollaborationMentionCandidate) => {
+    if (!query) return;
+    const inserted = insertCollaborationMention(channel.draft, query, candidate);
+    if (!inserted) return;
+    pendingCaret.current = inserted.caret;
+    channel.onChange(inserted.draft);
+    setSelection(null);
+    setMentionIndex(0);
+  };
   // Keep the mode and parent-owned drafts while removing all writable controls.
   if (resolved) return <section data-collaboration-resolved-panel aria-label="Resolved collaboration" className="shrink-0 space-y-2 border-t border-[var(--workspace-border)] pt-3">
     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -81,12 +124,11 @@ export function CollaborationChatComposer({ shared, internal, resolved }: {
     </div>
     {resolved.error ? <p role="status" className="text-xs text-[var(--workspace-text-muted)]">{resolved.error}</p> : null}
   </section>;
-  const channel = mode === "shared" ? shared : internal;
   // Drafts and retained retry operations belong to the existing owner handlers.
   const sending = shared.sending || internal.sending;
   return <section data-collaboration-composers className="shrink-0 space-y-2 border-t border-[var(--workspace-border)] pt-3">
     <div role="group" aria-label="Message visibility" className="flex gap-1">
-      {(["shared", "internal"] as const).map(value => <button key={value} type="button" aria-pressed={mode === value} onClick={() => setMode(value)} className={`inline-flex min-h-11 items-center gap-1.5 rounded-full px-4 text-sm ${mode === value ? "bg-[var(--workspace-accent-surface-start)] font-medium text-[var(--workspace-text)]" : "text-[var(--workspace-text-muted)] hover:bg-[var(--workspace-hover-surface)]"}`}>
+      {(["shared", "internal"] as const).map(value => <button key={value} type="button" aria-pressed={mode === value} onClick={() => { setMode(value); setSelection(null); setMentionIndex(0); }} className={`inline-flex min-h-11 items-center gap-1.5 rounded-full px-4 text-sm ${mode === value ? "bg-[var(--workspace-accent-surface-start)] font-medium text-[var(--workspace-text)]" : "text-[var(--workspace-text-muted)] hover:bg-[var(--workspace-hover-surface)]"}`}>
         {value === "internal" ? <CollaborationLock /> : null}{value === "shared" ? "Shared" : "Internal"}
       </button>)}
     </div>
@@ -94,19 +136,54 @@ export function CollaborationChatComposer({ shared, internal, resolved }: {
     <label className="block">
       <span className="sr-only">{mode === "shared" ? "Message" : "Internal note"}</span>
       <textarea
+        ref={textareaRef}
         data-collaboration-composer-mode={mode}
+        role="combobox"
+        aria-autocomplete="list"
+        aria-expanded={suggestions.length > 0}
+        aria-controls={suggestions.length > 0 ? listboxId : undefined}
+        aria-activedescendant={suggestions.length > 0 ? `${listboxId}-${activeIndex}` : undefined}
         aria-describedby={mode === "internal" ? "collaboration-composer-privacy" : undefined}
-        value={channel.draft}
-        onChange={event => channel.onChange(event.target.value)}
+        value={channel.draft.text}
+        onChange={event => {
+          channel.onChange(reconcileCollaborationMentionDraft(channel.draft, event.currentTarget.value));
+          syncSelection(event.currentTarget);
+          setMentionIndex(0);
+        }}
+        onSelect={event => syncSelection(event.currentTarget)}
+        onBlur={() => setSelection(null)}
+        onCompositionStart={() => setComposing(true)}
+        onCompositionEnd={event => { setComposing(false); syncSelection(event.currentTarget); }}
+        onKeyDown={event => {
+          if (composing || event.nativeEvent.isComposing || event.keyCode === 229) return;
+          if (event.key === "Escape" && query) { event.preventDefault(); setSelection(null); return; }
+          const action = collaborationMentionKey(event.key, activeIndex, suggestions.length);
+          if (!action) return;
+          event.preventDefault();
+          if (action.action === "move") setMentionIndex(action.index);
+          else if (action.action === "select") selectMention(suggestions[action.index]);
+          else setSelection(null);
+        }}
         disabled={channel.sending}
         rows={2}
         placeholder={mode === "shared" ? "Write a message…" : "Write an internal note…"}
         className="block max-h-32 min-h-16 w-full resize-none rounded-[14px] border border-[var(--workspace-border)] bg-[var(--workspace-card)] px-3 py-2 text-base leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-muted)] focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:opacity-60 sm:text-sm"
       />
     </label>
+    {suggestions.length > 0 ? <ul id={listboxId} role="listbox" aria-label="Mention a collaborator" className="max-h-52 overflow-y-auto rounded-[14px] border border-[var(--workspace-border)] bg-[var(--workspace-card)] p-1 shadow-lg">
+      {suggestions.map((candidate, index) => <li key={candidate.userId} role="presentation">
+        <button id={`${listboxId}-${index}`} type="button" role="option" tabIndex={-1} aria-selected={index === activeIndex}
+          ref={index === activeIndex ? highlightedOptionRef : undefined}
+          onPointerDown={event => event.preventDefault()}
+          onClick={() => selectMention(candidate)}
+          className={`min-h-11 w-full rounded-lg px-3 py-2 text-left text-sm text-[var(--workspace-text)] ${index === activeIndex ? "bg-[var(--workspace-accent-surface-start)] font-medium" : "hover:bg-[var(--workspace-hover-surface)]"}`}>
+          {candidate.displayName}
+        </button>
+      </li>)}
+    </ul> : query && atMentionLimit ? <p role="status" className="text-xs text-[var(--workspace-text-muted)]">Up to 32 mentions per message.</p> : null}
     <div className="flex items-center justify-between gap-3">
       <div role="status" className="min-w-0 text-xs text-[var(--workspace-text-muted)]">{channel.error}</div>
-      <button type="button" onClick={channel.onSend} disabled={sending || !channel.draft.trim()} className="inline-flex min-h-11 shrink-0 items-center justify-center rounded-full bg-pine px-6 text-sm font-medium text-[#fbf8f2] hover:bg-moss disabled:cursor-not-allowed disabled:opacity-45">
+      <button type="button" onClick={channel.onSend} disabled={sending || !channel.draft.text.trim()} className="inline-flex min-h-11 shrink-0 items-center justify-center rounded-full bg-pine px-6 text-sm font-medium text-[#fbf8f2] hover:bg-moss disabled:cursor-not-allowed disabled:opacity-45">
         {channel.sending ? "Sending…" : channel.error && channel.canRetry ? "Retry" : "Send"}
       </button>
     </div>

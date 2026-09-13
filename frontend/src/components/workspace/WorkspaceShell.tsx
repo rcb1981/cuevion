@@ -259,6 +259,11 @@ import {
   reopenCollaborationForOwner,
   type CollaborationOwnerAppendOperation,
 } from "../../lib/collaborationOwnerWriteApi";
+import {
+  collaborationMentionCandidates as projectedCollaborationMentionCandidates,
+  EMPTY_COLLABORATION_MENTION_DRAFT,
+  type CollaborationMentionDraft,
+} from "../../lib/collaborationMentions";
 import { useCollaborationSummaries } from "../../lib/useCollaborationSummaries";
 import {
   lookupActiveCollaborationSummary,
@@ -1858,7 +1863,7 @@ type CollaborationOwnerInternalNoteRequest = {
   messageId: string;
   sourceMailboxId: InboxId;
   collaborationId: string;
-  text: string;
+  draft: CollaborationMentionDraft;
   operation: CollaborationOwnerAppendOperation;
   inFlight: boolean;
 };
@@ -1880,7 +1885,7 @@ type CollaborationOwnerSharedMessageRequest = {
   messageId: string;
   sourceMailboxId: InboxId;
   collaborationId: string;
-  text: string;
+  draft: CollaborationMentionDraft;
   operation: CollaborationOwnerAppendOperation;
   inFlight: boolean;
 };
@@ -9271,6 +9276,8 @@ function canViewerSeeCollaborationMessage(
   return viewerType === "workspace" || getCollaborationMessageVisibility(entry) === "shared";
 }
 
+// Legacy demo / external-review adapter only. Canonical authenticated chat uses
+// collaborationMentions.ts; these handles never enter owner-v2 mention requests.
 function buildCollaborationMentionHandle(name: string, email: string) {
   const normalizedName = name.toLowerCase().replace(/[^a-z0-9]+/g, "");
 
@@ -17855,13 +17862,13 @@ function MailboxView({
     locator: CollaborationOwnerSourceLocator;
   } | null>(null);
   const [collaborationOwnerInternalNoteDraft, setCollaborationOwnerInternalNoteDraft] =
-    useState("");
+    useState<CollaborationMentionDraft>(EMPTY_COLLABORATION_MENTION_DRAFT);
   const [collaborationOwnerInternalNoteState, setCollaborationOwnerInternalNoteState] =
     useState<CollaborationOwnerInternalNoteState>({ status: "idle" });
   const collaborationOwnerInternalNoteRequestRef =
     useRef<CollaborationOwnerInternalNoteRequest | null>(null);
   const [collaborationOwnerSharedMessageDraft, setCollaborationOwnerSharedMessageDraft] =
-    useState("");
+    useState<CollaborationMentionDraft>(EMPTY_COLLABORATION_MENTION_DRAFT);
   const [collaborationOwnerSharedMessageState, setCollaborationOwnerSharedMessageState] =
     useState<CollaborationOwnerSharedMessageState>({ status: "idle" });
   const collaborationOwnerSharedMessageGenerationRef = useRef(0);
@@ -20961,10 +20968,11 @@ function MailboxView({
         participant.externalReviewToken &&
         participant.email,
     ) ?? null;
-  const collaborationMentionCandidates = getCollaborationMentionTargets(
+  // Legacy handle suggestions belong only to demo Collaboration.
+  const collaborationMentionCandidates = workspaceDataMode === "demo" ? getCollaborationMentionTargets(
     activeCollaborationParticipants,
     collaborationPeople,
-  );
+  ) : [];
   const collaborationMentionQuery = getMentionQueryAtCursor(
     collaborationReplyDraft,
     collaborationReplySelection,
@@ -23230,7 +23238,7 @@ function MailboxView({
     const trimmedNote = (options?.note ?? collaborationNote).trim();
     const initialMessageVisibility: MailMessageCollaborationVisibility =
       selectedPeople.some((person) => person.kind === "external") ? "shared" : "internal";
-    const initialMentionCandidates = getCollaborationMentionTargets(
+    const initialMentionCandidates = workspaceDataMode === "demo" ? getCollaborationMentionTargets(
       initialParticipants.map((participant) => ({
         id: participant.id,
         name: participant.name,
@@ -23239,7 +23247,7 @@ function MailboxView({
         status: participant.status,
       })),
       collaborationPeople,
-    );
+    ) : [];
     const initialMessages = trimmedNote
       ? [
           {
@@ -23249,11 +23257,11 @@ function MailboxView({
             text: trimmedNote,
             timestamp: nextTimestamp,
             visibility: initialMessageVisibility,
-            mentions: extractCollaborationMentions(
+            mentions: workspaceDataMode === "demo" ? extractCollaborationMentions(
               trimmedNote,
               initialMentionCandidates,
               currentUserId,
-            ),
+            ) : [],
           },
         ]
       : [];
@@ -23342,9 +23350,9 @@ function MailboxView({
     collaborationOwnerProjectionRequestRef.current = null;
     collaborationOwnerInternalNoteRequestRef.current = null;
     collaborationOwnerSharedMessageRequestRef.current = null;
-    setCollaborationOwnerInternalNoteDraft("");
+    setCollaborationOwnerInternalNoteDraft(EMPTY_COLLABORATION_MENTION_DRAFT);
     setCollaborationOwnerInternalNoteState({ status: "idle" });
-    setCollaborationOwnerSharedMessageDraft("");
+    setCollaborationOwnerSharedMessageDraft(EMPTY_COLLABORATION_MENTION_DRAFT);
     setCollaborationOwnerSharedMessageState({ status: "idle" });
     setCollaborationOwnerCreateState({ status: "idle" });
     setCollaborationOwnerProjection({
@@ -23686,11 +23694,11 @@ function MailboxView({
     setDetailActionsMenuState(null);
     setIsCollaborationActionsMenuOpen(false);
     collaborationOwnerInternalNoteRequestRef.current = null;
-    setCollaborationOwnerInternalNoteDraft("");
+    setCollaborationOwnerInternalNoteDraft(EMPTY_COLLABORATION_MENTION_DRAFT);
     setCollaborationOwnerInternalNoteState({ status: "idle" });
     collaborationOwnerSharedMessageGenerationRef.current += 1;
     collaborationOwnerSharedMessageRequestRef.current = null;
-    setCollaborationOwnerSharedMessageDraft("");
+    setCollaborationOwnerSharedMessageDraft(EMPTY_COLLABORATION_MENTION_DRAFT);
     setCollaborationOwnerSharedMessageState({ status: "idle" });
     if (options?.loadOwnerProjection) {
       beginCollaborationOwnerRead(
@@ -24143,7 +24151,7 @@ function MailboxView({
       projectionRequest.messageId !== messageId ||
       projectionRequest.sourceMailboxId !== sourceMailboxId ||
       existingRequest?.inFlight ||
-      !collaborationOwnerSharedMessageDraft.trim()
+      !collaborationOwnerSharedMessageDraft.text.trim()
     ) {
       return;
     }
@@ -24155,14 +24163,15 @@ function MailboxView({
       existingRequest.messageId === messageId &&
       existingRequest.sourceMailboxId === sourceMailboxId &&
       existingRequest.collaborationId === projection.collaboration.collaborationId &&
-      existingRequest.text === collaborationOwnerSharedMessageDraft
+      existingRequest.draft === collaborationOwnerSharedMessageDraft
         ? existingRequest
         : null;
 
     if (!request) {
       const preparation = prepareSharedCollaborationMessageForOwner(
         projection.collaboration.collaborationId,
-        collaborationOwnerSharedMessageDraft,
+        collaborationOwnerSharedMessageDraft.text,
+        collaborationOwnerSharedMessageDraft.mentions,
       );
       if (preparation.status !== "ready") {
         collaborationOwnerSharedMessageRequestRef.current = null;
@@ -24183,7 +24192,7 @@ function MailboxView({
         messageId,
         sourceMailboxId,
         collaborationId: projection.collaboration.collaborationId,
-        text: collaborationOwnerSharedMessageDraft,
+        draft: collaborationOwnerSharedMessageDraft,
         operation: preparation.operation,
         inFlight: false,
       };
@@ -24255,7 +24264,7 @@ function MailboxView({
         };
       });
       collaborationOwnerSharedMessageRequestRef.current = null;
-      setCollaborationOwnerSharedMessageDraft("");
+      setCollaborationOwnerSharedMessageDraft(EMPTY_COLLABORATION_MENTION_DRAFT);
       setCollaborationOwnerSharedMessageState({ status: "idle" });
     })(request);
   };
@@ -24280,7 +24289,7 @@ function MailboxView({
       projectionRequest.messageId !== messageId ||
       projectionRequest.sourceMailboxId !== sourceMailboxId ||
       existingRequest?.inFlight ||
-      !collaborationOwnerInternalNoteDraft.trim()
+      !collaborationOwnerInternalNoteDraft.text.trim()
     ) {
       return;
     }
@@ -24292,14 +24301,15 @@ function MailboxView({
       existingRequest.messageId === messageId &&
       existingRequest.sourceMailboxId === sourceMailboxId &&
       existingRequest.collaborationId === projection.collaboration.collaborationId &&
-      existingRequest.text === collaborationOwnerInternalNoteDraft
+      existingRequest.draft === collaborationOwnerInternalNoteDraft
         ? existingRequest
         : null;
 
     if (!request) {
       const preparation = prepareInternalCollaborationMessageForOwner(
         projection.collaboration.collaborationId,
-        collaborationOwnerInternalNoteDraft,
+        collaborationOwnerInternalNoteDraft.text,
+        collaborationOwnerInternalNoteDraft.mentions,
       );
       if (preparation.status !== "ready") {
         collaborationOwnerInternalNoteRequestRef.current = null;
@@ -24320,7 +24330,7 @@ function MailboxView({
         messageId,
         sourceMailboxId,
         collaborationId: projection.collaboration.collaborationId,
-        text: collaborationOwnerInternalNoteDraft,
+        draft: collaborationOwnerInternalNoteDraft,
         operation: preparation.operation,
         inFlight: false,
       };
@@ -24393,7 +24403,7 @@ function MailboxView({
         };
       });
       collaborationOwnerInternalNoteRequestRef.current = null;
-      setCollaborationOwnerInternalNoteDraft("");
+      setCollaborationOwnerInternalNoteDraft(EMPTY_COLLABORATION_MENTION_DRAFT);
       setCollaborationOwnerInternalNoteState({ status: "idle" });
     })(request);
   };
@@ -24428,11 +24438,11 @@ function MailboxView({
     );
     const canonicalMessage = getStoredCanonicalCollaborationMessage(messageId);
     const nextTimestamp = Date.now();
-    const mentions = extractCollaborationMentions(
+    const mentions = workspaceDataMode === "demo" ? extractCollaborationMentions(
       trimmedReply,
       collaborationMentionCandidates,
       currentUserId,
-    );
+    ) : [];
     const replyVisibility = hasRealInternalTeamContext
       ? collaborationReplyVisibility
       : "shared";
@@ -31191,7 +31201,7 @@ function MailboxView({
                                 </span>
                               </div>
                               <div className="mt-1 text-[0.88rem] leading-6 text-[var(--workspace-text-soft)]">
-                                {renderTextWithMentions(
+                                {workspaceDataMode === "demo" ? renderTextWithMentions(
                                   entry.text,
                                   new Map(
                                     (entry.mentions ?? []).map((mention) => [
@@ -31206,7 +31216,7 @@ function MailboxView({
                                       currentUserId,
                                       currentUserEmail,
                                     ),
-                                )}
+                                ) : entry.text}
                               </div>
                             </div>
                           ))}
@@ -31381,15 +31391,16 @@ function MailboxView({
                       error: collaborationLifecycleStatus === "failure" ? "Collaboration could not be updated. Retry." : null,
                       onReopen: () => { void transitionCanonicalCollaboration(); },
                     } : undefined}
+                    mentionCandidates={projectedCollaborationMentionCandidates(activeCollaborationOwnerProjection.participants)}
                     shared={{
                       draft: collaborationOwnerSharedMessageDraft,
                       sending: collaborationOwnerSharedMessageState.status === "sending",
                       error: collaborationOwnerSharedMessageState.status === "failure" ? getCollaborationOwnerSharedMessageFailureMessage(collaborationOwnerSharedMessageState.failureStatus, collaborationOwnerSharedMessageState.retryAfterSeconds) : null,
                       canRetry: collaborationOwnerSharedMessageState.status === "failure" && collaborationOwnerSharedMessageState.canRetry,
-                      onChange: (text) => {
+                      onChange: (draft) => {
                         const pendingRequest = collaborationOwnerSharedMessageRequestRef.current;
                         if (pendingRequest && !pendingRequest.inFlight) collaborationOwnerSharedMessageRequestRef.current = null;
-                        setCollaborationOwnerSharedMessageDraft(text);
+                        setCollaborationOwnerSharedMessageDraft(draft);
                         if (collaborationOwnerSharedMessageState.status === "failure") setCollaborationOwnerSharedMessageState({ status: "idle" });
                       },
                       onSend: submitCollaborationOwnerSharedMessage,
@@ -31399,10 +31410,10 @@ function MailboxView({
                       sending: collaborationOwnerInternalNoteState.status === "sending",
                       error: collaborationOwnerInternalNoteState.status === "failure" ? getCollaborationOwnerInternalNoteFailureMessage(collaborationOwnerInternalNoteState.failureStatus, collaborationOwnerInternalNoteState.retryAfterSeconds) : null,
                       canRetry: collaborationOwnerInternalNoteState.status === "failure" && collaborationOwnerInternalNoteState.canRetry,
-                      onChange: (text) => {
+                      onChange: (draft) => {
                         const pendingRequest = collaborationOwnerInternalNoteRequestRef.current;
                         if (pendingRequest && !pendingRequest.inFlight) collaborationOwnerInternalNoteRequestRef.current = null;
-                        setCollaborationOwnerInternalNoteDraft(text);
+                        setCollaborationOwnerInternalNoteDraft(draft);
                         if (collaborationOwnerInternalNoteState.status === "failure") setCollaborationOwnerInternalNoteState({ status: "idle" });
                       },
                       onSend: submitCollaborationOwnerInternalNote,
@@ -50576,12 +50587,12 @@ export function WorkspaceShell({
     }
 
     const nextTimestamp = Date.now();
-    const mentionCandidates = getCollaborationMentionTargets(inviteParticipants, []);
-    const mentions = extractCollaborationMentions(
+    const mentionCandidates = isDemoWorkspace ? getCollaborationMentionTargets(inviteParticipants, []) : [];
+    const mentions = isDemoWorkspace ? extractCollaborationMentions(
       trimmedReply,
       mentionCandidates,
       normalizeSenderLearningKey(authenticatedUser.email),
-    );
+    ) : [];
     const replyVisibility = hasRealInviteInternalTeamContext
       ? inviteReplyVisibility
       : "shared";
@@ -55654,7 +55665,8 @@ export function WorkspaceShell({
         ? [...inviteVisibleMessages].sort((first, second) => second.timestamp - first.timestamp)
         : [...inviteVisibleMessages.slice(-2)].reverse()
       : inviteVisibleMessages;
-    const inviteMentionCandidates = getCollaborationMentionTargets(inviteParticipants, []);
+    const inviteMentionCandidates = isDemoWorkspace || isExternalReviewRoute
+      ? getCollaborationMentionTargets(inviteParticipants, []) : [];
     const inviteMentionQuery = getMentionQueryAtCursor(
       inviteReplyDraft,
       inviteReplySelection,
@@ -56218,7 +56230,7 @@ export function WorkspaceShell({
                       </span>
                     </div>
                     <div className="text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
-                      {renderTextWithMentions(
+                      {isDemoWorkspace ? renderTextWithMentions(
                         entry.text,
                         new Map(
                           (entry.mentions ?? []).map((mention: MailMessageCollaborationMention) => [
@@ -56227,7 +56239,7 @@ export function WorkspaceShell({
                           ]),
                         ),
                         resolvedTheme,
-                      )}
+                      ) : entry.text}
                     </div>
                   </div>
                 ))}
