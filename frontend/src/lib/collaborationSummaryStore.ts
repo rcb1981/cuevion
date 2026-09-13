@@ -38,7 +38,8 @@ export function indexCollaborationSummaries(workspaceId: string, values: readonl
   return index;
 }
 
-export function lookupActiveCollaborationSummary(
+// Exact history access includes resolved records; Priority uses the active-only wrapper below.
+export function lookupCollaborationSummary(
   index: CollaborationSummaryIndex,
   workspaceId: string | null,
   input: CollaborationOwnerSourceLocatorInput,
@@ -50,6 +51,15 @@ export function lookupActiveCollaborationSummary(
     ? { provider: "google", ...locator.sourceRef }
     : { provider: "custom_imap", ...locator.sourceRef };
   const summary = index.get(collaborationSummaryKey({ workspaceId, mailboxId: locator.mailboxId, sourceRef }));
+  return summary ?? null;
+}
+
+export function lookupActiveCollaborationSummary(
+  index: CollaborationSummaryIndex,
+  workspaceId: string | null,
+  input: CollaborationOwnerSourceLocatorInput,
+): CollaborationSummary | null {
+  const summary = lookupCollaborationSummary(index, workspaceId, input);
   return summary && isActiveCollaborationSummary(summary) ? summary : null;
 }
 
@@ -66,8 +76,7 @@ export function isCurrentCollaborationOpenBinding(
   return Boolean(current && captured.scopeKey === current.scopeKey &&
     captured.selectionKey === current.selectionKey &&
     captured.summary.collaborationId === current.summary.collaborationId &&
-    collaborationSummaryKey(captured.summary) === collaborationSummaryKey(current.summary) &&
-    isActiveCollaborationSummary(current.summary));
+    collaborationSummaryKey(captured.summary) === collaborationSummaryKey(current.summary));
 }
 
 type PageLoader = typeof listCollaborationSummaries;

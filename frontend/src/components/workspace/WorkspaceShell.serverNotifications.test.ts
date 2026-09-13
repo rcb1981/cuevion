@@ -28,7 +28,7 @@ function displayFixture(options: { activity?: boolean; canonical?: boolean; hidd
     workspaceDataMode: "live", hasAuthenticatedMemberAuthority: true, managedInboxes: [{ id: "main" }], deriveCollaborationOwnerSourceLocator: () => ({ mailboxId: "main", sourceRef: {} }),
     collaborationOwnerProjectionGenerationRef: { current: 0 }, collaborationOwnerProjectionRequestRef: { current: null },
   };
-  for (const name of ["setActiveSmartFolderId", "setActiveFolder", "setIsSharedView", "setSelectionState", "closeCollaborationOverlay", "resetFullMessageModalSize", "setIsFullMessageOpen", "openCollaborationOverlay", "setCollaborationOwnerProjection", "setHighlightedCollaborationMessageId", "setCollaborationHistoryExpanded", "setIsCollaborationPeopleOpen", "setCollaborationContextTab"]) context[name] = (...args: any[]) => { calls.push(name); if (name === "setCollaborationContextTab") selectedTabs.push(args[0]); if (name === "setCollaborationOwnerProjection") context.activeCollaborationOwnerProjection = args[0].collaboration; };
+  for (const name of ["setActiveSmartFolderId", "setActiveFolder", "setIsSharedView", "setSelectionState", "closeCollaborationOverlay", "resetFullMessageModalSize", "setIsFullMessageOpen", "openCollaborationOverlay", "setCollaborationOwnerProjection", "setHighlightedCollaborationMessageId", "setCollaborationHistoryExpanded", "setCollaborationContextTab"]) context[name] = (...args: any[]) => { calls.push(name); if (name === "setCollaborationContextTab") selectedTabs.push(args[0]); if (name === "setCollaborationOwnerProjection") context.activeCollaborationOwnerProjection = args[0].collaboration; };
   vm.runInNewContext(displayEffects, context);
   return { context, completions, calls, selectedTabs, layout: () => layout(), effect: () => effect(), frame: () => { frames.shift()?.(); }, stale: () => { current = false; } };
 }
@@ -50,4 +50,15 @@ test("removed projection cannot confirm after focus", () => { const f = displayF
 test("wrong canonical Collaboration cannot confirm display", () => { const f = displayFixture({ canonical: true }); f.context.activeCollaborationOwnerProjection = { collaborationId: "wrong" }; f.effect(); f.frame(); assert.deepEqual(f.completions, []); });
 test("exact notification open uses canonical ID projection without source lookup or full mailbox refresh", () => { assert.ok(!displayEffects.includes("lookupCollaborationForOwner")); assert.ok(!displayEffects.includes("onArchiveFolderOpen")); assert.ok(!displayEffects.includes("onTrashFolderOpen")); assert.ok(!displayEffects.includes("refresh")); assert.ok(displayEffects.includes("exactNotification: true")); });
 
-test("notification target reveals the conversation before display acknowledgement", () => { const f = displayFixture({ canonical: true }); f.layout(); assert.ok(f.calls.includes("setIsCollaborationPeopleOpen")); assert.deepEqual(f.selectedTabs, ["conversation"]); assert.deepEqual(f.completions, []); });
+test("notification target reveals the conversation before display acknowledgement", () => { const f = displayFixture({ canonical: true }); f.layout(); assert.deepEqual(f.selectedTabs, ["conversation"]); assert.deepEqual(f.completions, []); });
+
+test("resolved Collaboration still forces Conversation and confirms only after exact activity display", () => {
+  const f = displayFixture({ canonical: true });
+  f.context.serverNotificationDisplay.collaboration.state = "resolved";
+  f.layout();
+  assert.deepEqual(f.selectedTabs, ["conversation"]);
+  f.effect(); f.frame();
+  assert.deepEqual(f.completions, []);
+  assert.deepEqual(f.calls.slice(-2), ["scroll", "focus"]);
+  f.frame(); assert.deepEqual(f.completions, [true]);
+});

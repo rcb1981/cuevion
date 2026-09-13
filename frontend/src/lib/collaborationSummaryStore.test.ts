@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import {
   createCollaborationSummaryStore, indexCollaborationSummaries,
-  lookupActiveCollaborationSummary, loadWorkspaceCollaborationSummaries,
+  lookupCollaborationSummary, lookupActiveCollaborationSummary, loadWorkspaceCollaborationSummaries,
   isCurrentCollaborationOpenBinding,
 } from "./collaborationSummaryStore";
 import type { CollaborationSummary, CollaborationSummaryResult } from "./collaborationSummaryApi";
@@ -25,6 +25,7 @@ const defer = <T>() => { let resolve!: (value: T) => void; const promise = new P
 async function run() {
   for (const state of ["needs_review", "needs_action", "note_only", "resolved", "unknown"]) {
     const index = indexCollaborationSummaries(workspaceId, [{ ...summary, state }]);
+    assert.equal(Boolean(lookupCollaborationSummary(index, workspaceId, input)), state !== "unknown", state);
     assert.equal(Boolean(lookupActiveCollaborationSummary(index, workspaceId, input)), !["resolved", "unknown"].includes(state), state);
   }
   const index = indexCollaborationSummaries(workspaceId, [summary, summary]);
@@ -50,10 +51,22 @@ async function run() {
     { message: { ...imapInput.message, imapUid: "43" } }, { message: { ...imapInput.message, uidValidity: undefined } }]) {
     assert.equal(lookupActiveCollaborationSummary(imapIndex, workspaceId, { ...imapInput, ...change }), null);
   }
+  const resolvedImapIndex = indexCollaborationSummaries(workspaceId, [{ ...imapSummary, state: "resolved" }]);
+  assert.equal(lookupCollaborationSummary(resolvedImapIndex, workspaceId, imapInput)?.collaborationId, summary.collaborationId);
+  assert.equal(lookupActiveCollaborationSummary(resolvedImapIndex, workspaceId, imapInput), null);
+  assert.equal(lookupCollaborationSummary(resolvedImapIndex, workspaceId, { ...imapInput, message: { ...imapInput.message, uidValidity: "9002" } }), null);
   const binding = { scopeKey: "account-a", selectionKey: "mailbox-a:local-id", summary };
   assert.equal(isCurrentCollaborationOpenBinding(binding, binding), true);
+  const resolvedBinding = { ...binding, summary: { ...summary, state: "resolved" as const } };
+  assert.equal(isCurrentCollaborationOpenBinding(resolvedBinding, resolvedBinding), true);
+  const resolvedIndex = indexCollaborationSummaries(workspaceId, [resolvedBinding.summary]);
+  assert.equal(lookupCollaborationSummary(resolvedIndex, workspaceId, input)?.collaborationId, summary.collaborationId);
+  assert.equal(lookupActiveCollaborationSummary(resolvedIndex, workspaceId, input), null);
+  assert.equal(lookupCollaborationSummary(resolvedIndex, workspaceId, { ...input, message: { ...input.message, providerMessageId: "wrong", subject: "same", sender: "same", timestamp: "same" } }), null);
+  assert.equal(lookupCollaborationSummary(resolvedIndex, workspaceId, { ...input, sourceMailboxId: "wrong" }), null);
+  assert.equal(lookupCollaborationSummary(resolvedIndex, `wsp_${"X".repeat(22)}`, input), null);
+  assert.equal(lookupCollaborationSummary(indexCollaborationSummaries(workspaceId, [summary, { ...summary, collaborationId: "B".repeat(22) }]), workspaceId, input), null);
   for (const current of [null, { ...binding, scopeKey: "account-b" }, { ...binding, selectionKey: "another-mail" },
-    { ...binding, summary: { ...summary, state: "resolved" as const } },
     { ...binding, summary: { ...summary, collaborationId: "B".repeat(22) } }]) {
     assert.equal(isCurrentCollaborationOpenBinding(binding, current), false);
   }
@@ -112,6 +125,7 @@ async function run() {
     state: "resolved", updatedAt: summary.updatedAt + 1, viewerAccess: "owner" } as any;
   await store.acceptMutation(dto);
   assert.equal(lookupActiveCollaborationSummary(store.getSnapshot(), workspaceId, input), null);
+  assert.equal(lookupCollaborationSummary(store.getSnapshot(), workspaceId, input)?.state, "resolved");
   await store.acceptMutation({ ...dto, state: "note_only", updatedAt: dto.updatedAt + 1 });
   assert.equal(lookupActiveCollaborationSummary(store.getSnapshot(), workspaceId, input)?.state, "note_only");
   await store.acceptMutation(dto);

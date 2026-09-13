@@ -57,7 +57,7 @@ try {
     ") : isPreStartCollaboration ? (",
   );
   const ownerLifecycleFooterRegion = sourceBetween(workspaceSource,
-    '<span data-collaboration-lifecycle-status', 'data-collaboration-scroll-body');
+    '<CollaborationLifecycleSettings', '<div className={hasActiveCollaborationOwnerLifecycle');
   const ownerStateLabelRegion = sourceBetween(
     workspaceSource,
     "function getCollaborationOwnerStateLabel(",

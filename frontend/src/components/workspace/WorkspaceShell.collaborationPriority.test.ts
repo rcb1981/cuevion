@@ -141,12 +141,20 @@ async function run() {
   currentRef.current = { ...binding, selectionKey: "different-selected-mail" };
   cue.props.onClick(); assert.equal(opened.length, 1, "stale selection cannot open");
   currentRef.current = null; cue.props.onClick(); assert.equal(opened.length, 1, "removed binding cannot open");
-  activeBinding = null; assert.equal(render(mail), null, "resolved/no binding hides active cue");
+  activeBinding = null; assert.equal(render(mail), null, "missing exact binding hides the cue");
+  activeBinding = { ...binding, summary: { ...summary, state: "resolved" } };
+  currentRef.current = activeBinding;
+  const resolvedCue = render(mail);
+  assert.ok(renderToStaticMarkup(resolvedCue).includes("View Collaboration"));
+  resolvedCue.props.onClick();
+  assert.equal(opened.length, 2);
+  assert.equal(opened[1][1].expectedBinding.summary.collaborationId, summary.collaborationId);
   activeBinding = binding; assert.equal(render(mail, "full"), null, "no duplicate hidden/full cue");
-  for (const outcome of ["exact", "wrong-id", "binding-removed"]) {
+  for (const state of ["needs_review", "resolved"]) for (const outcome of ["exact", "wrong-id", "binding-removed"]) {
     const projection: any[] = [];
     const requestRef: any = { current: null };
-    const bindingRef: any = { current: binding };
+    const expectedBinding = { ...binding, summary: { ...summary, state } };
+    const bindingRef: any = { current: expectedBinding };
     let reads = 0;
     const read = evaluate("beginCollaborationOwnerRead", {
       managedInboxes: [mailbox], workspaceDataMode: "live", hasAuthenticatedMemberAuthority: true,
@@ -161,12 +169,12 @@ async function run() {
         if (outcome === "binding-removed") bindingRef.current = null;
         return { status: "success", collaborationId: outcome === "wrong-id" ? "B".repeat(22) : summary.collaborationId };
       },
-      readCollaborationForOwner: async (id: string) => { reads++; assert.equal(id, summary.collaborationId); return { status: "success", collaboration: summary }; },
+      readCollaborationForOwner: async (id: string) => { reads++; assert.equal(id, summary.collaborationId); return { status: "success", collaboration: { ...summary, state } }; },
       onCanonicalCollaborationMutation: () => {},
       setPendingEndCollaborationMessageId: () => {}, setIsCollaborationParticipantPickerOpen: () => {},
       setIsCollaborationInviteComposerOpen: () => {}, setIsCollaborationActionsMenuOpen: () => {},
     });
-    read(mail.id, mailbox.id, mail, "Inbox", binding);
+    read(mail.id, mailbox.id, mail, "Inbox", expectedBinding);
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(reads, outcome === "exact" ? 1 : 0, "read only the exact current summary ID");
     assert.equal(projection.at(-1).status, outcome === "exact" ? "success" : "non_retryable_failure");
@@ -305,8 +313,9 @@ async function run() {
     collaborationOwnerProjectionGenerationRef: { current: 1 }, setCollaborationOwnerCreateState: () => {}, setCollaborationOwnerProjection: () => {},
     onCanonicalCollaborationMutation: (dto: any) => opened.push(dto),
   });
-  create(summary, "wrong-context"); assert.equal(opened.length, 1);
-  create(summary, "create-context"); assert.equal(opened.length, 2, "successful create reaches summary projection");
+  const openCountBeforeCreate = opened.length;
+  create(summary, "wrong-context"); assert.equal(opened.length, openCountBeforeCreate);
+  create(summary, "create-context"); assert.equal(opened.length, openCountBeforeCreate + 1, "successful create reaches summary projection");
   assert.match(source, /collaborationOwnerProjectionRequestRef\.current = null;\s*collaborationLifecycleRequestRef\.current = null;/);
   assert.match(source, /key=\{`\$\{activeMailbox.id\}-\$\{mailboxResetToken\}-\$\{collaborationSummaries.scopeKey\}`\}/);
   assert.match(declarations.get("beginCollaborationOwnerRead")!, /lookupResult.collaborationId !== expectedBinding.summary.collaborationId/);
