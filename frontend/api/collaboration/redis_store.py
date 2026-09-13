@@ -2940,7 +2940,6 @@ else:
       or current.ownerEmail ~= replacement.ownerEmail
       or current.workspaceId ~= replacement.workspaceId
       or current.mailboxId ~= replacement.mailboxId
-      or current.state ~= replacement.state
       or current.createdAt ~= replacement.createdAt
       or not sourceEqual(current.sourceRef, replacement.sourceRef)
       or not sourceMessageEqual(current.sourceMessage, replacement.sourceMessage)
@@ -3007,6 +3006,10 @@ else:
       end
       return cjson.encode({status='recovered', record=raw})
     end
+    -- A committed reply remains recoverable after Resolve. Fresh replies must
+    -- observe lifecycle closure at this same atomic boundary.
+    if current.state == 'resolved' then return cjson.encode({status='collaboration_resolved'}) end
+    if current.state ~= replacement.state then return cjson.encode({status='invalid_scope'}) end
     if not timestampMilliseconds(ARGV[1]) or current.updatedAt ~= ARGV[1] then
       return cjson.encode({status='stale'})
     end
@@ -3121,6 +3124,7 @@ else:
             response_shapes={
                 "discovery_capacity_reached": set(),
                 "saved": {"record"}, "recovered": {"record"},
+                "collaboration_resolved": set(),
                 "idempotency_conflict": set(), "missing": set(), "stale": set(), "malformed": set(),
                 "invalid_scope": set(), "nonadvancing": set(), "source_pointer_conflict": set(),
                 "oversized": set(), "invalid_messages": set(), "invite_missing": set(),
@@ -3137,6 +3141,8 @@ else:
             return _V2RecordResult(record)
         if status == "idempotency_conflict":
             return {"status": "conflict", "error": {"code": "idempotency_conflict"}}
+        if status == "collaboration_resolved":
+            return {"status": "conflict", "error": {"code": "collaboration_resolved"}}
         if status == "missing":
             return {"status": "missing", "error": {"code": "collaboration_not_found"}}
         if status in {"stale", "nonadvancing"}:
@@ -3422,6 +3428,9 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
       or not participantAuthorityEqual(current, replacement) then
       return cjson.encode({status='invalid_scope'})
     end
+    -- This older append-only primitive has no idempotent recovery branch.
+    if current.state == 'resolved' then return cjson.encode({status='collaboration_resolved'}) end
+    if current.state ~= replacement.state then return cjson.encode({status='invalid_scope'}) end
     if not timestampMilliseconds(ARGV[1]) or current.updatedAt ~= ARGV[1] then
       return cjson.encode({status='stale'})
     end
@@ -3478,12 +3487,15 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
             response_shapes={
                 "discovery_capacity_reached": set(),
                 "saved": set(), "missing": set(), "stale": set(),
+                "collaboration_resolved": set(),
                 "malformed": set(), "invalid_scope": set(), "nonadvancing": set(),
                 "source_pointer_conflict": set(), "oversized": set(), "invalid_messages": set(),
             },
         )
         if result.get("status") == "saved":
             return _V2RecordResult(thread)
+        if result.get("status") == "collaboration_resolved":
+            return {"status": "conflict", "error": {"code": "collaboration_resolved"}}
         if result.get("status") == "missing":
             return {"status": "missing", "error": {"code": "collaboration_not_found"}}
         if result.get("status") in {"stale", "nonadvancing"}:
@@ -3807,6 +3819,10 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
       return cjson.encode({status='recovered', message=matched, updatedAt=record.updatedAt})
     end
 
+    -- Recovery above never appends or recreates notifications. Every fresh
+    -- operation must observe Resolve before planning any canonical writes.
+    if current.state == 'resolved' then return cjson.encode({status='collaboration_resolved'}) end
+
     if #ARGV[2] > 262144 or #ARGV[6] > IDEMPOTENCY_RECORD_MAX
       or not timestampMilliseconds(ARGV[1]) then
       return cjson.encode({status='malformed'})
@@ -3822,6 +3838,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
       or current.v ~= replacement.v or current.ownerEmail ~= replacement.ownerEmail
       or current.workspaceId ~= replacement.workspaceId
       or current.mailboxId ~= replacement.mailboxId
+      or current.state ~= replacement.state
       or current.createdAt ~= replacement.createdAt
       or not sourceEqual(current.sourceRef, replacement.sourceRef)
       or not sourceMessageEqual(current.sourceMessage, replacement.sourceMessage)
@@ -4030,6 +4047,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
                 "discovery_capacity_reached": set(),
                 "saved": {"message", "updatedAt"},
                 "recovered": {"message", "updatedAt"},
+                "collaboration_resolved": set(),
                 "missing": set(),
                 "stale": set(),
                 "malformed": set(),
@@ -4057,6 +4075,8 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
                 updated_at,
                 recovered=result["status"] == "recovered",
             )
+        if result.get("status") == "collaboration_resolved":
+            return {"status": "conflict", "error": {"code": "collaboration_resolved"}}
         if result.get("status") == "missing":
             return {
                 "status": "missing",

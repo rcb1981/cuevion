@@ -165,6 +165,8 @@ def _guest_failure(result: object) -> PublicResponse:
         "collaboration_not_found": (401, "session_revoked"),
         "already_logged_out": (401, "session_revoked"),
         "stale_thread": (409, "conflict"),
+        "collaboration_resolved": (409, "conflict"),
+        "idempotency_conflict": (409, "conflict"),
     }
     status, public_code = mapping.get(code, (500, "internal_error"))
     return json_failure(public_code, status=status)

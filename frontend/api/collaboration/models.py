@@ -74,6 +74,7 @@ else:
             "forbidden",
             "mailbox_not_found",
             "collaboration_not_found",
+            "collaboration_resolved",
             "source_not_found",
             "source_changed",
             "invite_not_found",

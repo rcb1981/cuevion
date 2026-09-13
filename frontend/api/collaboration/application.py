@@ -124,6 +124,7 @@ _CREATE_WITH_GUEST_FAILURE_STAGES = frozenset(
 _CANONICAL_OWNER_MUTATION_ERROR_CODES = {
     "discovery_capacity_reached": "discovery_capacity_reached",
     "collaboration_not_found": "collaboration_not_found",
+    "collaboration_resolved": "collaboration_resolved",
     "forbidden": "forbidden",
     "invalid_request": "invalid_request",
     "idempotency_conflict": "idempotency_conflict",

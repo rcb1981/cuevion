@@ -384,10 +384,19 @@ class LifecycleRedisTests(unittest.TestCase):
         resolved = self.stored()
         advanced = {**resolved, "updatedAt": resolved["updatedAt"] + 1,
                     "messages": [*resolved["messages"], redis_tests.message_record(index=3, created_at=resolved["updatedAt"] + 1, text="New note")]}
+        before = self.snapshot()
         saved = redis_store._save_v2_thread_if_expected(advanced, resolved["updatedAt"], command_transport=self.transport)
+        self.assertEqual(saved, {"status": "conflict", "error": {"code": "collaboration_resolved"}})
+        self.assert_unchanged(before)
+
+        self.assertEqual(self.transition(resolved, "reopen")["status"], "ok")
+        active = self.stored()
+        advanced = {**active, "updatedAt": active["updatedAt"] + 1,
+                    "messages": [*active["messages"], redis_tests.message_record(index=3, created_at=active["updatedAt"] + 1, text="New note")]}
+        saved = redis_store._save_v2_thread_if_expected(advanced, active["updatedAt"], command_transport=self.transport)
         self.assertEqual(saved.get("status"), "ok", saved)
         before = self.snapshot()
-        result = self.transition(resolved, "reopen", thread_loader=lambda *_a, **_k: redis_store._V2RecordResult(resolved))
+        result = self.transition(active, "resolve", thread_loader=lambda *_a, **_k: redis_store._V2RecordResult(active))
         self.assertEqual(result["error"]["code"], "stale_thread")
         self.assert_unchanged(before)
         self.assertEqual(self.stored()["messages"], models.normalize_v2_thread_record(advanced)["messages"])

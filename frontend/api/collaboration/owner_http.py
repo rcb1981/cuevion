@@ -86,6 +86,7 @@ _APPLICATION_FAILURES = {
     "forbidden": (404, "not_found"),
     "source_changed": (409, "conflict"),
     "stale_thread": (409, "conflict"),
+    "collaboration_resolved": (409, "conflict"),
     "stale_invitation": (409, "conflict"),
     "idempotency_conflict": (409, "conflict"),
     "guest_capacity_reached": (409, "conflict"),

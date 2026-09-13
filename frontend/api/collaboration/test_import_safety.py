@@ -594,6 +594,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
                 action,
                 "owner",
                 "Owner",
+                actor_user_id="usr_" + "A" * 22,
             )
 
         reply_context = mint_internal("reply")
