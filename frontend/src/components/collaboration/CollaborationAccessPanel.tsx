@@ -410,6 +410,7 @@ export function CollaborationAccessPanel({
     event.preventDefault();
     if (
       !collaboration ||
+      collaboration.state === "resolved" ||
       collaboration.viewerAccess !== "owner" ||
       collaboration.participants.length >= 16 ||
       !eligibleTeamMembers.some((member) => member.memberUserId === addTeamMemberId) ||
@@ -452,6 +453,7 @@ export function CollaborationAccessPanel({
     event.preventDefault();
     if (
       !collaboration ||
+      collaboration.state === "resolved" ||
       collaboration.viewerAccess !== "owner" ||
       collaboration.externalGuests.length >= 16 ||
       mutationInFlight
@@ -786,6 +788,7 @@ export function CollaborationAccessPanel({
   }
 
   const isOwner = collaboration.viewerAccess === "owner";
+  const isResolved = collaboration.state === "resolved";
   const teamLimitReached = collaboration.participants.length >= 16;
   const externalGuests = isOwner ? collaboration.externalGuests : [];
   const guestLimitReached = externalGuests.length >= 16;
@@ -798,11 +801,13 @@ export function CollaborationAccessPanel({
         </div>
       </div>
 
+      {isResolved ? <p className="text-xs leading-5 text-[var(--workspace-text-muted)]">Reopen the collaboration to add people.</p> : null}
+
       <div className="grid gap-4 sm:grid-cols-2">
         <section className="min-w-0 space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h4 className="text-[0.84rem] font-medium text-[var(--workspace-text)]">Cuevion Team</h4>
-            {isOwner ? (
+            {isOwner && !isResolved ? (
               <button type="button" onClick={() => setIsAddTeamOpen((current) => !current)} disabled={teamLimitReached || eligibleTeamMembers.length === 0 || mutationInFlight} className={secondaryButtonClass}>Add Team member</button>
             ) : null}
           </div>
@@ -816,8 +821,8 @@ export function CollaborationAccessPanel({
             ))}
           </div>
           {teamLimitReached ? <p className="text-[0.76rem] text-[var(--workspace-text-muted)]">Team participant limit reached.</p> : null}
-          {isOwner && eligibleTeamMembers.length === 0 && !teamLimitReached ? <p className="text-[0.76rem] leading-5 text-[var(--workspace-text-muted)]">No other eligible Team members yet. Add a Team member in Team Settings first.</p> : null}
-          {isOwner && isAddTeamOpen && !teamLimitReached ? (
+          {isOwner && !isResolved && eligibleTeamMembers.length === 0 && !teamLimitReached ? <p className="text-[0.76rem] leading-5 text-[var(--workspace-text-muted)]">No other eligible Team members yet. Add a Team member in Team Settings first.</p> : null}
+          {isOwner && !isResolved && isAddTeamOpen && !teamLimitReached ? (
             <form onSubmit={submitAddTeamMember} className="space-y-2 rounded-[14px] bg-[var(--workspace-card-subtle)] p-3">
               <label className="block space-y-1.5">
                 <span className="text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-muted)]">Team member</span>
@@ -839,7 +844,7 @@ export function CollaborationAccessPanel({
           <section className="min-w-0 space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h4 className="text-[0.84rem] font-medium text-[var(--workspace-text)]">External guests</h4>
-              <button type="button" onClick={() => setIsInviteGuestOpen((current) => !current)} disabled={guestLimitReached || mutationInFlight} className={secondaryButtonClass}>Invite external guest</button>
+              {!isResolved ? <button type="button" onClick={() => setIsInviteGuestOpen((current) => !current)} disabled={guestLimitReached || mutationInFlight} className={secondaryButtonClass}>Invite external guest</button> : null}
             </div>
             <p className="text-[0.74rem] text-[var(--workspace-text-muted)]">Shared messages only</p>
             {externalGuests.length > 0 ? (
@@ -877,7 +882,7 @@ export function CollaborationAccessPanel({
             ) : <p className="text-[0.76rem] text-[var(--workspace-text-muted)]">No external guests.</p>}
             {guestLimitReached ? <p className="text-[0.76rem] text-[var(--workspace-text-muted)]">External guest invitation limit reached.</p> : null}
             {!isInviteGuestOpen && inviteMutation.status === "failure" ? <div role="alert" aria-live="polite" className="text-[0.76rem] leading-5 text-[var(--workspace-text-muted)]">{inviteMutation.message}</div> : null}
-            {isInviteGuestOpen && !guestLimitReached ? (
+            {!isResolved && isInviteGuestOpen && !guestLimitReached ? (
               <form onSubmit={submitGuestInvitation} className="space-y-2 rounded-[14px] bg-[var(--workspace-card-subtle)] p-3">
                 <label className="block space-y-1.5">
                   <span className="text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-muted)]">Email (optional)</span>

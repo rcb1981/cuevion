@@ -30732,6 +30732,7 @@ function MailboxView({
                     <p className="col-span-2 truncate text-sm text-[var(--workspace-text)]" title={activeCollaborationMessage.subject}>{activeCollaborationMessage.subject}</p>
                     <div className="col-span-2 flex min-w-0 items-center justify-between gap-3 text-xs text-[var(--workspace-text-muted)]">
                       <p className="min-w-0 truncate" title={activeCollaborationMessage.from}>From {activeCollaborationMessage.sender || activeCollaborationMessage.from}</p>
+                      {activeCollaborationOwnerProjection?.state === "resolved" ? <span role="status" data-collaboration-header-status className="shrink-0 rounded-full border border-[var(--workspace-border)] px-2.5 py-1 font-medium text-[var(--workspace-text)]">Resolved</span> : null}
                     </div>
                   </div>
                   {activeCollaborationOwnerProjection ? <CollaborationContextTabs selected={collaborationContextTab} onSelect={selectCollaborationContextTab} /> : null}
@@ -31374,6 +31375,12 @@ function MailboxView({
 
                   {activeCollaborationOwnerProjection ? <CollaborationChatComposer
                     key={activeCollaborationOwnerContextKey}
+                    resolved={activeCollaborationOwnerProjection.state === "resolved" ? {
+                      canReopen: activeCollaborationOwnerProjection.viewerAccess === "owner",
+                      pending: collaborationLifecycleStatus === "pending",
+                      error: collaborationLifecycleStatus === "failure" ? "Collaboration could not be updated. Retry." : null,
+                      onReopen: () => { void transitionCanonicalCollaboration(); },
+                    } : undefined}
                     shared={{
                       draft: collaborationOwnerSharedMessageDraft,
                       sending: collaborationOwnerSharedMessageState.status === "sending",

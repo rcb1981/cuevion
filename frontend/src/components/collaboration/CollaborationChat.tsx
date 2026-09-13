@@ -57,11 +57,30 @@ export type CollaborationComposerChannel = {
   onSend: () => void;
 };
 
-export function CollaborationChatComposer({ shared, internal }: {
+export function CollaborationChatComposer({ shared, internal, resolved }: {
   shared: CollaborationComposerChannel;
   internal: CollaborationComposerChannel;
+  resolved?: {
+    canReopen: boolean;
+    pending: boolean;
+    error: string | null;
+    onReopen: () => void;
+  };
 }) {
   const [mode, setMode] = useState<"shared" | "internal">("shared");
+  // Keep the mode and parent-owned drafts while removing all writable controls.
+  if (resolved) return <section data-collaboration-resolved-panel aria-label="Resolved collaboration" className="shrink-0 space-y-2 border-t border-[var(--workspace-border)] pt-3">
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="min-w-0">
+        <p className="text-sm font-medium text-[var(--workspace-text)]">This collaboration is resolved.</p>
+        <p className="mt-1 text-xs leading-5 text-[var(--workspace-text-muted)]">{resolved.canReopen ? "Reopen it to continue the conversation." : "Ask the collaboration owner to reopen it to continue the conversation."}</p>
+      </div>
+      {resolved.canReopen ? <button type="button" disabled={resolved.pending} onClick={resolved.onReopen} className="min-h-11 shrink-0 rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-card)] px-4 text-sm text-[var(--workspace-text)] hover:bg-[var(--workspace-hover-surface)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--workspace-accent-text)] disabled:cursor-not-allowed disabled:text-[var(--workspace-text-muted)]">
+        {resolved.pending ? "Reopening…" : "Reopen collaboration"}
+      </button> : null}
+    </div>
+    {resolved.error ? <p role="status" className="text-xs text-[var(--workspace-text-muted)]">{resolved.error}</p> : null}
+  </section>;
   const channel = mode === "shared" ? shared : internal;
   // Drafts and retained retry operations belong to the existing owner handlers.
   const sending = shared.sending || internal.sending;

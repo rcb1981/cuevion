@@ -1,6 +1,8 @@
 // @ts-nocheck
 
 import assert from "node:assert/strict";
+import vm from "node:vm";
+import ts from "typescript";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -193,6 +195,14 @@ try {
   assert.doesNotMatch(ownerMarkup, new RegExp(OWNER_USER_ID));
   assert.doesNotMatch(ownerMarkup, new RegExp(INVITE_IDS[0]));
 
+  const resolvedOwnerMarkup = renderPanel({mode: "access", collaboration: {...baseCollaboration("owner"), state: "resolved"}});
+  for (const text of ["Workspace Owner", "Existing Member", "Active Guest", "Pending", "Revoked", "Expired", "Reopen the collaboration to add people."]) assert.ok(resolvedOwnerMarkup.includes(text), text);
+  for (const text of ["Add Team member", "Invite external guest", "Create secure link"]) assert.ok(!resolvedOwnerMarkup.includes(text), text);
+  assert.equal((resolvedOwnerMarkup.match(/Revoke access/g) ?? []).length, 2, "resolved owners retain revocation");
+  const resolvedParticipantMarkup = renderPanel({mode: "access", collaboration: {...baseCollaboration("participant"), state: "resolved"}});
+  assert.ok(resolvedParticipantMarkup.includes("Existing Member"));
+  for (const text of ["Revoke access", "Invite external guest", "Add Team member", "Active Guest"]) assert.ok(!resolvedParticipantMarkup.includes(text), text);
+
   const participantMarkup = renderPanel({
     mode: "access",
     collaboration: baseCollaboration("participant"),
@@ -265,6 +275,23 @@ try {
     resolve(process.cwd(), "src/components/collaboration/CollaborationAccessPanel.tsx"),
     "utf8",
   );
+  const tree = ts.createSourceFile("CollaborationAccessPanel.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  for (const name of ["submitAddTeamMember", "submitGuestInvitation"]) {
+    let initializer: string | undefined;
+    const visit = (node: ts.Node) => {
+      if (ts.isVariableDeclaration(node) && node.name.getText(tree) === name) initializer = node.initializer?.getText(tree);
+      ts.forEachChild(node, visit);
+    };
+    visit(tree);
+    assert.ok(initializer, name);
+    let prevented = false;
+    const program = ts.transpileModule(`(${initializer})(event);`, {compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText;
+    // No mutation dependencies are provided: a resolved form must return before
+    // validation, state changes, secret clearing or any transport can execute.
+    vm.runInNewContext(program, {collaboration:{...baseCollaboration("owner"),state:"resolved"}, event:{preventDefault(){prevented=true;}}});
+    assert.equal(prevented, true, name);
+  }
+
   const workspaceSource = readFileSync(
     resolve(process.cwd(), "src/components/workspace/WorkspaceShell.tsx"),
     "utf8",
