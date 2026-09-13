@@ -325,7 +325,7 @@ def parse_json_object(
             ),
         )
     except (
-        json.JSONDecodeError,
+        ValueError,
         RecursionError,
         _DuplicateObjectKey,
         _ForbiddenJsonNumber,

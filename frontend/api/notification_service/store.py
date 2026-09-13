@@ -70,10 +70,11 @@ end
 local function notificationRecordValid(record, raw, workspace, user)
   if type(record) ~= 'table' or type(raw) ~= 'string' or #raw > 4096 then return false end
   local fields = rawInviteMembers(raw)
-  if not fields or keyCount(fields) ~= 13 or not fields.readAt or not fields.activityId then return false end
+  if not fields or keyCount(fields) ~= (fields.attention and 14 or 13)
+    or not fields.readAt or not fields.activityId then return false end
   local allowed = {v=true,notificationId=true,workspaceId=true,recipientUserId=true,kind=true,
     collaborationId=true,mailboxId=true,sourceRef=true,activityId=true,actor=true,
-    createdAt=true,expiresAt=true,readAt=true}
+    createdAt=true,expiresAt=true,readAt=true,attention=true}
   for field, _ in pairs(fields) do if not allowed[field] then return false end end
   if record.v ~= '1' or not notificationIdValid(record.notificationId)
     or record.workspaceId ~= workspace or not canonicalWorkspaceId(record.workspaceId)
@@ -86,6 +87,8 @@ local function notificationRecordValid(record, raw, workspace, user)
   if (record.kind == 'shared_message' or record.kind == 'internal_note') and notificationNull(record.activityId) then return false end
   if record.actor.type == 'external_guest' and record.kind ~= 'shared_message' then return false end
   if record.actor.type == 'cuevion_user' and record.actor.userId == user then return false end
+  if fields.attention and (record.attention ~= 'mention' or record.actor.type ~= 'cuevion_user'
+    or (record.kind ~= 'shared_message' and record.kind ~= 'internal_note')) then return false end
   local created, expires = integerValue(record.createdAt), integerValue(record.expiresAt)
   if expires <= created or expires > created + NOTIFICATION_RETENTION then return false end
   if not notificationNull(record.readAt) and (not timestampMilliseconds(record.readAt)
@@ -101,6 +104,7 @@ local function notificationEncode(record)
   for _, key in ipairs({'activityId','readAt'}) do
     fields[#fields+1] = cjson.encode(key) .. ':' .. (notificationNull(record[key]) and 'null' or cjson.encode(record[key]))
   end
+  if record.attention ~= nil then fields[#fields+1] = '"attention":' .. cjson.encode(record.attention) end
   return '{' .. table.concat(fields, ',') .. '}'
 end
 local function notificationTopology(keys)
@@ -165,7 +169,7 @@ local function notificationRecipients(thread, actorUserId)
   for _, participant in ipairs(thread.participants or {}) do add(participant.userId) end
   return users
 end
-local function notificationPrepare(thread, kind, actor, activityId, recipients, ttl, createdAt, eventIdentity, threadKey)
+local function notificationPrepare(thread, kind, actor, activityId, recipients, ttl, createdAt, eventIdentity, threadKey, mentionUserIds)
   if not threadValid(thread) or not canonicalWorkspaceId(thread.workspaceId)
     or not canonicalUserId(thread.ownerUserId) or not notificationKindValid(kind)
     or not notificationActorValid(actor) or not timestampMilliseconds(createdAt)
@@ -176,6 +180,18 @@ local function notificationPrepare(thread, kind, actor, activityId, recipients, 
   local allowed = {}
   for _, user in ipairs(notificationRecipients(thread, nil)) do allowed[user] = true end
   if actor.type == 'cuevion_user' and not allowed[actor.userId] then return nil, 'malformed' end
+  local mentioned = {}
+  if mentionUserIds ~= nil then
+    if type(mentionUserIds) ~= 'table' or #mentionUserIds > 16
+      or keyCount(mentionUserIds) ~= #mentionUserIds then return nil, 'malformed' end
+    if #mentionUserIds > 0 and (actor.type ~= 'cuevion_user'
+      or (kind ~= 'shared_message' and kind ~= 'internal_note')) then return nil, 'malformed' end
+    for index, user in pairs(mentionUserIds) do
+      if type(index) ~= 'number' or index < 1 or index > #mentionUserIds or index ~= math.floor(index)
+        or not canonicalUserId(user) or not allowed[user] or mentioned[user] then return nil, 'malformed' end
+      mentioned[user] = true
+    end
+  end
   local now = notificationNow()
   -- Notification time belongs to this Redis commit. Collaboration's monotonic
   -- activity clock can be slightly ahead; the activityId retains exact routing.
@@ -203,6 +219,7 @@ local function notificationPrepare(thread, kind, actor, activityId, recipients, 
         kind=kind,collaborationId=thread.collaborationId,mailboxId=thread.mailboxId,
         sourceRef=thread.sourceRef,activityId=activityId,actor=actor,createdAt=createdAt,
         expiresAt=notificationInteger(expiry),readAt=JSON_NULL}
+      if mentioned[user] then record.attention = 'mention' end
       local encoded = notificationEncode(record)
       if not notificationRecordValid(record, encoded, thread.workspaceId, user) then return nil, 'malformed' end
       local prune, survivors, prior, latest = {}, {}, nil, expiry
@@ -218,6 +235,7 @@ local function notificationPrepare(thread, kind, actor, activityId, recipients, 
         if existing.kind ~= kind or existing.collaborationId ~= thread.collaborationId
           or existing.mailboxId ~= thread.mailboxId or not sourceEqual(existing.sourceRef, thread.sourceRef)
           or (not notificationNull(activityId) and existing.activityId ~= activityId)
+          or existing.attention ~= record.attention
           or existing.actor.type ~= actor.type or existing.actor.userId ~= actor.userId then return nil, 'malformed' end
       elseif #survivors == NOTIFICATION_MAX and (createdAt < survivors[1].record.createdAt
         or (createdAt == survivors[1].record.createdAt and id < survivors[1].id)) then

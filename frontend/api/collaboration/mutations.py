@@ -24,8 +24,10 @@ from .models import (
     _v2_bounded_string,
     normalize_v2_thread_record,
     normalize_v2_message_record,
+    normalize_v2_mentions,
     normalize_v2_owner_idempotency_key,
     normalize_v2_participant_authority,
+    normalize_v2_team_membership_ref,
     normalize_v2_user_id,
 )
 from .authorization import _is_internal_capability
@@ -45,6 +47,7 @@ from .redis_store import (
 
 
 _PARTICIPANT_CAS_ATTEMPTS = 4
+_MENTIONS_ABSENT = object()
 
 
 def _failure(code: str) -> dict:
@@ -57,8 +60,11 @@ _CANONICAL_MUTATION_STORAGE_ERRORS = {
     ("conflict", "stale_thread"): "stale_thread",
     ("conflict", "idempotency_conflict"): "idempotency_conflict",
     ("expired", "session_expired"): "session_expired",
+    ("error", "forbidden"): "forbidden",
+    ("error", "invalid_request"): "invalid_request",
     ("forbidden", "forbidden"): "forbidden",
     ("malformed", "storage_protocol_error"): "storage_protocol_error",
+    ("malformed", "invalid_request"): "invalid_request",
     ("missing", "collaboration_not_found"): "collaboration_not_found",
     ("revoked", "session_expired"): "session_expired",
     ("revoked", "session_revoked"): "session_revoked",
@@ -323,6 +329,7 @@ def _owner_mutation_fingerprint(
     capability: object,
     text: str,
     visibility: str,
+    mentions: object = _MENTIONS_ABSENT,
 ) -> str | None:
     if (
         not _is_internal_capability(
@@ -360,6 +367,14 @@ def _owner_mutation_fingerprint(
     }
     if capability.actor_user_id is not None:
         canonical["actorUserId"] = capability.actor_user_id
+    requested_mentions = normalize_v2_mentions(
+        [] if mentions is _MENTIONS_ABSENT else mentions, text, validate_spans=False,
+    )
+    if requested_mentions is None:
+        return None
+    # Preserve the exact historical fingerprint for every text-only request.
+    if requested_mentions:
+        canonical["mentions"] = requested_mentions
     try:
         encoded = json.dumps(
             canonical,
@@ -373,12 +388,49 @@ def _owner_mutation_fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _validate_v2_mention_targets(thread: dict, mentions: list[dict], team_member_resolver) -> str | None:
+    """Validate each distinct target once; this proof never grants access."""
+    owner_id = thread.get("ownerUserId")
+    if normalize_v2_user_id(owner_id) is None:
+        return "forbidden"
+    participants = {entry["userId"]: entry for entry in thread.get("participants", [])}
+    labels = {}
+    for mention in mentions:
+        user_id = mention["userId"]
+        if user_id in labels:
+            continue
+        if user_id == owner_id:
+            label = thread.get("ownerDisplayName")
+        else:
+            participant = participants.get(user_id)
+            if participant is None:
+                return "forbidden"
+            membership, error = team_member_resolver(thread["workspaceId"], user_id)
+            if error == "not_active":
+                return "forbidden"
+            if error is not None or type(membership) is not dict:
+                return "storage_unavailable"
+            if (membership.get("memberUserId") != user_id
+                    or normalize_v2_team_membership_ref(membership.get("sourceInvitationId")) is None):
+                return "storage_unavailable"
+            if membership["sourceInvitationId"] != participant["membershipRef"]:
+                return "forbidden"
+            label = membership.get("displayName")
+        if _v2_bounded_string(label, max_length=256) != label or type(label) is not str:
+            return "storage_unavailable"
+        labels[user_id] = "@" + label
+    if any(mention["displayText"] != labels[mention["userId"]] for mention in mentions):
+        return "invalid_request"
+    return None
+
+
 def append_owner_v2_message_idempotently(
     context: object,
     text: object,
     *,
     visibility: str,
     idempotency_key: object,
+    mentions: object = _MENTIONS_ABSENT,
     thread_loader=_load_v2_thread,
     thread_saver=_append_v2_owner_message_idempotently,
     command_transport=None,
@@ -409,6 +461,13 @@ def append_owner_v2_message_idempotently(
     canonical_key = normalize_v2_owner_idempotency_key(idempotency_key)
     if canonical_key is None:
         return _failure("invalid_request")
+    requested_mentions = normalize_v2_mentions(
+        [] if mentions is _MENTIONS_ABSENT else mentions, text, validate_spans=False,
+    )
+    if requested_mentions is None:
+        return _failure("invalid_request")
+    canonical_mentions = normalize_v2_mentions(requested_mentions, text)
+    fresh_mention_error = "invalid_request" if canonical_mentions is None else None
 
     thread, error = _load_scoped_thread(
         context,
@@ -418,7 +477,28 @@ def append_owner_v2_message_idempotently(
     if error:
         return error
     from api.notification_service.recipients import resolve_notification_recipients
-    intended = resolve_notification_recipients(thread, context.actor_user_id)
+    if requested_mentions:
+        from .authorization import _resolve_active_team_member
+        membership_cache = {}
+
+        def resolve_member(workspace_id, user_id):
+            key = (workspace_id, user_id)
+            if key not in membership_cache:
+                try:
+                    membership_cache[key] = _resolve_active_team_member(workspace_id, user_id)
+                except Exception:
+                    membership_cache[key] = (None, "unavailable")
+            return membership_cache[key]
+
+        if fresh_mention_error is None:
+            fresh_mention_error = _validate_v2_mention_targets(thread, canonical_mentions, resolve_member)
+        if fresh_mention_error == "storage_unavailable":
+            return _failure("storage_unavailable")
+        intended = resolve_notification_recipients(
+            thread, context.actor_user_id, team_member_resolver=resolve_member,
+        )
+    else:
+        intended = resolve_notification_recipients(thread, context.actor_user_id)
     if intended.get("status") != "ok":
         return _failure(intended.get("error", {}).get("code", "storage_unavailable"))
     expected = thread["updatedAt"]
@@ -431,13 +511,14 @@ def append_owner_v2_message_idempotently(
         author_kind=context.actor_kind,
         visibility=visibility,
         created_at=now,
+        **({"mentions": canonical_mentions} if canonical_mentions else {}),
     )
     if message is None:
         return _failure("invalid_request")
     replacement = normalize_v2_thread_record(
         {**thread, "messages": [*thread["messages"], message], "updatedAt": now}
     )
-    fingerprint = _owner_mutation_fingerprint(context, message["text"], visibility)
+    fingerprint = _owner_mutation_fingerprint(context, message["text"], visibility, requested_mentions)
     if replacement is None or fingerprint is None:
         return _failure("invalid_request")
 
@@ -451,6 +532,8 @@ def append_owner_v2_message_idempotently(
         actor_user_id=context.actor_user_id,
         recipient_user_ids=intended["userIds"],
         command_transport=command_transport,
+        **({"requested_mentions": requested_mentions, "fresh_mention_error": fresh_mention_error}
+           if requested_mentions else {}),
     )
     if type(saved) is not _V2OwnerAppendResult:
         if type(saved) is dict:
@@ -471,6 +554,7 @@ def append_owner_v2_message_idempotently(
         or committed_message["text"] != message["text"]
         or committed_message["visibility"] != visibility
         or committed_message["createdAt"] != saved.updated_at
+        or committed_message.get("mentions", []) != requested_mentions
     ):
         return _failure("storage_protocol_error")
     return {
@@ -483,6 +567,7 @@ def append_owner_v2_message_idempotently(
             "text": committed_message["text"],
             "timestamp": committed_message["createdAt"],
             "visibility": committed_message["visibility"],
+            **({"mentions": committed_message["mentions"]} if committed_message.get("mentions") else {}),
         },
         "updatedAt": saved.updated_at,
         "error": None,

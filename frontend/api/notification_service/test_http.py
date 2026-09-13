@@ -244,6 +244,34 @@ class NotificationHttpTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.mark.assert_called_once_with(WORKSPACE, USER, NOTIFICATION)
 
+    def test_mention_attention_survives_list_and_mark_read_without_authority_fields(self):
+        for kind in ("shared_message", "internal_note"):
+            with self.subTest(kind=kind):
+                self.list.return_value["notifications"] = [dto(kind=kind, attention="mention")]
+                listed = self.invoke(request({"operation": "list"}))
+                self.assertEqual(listed.status, 200)
+                self.assertEqual(json.loads(listed.body)["notifications"], [dto(kind=kind, attention="mention")])
+                marked_row = dto(kind=kind, attention="mention", readAt=NOW * 1000 + 100)
+                self.mark.return_value["notification"] = marked_row
+                marked = self.invoke(request({"operation": "mark_read", "notificationId": NOTIFICATION}))
+                self.assertEqual(marked.status, 200)
+                self.assertEqual(json.loads(marked.body)["notification"], marked_row)
+                for field in ("recipientUserId", "mentions", "membershipRef", "sourceInvitationId", "body", "text"):
+                    self.assertNotIn(field, json.loads(marked.body)["notification"])
+
+    def test_invalid_attention_output_fails_closed_and_clients_cannot_set_attention(self):
+        for attention in (None, False, 1, {}, [], "normal"):
+            with self.subTest(attention=attention):
+                self.list.return_value["notifications"] = [dto(attention=attention)]
+                self.assertEqual(self.invoke(request({"operation": "list"})).status, 503)
+                self.mark.return_value["notification"] = dto(attention=attention, readAt=NOW * 1000 + 100)
+                self.assertEqual(self.invoke(request({"operation": "mark_read", "notificationId": NOTIFICATION})).status, 503)
+        for operation in ("summary", "list", "mark_read"):
+            payload = {"operation": operation, "attention": "mention"}
+            if operation == "mark_read":
+                payload["notificationId"] = NOTIFICATION
+            self.assertEqual(self.invoke(request(payload)).status, 400)
+
     def test_page_limit_and_cursor_strictness(self):
         for limit in (0, 51, True, "50", 1.5, None):
             with self.subTest(limit=limit):

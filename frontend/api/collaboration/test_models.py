@@ -7,6 +7,9 @@ import unittest
 from .models import (
     MAX_V2_EXTERNAL_GUESTS,
     MAX_V2_THREAD_BYTES,
+    MAX_V2_MENTION_BYTES,
+    MAX_V2_SAFE_INTEGER,
+    _build_v2_server_message,
     build_v2_guest_thread_dto,
     generate_v2_bearer_secret,
     generate_v2_opaque_id,
@@ -18,6 +21,7 @@ from .models import (
     normalize_v2_external_guest_projection_item,
     normalize_v2_thread_record,
     normalize_v2_message_record,
+    normalize_v2_mentions,
     build_v2_guest_shared_reply,
     build_v2_owner_internal_message,
 )
@@ -109,6 +113,180 @@ def sample_participant_thread() -> dict:
             },
         ],
     }
+
+
+class CollaborationV2MentionModelTests(unittest.TestCase):
+    USER_ID = "usr_" + "E" * 21 + "A"
+
+    def mention(self, start=0, end=5, display_text="@Emma", *, user_id=None):
+        return {
+            "userId": self.USER_ID if user_id is None else user_id,
+            "start": start,
+            "end": end,
+            "displayText": display_text,
+        }
+
+    def test_historical_and_empty_mentions_preserve_absence_without_inference(self):
+        message = {**sample_thread()["messages"][0], "text": "@Emma is ordinary text"}
+        old = normalize_v2_message_record(message)
+        self.assertNotIn("mentions", old)
+        self.assertEqual(normalize_v2_message_record({**message, "mentions": []}), old)
+        for invalid in (None, {}, "@Emma", False):
+            with self.subTest(invalid=invalid):
+                self.assertIsNone(normalize_v2_message_record({**message, "mentions": invalid}))
+        thread = {**sample_thread(), "messages": [old]}
+        wire = encode_v2_wire_record(thread, "thread")
+        self.assertNotIn("mentions", wire["messages"][0])
+        self.assertEqual(decode_v2_wire_record(wire, "thread"), thread)
+
+    def test_canonical_order_preserves_repeated_users_and_does_not_mutate_input(self):
+        early = self.mention()
+        late = self.mention(10, 15)
+        unordered = [late, early]
+        snapshot = copy.deepcopy(unordered)
+        expected = [early, late]
+        self.assertEqual(normalize_v2_mentions(unordered, "@Emma and @Emma"), expected)
+        self.assertEqual(normalize_v2_mentions(expected, "@Emma and @Emma"), expected)
+        self.assertEqual(unordered, snapshot)
+        self.assertEqual(
+            normalize_v2_mentions([self.mention(5, 10), early], "@Emma@Emma"),
+            [early, self.mention(5, 10)],
+        )
+
+    def test_utf16_offsets_support_supplementary_characters_before_inside_and_after(self):
+        mentions = [self.mention(3, 8), self.mention(12, 14, "@李")]
+        self.assertEqual(normalize_v2_mentions(mentions, "😀 @Emma 𝄞 @李"), mentions)
+        inside = self.mention(5, 8, "@😀")
+        self.assertEqual(normalize_v2_mentions([inside], "left @😀 right"), [inside])
+
+    def test_invalid_utf16_spans_and_body_mismatches_reject_whole_metadata(self):
+        valid = self.mention(2, 7)
+        for invalid in (
+            self.mention(-1, 7), self.mention(2, 2), self.mention(3, 2),
+            self.mention(2, 8), self.mention(1, 7), self.mention(0, 1, "😀"),
+            self.mention(2, 7, "@Other"), self.mention(1, 6),
+        ):
+            with self.subTest(invalid=invalid):
+                self.assertIsNone(normalize_v2_mentions([invalid], "😀@Emma"))
+        self.assertIsNone(normalize_v2_mentions([valid, self.mention(4, 7, "mma")], "😀@Emma"))
+        self.assertIsNone(normalize_v2_mentions([valid, valid], "😀@Emma"))
+        self.assertIsNone(normalize_v2_mentions([valid], "\ud800@Emma"))
+
+    def test_exact_types_ids_and_field_allowlist_fail_closed(self):
+        valid = self.mention()
+        for field, value in (
+            ("start", True), ("end", False), ("start", 0.0), ("end", "5"),
+            ("end", MAX_V2_SAFE_INTEGER + 1), ("userId", "guest-123"),
+            ("userId", "usr_" + "A" * 21 + "B"), ("userId", None),
+            ("displayText", None), ("displayText", "\ud800"),
+        ):
+            with self.subTest(field=field, value=value):
+                self.assertIsNone(normalize_v2_mentions([{**valid, field: value}], "@Emma"))
+        for field in valid:
+            self.assertIsNone(normalize_v2_mentions([{key: value for key, value in valid.items() if key != field}], "@Emma"))
+        for field in ("membershipRef", "sourceInvitationId", "email", "notify"):
+            self.assertIsNone(normalize_v2_mentions([{**valid, field: "private"}], "@Emma"))
+        self.assertIsNone(normalize_v2_mentions([valid, None], "@Emma"))
+        self.assertIsNone(normalize_v2_mentions((valid,), "@Emma"))
+
+    def test_occurrence_and_distinct_user_limits_reject_without_truncation(self):
+        body = " ".join(["@Emma"] * 33)
+        occurrences = [self.mention(index * 6, index * 6 + 5) for index in range(33)]
+        self.assertEqual(len(normalize_v2_mentions(occurrences[:32], body)), 32)
+        self.assertIsNone(normalize_v2_mentions(occurrences, body))
+        distinct = [
+            self.mention(index * 6, index * 6 + 5, user_id="usr_" + chr(65 + index) * 21 + "A")
+            for index in range(17)
+        ]
+        self.assertEqual(len(normalize_v2_mentions(distinct[:16], body)), 16)
+        self.assertIsNone(normalize_v2_mentions(distinct, body))
+
+    def test_metadata_utf8_byte_cap_includes_json_overhead(self):
+        def metadata_size(mentions):
+            return len(json.dumps(mentions, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+
+        # A four-digit end offset keeps the JSON overhead fixed at this boundary.
+        overhead = metadata_size([self.mention(0, 1000, "")])
+        body = "@" + "é" * ((MAX_V2_MENTION_BYTES - overhead - 1) // 2)
+        remainder = MAX_V2_MENTION_BYTES - overhead - len(body.encode("utf-8"))
+        body += "a" * remainder
+        mentions = [self.mention(0, len(body), body)]
+        self.assertEqual(metadata_size(mentions), MAX_V2_MENTION_BYTES)
+        self.assertEqual(normalize_v2_mentions(mentions, body), mentions)
+        too_large = [self.mention(0, len(body) + 1, body + "a")]
+        self.assertEqual(metadata_size(too_large), MAX_V2_MENTION_BYTES + 1)
+        self.assertIsNone(normalize_v2_mentions(too_large, body + "a"))
+
+    def test_wire_offsets_are_decimal_strings_and_round_trip_without_mutating(self):
+        thread = sample_thread()
+        thread["messages"][0].update(text="😀 @Emma", mentions=[self.mention(3, 8)])
+        canonical = normalize_v2_thread_record(thread)
+        snapshot = copy.deepcopy(canonical)
+        wire = encode_v2_wire_record(canonical, "thread")
+        self.assertEqual(wire["messages"][0]["mentions"], [{**self.mention(3, 8), "start": "3", "end": "8"}])
+        self.assertEqual(decode_v2_wire_record(wire, "thread"), canonical)
+        self.assertEqual(canonical, snapshot)
+        for invalid in (3, 3.0, True, "03", "+3", "-0", "3.0", "3e0", " 3", "9007199254740992"):
+            with self.subTest(invalid=invalid):
+                malformed = copy.deepcopy(wire)
+                malformed["messages"][0]["mentions"][0]["start"] = invalid
+                self.assertIsNone(decode_v2_wire_record(malformed, "thread"))
+        for invalid in (None, {}, [None]):
+            malformed = copy.deepcopy(wire)
+            malformed["messages"][0]["mentions"] = invalid
+            self.assertIsNone(decode_v2_wire_record(malformed, "thread"))
+
+    def test_historical_mentions_do_not_revalidate_current_display_names(self):
+        historical = {**sample_thread()["messages"][0], "text": "@Former Name", "mentions": [self.mention(0, 12, "@Former Name")]}
+        canonical = normalize_v2_message_record(historical)
+        self.assertEqual(canonical["mentions"], historical["mentions"])
+        self.assertIsNone(canonical["authorUserId"])
+        self.assertEqual(normalize_v2_message_record(canonical), canonical)
+
+    def test_server_builder_stores_authenticated_metadata_but_not_guest_authority(self):
+        for kind in ("owner", "internal"):
+            message = _build_v2_server_message(
+                "@Emma", author_kind=kind, author_display_name="Writer",
+                visibility="shared", created_at=MS + 100, mentions=[self.mention()],
+            )
+            self.assertEqual(message["mentions"], [self.mention()])
+        self.assertIsNone(_build_v2_server_message(
+            "@Emma", author_kind="guest", author_display_name="Guest",
+            visibility="shared", created_at=MS + 100, mentions=[self.mention()],
+        ))
+        guest = _build_v2_server_message(
+            "@Emma", author_kind="guest", author_display_name="Guest",
+            visibility="shared", created_at=MS + 100,
+        )
+        self.assertNotIn("mentions", guest)
+
+    def test_guest_projection_keeps_visible_text_but_strips_mentions_and_internal_notes(self):
+        thread = sample_thread()
+        thread["messages"][0].update(text="@Emma", visibility="shared", mentions=[self.mention()])
+        thread["messages"].append({
+            **thread["messages"][0], "id": "N" * 22,
+            "text": "@Secret", "visibility": "internal", "mentions": [self.mention(0, 7, "@Secret")],
+        })
+        dto = build_v2_guest_thread_dto(thread)
+        self.assertEqual(dto["messages"][0]["text"], "@Emma")
+        self.assertEqual(len(dto["messages"]), 2)
+        serialized = json.dumps(dto)
+        for private in ("mentions", self.USER_ID, "@Secret", "membershipRef", "sourceInvitationId"):
+            self.assertNotIn(private, serialized)
+
+    def test_retry_structure_can_fingerprint_invalid_spans_without_authorizing_them(self):
+        for invalid in (
+            self.mention(-1, 5), self.mention(3, 2), self.mention(1, 1),
+            self.mention(1, 100), self.mention(0, 5, "@Else"),
+        ):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(normalize_v2_mentions([invalid], "@Emma", validate_spans=False), [invalid])
+                self.assertIsNone(normalize_v2_mentions([invalid], "@Emma"))
+        duplicate = [self.mention(), self.mention()]
+        self.assertEqual(normalize_v2_mentions(duplicate, "@Emma", validate_spans=False), duplicate)
+        self.assertIsNone(normalize_v2_mentions(duplicate, "@Emma"))
+        for invalid in (True, 0.5, "0", -MAX_V2_SAFE_INTEGER - 1):
+            self.assertIsNone(normalize_v2_mentions([{**self.mention(), "start": invalid}], "@Emma", validate_spans=False))
 
 
 class CollaborationV2ModelTests(unittest.TestCase):

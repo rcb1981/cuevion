@@ -199,6 +199,7 @@ def read_json_object(
     maximum_bytes: int,
     allowed_fields: object,
     required_fields: object = (),
+    reject_numbers: bool = True,
 ) -> dict[str, Any]:
     """Read exactly one bounded JSON body and enforce its top-level schema."""
 
@@ -232,6 +233,7 @@ def read_json_object(
         decoded,
         allowed_fields=allowed_fields,
         required_fields=required_fields,
+        reject_numbers=reject_numbers,
     )
 
 

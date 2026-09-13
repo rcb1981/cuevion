@@ -55,7 +55,7 @@ def normalize_notification_actor(value: object) -> dict | None:
 
 
 def normalize_notification_record(value: object) -> dict | None:
-    if type(value) is not dict or set(value) != _FIELDS:
+    if type(value) is not dict or set(value) not in (_FIELDS, _FIELDS | {"attention"}):
         return None
     actor = normalize_notification_actor(value.get("actor"))
     source = normalize_v2_source_ref(value.get("sourceRef"))
@@ -79,6 +79,11 @@ def normalize_notification_record(value: object) -> dict | None:
         or (kind in {"shared_message", "internal_note"} and value["activityId"] is None)
         or (kind != "shared_message" and actor["type"] == "external_guest")
         or (actor["type"] == "cuevion_user" and actor["userId"] == value["recipientUserId"])
+        or ("attention" in value and (
+            type(value["attention"]) is not str or value["attention"] != "mention"
+            or kind not in {"shared_message", "internal_note"}
+            or actor["type"] != "cuevion_user"
+        ))
     ):
         return None
     normalized = {**value, "actor": actor, "sourceRef": source}
@@ -98,7 +103,8 @@ def notification_dto(record: object) -> dict | None:
 
 
 def normalize_notification_dto(value: object) -> dict | None:
-    if type(value) is not dict or set(value) != _FIELDS - {"recipientUserId"}:
+    fields = _FIELDS - {"recipientUserId"}
+    if type(value) is not dict or set(value) not in (fields, fields | {"attention"}):
         return None
     # DTO carries no authority; supply a distinct valid sentinel only for schema validation.
     sentinel = "usr_" + "A" * 22

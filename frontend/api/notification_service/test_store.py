@@ -30,6 +30,29 @@ def record_fixture(**changes):
 
 
 class NotificationModelTests(unittest.TestCase):
+    def test_optional_mention_attention_preserves_historical_record_and_dto_shapes(self):
+        for kind in ("shared_message", "internal_note"):
+            for attention in ({}, {"attention": "mention"}):
+                value = record_fixture(kind=kind, **attention)
+                with self.subTest(kind=kind, attention=attention):
+                    self.assertEqual(models.normalize_notification_record(value), value)
+                    dto = models.notification_dto(value)
+                    self.assertEqual(models.normalize_notification_dto(dto), dto)
+                    self.assertEqual("attention" in dto, bool(attention))
+                    wire = {**value, **{field: str(value[field]) for field in ("v", "createdAt", "expiresAt")}}
+                    self.assertEqual(models.decode_notification_wire(json.dumps(wire)), value)
+
+    def test_attention_is_strict_server_activity_metadata(self):
+        for attention in (None, False, 1, [], {}, "", "generic", "MENTION"):
+            with self.subTest(attention=attention):
+                self.assertIsNone(models.normalize_notification_record(record_fixture(attention=attention)))
+        for kind in ("collaboration_started", "participant_added"):
+            self.assertIsNone(models.normalize_notification_record(record_fixture(kind=kind, attention="mention")))
+        self.assertIsNone(models.normalize_notification_record(record_fixture(
+            attention="mention", actor={"type": "external_guest", "displayName": "Guest"},
+        )))
+        self.assertIsNone(models.normalize_notification_record(record_fixture(attention="mention", mentions=[])))
+
     def test_all_supported_kinds_and_exact_routing(self):
         for kind in models.NOTIFICATION_KINDS:
             value = record_fixture(kind=kind, activityId="B" * 22 if kind in {"shared_message", "internal_note"} else None)
@@ -77,6 +100,9 @@ class NotificationModelTests(unittest.TestCase):
         self.assertIsNotNone(models.decode_notification_wire(wire))
         self.assertIsNone(models.decode_notification_wire(json.dumps(record_fixture())))
         self.assertIsNone(models.decode_notification_wire(wire[:-1] + ',"v":"1"}'))
+        mention_wire = wire[:-1] + ',"attention":"mention"}'
+        self.assertIsNotNone(models.decode_notification_wire(mention_wire))
+        self.assertIsNone(models.decode_notification_wire(mention_wire[:-1] + ',"attention":"mention"}'))
         del value["readAt"]
         self.assertIsNone(models.decode_notification_wire(json.dumps(value)))
 
@@ -109,7 +135,8 @@ class NotificationStoreRedisTests(unittest.TestCase):
         self.actor = {"type": "cuevion_user", "userId": OWNER, "displayName": "Owner"}
 
     def emit(self, *, kind="shared_message", actor=None, recipients=None, activity="B" * 22,
-             ttl=600_000, created=None, event_identity=None, fail_after_prepare=False):
+             ttl=600_000, created=None, event_identity=None, fail_after_prepare=False,
+             mention_user_ids=None):
         thread = json.dumps(encode_v2_wire_record(self.thread, "thread"), separators=(",", ":"))
         actor = self.actor if actor is None else actor
         script = redis_store._V2_LUA_COMMON + store.NOTIFICATION_LUA_HELPERS + r"""
@@ -117,8 +144,9 @@ local ok, thread = decodeWire(ARGV[1])
 if not ok then return cjson.encode({status='malformed'}) end
 local actor = cjson.decode(ARGV[3])
 local recipients = ARGV[5] == '' and notificationRecipients(thread, actor.userId) or cjson.decode(ARGV[5])
+local mentionUsers = ARGV[10] ~= '' and cjson.decode(ARGV[10]) or nil
 local plan, err = notificationPrepare(thread, ARGV[2], actor, ARGV[4] ~= '' and ARGV[4] or nil,
-  recipients, tonumber(ARGV[6]), ARGV[7], ARGV[8] ~= '' and ARGV[8] or nil)
+  recipients, tonumber(ARGV[6]), ARGV[7], ARGV[8] ~= '' and ARGV[8] or nil, nil, mentionUsers)
 if err then return cjson.encode({status=err}) end
 if ARGV[9] == 'fail' then return cjson.encode({status='aborted'}) end
 redis.call('SET', KEYS[1], 'canonical-commit')
@@ -128,7 +156,7 @@ return cjson.encode({status='ok',recipients=#plan})
         return json.loads(self.client.command(["EVAL", script, 1, "{cuevion-collab-v2}:test-canonical",
             thread, kind, json.dumps(actor), activity or "", json.dumps(recipients) if recipients is not None else "",
             str(ttl), str(created if created is not None else self.thread["createdAt"]), event_identity or "",
-            "fail" if fail_after_prepare else ""]))
+            "fail" if fail_after_prepare else "", json.dumps(mention_user_ids) if mention_user_ids is not None else ""]))
 
     def listing(self, user=PARTICIPANT, **options):
         return store.list_notifications(WORKSPACE, user, command_transport=self.client.transport, **options)
@@ -141,6 +169,80 @@ return cjson.encode({status='ok',recipients=#plan})
             self.assertEqual(result["unreadCount"], 1)
             self.assertEqual(result["notifications"][0]["activityId"], "B" * 22)
             self.assertNotIn("recipientUserId", result["notifications"][0])
+
+    def test_mentions_emphasize_one_existing_recipient_without_changing_kind_or_routing(self):
+        for kind in ("shared_message", "internal_note"):
+            with self.subTest(kind=kind):
+                self.client.command(["FLUSHALL"])
+                self.assertEqual(self.emit(kind=kind, mention_user_ids=[PARTICIPANT, OWNER]),
+                                 {"status": "ok", "recipients": 2})
+                mentioned = self.listing()["notifications"]
+                self.assertEqual(len(mentioned), 1)
+                self.assertEqual(mentioned[0]["attention"], "mention")
+                self.assertEqual(mentioned[0]["kind"], kind)
+                self.assertEqual(mentioned[0]["sourceRef"], self.thread["sourceRef"])
+                self.assertEqual(mentioned[0]["mailboxId"], self.thread["mailboxId"])
+                self.assertEqual(mentioned[0]["collaborationId"], self.thread["collaborationId"])
+                self.assertEqual(mentioned[0]["activityId"], "B" * 22)
+                self.assertNotIn("attention", self.listing(SECOND)["notifications"][0])
+                self.assertEqual(self.listing(OWNER)["notifications"], [])
+                self.assertNotIn("secret source", json.dumps(mentioned))
+                self.assertNotIn("mentions", mentioned[0])
+
+    def test_team_actor_can_mention_owner_and_self_without_self_notification(self):
+        actor = {"type": "cuevion_user", "userId": PARTICIPANT, "displayName": "Participant"}
+        self.assertEqual(self.emit(actor=actor, mention_user_ids=[OWNER, PARTICIPANT],
+                                   recipients=[OWNER, OWNER, PARTICIPANT, SECOND])["recipients"], 2)
+        self.assertEqual(self.listing(OWNER)["notifications"][0]["attention"], "mention")
+        self.assertNotIn("attention", self.listing(SECOND)["notifications"][0])
+        self.assertEqual(self.listing(PARTICIPANT)["notifications"], [])
+
+    def test_attention_identity_replay_read_state_and_historical_coexistence(self):
+        self.emit(recipients=[PARTICIPANT])
+        generic_id = self.listing()["notifications"][0]["notificationId"]
+        self.client.command(["FLUSHALL"])
+        self.emit(recipients=[PARTICIPANT], mention_user_ids=[PARTICIPANT])
+        row = self.listing()["notifications"][0]
+        self.assertEqual(row["notificationId"], generic_id)
+        marked = store.mark_read(WORKSPACE, PARTICIPANT, generic_id, command_transport=self.client.transport)
+        self.assertEqual(marked["notification"]["attention"], "mention")
+        self.assertEqual(marked["unreadCount"], 0)
+        self.emit(recipients=[PARTICIPANT], mention_user_ids=[PARTICIPANT])
+        self.assertEqual(self.listing()["notifications"], [marked["notification"]])
+        self.emit(recipients=[PARTICIPANT], activity="C" * 22)
+        rows = self.listing()["notifications"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(sum("attention" in entry for entry in rows), 1)
+        self.assertEqual(self.listing()["unreadCount"], 1)
+        self.assertEqual(store.mark_read(WORKSPACE, PARTICIPANT, generic_id,
+                                        command_transport=self.client.transport)["notification"], marked["notification"])
+
+    def test_invalid_mention_attention_plan_commits_nothing(self):
+        outside = "usr_" + "D" * 21 + "A"
+        for mention_users in ([outside], [PARTICIPANT, PARTICIPANT], ["guest"],
+                              {"target": PARTICIPANT}, "mention", [OWNER] * 17):
+            with self.subTest(mention_users=mention_users):
+                self.assertEqual(self.emit(mention_user_ids=mention_users)["status"], "malformed")
+                self.assertIsNone(self.client.command(["GET", "{cuevion-collab-v2}:test-canonical"]))
+                self.assertEqual(self.listing()["notifications"], [])
+        for options in ({"kind": "participant_added"},
+                        {"actor": {"type": "external_guest", "displayName": "Guest"}}):
+            self.assertEqual(self.emit(mention_user_ids=[PARTICIPANT], **options)["status"], "malformed")
+
+    def test_stored_invalid_attention_blocks_read_and_write_without_partial_commit(self):
+        self.emit(mention_user_ids=[PARTICIPANT])
+        keys = store.build_notification_keys(WORKSPACE, PARTICIPANT)
+        row = self.listing()["notifications"][0]
+        raw = json.loads(self.client.command(["HGET", keys[0], row["notificationId"]]))
+        for invalid in (None, False, 1, [], {}, "generic"):
+            with self.subTest(attention=invalid):
+                self.client.command(["HSET", keys[0], row["notificationId"], json.dumps({**raw, "attention": invalid})])
+                self.assertEqual(self.listing()["status"], "unavailable")
+                self.assertEqual(store.mark_read(WORKSPACE, PARTICIPANT, row["notificationId"],
+                                                command_transport=self.client.transport)["status"], "unavailable")
+                self.client.command(["DEL", "{cuevion-collab-v2}:test-canonical"])
+                self.assertEqual(self.emit(activity="C" * 22)["status"], "malformed")
+                self.assertIsNone(self.client.command(["GET", "{cuevion-collab-v2}:test-canonical"]))
 
     def test_participant_actor_and_duplicate_recipient_suppression(self):
         actor = {"type": "cuevion_user", "userId": PARTICIPANT, "displayName": "Participant"}
@@ -155,6 +257,7 @@ return cjson.encode({status='ok',recipients=#plan})
         for user in (OWNER, PARTICIPANT, SECOND):
             row = self.listing(user)["notifications"][0]
             self.assertEqual(row["actor"], actor)
+            self.assertNotIn("attention", row)
             encoded = json.dumps(row)
             for forbidden in ("secret source", "owner@example.com", "bearer", "guest@example.com"):
                 self.assertNotIn(forbidden, encoded)

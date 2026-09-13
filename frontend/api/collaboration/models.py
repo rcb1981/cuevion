@@ -51,6 +51,9 @@ else:
     MAX_V2_SUMMARY_PAGE_SIZE = 50
     MAX_V2_EXTERNAL_GUESTS = 16
     MAX_V2_MESSAGE_TEXT = 16_384
+    MAX_V2_MENTION_OCCURRENCES = 32
+    MAX_V2_MENTION_USERS = 16
+    MAX_V2_MENTION_BYTES = 16_384
     MAX_V2_SOURCE_BODY = 131_072
     MAX_V2_INVITE_LIFETIME_SECONDS = 24 * 60 * 60
     MAX_V2_GUEST_SESSION_LIFETIME_SECONDS = 8 * 60 * 60
@@ -614,6 +617,17 @@ else:
                 # compact so normalization preserves valid old record byte limits.
                 if message.get("authorUserId") is None:
                     message.pop("authorUserId", None)
+                if "mentions" in message:
+                    mentions = normalize_v2_mentions(message["mentions"], message.get("text"))
+                    if mentions is None:
+                        return None
+                    if mentions:
+                        message["mentions"] = [
+                            {**mention, "start": str(mention["start"]), "end": str(mention["end"])}
+                            for mention in mentions
+                        ]
+                    else:
+                        message.pop("mentions")
         return encoded
 
 
@@ -649,6 +663,25 @@ else:
                     return None
                 message["createdAt"] = parsed
                 message.setdefault("authorUserId", None)
+                if "mentions" in message:
+                    mentions = message["mentions"]
+                    if type(mentions) is not list:
+                        return None
+                    for mention in mentions:
+                        if type(mention) is not dict:
+                            return None
+                        for field in ("start", "end"):
+                            offset = _v2_wire_uint_to_int(mention.get(field))
+                            if offset is None:
+                                return None
+                            mention[field] = offset
+                    canonical_mentions = normalize_v2_mentions(mentions, message.get("text"))
+                    if canonical_mentions is None:
+                        return None
+                    if canonical_mentions:
+                        message["mentions"] = canonical_mentions
+                    else:
+                        message.pop("mentions")
         return decoded
 
 
@@ -840,9 +873,72 @@ else:
         return normalized if all(entry is not None for entry in normalized.values()) else None
 
 
+    def normalize_v2_mentions(value: Any, text: Any, *, validate_spans: bool = True) -> list[dict] | None:
+        """Validate immutable mention spans without inferring target entitlement.
+
+        Offsets use JavaScript UTF-16 units; the body and display text are never
+        rewritten. Current target identity and labels belong to fresh-request
+        authority checks, not historical message normalization.
+        ``validate_spans=False`` is only for bounded idempotency fingerprints;
+        its output must pass full validation before any fresh message is stored.
+        """
+        if type(value) is not list or len(value) > MAX_V2_MENTION_OCCURRENCES:
+            return None
+        if not value:
+            return []
+        if (
+            validate_spans and (
+                type(text) is not str
+                or _v2_free_text(text, max_length=MAX_V2_MESSAGE_TEXT) != text
+            )
+        ):
+            return None
+        boundaries = {0: 0}
+        utf16_offset = 0
+        if validate_spans:
+            for index, character in enumerate(text):
+                utf16_offset += 2 if ord(character) > 0xFFFF else 1
+                boundaries[utf16_offset] = index + 1
+        mentions = []
+        users = set()
+        for mention in value:
+            if type(mention) is not dict or set(mention) != {"userId", "start", "end", "displayText"}:
+                return None
+            user_id = mention["userId"]
+            start, end = mention["start"], mention["end"]
+            display_text = mention["displayText"]
+            if (
+                normalize_v2_user_id(user_id) != user_id
+                or type(user_id) is not str
+                or type(start) is not int
+                or type(end) is not int
+                or not -MAX_V2_SAFE_INTEGER <= start <= MAX_V2_SAFE_INTEGER
+                or not -MAX_V2_SAFE_INTEGER <= end <= MAX_V2_SAFE_INTEGER
+                or type(display_text) is not str
+                or _v2_free_text(display_text, max_length=MAX_V2_MENTION_BYTES) != display_text
+                or (validate_spans and (
+                    start < 0
+                    or end <= start
+                    or start not in boundaries
+                    or end not in boundaries
+                    or text[boundaries[start]:boundaries[end]] != display_text
+                ))
+            ):
+                return None
+            users.add(user_id)
+            if len(users) > MAX_V2_MENTION_USERS:
+                return None
+            mentions.append({"userId": user_id, "start": start, "end": end, "displayText": display_text})
+        mentions.sort(key=lambda mention: (mention["start"], mention["end"], mention["userId"]))
+        if validate_spans and any(current["start"] < previous["end"] for previous, current in zip(mentions, mentions[1:])):
+            return None
+        metadata = json.dumps(mentions, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        return mentions if len(metadata.encode("utf-8")) <= MAX_V2_MENTION_BYTES else None
+
+
     def normalize_v2_message_record(value: Any) -> dict | None:
         required = {"id", "authorKind", "authorDisplayName", "text", "visibility", "createdAt"}
-        if not isinstance(value, dict) or not _v2_exact_keys(value, required, {"authorUserId"}):
+        if not isinstance(value, dict) or not _v2_exact_keys(value, required, {"authorUserId", "mentions"}):
             return None
         message_id = value.get("id")
         author_kind = _v2_bounded_string(value.get("authorKind"), max_length=16)
@@ -854,6 +950,7 @@ else:
         visibility = _v2_bounded_string(value.get("visibility"), max_length=16)
         # Missing identity is historical absence of proof, never owner inference.
         author_user_id = value.get("authorUserId")
+        mentions = normalize_v2_mentions(value.get("mentions", []), text)
         if (
             not is_v2_opaque_id(message_id)
             or author_kind not in {"owner", "internal", "guest", "system"}
@@ -861,6 +958,8 @@ else:
             or text is None
             or created_at is None
             or visibility not in {"internal", "shared"}
+            or mentions is None
+            or (mentions and author_kind not in {"owner", "internal"})
             or (
                 author_user_id is not None
                 and (
@@ -870,7 +969,7 @@ else:
             )
         ):
             return None
-        return {
+        normalized = {
             "id": message_id,
             "authorKind": author_kind,
             "authorDisplayName": author_display_name,
@@ -879,6 +978,9 @@ else:
             "visibility": visibility,
             "createdAt": created_at,
         }
+        if mentions:
+            normalized["mentions"] = mentions
+        return normalized
 
 
     def normalize_v2_thread_record(value: Any) -> dict | None:
@@ -1329,6 +1431,7 @@ else:
         author_user_id: str | None = None,
         visibility: str,
         created_at: int | None = None,
+        mentions: list[dict] | None = None,
     ) -> dict | None:
         normalized_text = _v2_free_text(text, max_length=MAX_V2_MESSAGE_TEXT)
         display_name = _v2_bounded_string(author_display_name, max_length=256)
@@ -1354,6 +1457,7 @@ else:
                 "text": normalized_text,
                 "visibility": normalized_visibility,
                 "createdAt": timestamp,
+                **({"mentions": mentions} if mentions is not None else {}),
             }
         )
 
@@ -1381,6 +1485,7 @@ else:
         author_kind: str,
         visibility: str,
         created_at: int | None = None,
+        mentions: list[dict] | None = None,
     ) -> dict | None:
         from .authorization import _is_internal_capability
         if not _is_internal_capability(context, actions={"reply", "internal_note"}):
@@ -1397,6 +1502,7 @@ else:
             author_user_id=context.actor_user_id,
             visibility=visibility,
             created_at=created_at,
+            mentions=mentions,
         )
 
 

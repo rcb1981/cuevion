@@ -60,6 +60,7 @@ _OWNER_BODY_FIELDS = frozenset(
         "sourceRef",
         "state",
         "text",
+        "mentions",
         "participantUserId",
         "invitedEmail",
         "inviteId",
@@ -357,6 +358,26 @@ def _require_exact_fields(payload: dict, fields: frozenset[str]) -> None:
         raise BoundaryError("invalid_json_fields", 400)
 
 
+def _require_owner_number_policy(payload: dict) -> None:
+    """Keep JSON numbers confined to authenticated mention span offsets."""
+    operation = payload.get("operation")
+    append = type(operation) is str and operation in {"append_shared", "append_internal"}
+    pending = [(payload, ())]
+    while pending:
+        value, path = pending.pop()
+        if type(value) in {int, float}:
+            if not (
+                append and type(value) is int and len(path) == 3
+                and path[0] == "mentions" and type(path[1]) is int
+                and path[2] in {"start", "end"}
+            ):
+                raise BoundaryError("invalid_json", 400)
+        elif type(value) is dict:
+            pending.extend((item, (*path, key)) for key, item in value.items())
+        elif type(value) is list:
+            pending.extend((item, (*path, index)) for index, item in enumerate(value))
+
+
 def _safe_invitation_metadata(
     value: object,
     *,
@@ -555,7 +576,9 @@ def owner_response(
             maximum_bytes=MAX_OWNER_REQUEST_BYTES,
             allowed_fields=_OWNER_BODY_FIELDS,
             required_fields={"operation"},
+            reject_numbers=False,
         )
+        _require_owner_number_policy(payload)
         operation = payload.get("operation")
         if type(operation) is not str:
             raise BoundaryError("invalid_value", 400)
@@ -919,7 +942,8 @@ def owner_response(
         if operation in {"append_shared", "append_internal"}:
             _require_exact_fields(
                 payload,
-                frozenset({"operation", "collaborationId", "text"}),
+                frozenset({"operation", "collaborationId", "text"}
+                          | ({"mentions"} if "mentions" in payload else set())),
             )
             service = (
                 application.append_v2_shared_message_for_verified_owner
@@ -946,7 +970,8 @@ def owner_response(
                 context,
                 raw_headers,
                 payload.get("collaborationId"),
-                {"text": payload.get("text")},
+                {"text": payload.get("text"),
+                 **({"mentions": payload["mentions"]} if "mentions" in payload else {})},
                 idempotency_key=idempotency_key,
                 owner_security_configuration=configuration,
             )

@@ -46,6 +46,7 @@ from .models import (
     normalize_v2_email,
     normalize_v2_external_guest_projection,
     normalize_v2_invite_record,
+    normalize_v2_mentions,
     normalize_v2_source_ref,
     normalize_v2_participant_authority,
     normalize_v2_team_membership_ref,
@@ -383,6 +384,8 @@ def _build_owner_thread_dto(thread: dict[str, Any]) -> dict[str, Any]:
                 "text": message["text"],
                 "visibility": message["visibility"],
                 "timestamp": message["createdAt"],
+                **({"mentions": [dict(mention) for mention in message["mentions"]]}
+                   if message.get("mentions") else {}),
             }
             for message in thread["messages"]
         ],
@@ -724,6 +727,7 @@ def _owner_mutation_dto(
     capability: object,
     text: str,
     visibility: str,
+    mentions: object = None,
 ) -> dict[str, Any] | None:
     status = value.get("status") if type(value) is dict else None
     if (
@@ -747,9 +751,16 @@ def _owner_mutation_dto(
     message_visibility = (
         message.get("visibility") if type(message) is dict else None
     )
+    expected_mentions = normalize_v2_mentions([] if mentions is None else mentions, text)
+    received_mentions = normalize_v2_mentions(
+        message.get("mentions", []) if type(message) is dict else None, text,
+    )
     if (
         type(message) is not dict
-        or set(message) != _OWNER_MUTATION_MESSAGE_FIELDS
+        or set(message) - {"mentions"} != _OWNER_MUTATION_MESSAGE_FIELDS
+        or expected_mentions is None
+        or received_mentions != expected_mentions
+        or ("mentions" in message and message["mentions"] != received_mentions)
         or type(message_id) is not str
         or not is_v2_opaque_id(message_id)
         or type(author_display_name) is not str
@@ -784,6 +795,7 @@ def _owner_mutation_dto(
             "text": message["text"],
             "timestamp": message["timestamp"],
             "visibility": message["visibility"],
+            **({"mentions": received_mentions} if received_mentions else {}),
         },
         "updatedAt": updated_at,
     }
@@ -815,6 +827,7 @@ def _append_idempotent_v2_owner_message(
     text: str,
     *,
     idempotency_key: object,
+    mentions: object = None,
 ) -> dict:
     # This adapter is intentionally used only by the verified owner HTTP path;
     # inactive internal/Team and guest helpers retain their existing behavior.
@@ -831,6 +844,7 @@ def _append_idempotent_v2_owner_message(
         text,
         visibility=visibility,
         idempotency_key=idempotency_key,
+        **({"mentions": mentions} if mentions else {}),
     )
 
 
@@ -850,13 +864,17 @@ def _append_v2_owner_message(
         visibility = "internal"
     else:
         return _failure("malformed", "invalid_request")
-    if type(payload) is not dict or set(payload) != {"text"}:
+    if (type(payload) is not dict or set(payload) - {"mentions"} != {"text"}
+            or (owner_context is None and "mentions" in payload)):
         return _failure("malformed", "invalid_request")
     text = payload.get("text")
     if (
         type(text) is not str
         or _v2_free_text(text, max_length=MAX_V2_MESSAGE_TEXT) != text
     ):
+        return _failure("malformed", "invalid_request")
+    requested_mentions = normalize_v2_mentions(payload.get("mentions", []), text, validate_spans=False)
+    if requested_mentions is None:
         return _failure("malformed", "invalid_request")
 
     if owner_context is None:
@@ -905,6 +923,7 @@ def _append_v2_owner_message(
             capability,
             text,
             idempotency_key=idempotency_key,
+            **({"mentions": requested_mentions} if requested_mentions else {}),
         )
     )
     dto = _owner_mutation_dto(
@@ -912,6 +931,7 @@ def _append_v2_owner_message(
         capability=capability,
         text=text,
         visibility=visibility,
+        **({"mentions": requested_mentions} if requested_mentions else {}),
     )
     if dto is not None:
         return dto

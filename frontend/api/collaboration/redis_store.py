@@ -60,6 +60,7 @@ else:
         normalize_v2_email,
         normalize_v2_invite_record,
         normalize_v2_message_record,
+        normalize_v2_mentions,
         normalize_v2_owner_idempotency_key,
         normalize_v2_source_ref,
         normalize_v2_workspace_id,
@@ -1666,6 +1667,9 @@ else:
         cursor = skipJsonWhitespace(raw, nextCursor)
         if string.byte(raw, cursor) ~= 58 then return nil end
         local valueCursor = skipJsonWhitespace(raw, cursor + 1)
+        -- cjson loses the distinction between [] and {}. Mention metadata is
+        -- always an array, including at nested activity boundaries.
+        if key == 'mentions' and string.byte(raw, valueCursor) ~= 91 then return nil end
         cursor = parseJsonValue(raw, valueCursor, depth + 1)
         if not cursor then return nil end
         if members then
@@ -1751,6 +1755,12 @@ else:
       -- must carry a real participants array, never an accepted empty object.
       if ok and type(value) == 'table' and value.participants ~= nil
         and not rawTopLevelArray(raw, 'participants') then return false, nil end
+      if ok and type(value) == 'table' and type(value.messages) == 'table' then
+        for _, message in pairs(value.messages) do
+          if type(message) == 'table' and type(message.mentions) == 'table'
+            and keyCount(message.mentions) == 0 then message.mentions = nil end
+        end
+      end
       return ok, value
     end
     local function integerValue(value)
@@ -1937,9 +1947,83 @@ else:
       if value == JSON_NULL then return nil end
       return value
     end
+    local function jsonStringBytes(value)
+      local size = 2
+      for index = 1, #value do
+        local byte = string.byte(value, index)
+        if byte == 34 or byte == 92 or byte == 8 or byte == 9
+          or byte == 10 or byte == 12 or byte == 13 then size = size + 2
+        elseif byte < 32 then size = size + 6
+        else size = size + 1 end
+      end
+      return size
+    end
+    local function mentionInteger(value, validateSpans)
+      if validateSpans or type(value) ~= 'string' or string.sub(value, 1, 1) ~= '-' then
+        return integerValue(value)
+      end
+      local magnitude = integerValue(string.sub(value, 2))
+      if not magnitude or magnitude == 0 then return nil end
+      return -magnitude
+    end
+    local function mentionBoundaries(text)
+      local boundaries = {[0]=1}
+      local cursor, units = 1, 0
+      while cursor <= #text do
+        local first = string.byte(text, cursor)
+        if first >= 240 then cursor = cursor + 4; units = units + 2
+        elseif first >= 224 then cursor = cursor + 3; units = units + 1
+        elseif first >= 192 then cursor = cursor + 2; units = units + 1
+        else cursor = cursor + 1; units = units + 1 end
+        boundaries[units] = cursor
+      end
+      return boundaries
+    end
+    local function mentionsValid(mentions, text, validateSpans)
+      if mentions == nil then return true end
+      if type(mentions) ~= 'table' or #mentions > 32 or keyCount(mentions) ~= #mentions then return false end
+      local boundaries = validateSpans and #mentions > 0 and mentionBoundaries(text) or nil
+      local targets, distinct, previous, previousStart, previousEnd = {}, 0, nil, nil, nil
+      local size = 2
+      for index, mention in ipairs(mentions) do
+        if type(mention) ~= 'table' or keyCount(mention) ~= 4
+          or not canonicalUserId(mention.userId)
+          or type(mention.displayText) ~= 'string' or (validateSpans and #mention.displayText == 0)
+          or not freeText(mention.displayText, 16384) then return false end
+        local start = mentionInteger(mention.start, validateSpans)
+        local finish = mentionInteger(mention['end'], validateSpans)
+        if start == nil or finish == nil then return false end
+        if previous and (start < previousStart
+          or (start == previousStart and finish < previousEnd)
+          or (start == previousStart and finish == previousEnd and mention.userId < previous.userId)) then return false end
+        if validateSpans and (finish <= start or not boundaries[start] or not boundaries[finish]
+          or (previous and start < previousEnd)
+          or string.sub(text, boundaries[start], boundaries[finish] - 1) ~= mention.displayText) then return false end
+        if not targets[mention.userId] then
+          targets[mention.userId] = true; distinct = distinct + 1
+          if distinct > 16 then return false end
+        end
+        -- Size of canonical UTF-8 application JSON, with numeric offsets.
+        size = size + (index == 1 and 0 or 1) + #'{"displayText":,"end":,"start":,"userId":}'
+          + jsonStringBytes(mention.displayText) + #mention['end'] + #mention.start + jsonStringBytes(mention.userId)
+        if size > 16384 then return false end
+        previous, previousStart, previousEnd = mention, start, finish
+      end
+      return true
+    end
+    local function mentionsEqual(a, b)
+      a, b = a or {}, b or {}
+      if #a ~= #b then return false end
+      for index, mention in ipairs(a) do
+        local other = b[index]
+        if mention.userId ~= other.userId or mention.start ~= other.start
+          or mention['end'] ~= other['end'] or mention.displayText ~= other.displayText then return false end
+      end
+      return true
+    end
     local function messageValid(message)
       return type(message) == 'table'
-        and keyCount(message) == (message.authorUserId == nil and 6 or 7) and opaqueId(message.id)
+        and keyCount(message) == (message.authorUserId == nil and 6 or 7) + (message.mentions == nil and 0 or 1) and opaqueId(message.id)
         and (message.authorKind == 'owner' or message.authorKind == 'internal' or message.authorKind == 'guest' or message.authorKind == 'system')
         and (messageAuthorUserId(message) == nil
           or ((message.authorKind == 'owner' or message.authorKind == 'internal')
@@ -1947,11 +2031,14 @@ else:
         and displayString(message.authorDisplayName, 256, false) and freeText(message.text, 16384)
         and (message.visibility == 'internal' or message.visibility == 'shared')
         and timestampMilliseconds(message.createdAt)
+        and (message.mentions == nil or message.authorKind == 'owner' or message.authorKind == 'internal')
+        and mentionsValid(message.mentions, message.text, true)
     end
     local function messageEqual(a, b)
       return a.id == b.id and a.authorKind == b.authorKind and a.authorDisplayName == b.authorDisplayName
         and messageAuthorUserId(a) == messageAuthorUserId(b)
         and a.text == b.text and a.visibility == b.visibility and a.createdAt == b.createdAt
+        and mentionsEqual(a.mentions, b.mentions)
     end
     local function messagesValid(messages)
       if type(messages) ~= 'table' or #messages > 500 then return false end
@@ -3721,6 +3808,16 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
 
     local threadRetention = integerValue(ARGV[3])
     local idempotencyRetention = integerValue(ARGV[4])
+    local freshMentionError = ARGV[18] or ''
+    local requestedRaw = ARGV[19] or '{"mentions":[]}'
+    local requestedOk, requested = decodeWire(requestedRaw)
+    if #requestedRaw > 18000 or not requestedOk or type(requested) ~= 'table'
+      or keyCount(requested) ~= 1 or not rawTopLevelArray(requestedRaw, 'mentions')
+      or not mentionsValid(requested.mentions, '', false)
+      or (freshMentionError ~= '' and freshMentionError ~= 'invalid_request'
+        and freshMentionError ~= 'forbidden' and freshMentionError ~= 'storage_unavailable') then
+      return cjson.encode({status='malformed'})
+    end
     if not threadRetention or threadRetention <= 0 or threadRetention > RETENTION_MAX
       or not idempotencyRetention or idempotencyRetention <= 0
       or idempotencyRetention > threadRetention
@@ -3801,6 +3898,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         or (messageAuthorUserId(matched) ~= nil and messageAuthorUserId(matched) ~= ARGV[16])
         or matched.authorDisplayName ~= ARGV[13] or matched.text ~= ARGV[14]
         or matched.visibility ~= ARGV[12] or matched.createdAt ~= record.updatedAt
+        or not mentionsEqual(matched.mentions, requested.mentions)
         or integerValue(current.updatedAt) < integerValue(record.updatedAt) then
         return cjson.encode({status='idempotency_malformed'})
       end
@@ -3822,6 +3920,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     -- Recovery above never appends or recreates notifications. Every fresh
     -- operation must observe Resolve before planning any canonical writes.
     if current.state == 'resolved' then return cjson.encode({status='collaboration_resolved'}) end
+    if freshMentionError ~= '' then return cjson.encode({status='mention_rejected', errorCode=freshMentionError}) end
 
     if #ARGV[2] > 262144 or #ARGV[6] > IDEMPOTENCY_RECORD_MAX
       or not timestampMilliseconds(ARGV[1]) then
@@ -3862,6 +3961,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
       or (ARGV[16] ~= '' and messageAuthorUserId(appended) ~= ARGV[16])
       or (ARGV[16] == '' and messageAuthorUserId(appended) ~= nil)
       or appended.text ~= ARGV[14] or appended.visibility ~= ARGV[12]
+      or not mentionsEqual(appended.mentions, requested.mentions)
       or appended.createdAt ~= replacement.updatedAt
       or record.fingerprint ~= ARGV[5] or record.collaborationId ~= ARGV[7]
       or record.action ~= ARGV[11] or record.messageId ~= appended.id
@@ -3879,9 +3979,16 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         return cjson.encode({status='malformed'})
       end
       local notificationError
+      local mentionUserIds, seenMentionUsers = {}, {}
+      for _, mention in ipairs(appended.mentions or {}) do
+        if not seenMentionUsers[mention.userId] then
+          seenMentionUsers[mention.userId] = true
+          table.insert(mentionUserIds, mention.userId)
+        end
+      end
       notificationPlan, notificationError = notificationPrepare(replacement,
         ARGV[11] == 'reply' and 'shared_message' or 'internal_note', actor, appended.id,
-        intendedRecipients, redis.call('PTTL', KEYS[1]), appended.createdAt, nil, KEYS[1])
+        intendedRecipients, redis.call('PTTL', KEYS[1]), appended.createdAt, nil, KEYS[1], mentionUserIds)
       if notificationError then return cjson.encode({status='malformed'}) end
     end
     notificationCommit(notificationPlan)
@@ -3898,7 +4005,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
     ) -> tuple[dict, int] | None:
         if (
             type(value) is not dict
-            or set(value) - {"authorUserId"}
+            or set(value) - {"authorUserId", "mentions"}
             != {
                 "id",
                 "authorKind",
@@ -3914,6 +4021,22 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         ):
             return None
         parsed_updated_at = int(updated_at)
+        value = dict(value)
+        if "mentions" in value:
+            if type(value["mentions"]) is not list:
+                return None
+            decoded_mentions = []
+            for mention in value["mentions"]:
+                if type(mention) is not dict:
+                    return None
+                mention = dict(mention)
+                for field in ("start", "end"):
+                    offset = mention.get(field)
+                    if type(offset) is not str or re.fullmatch(r"(?:0|[1-9][0-9]{0,15})", offset) is None:
+                        return None
+                    mention[field] = int(offset)
+                decoded_mentions.append(mention)
+            value["mentions"] = decoded_mentions
         message = normalize_v2_message_record(
             {**value, "createdAt": parsed_updated_at}
         )
@@ -3932,6 +4055,8 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         author_kind: str = "owner",
         actor_user_id: str | None = None,
         recipient_user_ids: list[str] | None = None,
+        requested_mentions: list[dict] | None = None,
+        fresh_mention_error: str | None = None,
         command_transport=None,
     ) -> dict:
         thread = normalize_v2_thread_record(thread_record)
@@ -3954,6 +4079,16 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
         ):
             return {"status": "malformed", "error": {"code": "invalid_request"}}
         appended = thread["messages"][-1]
+        canonical_mentions = normalize_v2_mentions(
+            requested_mentions if requested_mentions is not None else appended.get("mentions", []),
+            appended["text"], validate_spans=False,
+        )
+        if canonical_mentions is None or fresh_mention_error not in {None, "invalid_request", "forbidden", "storage_unavailable"}:
+            return {"status": "malformed", "error": {"code": "invalid_request"}}
+        requested_wire = json.dumps(
+            {"mentions": [{**mention, "start": str(mention["start"]), "end": str(mention["end"])} for mention in canonical_mentions]},
+            ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+        )
         expected_visibility = "shared" if action == "reply" else "internal"
         if (
             appended["authorKind"] != author_kind
@@ -4041,6 +4176,8 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
                 author_kind,
                 actor_user_id or (thread.get("ownerUserId", "") if author_kind == "owner" else ""),
                 json.dumps(recipient_user_ids if recipient_user_ids is not None else [], separators=(",", ":")),
+                fresh_mention_error or "",
+                requested_wire,
             ],
             command_transport,
             response_shapes={
@@ -4048,6 +4185,7 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
                 "saved": {"message", "updatedAt"},
                 "recovered": {"message", "updatedAt"},
                 "collaboration_resolved": set(),
+                "mention_rejected": {"errorCode"},
                 "missing": set(),
                 "stale": set(),
                 "malformed": set(),
@@ -4059,6 +4197,9 @@ if not targetOk or not sourceOk or not sourceValid(expectedSource)
                 "idempotency_conflict": set(),
             },
         )
+        if result.get("status") == "mention_rejected":
+            code = result.get("errorCode")
+            return {"status": "error", "error": {"code": code if code in {"invalid_request", "forbidden", "storage_unavailable"} else "storage_protocol_error"}}
         if result.get("status") in {"saved", "recovered"}:
             parsed = _owner_append_message_from_wire(
                 result.get("message"),
