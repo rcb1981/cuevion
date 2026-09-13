@@ -1,0 +1,142 @@
+[
+  {
+    "file": "src/components/workspace/WorkspaceShell.collaborationPriority.test.ts",
+    "status": 0,
+    "output": "PASS Workspace Collaboration: actual Priority gates, suppression, exact older mail, reason composition, CTA rendering/click, lifecycle and create integration\n"
+  },
+  {
+    "file": "src/components/workspace/WorkspaceShell.collaborationEmailSender.test.ts",
+    "status": 0,
+    "output": "PASS 10 sender presentation cases, immutable source and reader integration\n"
+  },
+  {
+    "file": "src/components/collaboration/CollaborationChat.test.ts",
+    "status": 0,
+    "output": "✔ my Shared (1.148371ms)\n✔ my Internal (0.117493ms)\n✔ other Shared (0.111704ms)\n✔ other Internal (0.096484ms)\n✔ guest (0.136278ms)\n✔ historical same display name (0.104511ms)\n✔ historical same email (0.096561ms)\n✔ historical Internal (0.083656ms)\n✔ unknown viewer (0.124151ms)\n✔ both IDs null (0.174801ms)\n✔ non-user role cannot align right even with matching ID (0.097603ms)\n✔ chronological DOM order, canonical IDs, sender, exact highlight and machine-readable time (6.405542ms)\n✔ internal notes and guests have readable context without technical role strings (1.17563ms)\n✔ one composer defaults Shared with no internal draft or privacy cue in markup (1.362667ms)\n✔ plain empty state (0.236593ms)\n✔ an out-of-Date-range legacy timestamp does not crash the timeline (0.483683ms)\nℹ tests 16\nℹ suites 0\nℹ pass 16\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 20.952938\n"
+  },
+  {
+    "file": "src/components/collaboration/CollaborationAccessPanel.test.tsx",
+    "status": 0,
+    "output": ""
+  },
+  {
+    "file": "src/components/workspace/WorkspaceShell.collaborationOwnerRead.test.ts",
+    "status": 0,
+    "output": ""
+  },
+  {
+    "file": "src/lib/collaborationOwnerSourceLocator.test.ts",
+    "status": 0,
+    "output": ""
+  },
+  {
+    "file": "src/lib/collaborationOwnerReadApi.test.ts",
+    "status": 0,
+    "output": ""
+  },
+  {
+    "file": "src/lib/collaborationOwnerWriteApi.test.ts",
+    "status": 0,
+    "output": ""
+  },
+  {
+    "file": "src/lib/collaborationGuestApi.test.ts",
+    "status": 0,
+    "output": ""
+  },
+  {
+    "file": "src/App.collaborationGuestRoute.test.ts",
+    "status": 0,
+    "output": ""
+  },
+  {
+    "file": "src/lib/collaborationSummaryApi.test.ts",
+    "status": 0,
+    "output": "PASS summary: exact sources, lifecycle, schema, bounds, ordering and cursors\nPASS summary: authenticated bounded fetch, strict envelope, cursor and failures\n"
+  },
+  {
+    "file": "src/lib/collaborationSummaryStore.test.ts",
+    "status": 0,
+    "output": "PASS Collaboration summary store: authority, exact sources, bounded hydration, races, mutations, CTA bindings, O(1) lookups\n"
+  },
+  {
+    "file": "src/components/workspace/WorkspaceShell.collaborationIdentity.test.ts",
+    "status": 0,
+    "output": "WorkspaceShell collaboration mailbox identity tests passed\n"
+  },
+  {
+    "file": "src/lib/notificationsApi.test.ts",
+    "status": 0,
+    "output": "✔ strict C3C contract accepts body-free Google and IMAP records (3.302292ms)\n✔ strict DTO rejects body (0.209201ms)\n✔ strict DTO rejects note (0.141398ms)\n✔ strict DTO rejects email (0.111366ms)\n✔ strict DTO rejects mention (0.142234ms)\n✔ strict DTO rejects workspace (0.156425ms)\n✔ strict DTO rejects mailbox (0.138877ms)\n✔ strict DTO rejects activity (0.214172ms)\n✔ strict DTO rejects id (0.147209ms)\n✔ strict DTO rejects read (0.297525ms)\n✔ strict DTO rejects expiry (0.165861ms)\n✔ strict DTO rejects source (0.139631ms)\n✔ strict DTO rejects version (0.097656ms)\n✔ strict DTO rejects actorEmail (0.104514ms)\n✔ strict DTO rejects actorType (0.081148ms)\n✔ strict DTO rejects actorControl (0.070342ms)\n✔ summary rejects invalid count -1 (0.172019ms)\n✔ summary rejects invalid count 1001 (0.056487ms)\n✔ summary rejects invalid count 1.5 (0.063222ms)\n✔ summary rejects invalid count 5 (0.051802ms)\n✔ summary rejects invalid count null (0.049367ms)\n✔ summary rejects invalid count true (0.05526ms)\n✔ server count greater than fifty is preserved (0.160524ms)\n✔ page cursor is preserved byte for byte (0.465379ms)\n✔ strict list rejects duplicate IDs (0.151177ms)\n✔ strict list rejects over fifty (0.059183ms)\n✔ strict list rejects wrong order (0.117523ms)\n✔ strict list rejects empty advancing cursor (0.087352ms)\n✔ strict list rejects malformed cursor (0.050374ms)\n✔ strict list rejects extra authority (0.077605ms)\n✔ non-advancing cursor rejected (0.105716ms)\n✔ mark-read requires exact ID, nonnull returned readAt and returned count (0.285853ms)\n✔ copy collaboration_started cuevion_user (0.153352ms)\n✔ copy participant_added cuevion_user (0.060358ms)\n✔ copy shared_message cuevion_user (0.071061ms)\n✔ copy shared_message external_guest (0.073439ms)\n✔ copy internal_note cuevion_user (0.06675ms)\n✔ actor email is never displayed as fallback (0.08387ms)\n✔ transport uses one neutral POST per operation and no authority fields (0.740729ms)\n✔ HTTP 401 safe failure without raw error or retry (0.192201ms)\n✔ HTTP 403 safe failure without raw error or retry (0.095535ms)\n✔ HTTP 404 safe failure without raw error or retry (0.078494ms)\n✔ HTTP 503 safe failure without raw error or retry (0.064528ms)\n✔ network failure does not retry (0.240188ms)\n✔ equal timestamp page order follows descending notification ID (0.433521ms)\nℹ tests 45\nℹ suites 0\nℹ pass 45\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 20.64821\n"
+  },
+  {
+    "file": "src/lib/notificationNavigation.test.ts",
+    "status": 0,
+    "output": "✔ loaded google: exact mail, historical Collaboration, activity then mark (5.427748ms)\n✔ cold google uses C3D0 and augmentation before display (1.417905ms)\n✔ loaded custom_imap: exact mail, historical Collaboration, activity then mark (0.61161ms)\n✔ cold custom_imap uses C3D0 and augmentation before display (0.466132ms)\n✔ cold Google identity mismatch fails without augmentation or mark (0.562628ms)\n✔ cold mailbox mismatch fails without augmentation or mark (0.328152ms)\n✔ cold source reference mismatch fails without augmentation or mark (0.324271ms)\n✔ cold source_changed fails safely without retry (0.440292ms)\n✔ cold message_not_found fails safely without retry (0.46245ms)\n✔ cold provider_mismatch fails safely without retry (0.807364ms)\n✔ cold service_unavailable fails safely without retry (0.345473ms)\n✔ wrong mailbox fails before lookup (0.257956ms)\n✔ wrong workspace fails before lookup (0.185635ms)\n✔ provider mismatch fails before fetch (0.2282ms)\n✔ loaded wrong exact identity never falls back to subject sender or timestamp (0.327745ms)\n✔ ambiguous loaded identity fails closed (0.272669ms)\n✔ canonical read wrong collaborationId never displays or marks (0.505642ms)\n✔ canonical read wrong mailboxId never displays or marks (0.315192ms)\n✔ null activity opens exact Collaboration then marks (0.535738ms)\n✔ missing activity stays unread with safe feedback (0.407524ms)\n✔ duplicate canonical activity ID fails closed (0.389632ms)\n✔ Collaboration not_found remains unread (0.497069ms)\n✔ Collaboration forbidden remains unread (0.202696ms)\n✔ Collaboration unauthorized remains unread (0.202936ms)\n✔ Collaboration service_unavailable remains unread (0.163588ms)\n✔ click and exact mail alone do not mark; waits for canonical visible display (0.683496ms)\n✔ failed mail display never marks (1.281464ms)\n✔ failed collaboration display never marks (0.197429ms)\n✔ same current navigation activation dedupes (0.361444ms)\n✔ click A then B fences A after cold fetch (0.756142ms)\n✔ click A then B fences A after canonical read (0.566122ms)\n✔ account switch fences navigation (0.355275ms)\n✔ workspace switch fences navigation (0.220927ms)\n✔ mailbox connection revision change fences cold publication (0.27281ms)\n✔ mark failure reports safe feedback (0.297715ms)\n✔ exact lookup uses canonical provider keys, not display fields (0.579219ms)\n✔ actual C3D0 google publication augments without replacing mailbox (1.091075ms)\n✔ actual C3D0 custom_imap publication augments without replacing mailbox (0.401763ms)\n✔ same-tick A then B starts no stale cold request (0.490336ms)\n✔ renderer ID collision with a message lacking provider identity fails exact lookup (0.201732ms)\n✔ bounded navigation finishes on deadline even if canonical read never settles (11.84761ms)\nℹ tests 41\nℹ suites 0\nℹ pass 41\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 43.13832\n"
+  },
+  {
+    "file": "src/lib/workspaceNotificationStore.test.ts",
+    "status": 0,
+    "output": "✔ construction does not load records; workspace startup exactly one summary (2.848919ms)\n✔ concurrent startup summary dedupes same promise (0.428334ms)\n✔ Dashboard and workbench concurrent first page share request (0.884751ms)\n✔ no page before record consumer (0.458516ms)\n✔ Dashboard reuses first page regardless of age (0.3551ms)\n✔ workbench revisit refreshes once after sixty seconds (0.385497ms)\n✔ one Load more click requests one unmodified cursor and never drains (0.57622ms)\n✔ duplicate concurrent load-more blocked (0.438285ms)\n✔ failed page preserves old rows and cursor (0.441461ms)\n✔ failed explicit refresh preserves old rows and is retryable (0.505026ms)\n✔ pagination dedupes notification IDs and preserves newest first (0.338229ms)\n✔ non-advancing page cannot drain repeatedly (0.219663ms)\n✔ cyclic cursor is rejected without losing rows (0.26202ms)\n✔ account switch clears rows/count immediately and fences old summary/page (0.416983ms)\n✔ workspace switch clears rows/count immediately and fences old summary/page (0.210615ms)\n✔ A to B to A fences first A (0.354477ms)\n✔ mark-read success publishes returned readAt and unreadCount without summary (0.860246ms)\n✔ mark-read failure leaves readAt/count unchanged (0.361357ms)\n✔ duplicate mark-read while in flight shares promise (0.389324ms)\n✔ read notifications reopen without another mutation (0.294048ms)\n✔ stale summary and list cannot undo a successful mark-read (0.482595ms)\n✔ concurrent different marks serialize server count responses (0.558725ms)\n✔ scope switch fences mark-read publication (0.504188ms)\n✔ queued mark revalidates navigation before HTTP (0.237571ms)\n✔ opening sections and rendering rows marks zero notifications (0.212355ms)\n✔ no records, no cursor: loadMore does nothing (0.103132ms)\nℹ tests 26\nℹ suites 0\nℹ pass 26\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 24.12059\n"
+  },
+  {
+    "file": "src/components/workspace/WorkspaceShell.serverNotifications.test.ts",
+    "status": 0,
+    "output": "✔ local authority removed: buildVisibleNotificationItems (3.127977ms)\n✔ local authority removed: readNotificationIds (1.198415ms)\n✔ local authority removed: notificationReadStorageKey (0.942371ms)\n✔ local authority removed: markNotificationSourceIdsRead (1.134858ms)\n✔ local authority removed: notification:resolved: (1.215373ms)\n✔ local authority removed: notification:reply: (1.245012ms)\n✔ local authority removed: notification:mention: (1.204791ms)\n✔ sidebar consumes shared server unread count (1.117497ms)\n✔ Dashboard and workbench receive exactly the same shared authority and handler (1.810174ms)\n✔ no stale localStorage read arrays can influence visible notifications (0.606593ms)\n✔ mail selection does not itself confirm display (4.177235ms)\n✔ mail requires exact rendered modal before confirmation (1.85332ms)\n✔ wrong rendered source identity does not confirm mail (1.063165ms)\n✔ hidden source modal does not confirm display (0.917393ms)\n✔ canonical loading does not confirm Collaboration display (0.943492ms)\n✔ canonical activity is scrolled and focused before next frame confirmation (1.169146ms)\n✔ null activity needs exact canonical visible projection (0.899095ms)\n✔ missing rendered activity never confirms success (2.294284ms)\n✔ activity that cannot receive focus never confirms success (1.070863ms)\n✔ A then B fence between focus and painted frame prevents confirmation (0.899675ms)\n✔ removed projection cannot confirm after focus (0.803429ms)\n✔ wrong canonical Collaboration cannot confirm display (0.798609ms)\n✔ exact notification open uses canonical ID projection without source lookup or full mailbox refresh (0.139395ms)\n✔ notification target reveals the conversation before display acknowledgement (1.203404ms)\n✔ resolved Collaboration still forces Conversation and confirms only after exact activity display (1.364511ms)\nℹ tests 25\nℹ suites 0\nℹ pass 25\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 48.956428\n"
+  },
+  {
+    "file": "src/lib/collaborationGuestInviteLink.test.ts",
+    "status": 0,
+    "output": ""
+  },
+  {
+    "file": "src/components/collaboration/ExternalCollaborationGuestView.test.tsx",
+    "status": 0,
+    "output": ""
+  },
+  {
+    "file": "src/lib/exactMailboxMessageApi.test.ts",
+    "status": 0,
+    "output": "PASS strict Google canonical message parser\nPASS strict IMAP canonical identity parser\nPASS Google thread ID is not required\nPASS Google returned folder must match canonical provider labels\nPASS Google label precedence determines canonical folder\nPASS Google invalid labels rejected without normalization\nPASS Google invalid provider thread ID rejected without normalization\nPASS wrong envelope mailbox rejected\nPASS wrong nested mailbox rejected\nPASS wrong envelope source rejected\nPASS wrong provider message ID rejected\nPASS extra envelope field rejected\nPASS provider token field rejected\nPASS raw provider response rejected\nPASS malformed body rejected\nPASS numeric unread rejected\nPASS missing display field rejected\nPASS attachment extra field rejected\nPASS negative attachment size rejected\nPASS provider identity cross-contamination rejected\nPASS IMAP UIDVALIDITY mismatch rejected\nPASS IMAP UID mismatch rejected\nPASS source contract follows C3C Google identifiers and bounded IMAP UID\nPASS one exact POST uses JSON, include credentials, no-store and caller signal\nPASS fixed source_changed failure is preserved without provider detail\nPASS raw provider error fails closed\nPASS network failure performs no retries\nPASS pre-aborted request never calls fetch\nPASS abort while fetch resolves prevents success publication\nPASS abort during JSON parse prevents success publication\nPASS malformed JSON returns invalid_response\nPASS request source is captured before caller mutation\n32 exact mailbox API tests passed\n"
+  },
+  {
+    "file": "src/lib/exactMailboxMessageStore.test.ts",
+    "status": 0,
+    "output": "PASS cold item augments only its folder and selects the exact display message\nPASS loaded Google identity dedupes and preserves the current object and folder\nPASS duplicate exact Google identity across folders retains one canonical row\nPASS loaded IMAP identity includes live UIDVALIDITY and UID\nPASS account switch fences both insertion and selection\nPASS workspace switch fences both insertion and selection\nPASS mailbox switch fences both insertion and selection\nPASS provider change fences both insertion and selection\nPASS mailbox config change fences both insertion and selection\nPASS scope changes away and back fences both insertion and selection\nPASS signed-out current scope fences publication\nPASS aborted ticket prevents a provider result from publishing\nPASS envelope source mismatch fails closed even when message identity matches\nPASS normalizer changing source identity cannot publish\nPASS wrong mailbox response cannot publish\nPASS renderer ID collision with a different exact source fails closed\nPASS existing exact row renderer ID collision also fails closed\nPASS canonical exact seed fits the existing WorkspaceShell renderer input\nPASS cold IMAP seed augments without replacing existing message list\nPASS same subject and sender never identify a target\nPASS scope ticket snapshots caller state and cannot be changed\n21 exact mailbox publication tests passed\n"
+  },
+  {
+    "file": "src/components/workspace/WorkspaceShell.performance.test.ts",
+    "status": 0,
+    "output": "PERF-N4 100x100: identity before>=10000, after=100; history visits before=10000, index=100, buckets=100\nPERF-N3 synthetic keyword-family scans: before>=29000, after=2900\n"
+  },
+  {
+    "file": "src/components/workspace/WorkspaceShell.emailHtmlStage.test.ts",
+    "status": 0,
+    "output": ""
+  },
+  {
+    "file": "src/components/workspace/WorkspaceShell.threadAppleMailStructure.test.ts",
+    "status": 0,
+    "output": ""
+  },
+  {
+    "file": "src/components/workspace/WorkspaceShell.threadAppleMailDisclosure.test.ts",
+    "status": 0,
+    "output": ""
+  },
+  {
+    "file": "src/components/workspace/WorkspaceShell.fullMessageModal.test.ts",
+    "status": 0,
+    "output": ""
+  },
+  {
+    "file": "src/components/workspace/WorkspaceShell.sentTimestamp.test.ts",
+    "status": 0,
+    "output": ""
+  },
+  {
+    "file": "src/components/workspace/WorkspaceShell.replyAttachments.test.ts",
+    "status": 0,
+    "output": ""
+  }
+]

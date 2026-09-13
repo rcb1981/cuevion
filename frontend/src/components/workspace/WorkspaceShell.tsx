@@ -48395,7 +48395,7 @@ export function WorkspaceShell({
       message,
     });
   const getCollaborationSummary = (mailboxId: InboxId, message: MailMessage, folder: MailFolder = "Inbox") =>
-    lookupCollaborationSummary(collaborationSummaries.index, authenticatedUser?.workspaceId ?? null, {
+    lookupCollaborationSummary(collaborationSummaries.historyIndex, authenticatedUser?.workspaceId ?? null, {
       workspaceDataMode,
       hasAuthenticatedMemberAuthority,
       managedMailbox: collaborationManagedMailboxById.get(mailboxId) ?? null,

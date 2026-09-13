@@ -1,0 +1,51 @@
+{
+  "baseline": "0982786e7781d4f00e0d6113b29346c2e679883e",
+  "bugReproduced": true,
+  "checks": [
+    "active selected mail hydrates through real hook and shows one Open Collaboration CTA",
+    "selected-mail CTA opens exact canonical collaborationId through actual open/read handlers",
+    "normal lifecycle handler resolves once after confirmation and publishes canonical response",
+    "real close/fence clears modal projection and returns to same selected source mail",
+    "PRE-FIX BUG: resolved source loses all Collaboration CTAs"
+  ],
+  "resolvedBeforeClose": {
+    "canonical": "resolved",
+    "history": null,
+    "active": null,
+    "modal": "resolved"
+  },
+  "afterClose": {
+    "canonical": "resolved",
+    "history": null,
+    "active": null,
+    "modal": null
+  },
+  "requests": [
+    {
+      "operation": "csrf"
+    },
+    {
+      "operation": "list_summaries",
+      "cursor": null
+    },
+    {
+      "operation": "lookup",
+      "mailboxId": "main",
+      "sourceRef": {
+        "providerMessageId": "source-123"
+      }
+    },
+    {
+      "operation": "read",
+      "collaborationId": "CCCCCCCCCCCCCCCCCCCCCC"
+    },
+    {
+      "operation": "resolve",
+      "collaborationId": "CCCCCCCCCCCCCCCCCCCCCC",
+      "expectedState": "needs_review",
+      "expectedUpdatedAt": "1789215960000"
+    }
+  ],
+  "errors": [],
+  "external": []
+}

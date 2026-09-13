@@ -1,0 +1,74 @@
+{
+  "passed": 18,
+  "checks": [
+    "active selected mail hydrates through real hook and shows one Open Collaboration CTA",
+    "selected-mail CTA opens exact canonical collaborationId through actual open/read handlers",
+    "normal lifecycle handler resolves once after confirmation and publishes canonical response",
+    "real close/fence clears modal projection and returns to same selected source mail",
+    "resolve immediately retains canonical history and clears active projection before modal close",
+    "after close: same selected mail has exactly one View Collaboration CTA",
+    "resolved history does not restore Priority; active-index empty fast path remains",
+    "Manual Priority remains independent of resolved history",
+    "unrelated mail with identical subject/sender has no CTA or fuzzy fallback",
+    "reselect exact source mail restores View Collaboration without requests",
+    "hard refresh rehydrates resolved history via existing bounded list_summaries",
+    "View Collaboration opens the same exact ID using existing lookup/read only",
+    "resolved Conversation, Email and Settings are readable; Reopen is available",
+    "real Reopen publishes immediately and restores active Collaboration Priority with same ID",
+    "close after Reopen shows one Open Collaboration CTA",
+    "no new discovery, per-row requests or polling during resolve/close/reselect/reopen",
+    "closing during pending Resolve still publishes retained source binding",
+    "zero browser errors and external requests"
+  ],
+  "finalState": {
+    "canonical": "resolved",
+    "history": "resolved",
+    "active": null,
+    "modal": null
+  },
+  "requests": [
+    {
+      "operation": "csrf"
+    },
+    {
+      "operation": "list_summaries",
+      "cursor": null
+    },
+    {
+      "operation": "lookup",
+      "mailboxId": "main",
+      "sourceRef": {
+        "providerMessageId": "source-123"
+      }
+    },
+    {
+      "operation": "read",
+      "collaborationId": "CCCCCCCCCCCCCCCCCCCCCC"
+    },
+    {
+      "operation": "reopen",
+      "collaborationId": "CCCCCCCCCCCCCCCCCCCCCC",
+      "expectedState": "resolved",
+      "expectedUpdatedAt": "1789215960001"
+    },
+    {
+      "operation": "lookup",
+      "mailboxId": "main",
+      "sourceRef": {
+        "providerMessageId": "source-123"
+      }
+    },
+    {
+      "operation": "read",
+      "collaborationId": "CCCCCCCCCCCCCCCCCCCCCC"
+    },
+    {
+      "operation": "resolve",
+      "collaborationId": "CCCCCCCCCCCCCCCCCCCCCC",
+      "expectedState": "note_only",
+      "expectedUpdatedAt": "1789215960002"
+    }
+  ],
+  "errors": [],
+  "external": []
+}

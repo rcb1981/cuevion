@@ -18,5 +18,7 @@ export function useCollaborationSummaries(workspaceId: string | null, userId: st
   const acceptMutation = useMemo(() => (collaboration: CollaborationOwnerReadDto) => {
     if (currentStore.current === store) void store.acceptMutation(collaboration);
   }, [store]);
-  return { scopeKey, index, acceptMutation };
+  // Source-mail history access retains resolved bindings. Keep the active-only
+  // index separate so Priority eligibility and its empty-index fast path stay unchanged.
+  return { scopeKey, index, historyIndex: summaries, acceptMutation };
 }
