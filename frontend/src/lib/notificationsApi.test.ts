@@ -7,6 +7,78 @@ test("strict C3C contract accepts body-free Google and IMAP records", () => {
   assert.deepEqual(parseServerNotification(notification(), scope.workspaceId), notification());
   assert.ok(parseServerNotification(notification(1, { sourceRef: imap }), scope.workspaceId));
 });
+test("historical notification responses preserve absent attention for list and mark-read", () => {
+  const oldPage = page();
+  const oldRead = { v: 1, unreadCount: 86, notification: notification(1, { readAt: time }) };
+  assert.deepEqual(parseNotificationPage(oldPage, scope.workspaceId, null), oldPage);
+  assert.deepEqual(parseNotificationRead(oldRead, scope.workspaceId, notification().notificationId), oldRead);
+  assert.equal(Object.hasOwnProperty.call(parseServerNotification(notification(), scope.workspaceId), "attention"), false);
+});
+for (const kind of ["collaboration_started", "participant_added", "shared_message", "internal_note"] as const) {
+  for (const sourceRef of [notification().sourceRef, imap]) {
+    test(`mention attention preserves ${kind} and ${sourceRef.provider} routing in unread/read responses`, () => {
+      const row = notification(1, { kind, sourceRef, attention: "mention" });
+      const parsed = parseServerNotification(row, scope.workspaceId);
+      assert.deepEqual(parsed, row);
+      assert.equal(parsed?.attention, "mention");
+      assert.equal(parsed?.kind, kind);
+      const list = page([row], 87, "unchanged-cursor");
+      assert.deepEqual(parseNotificationPage(list, scope.workspaceId, null), list);
+      const read = { v: 1, unreadCount: 86, notification: { ...row, readAt: time } };
+      assert.deepEqual(parseNotificationRead(read, scope.workspaceId, row.notificationId), read);
+      assert.equal(parsed?.notificationId, notification().notificationId);
+      assert.equal(notificationCopy(row), notificationCopy(notification(1, { kind, sourceRef })));
+    });
+  }
+}
+for (const [name, attention] of [
+  ["unsupported string", "urgent"], ["case variant", "Mention"], ["null", null],
+  ["undefined", undefined], ["number", 1], ["boolean", true], ["object", {}], ["array", ["mention"]],
+] as const) {
+  test(`invalid attention ${name} rejects record, list and read without coercion`, async () => {
+    const row = { ...notification(), attention };
+    assert.equal(parseServerNotification(row, scope.workspaceId), null);
+    const list = { ...page(), notifications: [row] };
+    const read = { v: 1, unreadCount: 86, notification: { ...row, readAt: time } };
+    assert.equal(parseNotificationPage(list, scope.workspaceId, null), null);
+    assert.equal(parseNotificationRead(read, scope.workspaceId, row.notificationId), null);
+    let count = 0;
+    const api = createNotificationsApi((async (_url, init) => {
+      count++;
+      const operation = JSON.parse(String(init?.body)).operation;
+      return { ok: true, json: async () => operation === "list" ? list : read } as Response;
+    }) as typeof fetch);
+    assert.deepEqual(await api.list(scope.workspaceId, null), { status: "invalid_response" });
+    assert.deepEqual(await api.markRead(scope.workspaceId, row.notificationId), { status: "invalid_response" });
+    assert.equal(count, 2);
+  });
+}
+test("attention does not loosen unknown-field or notification-kind validation", () => {
+  assert.equal(parseServerNotification({ ...notification(), attention: "mention", membershipRef: "private" }, scope.workspaceId), null);
+  assert.equal(parseServerNotification({ ...notification(), attention: "mention", kind: "mention" }, scope.workspaceId), null);
+});
+test("transport preserves attention without sending it or changing summary/list/mark-read requests", async () => {
+  const calls: unknown[] = [];
+  const row = notification(1, { attention: "mention" });
+  const list = page([row], 87, "next");
+  const read = { v: 1, unreadCount: 86, notification: { ...row, readAt: time } };
+  const api = createNotificationsApi((async (url, init) => {
+    assert.equal(url, "/api/notifications");
+    assert.equal(init?.method, "POST");
+    assert.equal(init?.credentials, "include");
+    assert.equal(init?.cache, "no-store");
+    const body = JSON.parse(String(init?.body));
+    calls.push(body);
+    return { ok: true, json: async () => body.operation === "summary" ? { v: 1, unreadCount: 87 } : body.operation === "list" ? list : read } as Response;
+  }) as typeof fetch);
+  assert.deepEqual(await api.summary(), { status: "success", value: { v: 1, unreadCount: 87 } });
+  assert.deepEqual(await api.list(scope.workspaceId, "previous"), { status: "success", value: list });
+  assert.deepEqual(await api.markRead(scope.workspaceId, row.notificationId), { status: "success", value: read });
+  assert.deepEqual(calls, [
+    { operation: "summary" }, { operation: "list", limit: 50, cursor: "previous" },
+    { operation: "mark_read", notificationId: row.notificationId },
+  ]);
+});
 for (const [name, change] of Object.entries({ body: { body: "secret" }, note: { text: "secret" }, email: { email: "private" }, mention: { kind: "mention" }, workspace: { workspaceId: "wsp_" + "Z".repeat(22) }, mailbox: { mailboxId: " mail" }, activity: { activityId: null }, id: { notificationId: "ntf_bad" }, read: { readAt: time + 86400000 }, expiry: { expiresAt: time - 999999 }, source: { sourceRef: { provider: "google", providerMessageId: "other", threadId: "guess" } }, version: { v: true }, actorEmail: { actor: { type: "external_guest", displayName: "Guest", email: "hidden" } }, actorType: { actor: { type: "system", displayName: "System" } }, actorControl: { actor: { type: "external_guest", displayName: "bad\nname" } } })) {
   test(`strict DTO rejects ${name}`, () => assert.equal(parseServerNotification({ ...notification(), ...change }, scope.workspaceId), null));
 }

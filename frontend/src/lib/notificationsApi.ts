@@ -6,6 +6,7 @@ export type ServerNotification = Readonly<{
   mailboxId: string; sourceRef: ExactMailboxSourceRef; collaborationId: string; activityId: string | null;
   actor: { type: "cuevion_user"; userId: string; displayName: string } | { type: "external_guest"; displayName: string };
   createdAt: number; expiresAt: number; readAt: number | null;
+  attention?: "mention";
 }>;
 export type NotificationSummary = { v: 1; unreadCount: number };
 export type NotificationPage = NotificationSummary & { notifications: ServerNotification[]; nextCursor: string | null };
@@ -25,7 +26,9 @@ function closed(value: unknown, keys: string[]): value is Record<string, unknown
 const timestamp = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 1577836800000 && value <= 4102444800999;
 export const validNotificationCursor = (value: unknown): value is string | null => value === null || (typeof value === "string" && /^[\x00-\x7f]{1,1024}$/.test(value));
 export function parseServerNotification(value: unknown, workspaceId: string): ServerNotification | null {
-  if (!closed(value, ["v", "notificationId", "workspaceId", "kind", "mailboxId", "sourceRef", "collaborationId", "activityId", "actor", "createdAt", "expiresAt", "readAt"]) ||
+  const hasAttention = value != null && Object.prototype.hasOwnProperty.call(value, "attention");
+  if (!closed(value, ["v", "notificationId", "workspaceId", "kind", "mailboxId", "sourceRef", "collaborationId", "activityId", "actor", "createdAt", "expiresAt", "readAt", ...(hasAttention ? ["attention"] : [])]) ||
+    (hasAttention && value.attention !== "mention") ||
     value.v !== 1 || !isNotificationId(value.notificationId) || !workspace(value.workspaceId) || value.workspaceId !== workspaceId ||
     !["collaboration_started", "participant_added", "shared_message", "internal_note"].includes(value.kind as string) ||
     typeof value.mailboxId !== "string" || value.mailboxId.length > 256 || !/^[a-z0-9][a-z0-9._:-]*$/.test(value.mailboxId) ||

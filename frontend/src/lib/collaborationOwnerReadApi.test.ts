@@ -11,6 +11,10 @@ import {
   parseCollaborationOwnerReadDto,
   readCollaborationForOwner,
 } from "./collaborationOwnerReadApi";
+import {
+  prepareInternalCollaborationMessageForOwner,
+  prepareSharedCollaborationMessageForOwner,
+} from "./collaborationOwnerWriteApi";
 
 type FetchCall = { input: RequestInfo | URL; init?: RequestInit };
 
@@ -66,6 +70,43 @@ const collaboration = {
   ],
   externalGuests: [],
 } as const;
+
+const mention = {
+  userId: PARTICIPANT_USER_ID, start: 0, end: 14, displayText: "@Team Reviewer",
+};
+const secondMention = {
+  userId: OWNER_USER_ID, start: 19, end: 35, displayText: "@Workspace Owner",
+};
+const mentionBody = "@Team Reviewer and @Workspace Owner";
+const validMentionResponses = [
+  { name: "historical absent mentions", fields: {} },
+  { name: "empty mentions", fields: { mentions: [] } },
+  { name: "one mention", fields: { mentions: [mention] } },
+  { name: "multiple mentions", fields: { mentions: [mention, secondMention] } },
+];
+const { end: _end, ...missingEnd } = mention;
+const malformedMentions: Array<[string, unknown]> = [
+  ["null array", null], ["undefined array", undefined], ["object array", {}],
+  ["string array", "@Team Reviewer"], ["boolean array", true],
+  ["null entry", [null]], ["array entry", [[]]], ["missing field", [missingEnd]],
+  ["extra private field", [{ ...mention, membershipRef: "private" }]],
+  ["empty userId", [{ ...mention, userId: "" }]],
+  ["non-string userId", [{ ...mention, userId: 42 }]],
+  ["fractional start", [{ ...mention, start: 0.5 }]],
+  ["boolean start", [{ ...mention, start: false }]],
+  ["negative start", [{ ...mention, start: -1 }]],
+  ["string start", [{ ...mention, start: "0" }]],
+  ["NaN start", [{ ...mention, start: NaN }]],
+  ["fractional end", [{ ...mention, end: 14.5 }]],
+  ["boolean end", [{ ...mention, end: true }]],
+  ["string end", [{ ...mention, end: "14" }]],
+  ["infinite end", [{ ...mention, end: Infinity }]],
+  ["equal end", [{ ...mention, end: 0 }]],
+  ["earlier end", [{ ...mention, start: 2, end: 1 }]],
+  ["empty displayText", [{ ...mention, displayText: "" }]],
+  ["non-string displayText", [{ ...mention, displayText: null }]],
+  ["valid and invalid entries", [mention, { ...secondMention, userId: "" }]],
+];
 
 function response(
   status: number,
@@ -127,11 +168,15 @@ function assertExactRequest(call: FetchCall, body: unknown, csrfToken?: string) 
   });
 }
 
+let passedTests = 0;
+let failedTests = 0;
 async function test(name: string, callback: () => Promise<void>) {
   __resetCollaborationOwnerReadApiForTests();
   try {
     await callback();
+    passedTests += 1;
   } catch (error) {
+    failedTests += 1;
     process.exitCode = 1;
     console.error(`FAIL: ${name}`);
     console.error(error);
@@ -145,6 +190,95 @@ async function run() {
   Date.now = () => nowMs;
 
   try {
+    for (const { name, fields } of validMentionResponses) {
+      await test(`owner/Team read preserves ${name} for Shared/Internal`, async () => {
+        for (const viewerAccess of ["owner", "participant"] as const) {
+          for (const visibility of ["shared", "internal"] as const) {
+            __resetCollaborationOwnerReadApiForTests();
+            const { externalGuests, ...base } = collaboration;
+            const dto = {
+              ...base, viewerAccess,
+              ...(viewerAccess === "owner" ? { externalGuests } : {}),
+              messages: [{ ...collaboration.messages[0], text: mentionBody, visibility, ...fields }],
+            };
+            assert.deepEqual(parseCollaborationOwnerReadDto(dto), dto);
+            const calls: FetchCall[] = [];
+            installFetch([csrfResponse("token"), readResponse(dto)], calls);
+            assert.deepEqual(await readCollaborationForOwner(COLLABORATION_ID), {
+              status: "success", collaboration: dto,
+            });
+            assert.equal(calls.length, 2);
+            assertExactRequest(calls[1], { operation: "read", collaborationId: COLLABORATION_ID }, "token");
+          }
+        }
+      });
+      for (const visibility of ["shared", "internal"] as const) {
+        await test(`${visibility} append response preserves ${name} without sending spans`, async () => {
+          const message = {
+            ...collaboration.messages[0], text: mentionBody, visibility, ...fields,
+            authorUserId: visibility === "shared" ? OWNER_USER_ID : PARTICIPANT_USER_ID,
+          };
+          const calls: FetchCall[] = [];
+          installFetch([csrfResponse("token"), response(200, {
+            ok: true, data: { message, updatedAt: message.timestamp },
+          })], calls);
+          const prepare = visibility === "shared"
+            ? prepareSharedCollaborationMessageForOwner : prepareInternalCollaborationMessageForOwner;
+          const prepared = prepare(COLLABORATION_ID, mentionBody);
+          assert.equal(prepared.status, "ready");
+          if (prepared.status !== "ready") throw new Error("Expected prepared append");
+          assert.deepEqual(await prepared.operation.execute(), {
+            status: "success", message, updatedAt: message.timestamp,
+          });
+          assert.equal(calls.length, 2);
+          assert.deepEqual(JSON.parse(String(calls[1].init?.body)), {
+            operation: `append_${visibility}`, collaborationId: COLLABORATION_ID, text: mentionBody,
+          });
+          assert.match(new Headers(calls[1].init?.headers).get("X-Cuevion-Idempotency-Key")!, /^[A-Za-z0-9_-]{43}$/);
+        });
+      }
+    }
+
+    for (const [name, mentions] of malformedMentions) {
+      await test(`read rejects ${name} with invalid_response`, async () => {
+        const dto = { ...collaboration, messages: [{ ...collaboration.messages[0], mentions }] };
+        assert.equal(parseCollaborationOwnerReadDto(dto), null);
+        installFetch([csrfResponse("token"), readResponse(dto)], []);
+        assert.deepEqual(await readCollaborationForOwner(COLLABORATION_ID), { status: "invalid_response" });
+      });
+      await test(`Shared/Internal append response rejects ${name}`, async () => {
+        for (const visibility of ["shared", "internal"] as const) {
+          __resetCollaborationOwnerReadApiForTests();
+          const message = { ...collaboration.messages[0], text: mentionBody, visibility, mentions };
+          installFetch([csrfResponse("token"), response(200, {
+            ok: true, data: { message, updatedAt: message.timestamp },
+          })], []);
+          const prepare = visibility === "shared"
+            ? prepareSharedCollaborationMessageForOwner : prepareInternalCollaborationMessageForOwner;
+          const prepared = prepare(COLLABORATION_ID, mentionBody);
+          if (prepared.status !== "ready") throw new Error("Expected prepared append");
+          assert.deepEqual(await prepared.operation.execute(), { status: "invalid_response" });
+        }
+      });
+    }
+
+    await test("mention response validation leaves label, target, offsets and ordering authority to the server", async () => {
+      const mentions = [
+        { userId: "server-supplied-id", start: 100, end: 200, displayText: "Server label" },
+        mention,
+      ];
+      const dto = { ...collaboration, messages: [{ ...collaboration.messages[0], mentions }] };
+      assert.deepEqual(parseCollaborationOwnerReadDto(dto), dto);
+      const prepared = prepareSharedCollaborationMessageForOwner(COLLABORATION_ID, dto.messages[0].text);
+      if (prepared.status !== "ready") throw new Error("Expected prepared append");
+      installFetch([csrfResponse("token"), response(200, {
+        ok: true, data: { message: dto.messages[0], updatedAt: dto.messages[0].timestamp },
+      })], []);
+      assert.deepEqual(await prepared.operation.execute(), {
+        status: "success", message: dto.messages[0], updatedAt: dto.messages[0].timestamp,
+      });
+    });
+
     await test("uses the exact CSRF and owner-read POST contracts", async () => {
       const calls: FetchCall[] = [];
       installFetch([csrfResponse("csrf-secret"), readResponse()], calls);
@@ -827,6 +961,7 @@ async function run() {
     globalThis.fetch = originalFetch;
     Date.now = originalDateNow;
     __resetCollaborationOwnerReadApiForTests();
+    console.log(`Collaboration transport tests: ${passedTests} passed, ${failedTests} failed`);
   }
 }
 

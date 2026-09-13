@@ -28,6 +28,13 @@ export type CollaborationOwnerReadState =
   | "note_only"
   | "resolved";
 
+export type CollaborationMention = {
+  userId: string;
+  start: number;
+  end: number;
+  displayText: string;
+};
+
 export type CollaborationOwnerReadMessage = {
   id: string;
   authorDisplayName: string;
@@ -36,6 +43,7 @@ export type CollaborationOwnerReadMessage = {
   text: string;
   visibility: "internal" | "shared";
   timestamp: number;
+  mentions?: CollaborationMention[];
 };
 
 export type CollaborationOwnerReadParticipant = {
@@ -230,7 +238,34 @@ export function isValidCollaborationParticipantUserId(
   return typeof value === "string" && CANONICAL_USER_ID_PATTERN.test(value);
 }
 
+// Response structure only; target authority and body-span validation belong to the server.
+export function parseCollaborationMentions(value: unknown): CollaborationMention[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const mentions: CollaborationMention[] = [];
+  for (const entry of value) {
+    if (
+      !isExactRecord(entry, ["userId", "start", "end", "displayText"]) ||
+      typeof entry.userId !== "string" || entry.userId.length === 0 ||
+      typeof entry.start !== "number" || !Number.isInteger(entry.start) || entry.start < 0 ||
+      typeof entry.end !== "number" || !Number.isInteger(entry.end) || entry.end <= entry.start ||
+      typeof entry.displayText !== "string" || entry.displayText.length === 0
+    ) {
+      return null;
+    }
+    mentions.push({
+      userId: entry.userId,
+      start: entry.start,
+      end: entry.end,
+      displayText: entry.displayText,
+    });
+  }
+  return mentions;
+}
+
 function parseMessage(value: unknown): CollaborationOwnerReadMessage | null {
+  const hasMentions = value != null && Object.prototype.hasOwnProperty.call(value, "mentions");
   if (
     !isExactRecord(value, [
       "id",
@@ -240,6 +275,7 @@ function parseMessage(value: unknown): CollaborationOwnerReadMessage | null {
       "text",
       "visibility",
       "timestamp",
+      ...(hasMentions ? ["mentions"] : []),
     ]) ||
     !isValidCollaborationOwnerReadId(value.id) ||
     typeof value.authorDisplayName !== "string" ||
@@ -257,6 +293,11 @@ function parseMessage(value: unknown): CollaborationOwnerReadMessage | null {
     return null;
   }
 
+  const mentions = hasMentions ? parseCollaborationMentions(value.mentions) : undefined;
+  if (mentions === null) {
+    return null;
+  }
+
   return {
     id: value.id,
     authorDisplayName: value.authorDisplayName,
@@ -265,6 +306,7 @@ function parseMessage(value: unknown): CollaborationOwnerReadMessage | null {
     text: value.text,
     visibility: value.visibility,
     timestamp: value.timestamp,
+    ...(mentions === undefined ? {} : { mentions }),
   };
 }
 

@@ -8,6 +8,7 @@ import {
   isValidCollaborationOwnerReadId,
   isValidCollaborationParticipantUserId,
   parseCollaborationExternalGuest,
+  parseCollaborationMentions,
   parseCollaborationOwnerReadDto,
   type CollaborationExternalGuest,
   type CollaborationOwnerReadMessage,
@@ -306,6 +307,7 @@ function parseAppendMessage(
   visibility: "internal" | "shared",
   text: string,
 ): CollaborationOwnerReadMessage | null {
+  const hasMentions = value != null && Object.prototype.hasOwnProperty.call(value, "mentions");
   if (
     !isExactRecord(value, [
       "id",
@@ -315,6 +317,7 @@ function parseAppendMessage(
       "text",
       "timestamp",
       "visibility",
+      ...(hasMentions ? ["mentions"] : []),
     ]) ||
     !isValidCollaborationOwnerReadId(value.id) ||
     typeof value.authorDisplayName !== "string" ||
@@ -329,6 +332,11 @@ function parseAppendMessage(
     return null;
   }
 
+  const mentions = hasMentions ? parseCollaborationMentions(value.mentions) : undefined;
+  if (mentions === null) {
+    return null;
+  }
+
   return {
     id: value.id,
     authorDisplayName: value.authorDisplayName,
@@ -337,6 +345,7 @@ function parseAppendMessage(
     text: value.text,
     timestamp: value.timestamp,
     visibility,
+    ...(mentions === undefined ? {} : { mentions }),
   };
 }
 
