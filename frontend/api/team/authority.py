@@ -962,6 +962,20 @@ class RuntimeTeamAuthority:
             return None, _unavailable_error()
         return result, None
 
+    def _get_primary_raw(self, key: str) -> tuple[str | None, TeamError | None]:
+        # Normal EVAL routes to Upstash's primary even when Lua only reads.
+        # Do not use read-only flags/variants or fall back to an ordinary GET.
+        result, error = self._command([
+            "EVAL", "return redis.call('GET', KEYS[1])", 1, key,
+        ])
+        if error:
+            return None, error
+        if result is None:
+            return None, None
+        if type(result) is not str:
+            return None, _unavailable_error()
+        return result, None
+
     def _atomic(self, operation: str, keys: list[str], arguments: list[object]) -> tuple[str | None, TeamError | None]:
         script = ATOMIC_MUTATION_SCRIPTS[operation]
         result, error = self._command(["EVAL", script, len(keys), *keys, *arguments])
@@ -1093,7 +1107,7 @@ class RuntimeTeamAuthority:
         workspace_id: str,
         member_user_id: str,
     ) -> tuple[dict[str, object] | None, TeamError | None]:
-        """Resolve one exact active v2 member through bounded pointer reads."""
+        """Resolve one exact active v2 member through uncached primary reads."""
 
         if (
             type(workspace_id) is not str
@@ -1103,7 +1117,7 @@ class RuntimeTeamAuthority:
         ):
             return None, _error("invalid_request", "Team member identity is invalid.")
 
-        pointer_raw, pointer_error = self._get_raw(
+        pointer_raw, pointer_error = self._get_primary_raw(
             _member_user_pointer_key(workspace_id, member_user_id)
         )
         if pointer_error:
@@ -1121,7 +1135,7 @@ class RuntimeTeamAuthority:
         ):
             return None, _unavailable_error()
 
-        member_raw, member_error = self._get_raw(
+        member_raw, member_error = self._get_primary_raw(
             _member_key(workspace_id, str(pointer["email"]))
         )
         if member_error:

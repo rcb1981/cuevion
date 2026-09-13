@@ -968,8 +968,8 @@ class TeamAuthorityStorageContractTests(unittest.TestCase):
         self.assertNotIn(encoded_secret, serialized)
         self.assertEqual(record["tokenDigest"], token_digest)
 
-    def test_exact_active_modern_member_resolver_is_bounded_and_provenance_bound(self):
-        authority = self.load_authority_module()
+    @staticmethod
+    def modern_member_fixture():
         user_id = "usr_" + "A" * 22
         membership = {
             "v": 2,
@@ -993,16 +993,22 @@ class TeamAuthorityStorageContractTests(unittest.TestCase):
             "sourceInvitationId": "tinv_provenance",
             "status": "active",
         }
+        pointer_key = f"cuevion:team:v2:member-user:workspace-a:{user_id}"
+        member_key = "cuevion:team:v1:member:workspace-a:recipient@example.test"
+        return user_id, pointer, membership, pointer_key, member_key
+
+    def test_exact_active_modern_member_resolver_is_bounded_and_provenance_bound(self):
+        authority = self.load_authority_module()
+        user_id, pointer, membership, pointer_key, member_key = self.modern_member_fixture()
         values = {
-            authority._member_user_pointer_key("workspace-a", user_id): authority._canonical_json(pointer),
-            authority._member_key("workspace-a", "recipient@example.test"): authority._canonical_json(membership),
+            pointer_key: authority._canonical_json(pointer),
+            member_key: authority._canonical_json(membership),
         }
         commands: list[list[object]] = []
 
         def transport(command: list[object]) -> dict[str, object]:
             commands.append(command)
-            self.assertEqual(command[0], "GET")
-            return {"result": values.get(str(command[1]))}
+            return {"result": values.get(str(command[-1]))}
 
         runtime = authority.RuntimeTeamAuthority(transport, environment={})
         resolved, error = runtime.resolve_active_member_by_user_id(
@@ -1019,92 +1025,190 @@ class TeamAuthorityStorageContractTests(unittest.TestCase):
                 "sourceInvitationId": "tinv_provenance",
             },
         )
-        self.assertEqual(len(commands), 2)
-        self.assertTrue(all(command[0] == "GET" for command in commands))
-        self.assertFalse(any("SCAN" in json.dumps(command).upper() for command in commands))
+        self.assertEqual(commands, [
+            ["EVAL", "return redis.call('GET', KEYS[1])", 1, pointer_key],
+            ["EVAL", "return redis.call('GET', KEYS[1])", 1, member_key],
+        ])
 
     def test_member_resolver_rejects_legacy_removed_wrong_workspace_and_malformed(self):
         authority = self.load_authority_module()
-        user_id = "usr_" + "A" * 22
-        pointer_key = authority._member_user_pointer_key("workspace-a", user_id)
-        member_key = authority._member_key("workspace-a", "recipient@example.test")
-        pointer = {
-            "v": 2,
-            "workspaceId": "workspace-a",
-            "memberUserId": user_id,
-            "email": "recipient@example.test",
-            "sourceInvitationId": "tinv_original",
-            "status": "active",
-        }
+        user_id, pointer, membership, pointer_key, member_key = self.modern_member_fixture()
         removed = {
-            "v": 2,
-            "workspaceId": "workspace-a",
-            "email": "recipient@example.test",
-            "verifiedRecipientEmail": "recipient@example.test",
-            "memberUserId": user_id,
-            "displayName": "Recipient",
-            "accessLevel": "Limited",
+            **membership,
             "status": "removed",
-            "sourceInvitationId": "tinv_original",
-            "createdAt": NOW_MS,
             "updatedAt": NOW_MS + 2,
-            "acceptedAt": NOW_MS + 1,
             "removedAt": NOW_MS + 2,
             "revokedAt": NOW_MS + 2,
         }
-
-        def runtime_for(values: dict[str, str]):
-            return authority.RuntimeTeamAuthority(
-                lambda command: {"result": values.get(str(command[1]))},
-                environment={},
-            )
-
+        other_user = "usr_" + "B" * 21 + "A"
         cases = [
-            runtime_for({}),
-            runtime_for(
-                {
-                    pointer_key: authority._canonical_json(pointer),
-                    member_key: authority._canonical_json(removed),
-                }
-            ),
-            runtime_for({pointer_key: "{}"}),
+            ("missing_pointer", None, membership, "team_member_not_active", 1),
+            ("missing_member", pointer, None, "team_authority_unavailable", 2),
+            ("removed_member", pointer, removed, "team_member_not_active", 2),
+            ("malformed_pointer", {}, membership, "team_authority_unavailable", 1),
+            ("malformed_member", pointer, {}, "team_authority_unavailable", 2),
+            ("legacy_pointer", {**pointer, "v": 1}, membership, "team_authority_unavailable", 1),
+            ("legacy_member", pointer, {**membership, "v": 1}, "team_authority_unavailable", 2),
+            ("pointer_workspace", {**pointer, "workspaceId": "workspace-b"}, membership, "team_authority_unavailable", 1),
+            ("member_workspace", pointer, {**membership, "workspaceId": "workspace-b"}, "team_authority_unavailable", 2),
+            ("pointer_user", {**pointer, "memberUserId": other_user}, membership, "team_authority_unavailable", 1),
+            ("member_user", pointer, {**membership, "memberUserId": other_user}, "team_authority_unavailable", 2),
+            ("reinvited_member", pointer, {**membership, "sourceInvitationId": "tinv_reinvited"}, "team_authority_unavailable", 2),
+            ("reinvited_pointer", {**pointer, "sourceInvitationId": "tinv_reinvited"}, membership, "team_authority_unavailable", 2),
+            ("unverified_member", pointer, {**membership, "verifiedRecipientEmail": "other@example.test"}, "team_authority_unavailable", 2),
         ]
-        expected_codes = [
-            "team_member_not_active",
-            "team_member_not_active",
-            "team_authority_unavailable",
+        expected_commands = [
+            ["EVAL", "return redis.call('GET', KEYS[1])", 1, pointer_key],
+            ["EVAL", "return redis.call('GET', KEYS[1])", 1, member_key],
         ]
-        for runtime, expected_code in zip(cases, expected_codes, strict=True):
-            resolved, error = runtime.resolve_active_member_by_user_id(
-                workspace_id="workspace-a",
-                member_user_id=user_id,
-            )
-            self.assertIsNone(resolved)
-            self.assertEqual(error["code"], expected_code)
+        for name, stored_pointer, stored_member, expected_code, count in cases:
+            with self.subTest(case=name):
+                responses = [
+                    {"result": authority._canonical_json(value) if value is not None else None}
+                    for value in (stored_pointer, stored_member)
+                ]
+                transport = Mock(side_effect=responses)
+                runtime = authority.RuntimeTeamAuthority(transport, environment={})
+                resolved, error = runtime.resolve_active_member_by_user_id(
+                    workspace_id="workspace-a", member_user_id=user_id,
+                )
+                self.assertIsNone(resolved)
+                self.assertEqual(error["code"], expected_code)
+                self.assertEqual(
+                    [call.args[0] for call in transport.call_args_list],
+                    expected_commands[:count],
+                )
 
-        resolved, error = cases[0].resolve_active_member_by_user_id(
-            workspace_id="workspace-b",
-            member_user_id=user_id,
+    def test_member_resolver_rejects_invalid_identity_before_primary_reads(self):
+        authority = self.load_authority_module()
+        user_id, _pointer, _member, _pointer_key, _member_key = self.modern_member_fixture()
+        for workspace_id, member_user_id in (
+            ("", user_id), (" workspace-a", user_id), (None, user_id),
+            ("workspace-a", "legacy-user-id"), ("workspace-a", None),
+        ):
+            with self.subTest(workspace_id=workspace_id, member_user_id=member_user_id):
+                transport = Mock()
+                resolved, error = authority.RuntimeTeamAuthority(
+                    transport, environment={},
+                ).resolve_active_member_by_user_id(
+                    workspace_id=workspace_id, member_user_id=member_user_id,
+                )
+                self.assertIsNone(resolved)
+                self.assertEqual(error["code"], "invalid_request")
+                transport.assert_not_called()
+
+    def test_member_resolver_primary_errors_fail_closed_without_get_fallback(self):
+        authority = self.load_authority_module()
+        user_id, pointer, _member, pointer_key, member_key = self.modern_member_fixture()
+        expected_commands = [
+            ["EVAL", "return redis.call('GET', KEYS[1])", 1, pointer_key],
+            ["EVAL", "return redis.call('GET', KEYS[1])", 1, member_key],
+        ]
+        failures = [
+            TimeoutError("private timeout"), RuntimeError("private transport"),
+            {"error": "ERR EVAL unavailable"}, {}, None, [],
+            {"result": "{}", "error": "private"},
+            {"result": {}}, {"result": []}, {"result": 1}, {"result": False},
+            {"result": "not-json"}, {"result": "[]"},
+        ]
+        for read_index in (0, 1):
+            for failure_index, failure in enumerate(failures):
+                with self.subTest(read_index=read_index, failure=failure_index):
+                    responses = [{"result": authority._canonical_json(pointer)}][:read_index]
+                    transport = Mock(side_effect=[*responses, failure])
+                    resolved, error = authority.RuntimeTeamAuthority(
+                        transport, environment={},
+                    ).resolve_active_member_by_user_id(
+                        workspace_id="workspace-a", member_user_id=user_id,
+                    )
+                    self.assertIsNone(resolved)
+                    self.assertEqual(error, {
+                        "code": "team_authority_unavailable",
+                        "message": "Team membership is temporarily unavailable.",
+                    })
+                    self.assertEqual(
+                        [call.args[0] for call in transport.call_args_list],
+                        expected_commands[:read_index + 1],
+                    )
+
+    def test_independent_resolver_uses_primary_after_completed_removal_despite_stale_replica(self):
+        from test_team_membership_store import MemoryTeamRedis
+
+        authority = self.load_authority_module()
+        user_id, pointer, membership, pointer_key, member_key = self.modern_member_fixture()
+        primary = MemoryTeamRedis()
+        primary.values.update({
+            pointer_key: authority._canonical_json(pointer),
+            member_key: authority._canonical_json(membership),
+            "cuevion:team:v1:members-index:workspace-a": '["recipient@example.test"]',
+        })
+        replica = dict(primary.values)
+        commands = []
+
+        def read_transport(command):
+            commands.append(command)
+            if command[0] == "GET":
+                return {"result": replica.get(command[1])}
+            if command[:3] == ["EVAL", "return redis.call('GET', KEYS[1])", 1]:
+                return {"result": primary.values.get(command[3])}
+            raise AssertionError("unexpected membership read command")
+
+        first_reader = authority.RuntimeTeamAuthority(read_transport, environment={})
+        before, error = first_reader.resolve_active_member_by_user_id(
+            workspace_id="workspace-a", member_user_id=user_id,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(before["sourceInvitationId"], "tinv_provenance")
+        removed, error = authority.RuntimeTeamAuthority(
+            primary, environment={}, now_ms=lambda: NOW_MS + 2,
+        ).remove_member(actor=owner(), member_email="recipient@example.test")
+        self.assertIsNone(error)
+        self.assertEqual(removed["status"], "removed")
+        self.assertNotIn(pointer_key, primary.values)
+        self.assertEqual(json.loads(primary.values[member_key])["status"], "removed")
+        self.assertEqual(json.loads(replica[pointer_key]), pointer)
+        self.assertEqual(json.loads(replica[member_key]), membership)
+
+        commands.clear()
+        independent_reader = authority.RuntimeTeamAuthority(read_transport, environment={})
+        resolved, error = independent_reader.resolve_active_member_by_user_id(
+            workspace_id="workspace-a", member_user_id=user_id,
         )
         self.assertIsNone(resolved)
         self.assertEqual(error["code"], "team_member_not_active")
-        resolved, error = cases[0].resolve_active_member_by_user_id(
-            workspace_id="workspace-a",
-            member_user_id="legacy-user-id",
-        )
-        self.assertIsNone(resolved)
-        self.assertEqual(error["code"], "invalid_request")
+        self.assertEqual(commands, [
+            ["EVAL", "return redis.call('GET', KEYS[1])", 1, pointer_key],
+        ])
 
-        unavailable = authority.RuntimeTeamAuthority(
-            lambda _command: (_ for _ in ()).throw(RuntimeError("private")),
-            environment={},
-        )
-        resolved, error = unavailable.resolve_active_member_by_user_id(
-            workspace_id="workspace-a",
-            member_user_id=user_id,
-        )
-        self.assertIsNone(resolved)
-        self.assertEqual(error["code"], "team_authority_unavailable")
+    def test_member_resolver_serializes_normal_eval_at_rest_root(self):
+        authority = self.load_authority_module()
+        user_id, pointer, membership, pointer_key, member_key = self.modern_member_fixture()
+        values = {
+            pointer_key: authority._canonical_json(pointer),
+            member_key: authority._canonical_json(membership),
+        }
+        requests = []
+
+        def respond(request, *, timeout):
+            command = json.loads(request.data)
+            requests.append((request.full_url, request.get_method(), command, timeout))
+            return io.BytesIO(json.dumps({"result": values.get(command[-1])}).encode())
+
+        with patch.object(authority, "urlopen", side_effect=respond):
+            resolved, error = authority.build_runtime_team_authority({
+                "KV_REST_API_URL": "https://redis.example.test/",
+                "KV_REST_API_TOKEN": "test-only-token",
+            }).resolve_active_member_by_user_id(
+                workspace_id="workspace-a", member_user_id=user_id,
+            )
+        self.assertIsNone(error)
+        self.assertEqual(resolved["memberUserId"], user_id)
+        self.assertEqual(requests, [
+            ("https://redis.example.test", "POST", [
+                "EVAL", "return redis.call('GET', KEYS[1])", 1, key,
+            ], 10)
+            for key in (pointer_key, member_key)
+        ])
 
     def test_invitation_lifetime_is_exactly_seven_days(self):
         authority = self.load_authority_module()
