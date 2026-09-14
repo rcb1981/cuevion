@@ -7,10 +7,13 @@ const AUTH0_LOGOUT_HOSTNAME = "cuevion-dev.eu.auth0.com";
 
 export type AuthenticationContext = "auth0" | "collaboration";
 
+export type WorkspaceRole = "owner" | "admin" | "member";
+
 export type CuevionSessionUser = {
   email: string;
   name: string;
   userType: "member";
+  workspaceRole: WorkspaceRole;
   userId?: string;
   workspaceId?: string;
 };
@@ -51,11 +54,15 @@ function normalizeMember(value: unknown): CuevionSessionUser | null {
   const userId = typeof value.userId === "string" ? value.userId.trim() : "";
   const workspaceId =
     typeof value.workspaceId === "string" ? value.workspaceId.trim() : "";
+  const workspaceRole = value.workspaceRole;
 
   if (
     !email ||
     !name ||
     value.userType !== "member" ||
+    (workspaceRole !== "owner" &&
+      workspaceRole !== "admin" &&
+      workspaceRole !== "member") ||
     !userId ||
     !workspaceId
   ) {
@@ -66,6 +73,7 @@ function normalizeMember(value: unknown): CuevionSessionUser | null {
     email,
     name,
     userType: "member",
+    workspaceRole,
     ...(userId ? { userId } : {}),
     ...(workspaceId ? { workspaceId } : {}),
   };
@@ -136,6 +144,27 @@ export async function loadStartupSession(
   }
 
   return { status: auth0Session.status, authSource: null, user: null };
+}
+
+export function startTeamInviteAuthentication(
+  token: string,
+  navigation?: Pick<Location, "replace">,
+): boolean {
+  if (
+    typeof token !== "string" ||
+    token !== token.trim() ||
+    !/^tinv_[A-Za-z0-9_-]{1,64}\.[A-Za-z0-9_-]{43}$/.test(token)
+  ) {
+    return false;
+  }
+
+  const query = new URLSearchParams({ team_invite: token });
+  try {
+    (navigation ?? window.location).replace(`${AUTH0_LOGIN_ENDPOINT}?${query}`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function isAuth0LoginPath(pathname: string) {

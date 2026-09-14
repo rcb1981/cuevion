@@ -12,6 +12,7 @@ import {
   isAuth0LoginPath,
   loadStartupSession,
   logoutAuth0Session,
+  startTeamInviteAuthentication,
 } from "./authApi";
 
 type FakeResponse = {
@@ -74,6 +75,94 @@ assert.equal(isAuth0LoginPath("/login/anything"), false);
 assert.equal(hasAuthCallbackError("?error=anything-sensitive"), true);
 assert.equal(hasAuthCallbackError("?auth_error=callback_failed"), true);
 assert.equal(hasAuthCallbackError("?next=%2F"), false);
+
+const teamInviteToken = `tinv_team-recipient.${"a".repeat(43)}`;
+const inviteNavigationCalls: string[] = [];
+assert.equal(
+  startTeamInviteAuthentication(teamInviteToken, {
+    replace: (url) => inviteNavigationCalls.push(String(url)),
+  }),
+  true,
+);
+assert.deepEqual(inviteNavigationCalls, [
+  `${AUTH0_LOGIN_ENDPOINT}?team_invite=${teamInviteToken}`,
+]);
+const inviteAuthenticationUrl = new URL(
+  inviteNavigationCalls[0]!,
+  "https://app.cuevion.com",
+);
+assert.equal(inviteAuthenticationUrl.origin, "https://app.cuevion.com");
+assert.equal(inviteAuthenticationUrl.pathname, AUTH0_LOGIN_ENDPOINT);
+assert.deepEqual([...inviteAuthenticationUrl.searchParams.entries()], [
+  ["team_invite", teamInviteToken],
+]);
+assert.equal(inviteAuthenticationUrl.hash, "");
+
+for (const invalidToken of [
+  "",
+  ` ${teamInviteToken}`,
+  `${teamInviteToken} `,
+  `${teamInviteToken}\n`,
+  `${teamInviteToken}&workspaceRole=owner`,
+  `${teamInviteToken}#role=admin`,
+  `${teamInviteToken}.extra`,
+  `tinv_.${"a".repeat(43)}`,
+  `tinv_${"a".repeat(65)}.${"a".repeat(43)}`,
+  `workspace-1.${"a".repeat(43)}`,
+  `tinv_team-recipient.${"a".repeat(42)}`,
+  `tinv_team-recipient.${"a".repeat(44)}`,
+  `tinv_team-recipient.${"/".repeat(43)}`,
+  `https://evil.example/${teamInviteToken}`,
+]) {
+  let navigationCount = 0;
+  assert.equal(
+    startTeamInviteAuthentication(invalidToken, {
+      replace: () => { navigationCount += 1; },
+    }),
+    false,
+  );
+  assert.equal(navigationCount, 0, "Malformed Team invite must not navigate");
+}
+assert.equal(
+  startTeamInviteAuthentication(teamInviteToken, {
+    replace: () => {
+      throw new Error("Navigation unavailable");
+    },
+  }),
+  false,
+);
+
+const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+let defaultInviteNavigation = "";
+let durableStorageAccesses = 0;
+Object.defineProperty(globalThis, "window", {
+  configurable: true,
+  value: {
+    location: { replace: (url: string) => { defaultInviteNavigation = url; } },
+    get localStorage() {
+      durableStorageAccesses += 1;
+      throw new Error("Invite navigation must not access localStorage");
+    },
+    get sessionStorage() {
+      durableStorageAccesses += 1;
+      throw new Error("Invite navigation must not access sessionStorage");
+    },
+  },
+});
+try {
+  assert.equal(startTeamInviteAuthentication(teamInviteToken), true);
+  assert.equal(
+    defaultInviteNavigation,
+    `${AUTH0_LOGIN_ENDPOINT}?team_invite=${teamInviteToken}`,
+  );
+  assert.equal(durableStorageAccesses, 0);
+} finally {
+  if (originalWindow) {
+    Object.defineProperty(globalThis, "window", originalWindow);
+  } else {
+    Reflect.deleteProperty(globalThis, "window");
+  }
+}
 
 assert.equal(
   getSessionAccountStorageKey("auth0", {
@@ -162,8 +251,9 @@ assert.equal(loginSource.includes("@auth0"), false);
 
 const appSource = fs.readFileSync(path.resolve(__dirname, "../App.tsx"), "utf8");
 assert.ok(
-  appSource.indexOf('appRoute === "login"') < appSource.indexOf('appRoute === "preview"'),
-  "/login must take precedence over onboarding preview",
+  appSource.indexOf('appRoute === "login"', appSource.indexOf("export default function App")) <
+    appSource.indexOf("<Auth0SessionBoundary", appSource.indexOf("export default function App")),
+  "/login must take precedence over the session-gated onboarding preview",
 );
 const startupRegion = sourceBetween(
   appSource,
@@ -207,6 +297,8 @@ assert.equal(
 );
 
 const authApiSource = fs.readFileSync(path.resolve(__dirname, "./authApi.ts"), "utf8");
+assert.equal(authApiSource.includes("localStorage"), false);
+assert.equal(authApiSource.includes("sessionStorage"), false);
 const removedLegacyRoutePrefix = ["/api", "beta"].join("/") + "/";
 const removedLegacyGateName = ["Beta", "AccessGate"].join("");
 const removedLegacySource = ["\"", "beta", "\""].join("");
@@ -364,7 +456,7 @@ assert.equal(
 );
 
 async function runAsyncTests() {
-  {
+  for (const workspaceRole of ["owner", "admin", "member"] as const) {
     const calls: FetchCall[] = [];
     const fetchImplementation = createFetch(
       [
@@ -378,6 +470,7 @@ async function runAsyncTests() {
             email: " Member@Example.com ",
             name: " Member Name ",
             userType: "member",
+            workspaceRole,
           },
         },
       ],
@@ -394,11 +487,55 @@ async function runAsyncTests() {
         email: "member@example.com",
         name: "Member Name",
         userType: "member",
+        workspaceRole,
       },
     });
     assert.deepEqual(calls.map((call) => call.url), [AUTH0_SESSION_ENDPOINT]);
     assert.equal(calls[0]?.init?.credentials, "include");
     assert.equal(calls[0]?.init?.cache, "no-store");
+  }
+
+  for (const workspaceRole of [
+    undefined,
+    null,
+    "",
+    "OWNER",
+    "owner ",
+    " member",
+    "guest",
+    "administrator",
+    0,
+    true,
+    {},
+    ["member"],
+  ]) {
+    const calls: FetchCall[] = [];
+    const result = await loadStartupSession(
+      createFetch(
+        [
+          {
+            status: 200,
+            payload: {
+              authenticated: true,
+              authSource: "auth0",
+              userId: "user-1",
+              workspaceId: "workspace-1",
+              email: "member@example.com",
+              name: "Member Name",
+              userType: "member",
+              ...(workspaceRole === undefined ? {} : { workspaceRole }),
+            },
+          },
+        ],
+        calls,
+      ),
+    );
+    assert.deepEqual(result, {
+      status: "unavailable",
+      authSource: null,
+      user: null,
+    });
+    assert.deepEqual(calls.map((call) => call.url), [AUTH0_SESSION_ENDPOINT]);
   }
 
   {

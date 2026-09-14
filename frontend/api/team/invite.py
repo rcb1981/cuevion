@@ -4,6 +4,7 @@ import json
 import os
 import secrets
 import sys
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -17,14 +18,14 @@ if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
 from api.auth.email_address import is_valid_auth_email  # noqa: E402
-from api.auth import http as auth_http, runtime as auth_runtime  # noqa: E402
+from api.auth import http as auth_http, runtime as auth_runtime, session_store as auth_session_store  # noqa: E402
 from api.auth.http import HttpBoundaryError, snapshot_request_headers  # noqa: E402
 from api.auth.runtime import (  # noqa: E402
     AuthenticatedMemberContext,
     MemberResolutionOutcome,
     resolve_authenticated_member,
 )
-from api.team.authority import build_runtime_team_authority  # noqa: E402
+from api.team.authority import ProvisioningInvitation, TeamAuthorityError, build_runtime_team_authority  # noqa: E402
 from api.team.http_security import require_safe_json_mutation  # noqa: E402
 
 TEAM_INVITE_SCHEMA_VERSION = 1
@@ -1271,6 +1272,173 @@ def _handle_invite_authentication(handler: BaseHTTPRequestHandler):
     auth_http.send_public_response(handler, response)
 
 
+def _continuation_error(status: int, code: str) -> auth_http.PublicResponse:
+    return auth_http.json_response(
+        status, _build_error(code, "The Team invitation could not be continued."),
+    )
+
+
+def _continuation_authority_error(error: object) -> auth_http.PublicResponse:
+    code = error.code if type(error) is TeamAuthorityError else None
+    if code in {"wrong_recipient", "unauthorized", "forbidden"}:
+        return _continuation_error(403, "recipient_mismatch")
+    if code == "expired_invite":
+        return _continuation_error(410, "continuation_expired")
+    if code in {
+        "invalid_invite", "conflict", "cancelled_invite", "declined_invite",
+        "used_invite", "team_member_not_active",
+    }:
+        return _continuation_error(409, "invalid_continuation")
+    return _continuation_error(503, "team_authority_unavailable")
+
+
+def team_invite_continuation_response(
+    method: str,
+    raw_path: str,
+    raw_headers: tuple[tuple[str, str], ...],
+    body: bytes,
+    *,
+    environment=None,
+    now: int | None = None,
+    session_resolver=None,
+    session_store_factory=None,
+    team_authority_factory=None,
+) -> auth_http.PublicResponse:
+    """Consume only server-bound intent after exact current-session revalidation."""
+    try:
+        auth_http.require_method(method, "POST")
+        headers = auth_http.validate_header_pairs(raw_headers)
+        require_safe_json_mutation(headers)
+        # This endpoint accepts no credential, authority, redirect, or invite ID
+        # from the browser. Even equivalent/duplicated query spellings fail shut.
+        if raw_path != "/api/team/invite?op=continue":
+            return _continuation_error(400, "invalid_request")
+        lengths = [value for name, value in headers if name.casefold() == "content-length"]
+        if (
+            type(body) is not bytes or not 2 <= len(body) <= 128
+            or len(lengths) != 1 or not lengths[0].isascii()
+            or not lengths[0].isdigit() or int(lengths[0]) != len(body)
+            or any(name.casefold() == "transfer-encoding" for name, _value in headers)
+        ):
+            return _continuation_error(400, "invalid_request")
+        payload = json.loads(body.decode("utf-8"))
+        if type(payload) is not dict or payload:
+            return _continuation_error(400, "invalid_request")
+    except HttpBoundaryError as error:
+        return _continuation_error(error.status, "invalid_request")
+    except Exception:
+        return _continuation_error(400, "invalid_request")
+
+    source = os.environ if environment is None else environment
+    clock = (lambda: int(time.time())) if now is None else (lambda: now)
+    try:
+        timestamp = clock()
+        resolver = session_resolver or auth_runtime.resolve_authenticated_member_session
+        resolution = resolver(headers, environment=source, now=timestamp)
+        if resolution.outcome is not MemberResolutionOutcome.AUTHENTICATED:
+            status = 503 if resolution.outcome is MemberResolutionOutcome.UNAVAILABLE else 401
+            return auth_http.json_response(
+                status,
+                _build_error("authentication_unavailable" if status == 503 else "unauthorized", "Authentication is required to continue."),
+                set_cookies=resolution.set_cookies,
+            )
+        session = resolution.session
+        if type(session) is not auth_runtime.AuthenticatedMemberSessionContext:
+            return _continuation_error(503, "authentication_unavailable")
+        member = session.member
+        binding = auth_session_store.TeamInviteContinuationBinding(
+            session_id=session.session_id, user_id=member.user_id,
+            workspace_id=member.workspace_id, issuer=session.issuer,
+            subject=session.subject, session_created_at=session.issued_at,
+            session_expires_at=session.expires_at,
+        )
+        secret = auth_session_store.resolve_session_secret(source)
+        store_factory = session_store_factory or auth_session_store.build_runtime_session_store
+        store = store_factory(source)
+        record = store.get_team_invite_continuation(binding, secret=secret, now=timestamp)
+        if record is None:
+            return _continuation_error(404, "continuation_unavailable")
+        if (
+            type(record) is not auth_session_store.TeamInviteContinuationRecord
+            or record.binding != binding
+            or not session.issued_at <= timestamp < session.expires_at
+            or not record.created_at <= timestamp < record.expires_at
+        ):
+            return _continuation_error(409, "invalid_continuation")
+        if (
+            member.membership_role != "member"
+            or member.email != record.invitee_email
+            or member.user_id == record.inviter_user_id
+        ):
+            return _continuation_error(403, "recipient_mismatch")
+        if record.status == "complete" and record.raw_invite_token is None:
+            # The token-free tombstone attests an earlier exact proof. This
+            # same-session replay neither invokes Team acceptance nor grants access.
+            return auth_http.json_response(200, {"ok": True, "status": "accepted"})
+        if record.status != "pending" or type(record.raw_invite_token) is not str:
+            return _continuation_error(409, "invalid_continuation")
+        if timestamp * 1000 >= record.invitation_expires_at:
+            return _continuation_error(410, "continuation_expired")
+        authority_factory = team_authority_factory or build_runtime_team_authority
+        authority = authority_factory(source)
+        invitation = authority.read_provisioning_invitation(record.raw_invite_token, allow_accepted=True)
+        if (
+            type(invitation) is not ProvisioningInvitation
+            or invitation.invitation_id != record.invitation_id
+            or invitation.token_digest != record.token_digest
+            or invitation.workspace_id != binding.workspace_id
+            or invitation.inviter_user_id != record.inviter_user_id
+            or invitation.email != record.invitee_email
+            or invitation.expires_at != record.invitation_expires_at
+            or invitation.status not in {"invited", "accepted"}
+        ):
+            return _continuation_error(409, "invalid_continuation")
+        if invitation.status == "invited":
+            if clock() >= min(record.expires_at, session.expires_at):
+                return _continuation_error(410, "continuation_expired")
+            try:
+                authority.accept_invitation(actor=member, token=record.raw_invite_token)
+            except Exception:
+                # An atomic accept may have committed before its response was
+                # lost. The primary exact-incarnation proof is the only success.
+                pass
+        try:
+            accepted = authority.prove_provisioning_acceptance(
+                record.raw_invite_token, member, record.invitation_id,
+            )
+        except TeamAuthorityError as error:
+            # If acceptance did not commit, the proof rejects the still-pending
+            # record as wrong_recipient. Keep this retryable; the original
+            # exact recipient and invitation metadata were already revalidated.
+            if invitation.status == "invited" and error.code == "wrong_recipient":
+                return _continuation_error(503, "team_authority_unavailable")
+            raise
+        if accepted is not True:
+            return _continuation_error(409, "invalid_continuation")
+        if store.complete_team_invite_continuation(
+            record, binding, secret=secret, now=clock(),
+        ) is not True:
+            return _continuation_error(409, "invalid_continuation")
+        return auth_http.json_response(200, {"ok": True, "status": "accepted"})
+    except TeamAuthorityError as error:
+        return _continuation_authority_error(error)
+    except Exception:
+        return _continuation_error(503, "team_authority_unavailable")
+
+
+def _handle_safe_continuation(handler: BaseHTTPRequestHandler):
+    try:
+        headers = snapshot_request_headers(handler)
+        lengths = [value for name, value in headers if name.casefold() == "content-length"]
+        if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit() or not 2 <= int(lengths[0]) <= 128:
+            raise ValueError("invalid request")
+        body = handler.rfile.read(int(lengths[0]))
+        response = team_invite_continuation_response(handler.command, handler.path, headers, body)
+    except Exception:
+        response = _continuation_error(400, "invalid_request")
+    auth_http.send_public_response(handler, response)
+
+
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         operation = _get_operation(self)
@@ -1298,6 +1466,10 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         operation = _get_operation(self)
+
+        if operation == "continue":
+            _handle_safe_continuation(self)
+            return
 
         if operation in {"issue", "action", "cancel"}:
             authenticated_member = _require_authenticated_member(

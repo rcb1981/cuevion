@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from urllib.parse import parse_qsl, quote, urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from api.auth import account_authority, auth0_flow, http, session_store
 from api.auth import models
@@ -25,6 +25,8 @@ _CALLBACK_QUERY_MAX_BYTES = 4096
 _AUTH_CODE_RE = re.compile(r"[!-~]{1,2048}")
 _LOGIN_ERROR_LOCATION = "/login?error=authentication_failed"
 _APP_LOCATION = "/"
+_LOGIN_PATH = "/api/auth/login"
+_TEAM_INVITE_TOKEN_RE = re.compile(r"tinv_[A-Za-z0-9_-]{1,64}\.[A-Za-z0-9_-]{43}")
 
 
 class MemberResolutionOutcome(str, Enum):
@@ -238,9 +240,51 @@ def _parse_callback_query(raw_path: str) -> tuple[str, str]:
     return code, state
 
 
+def _parse_login_invite(raw_path: str) -> str | None:
+    """Transport only the existing invite credential, never account authority."""
+    if (
+        type(raw_path) is not str or len(raw_path) > 1024
+        or any(not 33 <= ord(character) <= 126 for character in raw_path)
+        or "#" in raw_path
+    ):
+        raise ValueError("invalid login request")
+    parsed = urlsplit(raw_path)
+    if (
+        parsed.scheme or parsed.netloc or parsed.fragment
+        or parsed.path != _LOGIN_PATH
+    ):
+        raise ValueError("invalid login request")
+    if not parsed.query:
+        return None
+    pairs = parse_qsl(
+        parsed.query, keep_blank_values=True, strict_parsing=True,
+        max_num_fields=1, encoding="utf-8", errors="strict",
+    )
+    if (
+        len(pairs) != 1 or pairs[0][0] != "team_invite"
+        or _TEAM_INVITE_TOKEN_RE.fullmatch(pairs[0][1]) is None
+    ):
+        raise ValueError("invalid login request")
+    return pairs[0][1]
+
+
+def _same_origin_invite_navigation(headers: tuple[tuple[str, str], ...]) -> bool:
+    # Top-level GET navigation carries Fetch Metadata rather than Origin.
+    # Never use Referer, which can contain the invite credential.
+    origins = [value for name, value in headers if name.casefold() == "origin"]
+    sites = [value for name, value in headers if name.casefold() == "sec-fetch-site"]
+    return (
+        len(origins) <= 1 and len(sites) <= 1
+        and (not origins or origins == [http.CANONICAL_APP_ORIGIN])
+        and (not sites or sites == ["same-origin"])
+        and bool(origins or sites)
+    )
+
+
 def login_response(
     method: str,
     raw_headers: tuple[tuple[str, str], ...],
+    raw_path: str | None = None,
     *,
     environment: Mapping[str, str] | None = None,
     now: int | None = None,
@@ -252,6 +296,21 @@ def login_response(
         http.require_method(method, "GET")
         headers = http.validate_header_pairs(raw_headers)
         http.require_canonical_host(headers)
+        if raw_path is not None:
+            try:
+                if team_invite_token is not None:
+                    raise ValueError("ambiguous login request")
+                team_invite_token = _parse_login_invite(raw_path)
+            except (TypeError, ValueError, UnicodeError):
+                return http.json_response(400, {"error": {
+                    "code": "invalid_request",
+                    "message": "The authentication request was rejected.",
+                }})
+            if team_invite_token is not None and not _same_origin_invite_navigation(headers):
+                return http.json_response(403, {"error": {
+                    "code": "forbidden",
+                    "message": "The authentication request was rejected.",
+                }})
         source = os.environ if environment is None else environment
         config = auth0_flow.parse_auth0_configuration(source)
         if team_invite_token is not None:
@@ -485,6 +544,14 @@ def callback_response(
             )
             if identity.email != invitation.email:
                 raise ValueError("not authorized")
+        # New invitees already accept inside B1A PREPARE/FINALIZE. An existing
+        # canonical account needs only post-auth transport to that same Team
+        # authority; authentication itself must not invent acceptance.
+        continuation_required = (
+            invitation is not None
+            and invitation.status == "invited"
+            and authority_result.outcome is CurrentAccountReadOutcome.FOUND
+        )
         if authority_result.outcome is CurrentAccountReadOutcome.NOT_AUTHORIZED:
             if invitation is None or authority_result.authority is not None:
                 raise ValueError("not authorized")
@@ -529,7 +596,7 @@ def callback_response(
         session_store.revoke_request_session(
             store, headers=headers, secret=secret
         )
-        _record, session_cookie = session_store.create_server_session(
+        record, session_cookie = session_store.create_server_session(
             store,
             secret=secret,
             user_id=authority.user.user_id,
@@ -541,8 +608,39 @@ def callback_response(
             now=timestamp,
             random_bytes=random_bytes,
         )
+        if continuation_required:
+            binding = session_store.TeamInviteContinuationBinding(
+                session_id=record.session_id,
+                user_id=record.user_id,
+                workspace_id=record.workspace_id,
+                issuer=record.issuer,
+                subject=record.subject,
+                session_created_at=record.created_at,
+                session_expires_at=record.expires_at,
+            )
+            continuation = session_store.TeamInviteContinuationRecord(
+                binding=binding,
+                invitation_id=invitation.invitation_id,
+                token_digest=invitation.token_digest,
+                inviter_user_id=invitation.inviter_user_id,
+                invitee_email=authority.primary_verified_email.canonical_email,
+                invitation_expires_at=invitation.expires_at,
+                raw_invite_token=token,
+                created_at=timestamp,
+                expires_at=min(
+                    timestamp + session_store.TEAM_INVITE_CONTINUATION_TTL_SECONDS,
+                    record.expires_at,
+                    invitation.expires_at // 1000,
+                ),
+            )
+            # The browser session is published only after its continuation is
+            # durably retained. NX prevents replacement for an existing session.
+            if not store.put_team_invite_continuation(
+                continuation, secret=secret, now=timestamp,
+            ):
+                raise session_store.SessionStoreUnavailable()
         return http.redirect_response(
-            _APP_LOCATION if token is None else "/?team_invite=" + quote(token, safe=""),
+            "/?team_continue=1" if continuation_required else _APP_LOCATION,
             set_cookies=(clear_transaction, session_cookie),
         )
     except http.HttpBoundaryError as error:

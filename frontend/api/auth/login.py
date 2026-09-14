@@ -12,6 +12,7 @@ class handler(BaseHTTPRequestHandler):
         response = runtime.login_response(
             self.command,
             raw_headers,
+            self.path,
         )
         http.send_public_response(self, response)
 

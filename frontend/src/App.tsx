@@ -10,6 +10,7 @@ import {
   initialOnboardingState,
 } from "./data/onboardingOptions";
 import {
+  continueTeamInvite,
   fetchTeamInvite,
   mutateTeamInvite,
   type PublicTeamInvite,
@@ -52,6 +53,9 @@ import {
   getSessionAccountStorageKey,
   isAuth0LoginPath,
   loadStartupSession,
+  startTeamInviteAuthentication,
+  type StartupSessionResult,
+  type WorkspaceRole,
 } from "./lib/authApi";
 import { GMAIL_OAUTH_RECONNECT_REQUIRED_CONNECTION_MESSAGE } from "./lib/inboxConnectionApi";
 import { ExternalCollaborationGuestView } from "./components/collaboration/ExternalCollaborationGuestView";
@@ -63,6 +67,12 @@ import {
 const WorkspaceShell = lazy(() =>
   import("./components/workspace/WorkspaceShell").then((module) => ({
     default: module.WorkspaceShell,
+  })),
+);
+
+const TeamMemberShell = lazy(() =>
+  import("./components/workspace/TeamMemberShell").then((module) => ({
+    default: module.TeamMemberShell,
   })),
 );
 
@@ -95,6 +105,7 @@ type AuthenticatedCuevionUser = {
   userType: "member" | "guest";
   userId?: string;
   workspaceId?: string;
+  workspaceRole?: WorkspaceRole;
 };
 
 type RootAppRoute = "login" | "preview" | "app";
@@ -109,6 +120,7 @@ type CollaborationInviteRoute = {
 type TeamInviteRoute = {
   inviteToken: string;
 };
+type TeamInviteContinuationRoute = { valid: boolean };
 
 type PersistedOnboardingSession = OnboardingSessionV1;
 type AppView = "onboarding" | "transition" | "workspace";
@@ -752,14 +764,33 @@ function parseCollaborationInviteRoute(): CollaborationInviteRoute | null {
 
 function parseTeamInviteRoute(): TeamInviteRoute | null {
   const params = new URLSearchParams(window.location.search);
-  const inviteToken = params.get("team_invite");
+  const inviteTokens = params.getAll("team_invite");
 
-  if (!inviteToken) {
+  if (inviteTokens.length === 0) {
     return null;
   }
 
   return {
-    inviteToken,
+    // Duplicate or empty credentials retain the invite page and fail closed.
+    inviteToken: inviteTokens.length === 1 ? inviteTokens[0] : "",
+  };
+}
+
+export function parseTeamInviteContinuationRoute(
+  location?: Pick<Location, "pathname" | "search" | "hash">,
+): TeamInviteContinuationRoute | null {
+  const currentLocation = location ?? (typeof window === "undefined" ? null : window.location);
+  if (!currentLocation) {
+    return null;
+  }
+  const query = new URLSearchParams(currentLocation.search);
+  const fragment = new URLSearchParams(currentLocation.hash.replace(/^#\??/, ""));
+  if (!query.has("team_continue") && !fragment.has("team_continue")) {
+    return null;
+  }
+  return {
+    valid: currentLocation.pathname === "/" &&
+      currentLocation.search === "?team_continue=1" && currentLocation.hash === "",
   };
 }
 
@@ -3700,7 +3731,100 @@ export function classifyTeamInviteRouteFailure(
   return "unavailable";
 }
 
-function TeamInviteRouteView({
+export function TeamInviteContinuationRouteView({ route }: { route: TeamInviteContinuationRoute }) {
+  const [status, setStatus] = useState<
+    "pending" | "accepted" | "unavailable" | "unauthorized" | "terminal" | "invalid"
+  >(route.valid ? "pending" : "invalid");
+  const [retryVersion, setRetryVersion] = useState(0);
+  const pendingRequest = useRef<ReturnType<typeof continueTeamInvite> | null>(null);
+  const retryQueued = useRef(false);
+  const navigationStarted = useRef(false);
+  const leaveContinuation = useCallback((destination: "/" | "/api/auth/login") => {
+    if (navigationStarted.current) {
+      return;
+    }
+    navigationStarted.current = true;
+    try {
+      window.location.replace(destination);
+    } catch {
+      navigationStarted.current = false;
+      setStatus("unavailable");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!route.valid) {
+      setStatus("invalid");
+      return;
+    }
+    let cancelled = false;
+    setStatus("pending");
+    // StrictMode's effect replay observes the same in-flight request. A stale
+    // effect cannot update this page or navigate after its cleanup has run.
+    const request = pendingRequest.current ??= continueTeamInvite();
+    void request.then((result) => {
+      if (cancelled || pendingRequest.current !== request) {
+        return;
+      }
+      pendingRequest.current = null;
+      retryQueued.current = false;
+      if (result.ok) {
+        setStatus("accepted");
+        leaveContinuation("/");
+      } else {
+        setStatus(
+          result.status === "unavailable" ? "unavailable" :
+            result.status === "unauthorized" ? "unauthorized" : "terminal",
+        );
+      }
+    });
+    return () => { cancelled = true; };
+  }, [route.valid, retryVersion, leaveContinuation]);
+
+  const retry = () => {
+    if (!route.valid || status !== "unavailable" || pendingRequest.current || retryQueued.current) {
+      return;
+    }
+    retryQueued.current = true;
+    setStatus("pending");
+    setRetryVersion((version) => version + 1);
+  };
+  const message = status === "pending"
+    ? "Completing your Team invitation…"
+    : status === "accepted"
+      ? "Opening Cuevion…"
+      : status === "unavailable"
+        ? "Your Team invitation could not be completed yet. Please try again."
+        : status === "unauthorized"
+          ? "Sign in with the invited email address, then reopen the original invitation from your email."
+          : status === "invalid"
+            ? "This Team invitation continuation link is invalid. Reopen the original invitation from your email."
+            : "This Team invitation could not be continued. Reopen the original invitation from your email.";
+  const pending = status === "pending" || status === "accepted";
+
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-sand px-6 text-moss">
+      <div className="w-full max-w-lg space-y-6 rounded-3xl border border-moss/15 bg-white/70 p-8">
+        <h1 className="text-2xl font-medium">Team invitation</h1>
+        <p role={pending ? "status" : "alert"}>{message}</p>
+        {!pending ? (
+          <div className="flex flex-wrap gap-3">
+            {status === "unavailable" ? (
+              <button type="button" className={premiumAccessButtonClass} onClick={retry}>Retry</button>
+            ) : null}
+            {status === "unauthorized" ? (
+              <button type="button" className={premiumAccessButtonClass} onClick={() => leaveContinuation("/api/auth/login")}>Sign in</button>
+            ) : (
+              <button type="button" className="rounded-full border border-moss/20 px-5 py-2" onClick={() => leaveContinuation("/")}>Back to Cuevion</button>
+            )}
+          </div>
+        ) : null}
+      </div>
+    </main>
+  );
+}
+
+export function TeamInviteRouteView({
   route,
   sessionStatus,
   sessionUser,
@@ -3712,6 +3836,32 @@ function TeamInviteRouteView({
   const [invite, setInvite] = useState<PublicTeamInvite | null>(null);
   const [status, setStatus] = useState<TeamInviteRouteStatus>("loading");
   const [error, setError] = useState<string | null>(null);
+  const authenticationStarted = useRef(false);
+  const mutationPending = useRef(false);
+  const mutationGeneration = useRef(0);
+  const continuationStarted = useRef(false);
+  const continueToCuevion = useCallback(() => {
+    if (continuationStarted.current) return;
+    continuationStarted.current = true;
+    window.location.replace("/");
+  }, []);
+
+  useEffect(() => () => {
+    mutationGeneration.current += 1;
+    mutationPending.current = false;
+  }, [route.inviteToken, sessionStatus, sessionUser?.userId, sessionUser?.workspaceId, sessionUser?.workspaceRole]);
+
+  const startInviteAuthentication = () => {
+    if (!invite || invite.status !== "pending" || authenticationStarted.current) {
+      return;
+    }
+    authenticationStarted.current = true;
+    if (!startTeamInviteAuthentication(route.inviteToken)) {
+      authenticationStarted.current = false;
+      setStatus("unavailable");
+      setError("Sign-in could not be started. Reopen your invitation and try again.");
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -3752,11 +3902,21 @@ function TeamInviteRouteView({
     };
   }, [route.inviteToken]);
 
+  useEffect(() => {
+    if (
+      status === "accepted" && sessionStatus === "authenticated" &&
+      sessionUser?.workspaceRole === "member"
+    ) {
+      continueToCuevion();
+    }
+  }, [status, sessionStatus, sessionUser?.workspaceRole, continueToCuevion]);
+
   const handleInviteAction = async (actionType: "accept" | "decline") => {
     if (
       !invite ||
       invite.status !== "pending" ||
       status === "updating" ||
+      mutationPending.current ||
       sessionStatus !== "authenticated" ||
       !sessionUser
     ) {
@@ -3764,6 +3924,8 @@ function TeamInviteRouteView({
     }
 
     setStatus("updating");
+    mutationPending.current = true;
+    const generation = mutationGeneration.current;
     setError(null);
 
     const result = await mutateTeamInvite({
@@ -3772,6 +3934,10 @@ function TeamInviteRouteView({
         type: actionType,
       },
     });
+    if (mutationGeneration.current !== generation) {
+      return;
+    }
+    mutationPending.current = false;
 
     if (!result.ok) {
       setError(result.error?.message ?? "Could not update this team invite.");
@@ -3781,6 +3947,10 @@ function TeamInviteRouteView({
 
     setInvite(result.invite);
     setStatus(result.invite.status === "accepted" ? "accepted" : "declined");
+    if (result.invite.status === "accepted") {
+      // A fresh server session determines the destination; acceptance is not a role.
+      continueToCuevion();
+    }
   };
 
   const inviteStatusLabel =
@@ -3808,7 +3978,7 @@ function TeamInviteRouteView({
           : effectiveStatus === "invalid"
             ? "This invitation link is invalid."
             : effectiveStatus === "unauthorized"
-              ? "Sign in with the invited email address, then reopen this link."
+              ? "Sign in or create an account with the invited email address."
               : effectiveStatus === "unavailable"
                 ? "Team invitation authority is temporarily unavailable."
                 : null;
@@ -3834,6 +4004,33 @@ function TeamInviteRouteView({
                 : "This invite could not be opened."}
             </p>
           </div>
+
+          {invite?.status === "pending" &&
+          (effectiveStatus === "unauthorized" || effectiveStatus === "wrong-user") ? (
+            <div className="mt-6 flex justify-end">
+              <button
+                type="button"
+                className={premiumAccessButtonClass}
+                onClick={startInviteAuthentication}
+              >
+                {effectiveStatus === "wrong-user"
+                  ? "Switch account"
+                  : "Sign in or create account"}
+              </button>
+            </div>
+          ) : null}
+
+          {invite?.status === "accepted" && sessionStatus === "authenticated" ? (
+            <div className="mt-6 flex justify-end">
+              <button
+                type="button"
+                className={premiumAccessButtonClass}
+                onClick={continueToCuevion}
+              >
+                Continue to Cuevion
+              </button>
+            </div>
+          ) : null}
 
           <div className="mt-8 space-y-3">
             {invite ? (
@@ -3974,7 +4171,7 @@ function OnboardingPreviewRoute({ onExit }: { onExit: () => void }) {
   );
 }
 
-function CuevionApp() {
+function CuevionApp({ startupSession }: { startupSession?: StartupSessionResult } = {}) {
   const shouldShowLandingPage = isPublicLandingHost();
 
   if (shouldShowLandingPage) {
@@ -3989,7 +4186,9 @@ function CuevionApp() {
     );
   const [view, setView] = useState<AppView>(initialAccountState.view);
   const [sessionUser, setSessionUser] = useState<AuthenticatedCuevionUser | null>(null);
-  const memberSessionProbeRef = useRef<ReturnType<typeof loadStartupSession> | null>(null);
+  const memberSessionProbeRef = useRef<ReturnType<typeof loadStartupSession> | null>(
+    startupSession ? Promise.resolve(startupSession) : null,
+  );
   const [displayNameOverrides, setDisplayNameOverrides] = useState<DisplayNameOverrideStore>(() =>
     parseDisplayNameOverrides(),
   );
@@ -4945,7 +5144,94 @@ function CuevionApp() {
   );
 }
 
+function OwnerAppStartup({ session }: { session: StartupSessionResult }) {
+  useEffect(() => {
+    scrubManagedInboxBrowserStorage();
+  }, []);
+  return <CuevionApp startupSession={session} />;
+}
+
+// This boundary runs before CuevionApp, its state initializers, or any owner
+// effects mount. Browser routes and stored setup never select a workspace role.
+export function Auth0SessionRoute({
+  session,
+  appRoute,
+  onExitPreview,
+}: {
+  session: StartupSessionResult | null;
+  appRoute: RootAppRoute;
+  onExitPreview: () => void;
+}) {
+  const continuationRoute = parseTeamInviteContinuationRoute();
+  if (continuationRoute) {
+    return <TeamInviteContinuationRouteView key={String(continuationRoute.valid)} route={continuationRoute} />;
+  }
+  const teamInviteRoute = parseTeamInviteRoute();
+  if (teamInviteRoute) {
+    return (
+      <TeamInviteRouteView
+        key={teamInviteRoute.inviteToken}
+        route={teamInviteRoute}
+        sessionStatus={session?.status ?? "loading"}
+        sessionUser={session?.user ?? null}
+      />
+    );
+  }
+  if (!session) {
+    return <WorkspaceLoadingFallback />;
+  }
+  if (session.status === "authenticated" && session.user.workspaceRole === "member") {
+    return (
+      <Suspense fallback={<WorkspaceLoadingFallback />}>
+        <TeamMemberShell
+          key={`${session.user.workspaceId}:${session.user.userId}`}
+          authenticatedUser={session.user}
+        />
+      </Suspense>
+    );
+  }
+  if (
+    session.status === "unavailable" ||
+    (session.status === "authenticated" &&
+      session.user.workspaceRole !== "owner" && session.user.workspaceRole !== "admin")
+  ) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-sand px-6 text-moss">
+        <p role="alert">Sign-in is temporarily unavailable. Please try again.</p>
+      </main>
+    );
+  }
+  if (appRoute === "preview") {
+    return <OnboardingPreviewRoute onExit={onExitPreview} />;
+  }
+  if (session.status === "unauthenticated" && !parseCollaborationInviteRoute()) {
+    return <Auth0LoginView />;
+  }
+  return <OwnerAppStartup session={session} />;
+}
+
+function Auth0SessionBoundary({
+  appRoute,
+  onExitPreview,
+}: {
+  appRoute: RootAppRoute;
+  onExitPreview: () => void;
+}) {
+  const [session, setSession] = useState<StartupSessionResult | null>(null);
+  const probe = useRef<Promise<StartupSessionResult> | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void (probe.current ??= loadStartupSession()).then((result) => {
+      if (!cancelled) setSession(result);
+    });
+    return () => { cancelled = true; };
+  }, []);
+  return <Auth0SessionRoute session={session} appRoute={appRoute} onExitPreview={onExitPreview} />;
+}
+
 export default function App() {
+  const [teamInviteContinuationRoute, setTeamInviteContinuationRoute] =
+    useState<TeamInviteContinuationRoute | null>(() => parseTeamInviteContinuationRoute());
   const [collaborationGuestRoute, setCollaborationGuestRoute] =
     useState<CollaborationGuestRoute | null>(() =>
       resolveSafeCollaborationGuestRoute(),
@@ -4953,13 +5239,8 @@ export default function App() {
   const [appRoute, setAppRoute] = useState<RootAppRoute>(() => resolveRootAppRoute());
 
   useEffect(() => {
-    if (!collaborationGuestRoute) {
-      scrubManagedInboxBrowserStorage();
-    }
-  }, [collaborationGuestRoute]);
-
-  useEffect(() => {
     const handleGuestRouteChange = () => {
+      setTeamInviteContinuationRoute(parseTeamInviteContinuationRoute());
       setCollaborationGuestRoute(resolveSafeCollaborationGuestRoute());
     };
 
@@ -4980,6 +5261,15 @@ export default function App() {
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
+  if (teamInviteContinuationRoute) {
+    return (
+      <TeamInviteContinuationRouteView
+        key={String(teamInviteContinuationRoute.valid)}
+        route={teamInviteContinuationRoute}
+      />
+    );
+  }
+
   if (collaborationGuestRoute) {
     return (
       <ExternalCollaborationGuestView
@@ -4993,16 +5283,17 @@ export default function App() {
     return <Auth0LoginView />;
   }
 
-  if (appRoute === "preview") {
-    return (
-      <OnboardingPreviewRoute
-        onExit={() => {
-          window.history.replaceState(null, "", "/");
-          setAppRoute("app");
-        }}
-      />
-    );
+  if (isPublicLandingHost()) {
+    return <ComingSoonLanding />;
   }
 
-  return <CuevionApp />;
+  return (
+    <Auth0SessionBoundary
+      appRoute={appRoute}
+      onExitPreview={() => {
+        window.history.replaceState(null, "", "/");
+        setAppRoute("app");
+      }}
+    />
+  );
 }

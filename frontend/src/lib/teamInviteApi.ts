@@ -127,6 +127,10 @@ type MutateTeamInviteResponse =
     }
   | TeamLifecycleFailure;
 
+export type ContinueTeamInviteResponse =
+  | { ok: true; status: "accepted" }
+  | TeamLifecycleFailure;
+
 type CancelTeamInviteRequest = {
   invitationId: string;
 };
@@ -813,6 +817,39 @@ export async function mutateTeamInvite(
   }
 
   return { ok: true, invite };
+}
+
+export async function continueTeamInvite(): Promise<ContinueTeamInviteResponse> {
+  let response: Response;
+  try {
+    response = await fetch("/api/team/invite?op=continue", {
+      method: "POST",
+      mode: "same-origin",
+      credentials: "include",
+      cache: "no-store",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+  } catch {
+    return lifecycleFailure(null);
+  }
+
+  const payload = await readJsonResponse(response);
+  if (!response.ok) {
+    return lifecycleFailure(response.status, payload);
+  }
+  if (
+    !isRecord(payload) ||
+    Object.keys(payload).length !== 2 ||
+    payload.ok !== true ||
+    payload.status !== "accepted"
+  ) {
+    return lifecycleFailure(null);
+  }
+  return { ok: true, status: "accepted" };
 }
 
 export async function cancelTeamInvite(

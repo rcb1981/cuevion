@@ -19,6 +19,7 @@ from api.auth import (
     session_store,
 )
 from api.auth.callback import handler as CallbackHandler
+from api.auth.login import handler as LoginHandler
 from api.auth.test_account_authority import (
     EMAIL,
     ISSUER,
@@ -222,11 +223,87 @@ class LoginAndCallbackTests(unittest.TestCase):
         self.assertEqual(query["connection"], ["email"])
         self.assertEqual(query["redirect_uri"], [auth0_flow.CALLBACK_URI])
         self.assertEqual(query["scope"], ["openid profile email"])
+        self.assertEqual(query["prompt"], ["login"])
         self.assertNotIn(ENVIRONMENT["CUEVION_AUTH0_CLIENT_SECRET"], location)
         cookie = _header(response, "set-cookie")[0]
         self.assertIn("Secure", cookie)
         self.assertIn("HttpOnly", cookie)
         self.assertIn("SameSite=Lax", cookie)
+
+    def test_login_adapter_forwards_exact_path_without_frontend_authority(self):
+        path = "/api/auth/login?team_invite=tinv_test." + "a" * 43
+        headers = [("host", "app.cuevion.com"), ("sec-fetch-site", "same-origin")]
+        handler = AdapterHandler("GET", path, headers)
+        with mock.patch.object(
+            runtime, "login_response", return_value=runtime.http.redirect_response("/login")
+        ) as login:
+            LoginHandler._respond(handler)
+        login.assert_called_once_with("GET", tuple(headers), path)
+        self.assertEqual(handler.status, 303)
+
+    def test_public_normal_login_keeps_existing_owner_authorization_request(self):
+        responses = [runtime.login_response(
+            "GET", (("host", "app.cuevion.com"),), *path,
+            environment=ENVIRONMENT, now=NOW,
+            random_bytes=FixedTransactionRandom(),
+        ) for path in ((), ("/api/auth/login",))]
+        self.assertEqual(responses[0], responses[1])
+        self.assertEqual(responses[1].status, 303)
+
+    def test_public_login_rejects_malformed_duplicate_and_authority_queries(self):
+        token = "tinv_test." + "a" * 43
+        for path in (
+            "/api/auth/login?team_invite=",
+            "/api/auth/login?team_invite=malformed",
+            "/api/auth/login?team_invite=%ZZ",
+            "/api/auth/login?team_invite=" + token + "%0A",
+            "/api/auth/login?team_invite=" + token + "\n",
+            "\n/api/auth/login?team_invite=" + token,
+            "/api/auth/login?team_invite=" + token + "&team_invite=" + token,
+            "/api/auth/login?team_invite=" + token + "&role=owner",
+            "/api/auth/login?team_invite=" + token + "&workspaceRole=admin",
+            "/api/auth/login?team_invite=" + token + "&workspaceId=wsp_fake",
+            "/api/auth/login?team_invite=" + token + "&userId=usr_fake",
+            "/api/auth/login?team_invite=" + token + "&memberUserId=usr_fake",
+            "/api/auth/login?team_invite=" + token + "&email=recipient@example.com",
+            "/api/auth/login?team_invite=" + token + "&returnTo=https://evil.example",
+            "/api/auth/login?state=" + token,
+            "/api/auth/login?team_invite=" + token + "#fragment",
+            "/api/auth/login?team_invite=" + token + "#",
+            "https://app.cuevion.com/api/auth/login?team_invite=" + token,
+            "/api/auth/other?team_invite=" + token,
+            "/api/auth/login?team_invite=" + "a" * 1024,
+        ):
+            with self.subTest(path=path), mock.patch.object(runtime, "_team_authority") as team:
+                response = runtime.login_response(
+                    "GET", (("host", "app.cuevion.com"), ("sec-fetch-site", "same-origin")),
+                    path, environment={},
+                )
+            self.assertEqual(response.status, 400)
+            self.assertEqual(_header(response, "location"), [])
+            self.assertEqual(_header(response, "set-cookie"), [])
+            self.assertNotIn(token, response.body.decode())
+            team.assert_not_called()
+
+    def test_public_invite_login_requires_unambiguous_same_origin_navigation(self):
+        token = "tinv_test." + "a" * 43
+        for extra in (
+            (), (("sec-fetch-site", "cross-site"),),
+            (("sec-fetch-site", "same-site"),), (("sec-fetch-site", "none"),),
+            (("origin", "https://evil.example"),),
+            (("sec-fetch-site", "same-origin"), ("origin", "https://evil.example")),
+            (("sec-fetch-site", "cross-site"), ("origin", "https://app.cuevion.com")),
+            (("sec-fetch-site", "same-origin"), ("sec-fetch-site", "same-origin")),
+            (("origin", "https://app.cuevion.com"), ("origin", "https://app.cuevion.com")),
+        ):
+            with self.subTest(extra=extra), mock.patch.object(runtime, "_team_authority") as team:
+                response = runtime.login_response(
+                    "GET", (("host", "app.cuevion.com"), *extra),
+                    "/api/auth/login?team_invite=" + token, environment={},
+                )
+            self.assertIn(response.status, (400, 403))
+            self.assertEqual(_header(response, "location"), [])
+            team.assert_not_called()
 
     def test_callback_state_mismatch_clears_transaction_without_exchange(self):
         request = _transaction_request()
@@ -923,7 +1000,7 @@ class InviteBoundProvisioningTests(unittest.TestCase):
                 raise session_store.SessionStoreUnavailable()
         return self.commands(command)
 
-    def _callback(self, *, with_invite=True):
+    def _callback(self, *, with_invite=True, session_cookie=None):
         transaction = auth0_flow.build_authorization_request(
             auth0_flow.parse_auth0_configuration(ENVIRONMENT), NOW,
             team_invite_token=self.TOKEN if with_invite else None,
@@ -933,7 +1010,7 @@ class InviteBoundProvisioningTests(unittest.TestCase):
             mock.patch.object(auth0_flow, "validate_id_token_with_jwks", return_value=self.identity_override or _validated_identity()),
         ):
             return runtime.callback_response(
-                "GET", _transaction_headers(transaction),
+                "GET", _transaction_headers(transaction, session_cookie=session_cookie),
                 "/api/auth/callback?code=test-code&state=" + transaction.transaction.state,
                 environment=ENVIRONMENT, now=NOW,
                 session_store_factory=lambda _source: session_store.AuthSessionStore(self._command),
@@ -951,13 +1028,114 @@ class InviteBoundProvisioningTests(unittest.TestCase):
 
     def test_success_publishes_one_member_session_after_authoritative_finalize(self):
         response = self._callback()
-        self.assertEqual(_header(response, "location"), ["/?team_invite=" + self.TOKEN])
+        self.assertEqual(_header(response, "location"), ["/"])
         self.assertEqual(self.events, ["resolve", "invite-read", "prepare", "accept", "proof", "finalize", "resolve", "proof", "member-proof", "session"])
         writes = [command for command in self.commands.commands if str(command[1]).startswith(session_store.SESSION_KEY_PREFIX)]
         self.assertEqual(len(writes), 1)
         payload = json.loads(writes[0][2])
         self.assertEqual((payload["userId"], payload["workspaceId"], payload["workspaceRole"]), (self.canonical_user_id, WORKSPACE_ID, "member"))
         self.assertEqual(set(self.events), {"resolve", "invite-read", "prepare", "accept", "proof", "finalize", "member-proof", "session"})
+        self.assertNotIn(self.TOKEN, str(response.headers))
+        self.assertNotIn(self.TOKEN, response.body.decode())
+        self.assertFalse(any("continuation" in str(command[1]) for command in self.commands.commands))
+
+    def _existing_canonical_pending_callback(self, *, result=None, store=None):
+        transaction = auth0_flow.build_authorization_request(
+            auth0_flow.parse_auth0_configuration(ENVIRONMENT), NOW,
+            team_invite_token=self.TOKEN,
+        )
+        repository = mock.Mock(side_effect=AssertionError("existing identity must not provision"))
+        with (
+            mock.patch.object(auth0_flow, "exchange_authorization_code", return_value=SimpleNamespace(id_token="trusted-token")),
+            mock.patch.object(auth0_flow, "validate_id_token_with_jwks", return_value=_validated_identity()),
+        ):
+            response = runtime.callback_response(
+                "GET", _transaction_headers(transaction),
+                "/api/auth/callback?code=test&state=" + transaction.transaction.state,
+                environment=ENVIRONMENT, now=NOW,
+                session_store_factory=lambda _source: store or session_store.AuthSessionStore(self.commands),
+                authority_factory=lambda _source: FakeAuthority(identity_result=result or _authority_result()),
+                team_authority_factory=lambda _source: self.team,
+                invitee_repository_factory=repository,
+                random_bytes=FixedSessionRandom(),
+            )
+        repository.assert_not_called()
+        return response
+
+    def test_existing_canonical_pending_invite_uses_fixed_marker_and_exact_session_binding(self):
+        for role in (models.WorkspaceRole.OWNER, models.WorkspaceRole.ADMIN, models.WorkspaceRole.MEMBER):
+            with self.subTest(role=role.value):
+                self.setUp()
+                authority = _authority_result().authority
+                membership = authority.workspace_membership
+                result = contract.CurrentAccountAuthorityResult(
+                    contract.CurrentAccountReadOutcome.FOUND,
+                    contract.CurrentAccountAuthority(
+                        authority.user, authority.primary_verified_email,
+                        authority.authentication_identity, authority.workspace,
+                        models.WorkspaceMembership(
+                            1, WORKSPACE_ID, USER_ID, role,
+                            models.WorkspaceMembershipStatus.ACTIVE,
+                            membership.created_at, membership.updated_at, membership.row_version,
+                        ),
+                    ),
+                )
+                response = self._existing_canonical_pending_callback(result=result)
+                self.assertEqual(_header(response, "location"), ["/?team_continue=1"])
+                self.assertNotIn(self.TOKEN, str(response.headers))
+                self.assertNotIn(self.TOKEN, response.body.decode())
+                self.assertEqual(self.accept_count, 0)
+                self.assertEqual(self.prepare_count, 0)
+                cookie = next(value for value in _header(response, "set-cookie")
+                              if value.startswith(session_store.SESSION_COOKIE_NAME + "="))
+                store = session_store.AuthSessionStore(self.commands)
+                record, _ = session_store.load_server_session(
+                    store, headers=(("cookie", cookie.split(";", 1)[0]),),
+                    secret=ENVIRONMENT["CUEVION_AUTH_SESSION_SECRET"], now=NOW,
+                )
+                binding = session_store.TeamInviteContinuationBinding(
+                    record.session_id, record.user_id, record.workspace_id,
+                    record.issuer, record.subject, record.created_at, record.expires_at,
+                )
+                continuation = store.get_team_invite_continuation(
+                    binding, secret=ENVIRONMENT["CUEVION_AUTH_SESSION_SECRET"], now=NOW,
+                )
+                self.assertEqual(continuation.binding, binding)
+                self.assertEqual(record.workspace_role, role.value)
+                self.assertEqual(continuation.raw_invite_token, self.TOKEN)
+                self.assertEqual(continuation.invitation_id, self.invitation.invitation_id)
+                self.assertEqual(continuation.token_digest, self.invitation.token_digest)
+                self.assertEqual(continuation.invitee_email, EMAIL)
+                self.assertEqual(continuation.inviter_user_id, self.invitation.inviter_user_id)
+                self.assertEqual(continuation.expires_at, NOW + 60)
+                self.assertNotIn(self.TOKEN, repr(continuation))
+                self.assertTrue(any(self.TOKEN in str(command[2]) for command in self.commands.commands if command[0] == "SET"))
+
+    def test_continuation_persistence_failure_never_publishes_new_session_cookie(self):
+        for outcome in (False, session_store.SessionStoreUnavailable()):
+            with self.subTest(outcome=type(outcome).__name__):
+                self.setUp()
+                store = session_store.AuthSessionStore(self.commands)
+                with mock.patch.object(
+                    session_store.AuthSessionStore, "put_team_invite_continuation",
+                    side_effect=outcome if isinstance(outcome, Exception) else None,
+                    return_value=outcome if not isinstance(outcome, Exception) else None,
+                ):
+                    response = self._existing_canonical_pending_callback(store=store)
+                self.assertEqual(_header(response, "location"), ["/login?error=authentication_failed"])
+                self.assertFalse(any(value.startswith(session_store.SESSION_COOKIE_NAME + "=")
+                                     for value in _header(response, "set-cookie")))
+                self.assertNotIn(self.TOKEN, str(response.headers))
+                self.assertNotIn(self.TOKEN, response.body.decode())
+                self.assertEqual(self.accept_count, 0)
+
+    def test_existing_canonical_continuation_requires_exact_verified_recipient(self):
+        from dataclasses import replace
+
+        self.invitation = replace(self.invitation, email="different@example.com")
+        response = self._existing_canonical_pending_callback()
+        self._assert_no_session(response)
+        self.assertFalse(any("continuation" in str(command[1]) for command in self.commands.commands))
 
     def test_new_noninvited_identity_never_constructs_writer(self):
         self._assert_no_session(self._callback(with_invite=False))
@@ -988,7 +1166,7 @@ class InviteBoundProvisioningTests(unittest.TestCase):
         self.assertFalse(self.accepted)
         self.failure = None
         response = self._callback()
-        self.assertEqual(_header(response, "location"), ["/?team_invite=" + self.TOKEN])
+        self.assertEqual(_header(response, "location"), ["/"])
         self.assertIs(self.prepared, original)
         self.assertEqual(self.accept_count, 1)
 
@@ -1005,7 +1183,7 @@ class InviteBoundProvisioningTests(unittest.TestCase):
         self.assertTrue(self.accepted)
         self.assertFalse(self.active)
         self.failure = None
-        self.assertEqual(_header(self._callback(), "location"), ["/?team_invite=" + self.TOKEN])
+        self.assertEqual(_header(self._callback(), "location"), ["/"])
         self.assertEqual(self.accept_count, 1)
 
     def test_recovery_requires_exact_accepted_proof(self):
@@ -1021,7 +1199,7 @@ class InviteBoundProvisioningTests(unittest.TestCase):
         self.assertTrue(self.active)
         prepares = self.prepare_count
         self.failure = None
-        self.assertEqual(_header(self._callback(), "location"), ["/?team_invite=" + self.TOKEN])
+        self.assertEqual(_header(self._callback(), "location"), ["/"])
         self.assertEqual(self.prepare_count, prepares)
         self.assertEqual(self.accept_count, 1)
 
@@ -1032,7 +1210,7 @@ class InviteBoundProvisioningTests(unittest.TestCase):
         self.assertTrue(self.active)
         self.assertTrue(self.accepted)
         self.failure = None
-        self.assertEqual(_header(self._callback(), "location"), ["/?team_invite=" + self.TOKEN])
+        self.assertEqual(_header(self._callback(), "location"), ["/"])
         self.assertEqual(self.prepare_count, 1)
         self.assertEqual(self.accept_count, 1)
 
@@ -1067,6 +1245,76 @@ class InviteBoundProvisioningTests(unittest.TestCase):
         cookie = _header(response, "set-cookie")[0].split(";", 1)[0].split("=", 1)[1]
         tx = auth0_flow.consume_transaction_cookie(cookie, state, auth0_flow.parse_auth0_configuration(ENVIRONMENT), NOW)
         self.assertEqual(tx.team_invite_token, self.TOKEN)
+
+    def test_public_invite_login_seals_context_and_forces_account_reauthentication(self):
+        for origin_headers in (
+            (("sec-fetch-site", "same-origin"),),
+            (("origin", "https://app.cuevion.com"),),
+        ):
+            self.events.clear()
+            response = runtime.login_response(
+                "GET", (("host", "app.cuevion.com"), *origin_headers,
+                        ("cookie", "__Host-cuevion_session=existing-account")),
+                "/api/auth/login?team_invite=" + self.TOKEN,
+                environment=ENVIRONMENT, now=NOW,
+                random_bytes=FixedTransactionRandom(),
+                team_authority_factory=lambda _source: self.team,
+            )
+            self.assertEqual(response.status, 303)
+            self.assertEqual(self.events, ["invite-read"])
+            location = _header(response, "location")[0]
+            query = parse_qs(urlsplit(location).query)
+            self.assertEqual(query["prompt"], ["login"])
+            self.assertEqual(query["connection"], ["email"])
+            self.assertNotIn(self.TOKEN, location)
+            self.assertNotIn(self.TOKEN, query["state"][0])
+            cookies = _header(response, "set-cookie")
+            self.assertEqual(len(cookies), 1)
+            self.assertNotIn(self.TOKEN, cookies[0])
+            self.assertIn("Max-Age=600; Secure; HttpOnly; SameSite=Lax", cookies[0])
+            cookie = cookies[0].split(";", 1)[0].split("=", 1)[1]
+            tx = auth0_flow.consume_transaction_cookie(
+                cookie, query["state"][0],
+                auth0_flow.parse_auth0_configuration(ENVIRONMENT), NOW,
+            )
+            self.assertEqual(tx.team_invite_token, self.TOKEN)
+
+    def _existing_account_cookie(self):
+        store = session_store.AuthSessionStore(self.commands)
+        record, cookie = session_store.create_server_session(
+            store, secret=ENVIRONMENT["CUEVION_AUTH_SESSION_SECRET"],
+            user_id=USER_ID, workspace_id=WORKSPACE_ID,
+            security_epoch=3, workspace_role="owner",
+            issuer=ISSUER, subject="auth0|existing-other-account", now=NOW,
+        )
+        self.commands.commands.clear()
+        return record, cookie.split(";", 1)[0]
+
+    def test_invite_account_switch_revokes_old_session_only_after_recipient_finalize(self):
+        old_record, old_cookie = self._existing_account_cookie()
+        response = self._callback(session_cookie=old_cookie)
+        self.assertEqual(_header(response, "location"), ["/"])
+        session_commands = [command for command in self.commands.commands
+                            if str(command[1]).startswith(session_store.SESSION_KEY_PREFIX)]
+        self.assertEqual([command[0] for command in session_commands], ["DEL", "SET"])
+        payload = json.loads(session_commands[-1][2])
+        self.assertEqual(payload["userId"], self.canonical_user_id)
+        self.assertNotEqual(payload["userId"], old_record.user_id)
+        self.assertEqual(payload["workspaceRole"], "member")
+        self.assertEqual(payload["subject"], SUBJECT)
+        self.assertLess(self.events.index("finalize"), self.events.index("session"))
+        self.assertEqual(self.accept_count, 1)
+
+    def test_wrong_recipient_switch_keeps_existing_account_and_creates_no_authority(self):
+        _record, old_cookie = self._existing_account_cookie()
+        original_records = dict(self.commands.values)
+        self.identity_override = _validated_identity(email="wrong@example.com")
+        self._assert_no_session(self._callback(session_cookie=old_cookie))
+        self.assertEqual(self.repository_calls, 0)
+        self.assertEqual(self.prepare_count, 0)
+        self.assertEqual(self.accept_count, 0)
+        for key, value in original_records.items():
+            self.assertEqual(self.commands.values[key], value)
 
     def test_unusable_invites_fail_before_auth0_redirect_without_secret_text(self):
         from api.team.authority import TeamAuthorityError

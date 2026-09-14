@@ -11,7 +11,7 @@ import os
 import re
 import secrets
 import ssl
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Callable, Mapping
 from urllib.parse import urlsplit
 
@@ -30,6 +30,8 @@ SESSION_TTL_SECONDS = 8 * 60 * 60
 SESSION_SCHEMA_VERSION = 1
 SESSION_KEY_PREFIX = "cuevion:auth:v1:session:"
 TRANSACTION_USE_KEY_PREFIX = "cuevion:auth:v1:tx-used:"
+TEAM_INVITE_CONTINUATION_KEY_PREFIX = "cuevion:auth:v1:team-invite-continuation:"
+TEAM_INVITE_CONTINUATION_TTL_SECONDS = 600
 MAX_KV_RESPONSE_BYTES = 32_768
 KV_TIMEOUT_SECONDS = 5
 
@@ -39,10 +41,25 @@ _KV_TOKEN_ENV = "KV_REST_API_TOKEN"
 _LOOKUP_KEY_INFO = b"cuevion/auth/session-lookup-key/v1"
 _BINDING_KEY_INFO = b"cuevion/auth/session-binding-key/v1"
 _TRANSACTION_KEY_INFO = b"cuevion/auth/transaction-use-key/v1"
+_TEAM_INVITE_CONTINUATION_KEY_INFO = b"cuevion/auth/team-invite-continuation-key/v1"
 _HKDF_SALT = b"cuevion/auth/key-derivation/v1\x00"
 _BASE64URL_32_RE = re.compile(r"[A-Za-z0-9_-]{43}")
 _ACCOUNT_ID_RE = re.compile(r"(?:usr|wsp)_[A-Za-z0-9_-]{22}")
 _SECURITY_TEXT_RE = re.compile(r"[!-~]{1,512}")
+_TEAM_INVITATION_ID_RE = re.compile(r"tinv_[A-Za-z0-9_-]{1,64}")
+_TEAM_TOKEN_DIGEST_RE = re.compile(r"[a-f0-9]{64}")
+_CONTINUATION_EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+
+# CAS preserves the original expiry even when acceptance is retried. A terminal
+# record retains its exact incarnation/session binding but never the raw token.
+_COMPLETE_TEAM_INVITE_CONTINUATION = """
+local current = redis.call('GET', KEYS[1])
+if not current or redis.call('PTTL', KEYS[1]) <= 0 then return 0 end
+if current == ARGV[2] then return 1 end
+if current ~= ARGV[1] then return 0 end
+redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')
+return 1
+"""
 
 
 class SessionStoreUnavailable(Exception):
@@ -107,6 +124,101 @@ class ServerSessionRecord:
         )
         if not valid:
             raise ValueError("invalid server session record")
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class TeamInviteContinuationBinding:
+    session_id: str
+    user_id: str
+    workspace_id: str
+    issuer: str
+    subject: str
+    session_created_at: int
+    session_expires_at: int
+
+    def __post_init__(self) -> None:
+        if not (
+            type(self.session_id) is str
+            and _BASE64URL_32_RE.fullmatch(self.session_id) is not None
+            and type(self.user_id) is str
+            and _ACCOUNT_ID_RE.fullmatch(self.user_id) is not None
+            and self.user_id.startswith("usr_")
+            and type(self.workspace_id) is str
+            and _ACCOUNT_ID_RE.fullmatch(self.workspace_id) is not None
+            and self.workspace_id.startswith("wsp_")
+            and type(self.issuer) is str
+            and _SECURITY_TEXT_RE.fullmatch(self.issuer) is not None
+            and type(self.subject) is str
+            and _SECURITY_TEXT_RE.fullmatch(self.subject) is not None
+            and type(self.session_created_at) is int
+            and type(self.session_expires_at) is int
+            and 0 <= self.session_created_at < self.session_expires_at
+            and self.session_expires_at - self.session_created_at <= SESSION_TTL_SECONDS
+        ):
+            raise ValueError("invalid Team invite continuation")
+
+    def __repr__(self) -> str:
+        return "<TeamInviteContinuationBinding>"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class TeamInviteContinuationRecord:
+    binding: TeamInviteContinuationBinding
+    invitation_id: str
+    token_digest: str
+    inviter_user_id: str
+    invitee_email: str
+    invitation_expires_at: int
+    raw_invite_token: str | None = field(repr=False)
+    created_at: int
+    expires_at: int
+    status: str = "pending"
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        if type(self.binding) is not TeamInviteContinuationBinding:
+            raise ValueError("invalid Team invite continuation")
+        self.binding.__post_init__()
+        if not (
+            type(self.schema_version) is int and self.schema_version == 1
+            and type(self.status) is str and self.status in {"pending", "complete"}
+            and type(self.invitation_id) is str
+            and _TEAM_INVITATION_ID_RE.fullmatch(self.invitation_id) is not None
+            and type(self.token_digest) is str
+            and _TEAM_TOKEN_DIGEST_RE.fullmatch(self.token_digest) is not None
+            and type(self.inviter_user_id) is str
+            and _ACCOUNT_ID_RE.fullmatch(self.inviter_user_id) is not None
+            and self.inviter_user_id.startswith("usr_")
+            and type(self.invitee_email) is str
+            and self.invitee_email.isascii()
+            and all(33 <= ord(character) <= 126 for character in self.invitee_email)
+            and self.invitee_email == self.invitee_email.lower()
+            and len(self.invitee_email) <= 320
+            and _CONTINUATION_EMAIL_RE.fullmatch(self.invitee_email) is not None
+            and type(self.invitation_expires_at) is int
+            and type(self.created_at) is int and type(self.expires_at) is int
+            and self.binding.session_created_at <= self.created_at < self.expires_at
+            and self.expires_at <= self.binding.session_expires_at
+            and self.expires_at - self.created_at <= TEAM_INVITE_CONTINUATION_TTL_SECONDS
+            and self.expires_at * 1000 <= self.invitation_expires_at
+        ):
+            raise ValueError("invalid Team invite continuation")
+        if self.status == "pending":
+            if (
+                type(self.raw_invite_token) is not str
+                or not self.raw_invite_token.startswith(self.invitation_id + ".")
+                or _BASE64URL_32_RE.fullmatch(
+                    self.raw_invite_token[len(self.invitation_id) + 1:]
+                ) is None
+                or hashlib.sha256(self.raw_invite_token.encode("ascii")).hexdigest()
+                != self.token_digest
+            ):
+                raise ValueError("invalid Team invite continuation")
+        elif self.raw_invite_token is not None:
+            raise ValueError("invalid Team invite continuation")
+
+    def __repr__(self) -> str:
+        return "<TeamInviteContinuationRecord>"
 
 
 def _base64url(value: bytes) -> str:
@@ -287,6 +399,79 @@ def _decode_record(raw: object) -> ServerSessionRecord | None:
         return None
 
 
+def _team_invite_continuation_key(binding: TeamInviteContinuationBinding, secret: str) -> str:
+    if type(binding) is not TeamInviteContinuationBinding:
+        raise ValueError("invalid Team invite continuation")
+    binding.__post_init__()
+    key = _derive_key(secret, _TEAM_INVITE_CONTINUATION_KEY_INFO)
+    digest = _base64url(hmac.new(
+        key, binding.session_id.encode("ascii"), hashlib.sha256,
+    ).digest())
+    return TEAM_INVITE_CONTINUATION_KEY_PREFIX + digest
+
+
+def _encode_team_invite_continuation(record: TeamInviteContinuationRecord) -> str:
+    if type(record) is not TeamInviteContinuationRecord:
+        raise ValueError("invalid Team invite continuation")
+    record.__post_init__()
+    binding = record.binding
+    payload = {
+        "schemaVersion": record.schema_version,
+        "status": record.status,
+        "sessionId": binding.session_id,
+        "userId": binding.user_id,
+        "workspaceId": binding.workspace_id,
+        "issuer": binding.issuer,
+        "subject": binding.subject,
+        "sessionCreatedAt": binding.session_created_at,
+        "sessionExpiresAt": binding.session_expires_at,
+        "invitationId": record.invitation_id,
+        "tokenDigest": record.token_digest,
+        "inviterUserId": record.inviter_user_id,
+        "inviteeEmail": record.invitee_email,
+        "invitationExpiresAt": record.invitation_expires_at,
+        "createdAt": record.created_at,
+        "expiresAt": record.expires_at,
+    }
+    if record.status == "pending":
+        payload["rawInviteToken"] = record.raw_invite_token
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=True, sort_keys=True)
+
+
+def _decode_team_invite_continuation(raw: object) -> TeamInviteContinuationRecord | None:
+    try:
+        if type(raw) is not str or not 2 <= len(raw.encode("utf-8")) <= 4096:
+            return None
+        payload = json.loads(raw, object_pairs_hook=_strict_object, parse_constant=_reject_json_constant)
+        fields = {
+            "schemaVersion", "status", "sessionId", "userId", "workspaceId",
+            "issuer", "subject", "sessionCreatedAt", "sessionExpiresAt",
+            "invitationId", "tokenDigest", "inviterUserId", "inviteeEmail",
+            "invitationExpiresAt", "createdAt", "expiresAt",
+        }
+        if type(payload) is not dict:
+            return None
+        if payload.get("status") == "pending":
+            fields = fields | {"rawInviteToken"}
+        if set(payload) != fields:
+            return None
+        return TeamInviteContinuationRecord(
+            binding=TeamInviteContinuationBinding(
+                payload["sessionId"], payload["userId"], payload["workspaceId"],
+                payload["issuer"], payload["subject"],
+                payload["sessionCreatedAt"], payload["sessionExpiresAt"],
+            ),
+            invitation_id=payload["invitationId"], token_digest=payload["tokenDigest"],
+            inviter_user_id=payload["inviterUserId"], invitee_email=payload["inviteeEmail"],
+            invitation_expires_at=payload["invitationExpiresAt"],
+            raw_invite_token=payload.get("rawInviteToken"),
+            created_at=payload["createdAt"], expires_at=payload["expiresAt"],
+            status=payload["status"], schema_version=payload["schemaVersion"],
+        )
+    except (TypeError, ValueError, KeyError, RecursionError):
+        return None
+
+
 CommandTransport = Callable[[list[object]], dict[str, object]]
 
 
@@ -369,6 +554,62 @@ class AuthSessionStore:
         if result is None:
             return False
         raise SessionStoreUnavailable()
+
+    def put_team_invite_continuation(
+        self, record: TeamInviteContinuationRecord, *, secret: str, now: int,
+    ) -> bool:
+        encoded = _encode_team_invite_continuation(record)
+        if (
+            record.status != "pending" or type(now) is not int
+            or not record.created_at <= now < record.expires_at
+        ):
+            return False
+        result = self._command([
+            "SET", _team_invite_continuation_key(record.binding, secret), encoded,
+            "EX", record.expires_at - now, "NX",
+        ])
+        if result == "OK":
+            return True
+        if result is None:
+            return False
+        raise SessionStoreUnavailable()
+
+    def get_team_invite_continuation(
+        self, binding: TeamInviteContinuationBinding, *, secret: str, now: int,
+    ) -> TeamInviteContinuationRecord | None:
+        key = _team_invite_continuation_key(binding, secret)
+        if type(now) is not int or not binding.session_created_at <= now < binding.session_expires_at:
+            return None
+        raw = self._command(["GET", key])
+        if raw is None:
+            return None
+        record = _decode_team_invite_continuation(raw)
+        if record is None:
+            raise SessionStoreUnavailable()
+        if record.binding != binding or not record.created_at <= now < record.expires_at:
+            return None
+        return record
+
+    def complete_team_invite_continuation(
+        self, record: TeamInviteContinuationRecord, binding: TeamInviteContinuationBinding,
+        *, secret: str, now: int,
+    ) -> bool:
+        expected = _encode_team_invite_continuation(record)
+        key = _team_invite_continuation_key(binding, secret)
+        if (
+            record.status != "pending" or record.binding != binding or type(now) is not int
+            or not record.created_at <= now < record.expires_at
+        ):
+            return False
+        terminal = _encode_team_invite_continuation(replace(
+            record, status="complete", raw_invite_token=None,
+        ))
+        result = self._command([
+            "EVAL", _COMPLETE_TEAM_INVITE_CONTINUATION, 1, key, expected, terminal,
+        ])
+        if type(result) is not int or result not in (0, 1):
+            raise SessionStoreUnavailable()
+        return result == 1
 
 
 def _validate_kv_configuration(
@@ -552,9 +793,13 @@ def revoke_request_session(
 __all__ = (
     "SESSION_COOKIE_NAME",
     "SESSION_TTL_SECONDS",
+    "TEAM_INVITE_CONTINUATION_KEY_PREFIX",
+    "TEAM_INVITE_CONTINUATION_TTL_SECONDS",
     "SessionStoreUnavailable",
     "SessionConfigurationError",
     "ServerSessionRecord",
+    "TeamInviteContinuationBinding",
+    "TeamInviteContinuationRecord",
     "AuthSessionStore",
     "resolve_session_secret",
     "build_session_cookie",
