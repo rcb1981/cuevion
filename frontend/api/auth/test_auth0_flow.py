@@ -192,10 +192,107 @@ class AuthorizationRequestTests(unittest.TestCase):
             _cookie_value(cookie), _configuration(), NOW + 1
         )
         self.assertEqual(decrypted, result.transaction)
+        self.assertIsNone(decrypted.team_invite_token)
         consumed = flow.consume_transaction_cookie(
             _cookie_value(cookie), result.transaction.state, _configuration(), NOW + 1
         )
         self.assertEqual(consumed, result.transaction)
+
+    def test_invite_context_roundtrips_only_inside_authenticated_cookie(self):
+        token = "tinv_team-recipient." + "T" * 43
+        normal = flow.build_authorization_request(
+            _configuration(), NOW, random_bytes=_FixedRandom()
+        )
+        invited = flow.build_authorization_request(
+            _configuration(), NOW, random_bytes=_FixedRandom(),
+            team_invite_token=token,
+        )
+        # Identical entropy proves that invite context never changes any Auth0
+        # parameter, including state, nonce, and the PKCE challenge.
+        self.assertEqual(invited.authorization_url, normal.authorization_url)
+        self.assertEqual(invited.transaction.state, normal.transaction.state)
+        for public_value in (
+            invited.authorization_url,
+            invited.transaction_cookie,
+            repr(invited),
+            repr(invited.transaction),
+        ):
+            self.assertNotIn(token, public_value)
+        self.assertIn("Max-Age=600; Secure; HttpOnly; SameSite=Lax", invited.transaction_cookie)
+        resolved = flow.consume_transaction_cookie(
+            _cookie_value(invited.transaction_cookie), invited.transaction.state,
+            _configuration(), NOW + 599,
+        )
+        self.assertEqual(resolved.team_invite_token, token)
+        for returned_state, timestamp in (
+            (normal.transaction.nonce, NOW + 1),
+            (invited.transaction.state, NOW + 600),
+        ):
+            with self.assertRaises(flow.Auth0FlowError) as raised:
+                flow.consume_transaction_cookie(
+                    _cookie_value(invited.transaction_cookie), returned_state,
+                    _configuration(), timestamp,
+                )
+            self.assertEqual(raised.exception.code, "invalid_transaction")
+            self.assertNotIn(token, repr(raised.exception))
+
+    def test_invite_token_uses_exact_team_syntax_and_value_free_errors(self):
+        valid = "tinv_" + "a" * 64 + "." + "Z" * 43
+        request = flow.build_authorization_request(
+            _configuration(), NOW, random_bytes=_FixedRandom(), team_invite_token=valid,
+        )
+        self.assertEqual(request.transaction.team_invite_token, valid)
+        for invalid in (
+            "", True, 1, [], {}, b"tinv_private", " private-invite-marker ",
+            "tinv_." + "A" * 43, "tinv_a." + "A" * 42,
+            "tinv_" + "a" * 65 + "." + "A" * 43,
+            "tinv_a." + "A" * 43 + ".extra", valid + "\n",
+        ):
+            random_bytes = _FixedRandom()
+            with self.subTest(value_type=type(invalid).__name__), self.assertRaises(
+                flow.Auth0FlowError
+            ) as raised:
+                flow.build_authorization_request(
+                    _configuration(), NOW, random_bytes=random_bytes,
+                    team_invite_token=invalid,
+                )
+            self.assertEqual(raised.exception.code, "invalid_transaction")
+            self.assertNotIn("private-invite-marker", repr(raised.exception))
+            self.assertEqual(random_bytes.counts, [])
+
+    def test_legacy_transaction_payload_and_malformed_optional_context(self):
+        legacy = {
+            "v": 1,
+            "state": _b64(b"S" * 32),
+            "nonce": _b64(b"N" * 32),
+            "code_verifier": _b64(b"V" * 32),
+            "issued_at": NOW,
+            "expires_at": NOW + 600,
+        }
+
+        def encrypt(payload):
+            nonce = b"I" * 12
+            ciphertext = flow.AESGCM(flow._transaction_key(_configuration())).encrypt(
+                nonce, json.dumps(payload, separators=(",", ":")).encode(),
+                flow._TRANSACTION_AAD,
+            )
+            return ".".join(("v1", _b64(nonce), _b64(ciphertext)))
+
+        resolved = flow.decrypt_transaction_cookie(encrypt(legacy), _configuration(), NOW + 1)
+        self.assertIsNone(resolved.team_invite_token)
+        self.assertEqual(resolved.state, legacy["state"])
+        for malformed in (
+            {**legacy, "team_invite_token": None},
+            {**legacy, "team_invite_token": 1},
+            {**legacy, "team_invite_token": "private-malformed-token"},
+            {**legacy, "team_invite_token": {"token": "private-malformed-token"}},
+            {**legacy, "workspace_id": "wsp_forbidden"},
+            {**legacy, "team_invite_token": "tinv_a." + "A" * 43, "extra": True},
+        ):
+            with self.assertRaises(flow.Auth0FlowError) as raised:
+                flow.decrypt_transaction_cookie(encrypt(malformed), _configuration(), NOW + 1)
+            self.assertEqual(raised.exception.code, "invalid_transaction")
+            self.assertNotIn("private-malformed-token", repr(raised.exception))
 
     def test_transaction_cookie_rejects_tampering_wrong_key_expiry_and_state(self):
         result = flow.build_authorization_request(

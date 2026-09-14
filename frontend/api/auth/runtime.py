@@ -9,12 +9,13 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, quote, urlsplit
 
 from api.auth import account_authority, auth0_flow, http, session_store
 from api.auth import models
 from cuevion_auth.current_account_repository_contract import (
     AuthenticationIdentityLookupKey,
+    CurrentAccountAuthorityResult,
     CurrentAccountReadOutcome,
 )
 
@@ -57,7 +58,7 @@ class AuthenticatedMemberContext:
             or type(self.workspace_id) is not str
             or not self.workspace_id
             or type(self.membership_role) is not str
-            or not self.membership_role
+            or self.membership_role not in {"owner", "admin", "member"}
             or self.user_type != "member"
             or self.auth_source != "auth0"
         ):
@@ -244,18 +245,28 @@ def login_response(
     environment: Mapping[str, str] | None = None,
     now: int | None = None,
     random_bytes: Callable[[int], bytes] = secrets.token_bytes,
+    team_invite_token: str | None = None,
+    team_authority_factory: Callable[[Mapping[str, str]], object] | None = None,
 ) -> http.PublicResponse:
     try:
         http.require_method(method, "GET")
         headers = http.validate_header_pairs(raw_headers)
         http.require_canonical_host(headers)
-        config = auth0_flow.parse_auth0_configuration(
-            os.environ if environment is None else environment
-        )
+        source = os.environ if environment is None else environment
+        config = auth0_flow.parse_auth0_configuration(source)
+        if team_invite_token is not None:
+            team = _team_authority(source, team_authority_factory)
+            # Accepted tokens may start authentication solely for crash recovery.
+            # Callback must prove the exact accepted canonical user before any
+            # finalization/session. Public acceptance remains terminal.
+            team.read_provisioning_invitation(
+                team_invite_token, allow_accepted=True
+            )
         request = auth0_flow.build_authorization_request(
             config,
             int(time.time()) if now is None else now,
             random_bytes=random_bytes,
+            team_invite_token=team_invite_token,
         )
         return http.redirect_response(
             request.authorization_url,
@@ -265,6 +276,119 @@ def login_response(
         return _boundary_error_response(error)
     except Exception:
         return _authentication_unavailable_response()
+
+
+def _team_authority(source, factory):
+    if factory is None:
+        from api.team.authority import build_runtime_team_authority
+
+        factory = build_runtime_team_authority
+    return factory(source)
+
+
+def _invite_actor(prepared) -> AuthenticatedMemberContext:
+    return AuthenticatedMemberContext(
+        user_id=prepared.user_id,
+        email=prepared.email,
+        name=prepared.email,
+        workspace_id=prepared.workspace_id,
+        membership_role="member",
+    )
+
+
+def _require_provisioned_team_access(authority, issuer, subject, source, factory):
+    """Require current Team authority before publishing a new invitee session.
+
+    The stored verification provenance pins the original invitation separately
+    from canonical identity IDs. It is written by the invite-only writer.
+    Existing canonical accounts retain their ordinary login/session behavior.
+    Role still comes exclusively from current canonical membership.
+    """
+    email = authority.primary_verified_email
+    if not email.verification_source.lower().startswith("team-invite-oidc"):
+        return
+    if re.fullmatch(r"team-invite-oidc:v1:[a-f0-9]{64}", email.verification_source) is None:
+        raise ValueError("not authorized")
+    from cuevion_db.postgresql_team_invitee_repository import (
+        InviteePreparationRequest, derive_invitee_provenance, derive_invitee_record_ids,
+    )
+
+    if authority.workspace_membership.role is not models.WorkspaceRole.MEMBER:
+        raise ValueError("not authorized")
+    actor = AuthenticatedMemberContext(
+        user_id=authority.user.user_id, email=email.canonical_email,
+        name=authority.user.display_name, workspace_id=authority.workspace.workspace_id,
+        membership_role="member",
+    )
+    invitation = _team_authority(source, factory).prove_provisioned_member(actor)
+    request = InviteePreparationRequest(
+        issuer=issuer, subject=subject, email=email.canonical_email,
+        workspace_id=invitation.workspace_id,
+        invitation_id=invitation.invitation_id,
+        token_digest=invitation.token_digest,
+        inviter_user_id=invitation.inviter_user_id,
+    )
+    if email.verification_source != derive_invitee_provenance(request):
+        raise ValueError("not authorized")
+    expected = derive_invitee_record_ids(request)
+    if expected[:2] != (authority.user.user_id, email.email_id):
+        raise ValueError("not authorized")
+    identity = getattr(authority, "authentication_identity", None)
+    if identity is not None and identity.identity_id != expected[2]:
+        raise ValueError("not authorized")
+
+
+def _provision_invitee(identity, invitation, token, team, repository, reader, now):
+    """Prepare → exact Team acceptance/proof → finalize → canonical read."""
+    from cuevion_db.postgresql_team_invitee_repository import (
+        InviteePreparationRequest, derive_invitee_provenance,
+    )
+
+    if type(identity) is not auth0_flow.ValidatedIdentityEvidence:
+        raise ValueError("not authorized")
+    request = InviteePreparationRequest(
+        issuer=identity.issuer,
+        subject=identity.subject,
+        email=identity.email,
+        workspace_id=invitation.workspace_id,
+        invitation_id=invitation.invitation_id,
+        token_digest=invitation.token_digest,
+        inviter_user_id=invitation.inviter_user_id,
+    )
+    prepared = repository.prepare(request, now=now)
+    actor = _invite_actor(prepared)
+    # A primary accepted proof also reconciles an ambiguous/duplicate Redis
+    # accept result; public accept itself is never made replayable.
+    if invitation.status == "invited":
+        team.accept_invitation(actor=actor, token=token)
+    if team.prove_provisioning_acceptance(
+        token, actor, invitation.invitation_id
+    ) is not True:
+        raise ValueError("not authorized")
+    finalized = repository.finalize(prepared, now=now)
+    key = AuthenticationIdentityLookupKey(identity.issuer, identity.subject)
+    result = reader.resolve_current_account_by_identity(key)
+    if not account_authority.auth0_authority_matches(result, key, identity.email):
+        raise ValueError("not authorized")
+    authority = result.authority
+    if (
+        authority.user.user_id != prepared.user_id
+        or finalized.user_id != prepared.user_id
+        or authority.workspace.workspace_id != invitation.workspace_id
+        or authority.workspace_membership.role is not models.WorkspaceRole.MEMBER
+        or authority.user.security_epoch != finalized.security_epoch
+        or authority.primary_verified_email.email_id != finalized.email_id
+        or authority.primary_verified_email.verification_source
+        != derive_invitee_provenance(request)
+        or authority.authentication_identity.identity_id != finalized.identity_id
+        or authority.workspace_membership.row_version != finalized.membership_row_version
+    ):
+        raise ValueError("not authorized")
+    if team.prove_provisioning_acceptance(
+        token, actor, invitation.invitation_id
+    ) is not True:
+        raise ValueError("not authorized")
+    return result
 
 
 def callback_response(
@@ -279,6 +403,8 @@ def callback_response(
     session_store_factory: Callable[[Mapping[str, str]], session_store.AuthSessionStore] = session_store.build_runtime_session_store,
     authority_factory: Callable[[Mapping[str, str]], object] = account_authority.build_runtime_account_authority,
     random_bytes: Callable[[int], bytes] = secrets.token_bytes,
+    team_authority_factory: Callable[[Mapping[str, str]], object] | None = None,
+    invitee_repository_factory: Callable[[Mapping[str, str]], object] | None = None,
 ) -> http.PublicResponse:
     clear_transaction = auth0_flow.clear_transaction_cookie()
     source = os.environ if environment is None else environment
@@ -342,8 +468,34 @@ def callback_response(
         authority_result = authority_reader.resolve_current_account_by_identity(
             identity_key
         )
-        if authority_result.outcome is CurrentAccountReadOutcome.UNAVAILABLE:
+        if type(authority_result) is not CurrentAccountAuthorityResult:
+            raise ValueError("not authorized")
+        if authority_result.outcome in (
+            CurrentAccountReadOutcome.UNAVAILABLE,
+            CurrentAccountReadOutcome.INTERNAL_ERROR,
+        ):
             raise account_authority.AccountAuthorityUnavailableError()
+        invitation = None
+        team = None
+        token = transaction.team_invite_token
+        if token is not None:
+            team = _team_authority(source, team_authority_factory)
+            invitation = team.read_provisioning_invitation(
+                token, allow_accepted=True
+            )
+            if identity.email != invitation.email:
+                raise ValueError("not authorized")
+        if authority_result.outcome is CurrentAccountReadOutcome.NOT_AUTHORIZED:
+            if invitation is None or authority_result.authority is not None:
+                raise ValueError("not authorized")
+            factory = (
+                account_authority.build_runtime_team_invitee_repository
+                if invitee_repository_factory is None else invitee_repository_factory
+            )
+            authority_result = _provision_invitee(
+                identity, invitation, token, team, factory(source),
+                authority_reader, timestamp,
+            )
         if not account_authority.auth0_authority_matches(
             authority_result, identity_key, identity.email
         ):
@@ -351,6 +503,26 @@ def callback_response(
         authority = authority_result.authority
         if authority is None:
             raise ValueError("not authorized")
+        if invitation is not None:
+            if authority.workspace.workspace_id != invitation.workspace_id:
+                # Existing users in another workspace remain out of scope.
+                raise ValueError("not authorized")
+            if invitation.status == "accepted":
+                actor = AuthenticatedMemberContext(
+                    user_id=authority.user.user_id,
+                    email=authority.primary_verified_email.canonical_email,
+                    name=authority.user.display_name,
+                    workspace_id=authority.workspace.workspace_id,
+                    membership_role=authority.workspace_membership.role.value,
+                )
+                if team.prove_provisioning_acceptance(
+                    token, actor, invitation.invitation_id
+                ) is not True:
+                    raise ValueError("not authorized")
+        _require_provisioned_team_access(
+            authority, identity.issuer, identity.subject, source,
+            team_authority_factory,
+        )
 
         # Rotation is fail-closed: an existing credential must be revoked before
         # the new server-side session is published.
@@ -363,13 +535,14 @@ def callback_response(
             user_id=authority.user.user_id,
             workspace_id=authority.workspace.workspace_id,
             security_epoch=authority.user.security_epoch,
+            workspace_role=authority.workspace_membership.role.value,
             issuer=identity.issuer,
             subject=identity.subject,
             now=timestamp,
             random_bytes=random_bytes,
         )
         return http.redirect_response(
-            _APP_LOCATION,
+            _APP_LOCATION if token is None else "/?team_invite=" + quote(token, safe=""),
             set_cookies=(clear_transaction, session_cookie),
         )
     except http.HttpBoundaryError as error:
@@ -430,6 +603,7 @@ def _current_authority_member_context(
             and membership.workspace_id == workspace.workspace_id
             and membership.status is models.WorkspaceMembershipStatus.ACTIVE
             and type(membership.role) is models.WorkspaceRole
+            and record.workspace_role == membership.role.value
         )
         if not valid:
             return None
@@ -592,6 +766,7 @@ def session_response(
             "email": member.email,
             "name": member.name,
             "userType": member.user_type,
+            "workspaceRole": member.membership_role,
         },
     )
 

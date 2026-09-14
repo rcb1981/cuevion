@@ -75,6 +75,7 @@ class ServerSessionRecord:
     created_at: int
     expires_at: int
     binding_digest: str
+    workspace_role: str = "owner"
 
     def __post_init__(self) -> None:
         valid = (
@@ -101,6 +102,8 @@ class ServerSessionRecord:
             and self.expires_at - self.created_at <= SESSION_TTL_SECONDS
             and type(self.binding_digest) is str
             and _BASE64URL_32_RE.fullmatch(self.binding_digest) is not None
+            and type(self.workspace_role) is str
+            and self.workspace_role in {"owner", "admin", "member"}
         )
         if not valid:
             raise ValueError("invalid server session record")
@@ -228,6 +231,7 @@ def _encode_record(record: ServerSessionRecord) -> str:
             "sessionId": record.session_id,
             "userId": record.user_id,
             "workspaceId": record.workspace_id,
+            "workspaceRole": record.workspace_role,
             "securityEpoch": record.security_epoch,
             "issuer": record.issuer,
             "subject": record.subject,
@@ -249,7 +253,7 @@ def _decode_record(raw: object) -> ServerSessionRecord | None:
             object_pairs_hook=_strict_object,
             parse_constant=_reject_json_constant,
         )
-        if type(payload) is not dict or set(payload) != {
+        required_fields = {
             "schemaVersion",
             "sessionId",
             "userId",
@@ -260,7 +264,11 @@ def _decode_record(raw: object) -> ServerSessionRecord | None:
             "createdAt",
             "expiresAt",
             "bindingDigest",
-        }:
+        }
+        if type(payload) is not dict or set(payload) not in (
+            required_fields,
+            required_fields | {"workspaceRole"},
+        ):
             return None
         return ServerSessionRecord(
             schema_version=payload["schemaVersion"],
@@ -273,6 +281,7 @@ def _decode_record(raw: object) -> ServerSessionRecord | None:
             created_at=payload["createdAt"],
             expires_at=payload["expiresAt"],
             binding_digest=payload["bindingDigest"],
+            workspace_role=payload.get("workspaceRole", "owner"),
         )
     except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
         return None
@@ -476,6 +485,7 @@ def create_server_session(
     subject: str,
     now: int,
     random_bytes: Callable[[int], bytes] = secrets.token_bytes,
+    workspace_role: str = "owner",
 ) -> tuple[ServerSessionRecord, str]:
     raw_secret = random_bytes(32)
     raw_session_id = random_bytes(32)
@@ -496,6 +506,7 @@ def create_server_session(
         created_at=now,
         expires_at=now + SESSION_TTL_SECONDS,
         binding_digest=derived.credential_binding_digest,
+        workspace_role=workspace_role,
     )
     store.put(derived.credential_lookup_digest, record)
     return record, build_session_cookie(cookie_value)

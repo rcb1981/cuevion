@@ -182,7 +182,7 @@ def _transaction_headers(request, *, session_cookie: str | None = None):
 
 
 def _validated_identity(*, email: str = EMAIL):
-    return SimpleNamespace(
+    return auth0_flow.ValidatedIdentityEvidence(
         issuer=ISSUER,
         subject=SUBJECT,
         email=email,
@@ -325,6 +325,28 @@ class LoginAndCallbackTests(unittest.TestCase):
         self.assertNotIn("synthetic-id-token", str(session_commands[0]))
         self.assertEqual(len(authority.identity_calls), 1)
 
+    def test_existing_owner_login_preserves_owner_role_without_provisioning(self):
+        current = _authority_result().authority
+        membership = current.workspace_membership
+        owner_result = contract.CurrentAccountAuthorityResult(
+            contract.CurrentAccountReadOutcome.FOUND,
+            contract.CurrentAccountAuthority(
+                current.user, current.primary_verified_email,
+                current.authentication_identity, current.workspace,
+                models.WorkspaceMembership(
+                    1, WORKSPACE_ID, USER_ID, models.WorkspaceRole.OWNER,
+                    models.WorkspaceMembershipStatus.ACTIVE,
+                    membership.created_at, membership.updated_at, membership.row_version,
+                ),
+            ),
+        )
+        with mock.patch.object(runtime, "_team_authority", side_effect=AssertionError("normal owner login has no Team reads")):
+            response, commands, _reader = self._callback(authority_result=owner_result)
+        self.assertEqual(_header(response, "location"), ["/"])
+        sessions = [command for command in commands.commands if str(command[1]).startswith(session_store.SESSION_KEY_PREFIX)]
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(json.loads(sessions[0][2])["workspaceRole"], "owner")
+
     def test_callback_post_clears_transaction_cookie_without_mutating_store(self):
         request = _transaction_request()
         commands = MemoryCommands()
@@ -381,6 +403,7 @@ class SessionAndLogoutTests(unittest.TestCase):
             user_id=USER_ID,
             workspace_id=WORKSPACE_ID,
             security_epoch=security_epoch,
+            workspace_role="member",
             issuer=ISSUER,
             subject=SUBJECT,
             now=NOW,
@@ -532,6 +555,7 @@ class SessionAndLogoutTests(unittest.TestCase):
                 "email": EMAIL,
                 "name": "Cuevion Member",
                 "userType": "member",
+                "workspaceRole": "member",
             },
         )
         self.assertEqual(authority.user_calls, [(USER_ID, WORKSPACE_ID)])
@@ -711,6 +735,620 @@ class SessionAndLogoutTests(unittest.TestCase):
         self.assertEqual(_header(response, "x-content-type-options"), ["nosniff"])
         self.assertEqual(_header(response, "referrer-policy"), ["no-referrer"])
         self.assertEqual(_header(response, "content-type"), ["application/json; charset=utf-8"])
+
+    def test_legacy_owner_session_without_role_still_restores(self):
+        commands, store, headers = self._stored_session()
+        current = _user_result().authority
+        membership = current.workspace_membership
+        owner = contract.CurrentAccountByUserAuthorityResult(
+            contract.CurrentAccountReadOutcome.FOUND,
+            contract.CurrentAccountByUserAuthority(
+                current.user, current.primary_verified_email, current.workspace,
+                models.WorkspaceMembership(
+                    1, WORKSPACE_ID, USER_ID, models.WorkspaceRole.OWNER,
+                    models.WorkspaceMembershipStatus.ACTIVE,
+                    membership.created_at, membership.updated_at, membership.row_version,
+                ),
+            ),
+        )
+        for key, raw in list(commands.values.items()):
+            payload = json.loads(raw)
+            payload.pop("workspaceRole")
+            commands.values[key] = json.dumps(payload)
+        response = runtime.session_response(
+            "GET", headers, environment=ENVIRONMENT, now=NOW + 1,
+            session_store_factory=lambda _source: store,
+            authority_factory=lambda _source: FakeAuthority(user_result=owner),
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(_json(response)["workspaceRole"], "owner")
+
+    def test_persisted_role_cannot_promote_current_canonical_membership(self):
+        commands, store, headers = self._stored_session()
+        for key, raw in list(commands.values.items()):
+            payload = json.loads(raw)
+            payload["workspaceRole"] = "owner"
+            commands.values[key] = json.dumps(payload)
+        response = runtime.session_response(
+            "GET", headers, environment=ENVIRONMENT, now=NOW + 1,
+            session_store_factory=lambda _source: store,
+            authority_factory=lambda _source: FakeAuthority(user_result=_user_result()),
+        )
+        self.assertEqual(response.status, 401)
+
+
+class InviteBoundProvisioningTests(unittest.TestCase):
+    TOKEN = "tinv_test." + "a" * 43
+
+    def setUp(self):
+        import hashlib
+        from api.team.authority import ProvisioningInvitation
+
+        self.invitation = ProvisioningInvitation(
+            invitation_id="tinv_test", workspace_id=WORKSPACE_ID,
+            email=EMAIL, inviter_user_id=_authority_result().authority.workspace.created_by_user_id,
+            token_digest=hashlib.sha256(self.TOKEN.encode()).hexdigest(),
+            status="invited", expires_at=(NOW + 60) * 1000,
+        )
+        self.canonical_result = self._canonical_invitee_authority()
+        self.canonical_user_id = self.canonical_result.authority.user.user_id
+        self.events = []
+        self.prepared = None
+        self.active = False
+        self.accepted = False
+        self.failure = None
+        self.proof_count = 0
+        self.commands = MemoryCommands()
+        self.result_override = None
+        self.identity_override = None
+        self.initial_override = None
+        self.actor = None
+        self.repository_calls = 0
+        self.prepare_count = 0
+        self.accept_count = 0
+        self.team = SimpleNamespace(
+            read_provisioning_invitation=self._read_invite,
+            accept_invitation=self._accept,
+            prove_provisioning_acceptance=self._proof,
+            prove_provisioned_member=self._current_proof,
+        )
+        self.repository = SimpleNamespace(prepare=self._prepare, finalize=self._finalize)
+        self.reader = SimpleNamespace(resolve_current_account_by_identity=self._resolve)
+
+    def _read_invite(self, token, *, allow_accepted=False):
+        from dataclasses import replace
+
+        self.events.append("invite-read")
+        self.assertEqual(token, self.TOKEN)
+        if self.failure == "invite":
+            raise ValueError("rejected")
+        return replace(self.invitation, status="accepted" if self.accepted else "invited")
+
+    def _prepare(self, request, *, now):
+        self.events.append("prepare")
+        self.prepare_count += 1
+        self.assertEqual(request.issuer, ISSUER)
+        self.assertEqual(request.subject, SUBJECT)
+        self.assertEqual(request.email, EMAIL)
+        self.assertEqual(request.workspace_id, WORKSPACE_ID)
+        self.assertEqual(request.invitation_id, "tinv_test")
+        self.assertEqual(now, NOW)
+        if self.failure == "prepare":
+            raise ValueError("conflict")
+        if self.prepared is None:
+            authority = self.canonical_result.authority
+            self.prepared = SimpleNamespace(
+                user_id=authority.user.user_id, email=EMAIL, workspace_id=WORKSPACE_ID,
+                security_epoch=authority.user.security_epoch,
+                email_id=authority.primary_verified_email.email_id,
+                identity_id=authority.authentication_identity.identity_id,
+                membership_row_version=authority.workspace_membership.row_version,
+            )
+        return self.prepared
+
+    def _accept(self, *, actor, token):
+        self.events.append("accept")
+        self.assertIs(type(actor), runtime.AuthenticatedMemberContext)
+        self.assertEqual(actor.user_id, self.prepared.user_id)
+        self.assertEqual(actor.workspace_id, self.prepared.workspace_id)
+        self.assertEqual(actor.email, self.prepared.email)
+        self.assertEqual(actor.membership_role, "member")
+        self.assertEqual(token, self.TOKEN)
+        self.assertFalse(self.active)
+        self.actor = actor
+        if self.failure == "before_accept":
+            raise RuntimeError("process stopped")
+        self.accept_count += 1
+        if self.failure == "accept":
+            return None, {"code": "cancelled_invite"}
+        self.accepted = True
+        return {"ok": True}, None
+
+    def _proof(self, token, actor, invitation_id):
+        self.events.append("proof")
+        self.assertEqual(token, self.TOKEN)
+        self.assertEqual(invitation_id, self.invitation.invitation_id)
+        self.assertEqual(actor.user_id, self.canonical_user_id)
+        self.assertEqual(actor.email, EMAIL)
+        self.assertEqual(actor.workspace_id, WORKSPACE_ID)
+        if not self.accepted or self.failure == "proof":
+            raise ValueError("unproven acceptance")
+        self.proof_count += 1
+        return True
+
+    def _current_proof(self, actor):
+        from dataclasses import replace
+
+        self.events.append("member-proof")
+        self.assertEqual(actor.user_id, self.canonical_user_id)
+        self.assertEqual(actor.email, EMAIL)
+        self.assertEqual(actor.workspace_id, WORKSPACE_ID)
+        self.assertEqual(actor.membership_role, "member")
+        if not self.accepted or self.failure == "proof":
+            raise ValueError("unproven acceptance")
+        return replace(self.invitation, status="accepted")
+
+    def _finalize(self, prepared, *, now):
+        self.events.append("finalize")
+        self.assertTrue(self.accepted)
+        self.assertGreater(self.proof_count, 0)
+        self.assertIs(prepared, self.prepared)
+        if self.failure == "finalize":
+            raise RuntimeError("unavailable")
+        self.active = True
+        if self.failure == "after_finalize":
+            raise RuntimeError("process stopped")
+        return prepared
+
+    def _resolve(self, key):
+        self.events.append("resolve")
+        if self.initial_override is not None:
+            return self.initial_override
+        if self.active:
+            return self.result_override or self.canonical_result
+        return contract.CurrentAccountAuthorityResult(
+            contract.CurrentAccountReadOutcome.NOT_AUTHORIZED, None
+        )
+
+    def _repository_factory(self, _source):
+        self.repository_calls += 1
+        return self.repository
+
+    def _command(self, command):
+        if str(command[1]).startswith(session_store.SESSION_KEY_PREFIX) and command[0] == "SET":
+            self.events.append("session")
+            self.assertTrue(self.active)
+            self.assertGreater(self.proof_count, 0)
+            if self.failure == "session":
+                raise session_store.SessionStoreUnavailable()
+        return self.commands(command)
+
+    def _callback(self, *, with_invite=True):
+        transaction = auth0_flow.build_authorization_request(
+            auth0_flow.parse_auth0_configuration(ENVIRONMENT), NOW,
+            team_invite_token=self.TOKEN if with_invite else None,
+        )
+        with (
+            mock.patch.object(auth0_flow, "exchange_authorization_code", return_value=SimpleNamespace(id_token="trusted-test-token")),
+            mock.patch.object(auth0_flow, "validate_id_token_with_jwks", return_value=self.identity_override or _validated_identity()),
+        ):
+            return runtime.callback_response(
+                "GET", _transaction_headers(transaction),
+                "/api/auth/callback?code=test-code&state=" + transaction.transaction.state,
+                environment=ENVIRONMENT, now=NOW,
+                session_store_factory=lambda _source: session_store.AuthSessionStore(self._command),
+                authority_factory=lambda _source: self.reader,
+                team_authority_factory=lambda _source: self.team,
+                invitee_repository_factory=self._repository_factory,
+            )
+
+    def _assert_no_session(self, response):
+        self.assertEqual(_header(response, "location"), ["/login?error=authentication_failed"])
+        self.assertFalse(any(str(command[1]).startswith(session_store.SESSION_KEY_PREFIX) for command in self.commands.commands))
+        self.assertFalse(any(cookie.startswith(session_store.SESSION_COOKIE_NAME + "=") for cookie in _header(response, "set-cookie")))
+        self.assertNotIn(self.TOKEN, response.body.decode())
+        self.assertNotIn(self.TOKEN, str(response.headers))
+
+    def test_success_publishes_one_member_session_after_authoritative_finalize(self):
+        response = self._callback()
+        self.assertEqual(_header(response, "location"), ["/?team_invite=" + self.TOKEN])
+        self.assertEqual(self.events, ["resolve", "invite-read", "prepare", "accept", "proof", "finalize", "resolve", "proof", "member-proof", "session"])
+        writes = [command for command in self.commands.commands if str(command[1]).startswith(session_store.SESSION_KEY_PREFIX)]
+        self.assertEqual(len(writes), 1)
+        payload = json.loads(writes[0][2])
+        self.assertEqual((payload["userId"], payload["workspaceId"], payload["workspaceRole"]), (self.canonical_user_id, WORKSPACE_ID, "member"))
+        self.assertEqual(set(self.events), {"resolve", "invite-read", "prepare", "accept", "proof", "finalize", "member-proof", "session"})
+
+    def test_new_noninvited_identity_never_constructs_writer(self):
+        self._assert_no_session(self._callback(with_invite=False))
+        self.assertEqual(self.repository_calls, 0)
+        self.assertEqual(self.events, ["resolve"])
+
+    def test_uncertain_or_malformed_authority_never_provisions(self):
+        for outcome in (contract.CurrentAccountReadOutcome.UNAVAILABLE, contract.CurrentAccountReadOutcome.INTERNAL_ERROR):
+            self.initial_override = contract.CurrentAccountAuthorityResult(outcome, None)
+            self._assert_no_session(self._callback())
+        self.initial_override = SimpleNamespace(outcome=contract.CurrentAccountReadOutcome.NOT_AUTHORIZED, authority=None)
+        self._assert_no_session(self._callback())
+        self.assertEqual(self.repository_calls, 0)
+
+    def test_wrong_email_or_invalid_invite_never_prepares(self):
+        self.identity_override = _validated_identity(email="wrong@example.com")
+        self._assert_no_session(self._callback())
+        self.identity_override = None
+        self.failure = "invite"
+        self._assert_no_session(self._callback())
+        self.assertEqual(self.repository_calls, 0)
+
+    def test_case1_prepare_then_crash_leaves_inert_graph_and_retry_resumes(self):
+        self.failure = "before_accept"
+        self._assert_no_session(self._callback())
+        original = self.prepared
+        self.assertFalse(self.active)
+        self.assertFalse(self.accepted)
+        self.failure = None
+        response = self._callback()
+        self.assertEqual(_header(response, "location"), ["/?team_invite=" + self.TOKEN])
+        self.assertIs(self.prepared, original)
+        self.assertEqual(self.accept_count, 1)
+
+    def test_case2_accept_rejection_leaves_inert_account_and_no_session(self):
+        self.failure = "accept"
+        self._assert_no_session(self._callback())
+        self.assertFalse(self.active)
+        self.assertFalse(self.accepted)
+        self.assertNotIn("finalize", self.events)
+
+    def test_case3_accepted_then_finalize_failure_recovers_without_reaccept(self):
+        self.failure = "finalize"
+        self._assert_no_session(self._callback())
+        self.assertTrue(self.accepted)
+        self.assertFalse(self.active)
+        self.failure = None
+        self.assertEqual(_header(self._callback(), "location"), ["/?team_invite=" + self.TOKEN])
+        self.assertEqual(self.accept_count, 1)
+
+    def test_recovery_requires_exact_accepted_proof(self):
+        self.accepted = True
+        self.failure = "proof"
+        self._assert_no_session(self._callback())
+        self.assertNotIn("finalize", self.events)
+        self.assertFalse(self.active)
+
+    def test_case4_finalize_commit_then_crash_recovers_through_normal_authority(self):
+        self.failure = "after_finalize"
+        self._assert_no_session(self._callback())
+        self.assertTrue(self.active)
+        prepares = self.prepare_count
+        self.failure = None
+        self.assertEqual(_header(self._callback(), "location"), ["/?team_invite=" + self.TOKEN])
+        self.assertEqual(self.prepare_count, prepares)
+        self.assertEqual(self.accept_count, 1)
+
+    def test_case5_failed_session_preserves_durable_graph_for_next_login(self):
+        self.failure = "session"
+        response = self._callback()
+        self.assertEqual(_header(response, "location"), ["/login?error=authentication_failed"])
+        self.assertTrue(self.active)
+        self.assertTrue(self.accepted)
+        self.failure = None
+        self.assertEqual(_header(self._callback(), "location"), ["/?team_invite=" + self.TOKEN])
+        self.assertEqual(self.prepare_count, 1)
+        self.assertEqual(self.accept_count, 1)
+
+    def test_finalize_authoritative_read_mismatch_prevents_session(self):
+        from api.auth.test_account_authority import OTHER_USER_ID, OTHER_WORKSPACE_ID
+
+        for result in (_authority_result(user_id=OTHER_USER_ID), _authority_result(workspace_id=OTHER_WORKSPACE_ID)):
+            self.setUp()
+            self.result_override = result
+            self._assert_no_session(self._callback())
+
+    def test_existing_different_workspace_cannot_switch_or_provision(self):
+        from api.auth.test_account_authority import OTHER_WORKSPACE_ID
+
+        self.initial_override = _authority_result(workspace_id=OTHER_WORKSPACE_ID)
+        self._assert_no_session(self._callback())
+        self.assertEqual(self.repository_calls, 0)
+
+    def test_pending_login_validates_before_redirect_and_keeps_state_opaque(self):
+        response = runtime.login_response(
+            "GET", (("host", "app.cuevion.com"),),
+            environment=ENVIRONMENT, now=NOW, team_invite_token=self.TOKEN,
+            team_authority_factory=lambda _source: self.team,
+        )
+        self.assertEqual(response.status, 303)
+        self.assertEqual(self.events, ["invite-read"])
+        location = _header(response, "location")[0]
+        self.assertNotIn(self.TOKEN, location)
+        state = parse_qs(urlsplit(location).query)["state"][0]
+        self.assertEqual(len(state), 43)
+        self.assertNotIn("tinv_", state)
+        cookie = _header(response, "set-cookie")[0].split(";", 1)[0].split("=", 1)[1]
+        tx = auth0_flow.consume_transaction_cookie(cookie, state, auth0_flow.parse_auth0_configuration(ENVIRONMENT), NOW)
+        self.assertEqual(tx.team_invite_token, self.TOKEN)
+
+    def test_unusable_invites_fail_before_auth0_redirect_without_secret_text(self):
+        from api.team.authority import TeamAuthorityError
+
+        for code in ("invalid_invite", "expired_invite", "cancelled_invite", "declined_invite", "forbidden"):
+            team = SimpleNamespace(read_provisioning_invitation=mock.Mock(side_effect=TeamAuthorityError(code)))
+            response = runtime.login_response(
+                "GET", (("host", "app.cuevion.com"),),
+                environment=ENVIRONMENT, now=NOW, team_invite_token=self.TOKEN,
+                team_authority_factory=lambda _source: team,
+            )
+            self.assertEqual(response.status, 503)
+            self.assertEqual(_header(response, "location"), [])
+            self.assertNotIn(self.TOKEN, response.body.decode())
+
+    def test_entry_point_accepts_only_token_and_operation(self):
+        from api.team import invite
+
+        for query in (
+            "op=authenticate&token=" + self.TOKEN + "&workspaceRole=owner",
+            "op=authenticate&token=" + self.TOKEN + "&memberUserId=usr_fake",
+            "op=authenticate&token=" + self.TOKEN + "&returnTo=https://evil.example",
+            "op=authenticate&token=" + self.TOKEN + "&token=other",
+        ):
+            handler = AdapterHandler("GET", "/api/team/invite?" + query, [("host", "app.cuevion.com")])
+            with mock.patch.object(invite.auth_runtime, "login_response") as login:
+                invite._handle_invite_authentication(handler)
+            login.assert_not_called()
+            self.assertEqual(handler.status, 400)
+            self.assertNotIn(self.TOKEN, handler.wfile.getvalue().decode())
+        handler = AdapterHandler("GET", "/api/team/invite?op=authenticate&token=" + self.TOKEN, [("host", "app.cuevion.com")])
+        with mock.patch.object(invite.auth_runtime, "login_response", return_value=runtime.http.redirect_response("/login")) as login:
+            invite._handle_invite_authentication(handler)
+        self.assertEqual(login.call_args.kwargs, {"team_invite_token": self.TOKEN})
+
+    def _preparation_request(self, invitation=None):
+        from cuevion_db.postgresql_team_invitee_repository import InviteePreparationRequest
+
+        invitation = self.invitation if invitation is None else invitation
+        return InviteePreparationRequest(
+            ISSUER, SUBJECT, invitation.email, invitation.workspace_id,
+            invitation.invitation_id, invitation.token_digest, invitation.inviter_user_id,
+        )
+
+    def _canonical_invitee_authority(self, *, verification_source=None):
+        from cuevion_db.postgresql_team_invitee_repository import derive_invitee_provenance, derive_invitee_record_ids
+
+        request = self._preparation_request()
+        user_id, email_id, identity_id = derive_invitee_record_ids(request)
+        provenance = derive_invitee_provenance(request) if verification_source is None else verification_source
+        return contract.CurrentAccountAuthorityResult(
+            contract.CurrentAccountReadOutcome.FOUND,
+            contract.CurrentAccountAuthority(
+                models.CuevionUser(1, user_id, models.UserStatus.ACTIVE, email_id, "Team member", 1, NOW, NOW, 1),
+                models.VerifiedEmail(1, email_id, user_id, EMAIL, models.VerifiedEmailStatus.VERIFIED, provenance, NOW, NOW, None, 1),
+                models.AuthenticationIdentity(1, identity_id, user_id, ISSUER, SUBJECT, models.AuthenticationMethod.OIDC, models.AuthenticationIdentityStatus.ACTIVE, email_id, NOW, None, 1),
+                _authority_result().authority.workspace,
+                models.WorkspaceMembership(1, WORKSPACE_ID, user_id, models.WorkspaceRole.MEMBER, models.WorkspaceMembershipStatus.ACTIVE, NOW, NOW, 2),
+            ),
+        )
+
+    def _tokenless_callback(self, result, proof, *, identity=None):
+        from dataclasses import replace
+
+        if not isinstance(proof, Exception):
+            proof = replace(proof, status="accepted")
+        commands = MemoryCommands()
+        team = SimpleNamespace(prove_provisioned_member=mock.Mock(
+            side_effect=proof if isinstance(proof, Exception) else None,
+            return_value=None if isinstance(proof, Exception) else proof,
+        ))
+        writer = mock.Mock(side_effect=AssertionError("existing authority cannot provision"))
+        tx = _transaction_request()
+        with (
+            mock.patch.object(auth0_flow, "exchange_authorization_code", return_value=SimpleNamespace(id_token="test-token")),
+            mock.patch.object(auth0_flow, "validate_id_token_with_jwks", return_value=identity or _validated_identity()),
+        ):
+            response = runtime.callback_response(
+                "GET", _transaction_headers(tx),
+                "/api/auth/callback?code=test&state=" + tx.transaction.state,
+                environment=ENVIRONMENT, now=NOW,
+                session_store_factory=lambda _source: session_store.AuthSessionStore(commands),
+                authority_factory=lambda _source: FakeAuthority(identity_result=result),
+                team_authority_factory=lambda _source: team,
+                invitee_repository_factory=writer,
+            )
+        writer.assert_not_called()
+        return response, commands, team
+
+    def _assert_tokenless_result(self, response, commands, *, succeeds):
+        self.assertEqual(_header(response, "location"), ["/" if succeeds else "/login?error=authentication_failed"])
+        sessions = [cmd for cmd in commands.commands if str(cmd[1]).startswith(session_store.SESSION_KEY_PREFIX)]
+        self.assertEqual(len(sessions), 1 if succeeds else 0)
+        cookies = [cookie for cookie in _header(response, "set-cookie") if cookie.startswith(session_store.SESSION_COOKIE_NAME + "=")]
+        self.assertEqual(len(cookies), 1 if succeeds else 0)
+        self.assertNotIn(self.invitation.token_digest, repr(response))
+        self.assertNotIn("team-invite-oidc", repr(response))
+
+    def test_tokenless_finalized_login_requires_current_exact_team_incarnation(self):
+        from dataclasses import replace
+        from api.auth.test_account_authority import OTHER_WORKSPACE_ID
+        from api.team.authority import TeamAuthorityError
+        from cuevion_db.postgresql_team_invitee_repository import derive_invitee_provenance, derive_invitee_record_ids
+
+        original = self._preparation_request()
+        result = self.canonical_result
+        for changes in (
+            {"invitation_id": "tinv_replacement"},
+            {"token_digest": "0" * 64},
+            {"inviter_user_id": USER_ID},
+            {"workspace_id": OTHER_WORKSPACE_ID},
+        ):
+            with self.subTest(changes=changes):
+                replacement = replace(self.invitation, **changes)
+                request = self._preparation_request(replacement)
+                self.assertEqual(derive_invitee_record_ids(original), derive_invitee_record_ids(request))
+                self.assertNotEqual(derive_invitee_provenance(original), derive_invitee_provenance(request))
+                response, commands, team = self._tokenless_callback(result, replacement)
+                team.prove_provisioned_member.assert_called_once()
+                self._assert_tokenless_result(response, commands, succeeds=False)
+        for proof, succeeds in (
+            (replace(self.invitation, status="accepted"), True),
+            (TeamAuthorityError("team_member_not_active"), False),
+        ):
+            response, commands, _team = self._tokenless_callback(result, proof)
+            self._assert_tokenless_result(response, commands, succeeds=succeeds)
+
+    def test_legacy_malformed_or_unsupported_team_provenance_cannot_bypass_gate(self):
+        for source in (
+            "team-invite-oidc",
+            "TEAM-INVITE-OIDC:v1:" + "a" * 64,
+            "team-invite-oidc:v0:" + "a" * 64,
+            "team-invite-oidc:v2:" + "a" * 64,
+            "team-invite-oidc:v1:" + "a" * 63,
+            "team-invite-oidc:v1:" + "A" * 64,
+            "team-invite-oidc:unknown",
+            "team-invite-oidc-extra",
+        ):
+            with self.subTest(source=source):
+                result = self._canonical_invitee_authority(verification_source=source)
+                response, commands, team = self._tokenless_callback(result, self.invitation)
+                self._assert_tokenless_result(response, commands, succeeds=False)
+                team.prove_provisioned_member.assert_not_called()
+
+    def test_well_formed_but_wrong_team_provenance_still_requires_exact_match(self):
+        result = self._canonical_invitee_authority(
+            verification_source="team-invite-oidc:v1:" + "0" * 64,
+        )
+        response, commands, team = self._tokenless_callback(result, self.invitation)
+        self._assert_tokenless_result(response, commands, succeeds=False)
+        team.prove_provisioned_member.assert_called_once()
+
+    def test_fresh_provisioning_requires_durable_provenance_in_canonical_read(self):
+        from dataclasses import replace
+        from cuevion_db.postgresql_team_invitee_repository import derive_invitee_provenance
+
+        wrong_incarnation = derive_invitee_provenance(replace(
+            self._preparation_request(), invitation_id="tinv_replacement",
+        ))
+        for source in ("auth0-oidc", "team-invite-oidc", wrong_incarnation):
+            with self.subTest(source=source):
+                self.setUp()
+                self.result_override = self._canonical_invitee_authority(verification_source=source)
+                self._assert_no_session(self._callback())
+                self.assertTrue(self.active)
+                self.assertIn("finalize", self.events)
+                self.assertNotIn("session", self.events)
+                self.assertNotIn("member-proof", self.events)
+
+    def test_changed_verified_email_cannot_rewrite_existing_identity_or_create_user(self):
+        identity = _validated_identity(email="changed@example.test")
+        response, commands, team = self._tokenless_callback(
+            self.canonical_result, self.invitation, identity=identity,
+        )
+        self._assert_tokenless_result(response, commands, succeeds=False)
+        team.prove_provisioned_member.assert_not_called()
+        self.initial_override = self.canonical_result
+        self.identity_override = identity
+        self._assert_no_session(self._callback())
+        self.assertEqual(self.repository_calls, 0)
+
+    def test_team_provenance_never_publishes_owner_or_admin_session(self):
+        from dataclasses import replace
+
+        for role in (models.WorkspaceRole.OWNER, models.WorkspaceRole.ADMIN):
+            with self.subTest(role=role):
+                authority = self.canonical_result.authority
+                result = contract.CurrentAccountAuthorityResult(
+                    contract.CurrentAccountReadOutcome.FOUND,
+                    contract.CurrentAccountAuthority(
+                        authority.user, authority.primary_verified_email,
+                        authority.authentication_identity, authority.workspace,
+                        replace(authority.workspace_membership, role=role),
+                    ),
+                )
+                response, commands, team = self._tokenless_callback(result, self.invitation)
+                self._assert_tokenless_result(response, commands, succeeds=False)
+                team.prove_provisioned_member.assert_not_called()
+
+    def test_existing_owner_login_ignores_team_only_provenance_gate(self):
+        from dataclasses import replace
+
+        result = _authority_result()
+        authority = result.authority
+        result = contract.CurrentAccountAuthorityResult(
+            contract.CurrentAccountReadOutcome.FOUND,
+            contract.CurrentAccountAuthority(
+                authority.user, authority.primary_verified_email,
+                authority.authentication_identity, authority.workspace,
+                replace(authority.workspace_membership, role=models.WorkspaceRole.OWNER),
+            ),
+        )
+        response, commands, team = self._tokenless_callback(
+            result, AssertionError("ordinary owner must not read Team authority"),
+        )
+        self._assert_tokenless_result(response, commands, succeeds=True)
+        team.prove_provisioned_member.assert_not_called()
+        payload = json.loads(next(cmd[2] for cmd in commands.commands if str(cmd[1]).startswith(session_store.SESSION_KEY_PREFIX)))
+        self.assertEqual(payload["workspaceRole"], "owner")
+        self.assertEqual(payload["userId"], USER_ID)
+
+    def test_new_team_session_restore_uses_canonical_role_without_new_team_io(self):
+        authority = self._canonical_invitee_authority().authority
+        result = contract.CurrentAccountByUserAuthorityResult(
+            contract.CurrentAccountReadOutcome.FOUND,
+            contract.CurrentAccountByUserAuthority(
+                authority.user, authority.primary_verified_email,
+                authority.workspace, authority.workspace_membership,
+            ),
+        )
+        commands = MemoryCommands()
+        store = session_store.AuthSessionStore(commands)
+        _record, cookie = session_store.create_server_session(
+            store, secret=ENVIRONMENT["CUEVION_AUTH_SESSION_SECRET"],
+            user_id=authority.user.user_id, workspace_id=WORKSPACE_ID,
+            security_epoch=1, issuer=ISSUER, subject=SUBJECT,
+            now=NOW, workspace_role="member",
+        )
+        headers = (("host", "app.cuevion.com"), ("cookie", cookie.split(";", 1)[0]))
+        resolve = lambda: runtime.resolve_authenticated_member_session(
+            headers, environment=ENVIRONMENT, now=NOW + 1,
+            session_store_factory=lambda _source: store,
+            authority_factory=lambda _source: FakeAuthority(user_result=result),
+        )
+        with mock.patch.object(runtime, "_team_authority", side_effect=AssertionError("no new per-message Team reads")):
+            accepted = resolve()
+        self.assertIs(accepted.outcome, runtime.MemberResolutionOutcome.AUTHENTICATED)
+        self.assertEqual(accepted.session.member.email, EMAIL)
+        self.assertEqual(accepted.session.member.membership_role, "member")
+
+    def test_config_read_uses_member_email_without_inviter_workspace_fallback(self):
+        from api import user_config_store
+
+        member = runtime.AuthenticatedMemberContext(
+            user_id=USER_ID, email="invitee@example.com", name="Invitee",
+            workspace_id=WORKSPACE_ID, membership_role="member",
+        )
+        storage = {"owner@example.com": {"inboxes": [{"id": "owner-mailbox"}]}}
+        requested = []
+        def read(_store, email):
+            requested.append(email)
+            config = storage.get(email)
+            return {"status": "ok" if config else "not_found", "config": config, "error": None}
+        with (
+            mock.patch.object(user_config_store, "resolve_authenticated_member_authority", return_value=(member, None)),
+            mock.patch.object(user_config_store, "resolve_user_config_store", return_value=(storage, None)),
+            mock.patch.object(user_config_store, "read_user_config_record", side_effect=read),
+        ):
+            resolved, user, result = user_config_store.read_user_config_for_authenticated_member(())
+        self.assertIs(resolved, member)
+        self.assertEqual(user["email"], "invitee@example.com")
+        self.assertEqual(requested, ["invitee@example.com"])
+        self.assertIsNone(result["config"])
+        self.assertEqual(storage, {"owner@example.com": {"inboxes": [{"id": "owner-mailbox"}]}})
+
+    def test_writer_configuration_never_falls_back_to_reader(self):
+        for environment in ({}, {"CUEVION_AUTH_ACCOUNT_READER_DATABASE_URL": "reader"}, {
+            "CUEVION_AUTH_ACCOUNT_READER_DATABASE_URL": "same",
+            "CUEVION_AUTH_ACCOUNT_WRITER_DATABASE_URL": "same",
+        }):
+            with self.assertRaises(account_authority.AccountAuthorityConfigurationError):
+                account_authority.build_runtime_team_invitee_repository(environment)
 
 
 if __name__ == "__main__":

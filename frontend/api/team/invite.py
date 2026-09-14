@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, parse_qsl, quote, urlsplit
 from urllib.request import Request, urlopen
 
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -17,6 +17,7 @@ if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
 from api.auth.email_address import is_valid_auth_email  # noqa: E402
+from api.auth import http as auth_http, runtime as auth_runtime  # noqa: E402
 from api.auth.http import HttpBoundaryError, snapshot_request_headers  # noqa: E402
 from api.auth.runtime import (  # noqa: E402
     AuthenticatedMemberContext,
@@ -1241,9 +1242,42 @@ def _handle_action(handler: BaseHTTPRequestHandler, payload: dict):
     _send_json(handler, 200, {"ok": True, "invite": next_invite})
 
 
+def _handle_invite_authentication(handler: BaseHTTPRequestHandler):
+    """Start the existing Auth0 flow with a server-validated Team intent only."""
+    try:
+        parsed = urlsplit(handler.path)
+        if (
+            len(handler.path) > 1024 or parsed.scheme or parsed.netloc
+            or parsed.fragment or parsed.path != "/api/team/invite"
+        ):
+            raise ValueError("invalid request")
+        pairs = parse_qsl(
+            parsed.query, keep_blank_values=True, strict_parsing=True,
+            max_num_fields=2, encoding="utf-8", errors="strict",
+        )
+        if len(pairs) != 2 or {key for key, _value in pairs} != {"op", "token"}:
+            raise ValueError("invalid request")
+        values = dict(pairs)
+        if values["op"] != "authenticate" or not values["token"]:
+            raise ValueError("invalid request")
+        response = auth_runtime.login_response(
+            handler.command, snapshot_request_headers(handler),
+            team_invite_token=values["token"],
+        )
+    except Exception:
+        response = auth_http.json_response(
+            400, _build_error("invalid_request", "The authentication request was rejected.")
+        )
+    auth_http.send_public_response(handler, response)
+
+
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         operation = _get_operation(self)
+
+        if operation == "authenticate":
+            _handle_invite_authentication(self)
+            return
 
         if operation == "lookup":
             _handle_safe_lookup(self)

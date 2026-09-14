@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import ast
 import base64
+import json
 from pathlib import Path
 import pickle
 import unittest
 
 from api.auth import account_authority
 from api.auth import models
+from api.auth.runtime import AuthenticatedMemberContext
+from api.team import authority as team_authority
 from cuevion_auth import current_account_repository_contract as contract
 
 
@@ -649,9 +652,8 @@ class ResolverTests(unittest.TestCase):
                 self.assertEqual(len(connector.calls), 1)
                 self.assert_cleaned(before)
 
-    def test_stored_identity_method_and_candidate_mismatches_deny(self) -> None:
+    def test_stored_identity_and_candidate_mismatches_deny(self) -> None:
         cases = (
-            _authority_result(method=models.AuthenticationMethod.OIDC),
             _authority_result(identity_verified_email_id=None),
             _authority_result(issuer="https://other.example.test/"),
             _authority_result(subject="email|other"),
@@ -673,6 +675,26 @@ class ResolverTests(unittest.TestCase):
                     contract.CurrentAccountReadOutcome.NOT_AUTHORIZED,
                 )
                 self.assertEqual(len(connector.calls), 1)
+
+    def test_verified_canonical_identity_is_independent_of_login_method(self) -> None:
+        for method in (
+            models.AuthenticationMethod.EMAIL_OTP,
+            models.AuthenticationMethod.OIDC,
+            models.AuthenticationMethod.WEBAUTHN,
+        ):
+            with self.subTest(method=method):
+                expected = _authority_result(method=method)
+                repository = FakeRepository(expected)
+                runtime, connector = _runtime(
+                    repository,
+                    FakeConnection([_candidate_row()]),
+                    FakeConnection([_candidate_row()]),
+                )
+                self.assertIs(
+                    runtime.resolve_current_account_by_identity(_identity_key()),
+                    expected,
+                )
+                self.assertEqual(len(connector.calls), 2)
 
     def test_operational_and_transaction_status_failures_are_classified(self) -> None:
         class OperationalFailure(Exception):
@@ -759,7 +781,19 @@ class ResolverTests(unittest.TestCase):
 
 
 class ConsistencyAndCompositionTests(unittest.TestCase):
-    def test_auth0_authority_match_requires_exact_claims_email_and_method(self) -> None:
+    def test_matching_email_never_substitutes_for_canonical_identity(self) -> None:
+        result = _authority_result()
+        for issuer, subject in (
+            (ISSUER, "email|different-subject"),
+            ("https://different-issuer.example.test/", SUBJECT),
+        ):
+            with self.subTest(issuer=issuer, subject=subject):
+                key = contract.AuthenticationIdentityLookupKey(issuer, subject)
+                self.assertFalse(account_authority.auth0_authority_matches(result, key, EMAIL))
+                self.assertEqual(result.authority.user.user_id, USER_ID)
+                self.assertEqual(result.authority.primary_verified_email.canonical_email, EMAIL)
+
+    def test_auth0_authority_match_requires_exact_claims_and_verified_email(self) -> None:
         result = _authority_result()
         key = _identity_key()
         self.assertTrue(
@@ -769,7 +803,6 @@ class ConsistencyAndCompositionTests(unittest.TestCase):
             (result, _identity_key(subject="email|other"), EMAIL),
             (result, key, "other@example.test"),
             (result, key, EMAIL.upper()),
-            (_authority_result(method=models.AuthenticationMethod.OIDC), key, EMAIL),
             (_authority_result(identity_verified_email_id=None), key, EMAIL),
             (
                 _failure_result(
@@ -791,6 +824,20 @@ class ConsistencyAndCompositionTests(unittest.TestCase):
                         email,
                     )
                 )
+
+    def test_auth0_authority_match_accepts_each_canonical_authentication_method(self) -> None:
+        for method in (
+            models.AuthenticationMethod.EMAIL_OTP,
+            models.AuthenticationMethod.OIDC,
+            models.AuthenticationMethod.WEBAUTHN,
+        ):
+            with self.subTest(method=method):
+                self.assertTrue(account_authority.auth0_authority_matches(
+                    _authority_result(method=method), _identity_key(), EMAIL,
+                ))
+                self.assertFalse(account_authority.auth0_authority_matches(
+                    _authority_result(method=method), _identity_key(), "other@example.test",
+                ))
 
     def test_builder_uses_only_caller_mapping_and_injected_dependencies(self) -> None:
         before = FakeConnection([_candidate_row()])
@@ -871,6 +918,401 @@ class ConsistencyAndCompositionTests(unittest.TestCase):
             "cuevion_db.postgresql_current_account_repository",
             top_level_imports,
         )
+
+
+class TeamProvisioningProofTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.now = 2_000
+        self.owner = AuthenticatedMemberContext(
+            OTHER_USER_ID, "owner@example.test", "Owner", WORKSPACE_ID, "owner",
+        )
+        self.member = AuthenticatedMemberContext(
+            USER_ID, EMAIL, "Member", WORKSPACE_ID, "member",
+        )
+        self.invitation_id = "tinv_provisioning"
+        self.token, self.digest = team_authority.generate_invitation_token(
+            self.invitation_id, random_bytes=lambda count: b"a" * count,
+        )
+        self.invitation = team_authority.build_invitation_record(
+            invitation_id=self.invitation_id,
+            actor=self.owner,
+            invitee_email=EMAIL,
+            invitee_name="Member",
+            access_level="Limited",
+            token_digest=self.digest,
+            now_ms=1_000,
+        )
+        self.invitation_keys = (
+            f"cuevion:team:v2:invite-token:{self.invitation_id}:{self.digest}",
+            f"cuevion:team:v2:workspace-invite:{WORKSPACE_ID}:{self.invitation_id}",
+            f"cuevion:team:v2:recipient-invite:{WORKSPACE_ID}:{EMAIL}",
+        )
+        self.member_key = f"cuevion:team:v1:member:{WORKSPACE_ID}:{EMAIL}"
+        self.pointer_key = f"cuevion:team:v2:member-user:{WORKSPACE_ID}:{USER_ID}"
+        self.members_key = f"cuevion:team:v1:members-index:{WORKSPACE_ID}"
+        self.pending_key = f"cuevion:team:v2:pending-index:{WORKSPACE_ID}"
+        self.values: dict[str, str] = {}
+        self.calls: list[list[object]] = []
+        self.owner_valid: object = True
+        self.owner_calls: list[tuple[str, str]] = []
+        self.before_snapshot = None
+        self.store_invitation()
+        self.runtime = team_authority.RuntimeTeamAuthority(
+            self.transport,
+            environment={},
+            now_ms=lambda: self.now,
+            inviter_owner_validator=self.validate_owner,
+        )
+
+    @staticmethod
+    def wire(value: object) -> str:
+        return json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+    def store_invitation(self) -> None:
+        for key in self.invitation_keys:
+            self.values[key] = self.wire(self.invitation)
+
+    def validate_owner(self, user_id: str, workspace_id: str) -> object:
+        self.owner_calls.append((user_id, workspace_id))
+        return self.owner_valid
+
+    def transport(self, command: list[object]) -> dict[str, object]:
+        self.calls.append(command)
+        if command[0] != "EVAL":
+            raise AssertionError("provisioning used an ordinary replica read")
+        keys = command[3 : 3 + int(command[2])]
+        if command[1] == "return redis.call('GET', KEYS[1])":
+            return {"result": self.values.get(keys[0])}
+        if self.before_snapshot is not None:
+            hook, self.before_snapshot = self.before_snapshot, None
+            hook()
+        return {"result": [self.values.get(key) for key in keys]}
+
+    def accept_fixture(self) -> None:
+        self.invitation.update(
+            status="accepted", updatedAt=1_500, acceptedAt=1_500,
+            acceptedByUserId=USER_ID, acceptedByEmail=EMAIL,
+        )
+        self.store_invitation()
+        membership = team_authority.build_membership_record(
+            invitation_record=self.invitation, recipient=self.member,
+            accepted_at=1_500,
+        )
+        pointer = {
+            "v": 2, "workspaceId": WORKSPACE_ID, "memberUserId": USER_ID,
+            "email": EMAIL, "sourceInvitationId": self.invitation_id,
+            "status": "active",
+        }
+        self.values[self.member_key] = self.wire(membership)
+        self.values[self.pointer_key] = self.wire(pointer)
+        self.values[self.members_key] = self.wire([EMAIL])
+        self.values[self.pending_key] = "[]"
+
+    def prove(self, **overrides: object) -> bool:
+        arguments = {
+            "token": self.token, "actor": self.member,
+            "expected_invitation_id": self.invitation_id,
+        }
+        arguments.update(overrides)
+        return self.runtime.prove_provisioning_acceptance(**arguments)
+
+    def test_pending_proof_is_frozen_redacted_and_uses_only_primary_reads(self) -> None:
+        invitation = self.runtime.read_provisioning_invitation(self.token)
+        self.assertEqual(invitation.invitation_id, self.invitation_id)
+        self.assertEqual(invitation.workspace_id, WORKSPACE_ID)
+        self.assertEqual(invitation.email, EMAIL)
+        self.assertEqual(invitation.inviter_user_id, OTHER_USER_ID)
+        self.assertEqual(invitation.token_digest, self.digest)
+        self.assertEqual(invitation.status, "invited")
+        self.assertEqual(invitation.expires_at, self.invitation["expiresAt"])
+        self.assertNotIn(self.token, repr(invitation))
+        self.assertNotIn(self.digest, repr(invitation))
+        with self.assertRaises(AttributeError):
+            invitation.status = "accepted"
+        self.assertEqual(self.owner_calls, [(OTHER_USER_ID, WORKSPACE_ID)])
+        self.assertEqual([call[0] for call in self.calls], ["EVAL", "EVAL"])
+
+    def test_malformed_or_unknown_tokens_fail_without_owner_authority_lookup(self) -> None:
+        for token in (None, "", " " + self.token, self.token + " ", "wrong", self.token[:-1]):
+            with self.subTest(token_type=type(token).__name__):
+                with self.assertRaises(team_authority.TeamAuthorityError):
+                    self.runtime.read_provisioning_invitation(token)
+        self.assertEqual(self.owner_calls, [])
+
+    def test_expired_cancelled_declined_or_lost_owner_proof_fails(self) -> None:
+        baseline = dict(self.invitation)
+        for status in ("invited", "cancelled", "declined"):
+            with self.subTest(status=status):
+                self.invitation = dict(baseline)
+                self.invitation["status"] = status
+                if status != "invited":
+                    self.invitation[status + "At"] = 1_500
+                self.store_invitation()
+                self.now = int(baseline["expiresAt"])
+                with self.assertRaises(team_authority.TeamAuthorityError):
+                    self.runtime.read_provisioning_invitation(self.token)
+        self.invitation = baseline
+        self.store_invitation()
+        self.now = 2_000
+        for owner_valid in (False, "unavailable"):
+            self.owner_valid = owner_valid
+            with self.assertRaises(team_authority.TeamAuthorityError):
+                self.runtime.read_provisioning_invitation(self.token)
+
+    def test_missing_or_concurrently_changed_invitation_snapshot_fails(self) -> None:
+        self.values.pop(self.invitation_keys[2])
+        with self.assertRaises(team_authority.TeamAuthorityError):
+            self.runtime.read_provisioning_invitation(self.token)
+        self.store_invitation()
+        self.before_snapshot = lambda: self.values.pop(self.invitation_keys[1])
+        with self.assertRaises(team_authority.TeamAuthorityError):
+            self.runtime.read_provisioning_invitation(self.token)
+        self.assertEqual(self.owner_calls, [])
+
+    def test_accepted_recovery_is_explicit_and_preserves_public_accept_replay(self) -> None:
+        self.accept_fixture()
+        with self.assertRaises(team_authority.TeamAuthorityError) as caught:
+            self.runtime.read_provisioning_invitation(self.token)
+        self.assertEqual(caught.exception.code, "used_invite")
+        self.assertEqual(
+            self.runtime.read_provisioning_invitation(
+                self.token, allow_accepted=True,
+            ).status,
+            "accepted",
+        )
+        self.assertTrue(self.prove())
+        public_runtime = team_authority.RuntimeTeamAuthority(
+            lambda command: {"result": self.values.get(command[1])},
+            environment={}, now_ms=lambda: self.now,
+            inviter_owner_validator=self.validate_owner,
+        )
+        value, error = public_runtime.accept_invitation(
+            actor=self.member, token=self.token,
+        )
+        self.assertIsNone(value)
+        self.assertEqual(error["code"], "used_invite")
+        self.now = int(self.invitation["expiresAt"]) + 1
+        self.assertTrue(self.prove())
+        self.assertTrue(all(call[0] == "EVAL" for call in self.calls))
+
+    def test_wrong_user_email_workspace_role_or_invite_cannot_recover(self) -> None:
+        self.accept_fixture()
+        actors = (
+            object(), self.owner,
+            AuthenticatedMemberContext(USER_ID, "other@example.test", "Member", WORKSPACE_ID, "member"),
+            AuthenticatedMemberContext(USER_ID, EMAIL, "Member", OTHER_WORKSPACE_ID, "member"),
+            AuthenticatedMemberContext(USER_ID, EMAIL, "Member", WORKSPACE_ID, "owner"),
+        )
+        for actor in actors:
+            with self.subTest(actor_type=type(actor).__name__):
+                with self.assertRaises(team_authority.TeamAuthorityError):
+                    self.prove(actor=actor)
+        with self.assertRaises(team_authority.TeamAuthorityError):
+            self.prove(expected_invitation_id="tinv_another")
+
+    def test_removed_revoked_replaced_or_mismatched_membership_cannot_recover(self) -> None:
+        self.accept_fixture()
+        baseline = dict(self.values)
+        mutations = (
+            (self.member_key, {"status": "removed"}),
+            (self.member_key, {"revokedAt": 1_600}),
+            (self.member_key, {"sourceInvitationId": "tinv_newer"}),
+            (self.member_key, {"memberUserId": OTHER_USER_ID}),
+            (self.member_key, {"acceptedAt": 1_499}),
+            (self.pointer_key, {"sourceInvitationId": "tinv_newer"}),
+            (self.pointer_key, {"email": "other@example.test"}),
+        )
+        for key, changes in mutations:
+            with self.subTest(changes=changes):
+                self.values = dict(baseline)
+                record = json.loads(self.values[key])
+                record.update(changes)
+                self.values[key] = self.wire(record)
+                with self.assertRaises(team_authority.TeamAuthorityError):
+                    self.prove()
+        for missing_key in (self.member_key, self.pointer_key, self.members_key, self.pending_key):
+            with self.subTest(missing_key=missing_key):
+                self.values = dict(baseline)
+                self.values.pop(missing_key)
+                with self.assertRaises(team_authority.TeamAuthorityError):
+                    self.prove()
+
+    def test_changed_indexes_or_inviter_authority_prevent_finalization(self) -> None:
+        self.accept_fixture()
+        self.values[self.members_key] = "[]"
+        with self.assertRaises(team_authority.TeamAuthorityError):
+            self.prove()
+        self.values[self.members_key] = self.wire([EMAIL])
+        self.values[self.pending_key] = self.wire([self.invitation_id])
+        with self.assertRaises(team_authority.TeamAuthorityError):
+            self.prove()
+        self.values[self.pending_key] = "[]"
+        self.owner_valid = False
+        with self.assertRaises(team_authority.TeamAuthorityError):
+            self.prove()
+
+    def test_removal_racing_with_recovery_is_observed_by_primary_snapshot(self) -> None:
+        self.accept_fixture()
+        self.before_snapshot = lambda: self.values.pop(self.pointer_key)
+        with self.assertRaises(team_authority.TeamAuthorityError):
+            self.prove()
+
+    def test_conflicting_terminal_markers_and_late_acceptance_are_rejected(self) -> None:
+        self.invitation["cancelledAt"] = 1_500
+        self.store_invitation()
+        with self.assertRaises(team_authority.TeamAuthorityError):
+            self.runtime.read_provisioning_invitation(self.token)
+        self.invitation.pop("cancelledAt")
+        self.accept_fixture()
+        self.invitation["acceptedAt"] = self.invitation["expiresAt"]
+        self.invitation["updatedAt"] = self.invitation["expiresAt"]
+        self.now = int(self.invitation["expiresAt"])
+        self.store_invitation()
+        with self.assertRaises(team_authority.TeamAuthorityError):
+            self.prove()
+
+    def test_store_failure_never_falls_back_to_replica_reads(self) -> None:
+        def unavailable(command: list[object]) -> dict[str, object]:
+            self.assertEqual(command[0], "EVAL")
+            raise TimeoutError("private store unavailable")
+        runtime = team_authority.RuntimeTeamAuthority(
+            unavailable, environment={}, now_ms=lambda: self.now,
+        )
+        with self.assertRaises(team_authority.TeamAuthorityError) as caught:
+            runtime.read_provisioning_invitation(self.token)
+        self.assertEqual(caught.exception.code, "team_authority_unavailable")
+        self.assertNotIn("private", str(caught.exception))
+
+    def test_tokenless_member_proof_returns_exact_accepted_incarnation(self) -> None:
+        self.accept_fixture()
+        self.now = int(self.invitation["expiresAt"]) + 1
+        before = dict(self.values)
+        invitation = self.runtime.prove_provisioned_member(self.member)
+        self.assertEqual(invitation.invitation_id, self.invitation_id)
+        self.assertEqual(invitation.workspace_id, WORKSPACE_ID)
+        self.assertEqual(invitation.email, EMAIL)
+        self.assertEqual(invitation.inviter_user_id, OTHER_USER_ID)
+        self.assertEqual(invitation.token_digest, self.digest)
+        self.assertEqual(invitation.status, "accepted")
+        self.assertEqual(invitation.expires_at, self.invitation["expiresAt"])
+        self.assertNotIn(self.digest, repr(invitation))
+        self.assertNotIn(self.token, repr(self.calls))
+        self.assertEqual(self.values, before)
+        self.assertEqual([call[0] for call in self.calls], ["EVAL"] * 3)
+        self.assertEqual([call[2] for call in self.calls], [1, 1, 7])
+        self.assertEqual(self.calls[0][3:], [self.pointer_key])
+        self.assertEqual(self.calls[1][3:], [self.invitation_keys[1]])
+        self.assertEqual(self.owner_calls, [(OTHER_USER_ID, WORKSPACE_ID)])
+
+    def test_tokenless_member_proof_rejects_wrong_actor(self) -> None:
+        self.accept_fixture()
+        actors = (
+            object(), self.owner,
+            AuthenticatedMemberContext(OTHER_USER_ID, EMAIL, "Member", WORKSPACE_ID, "member"),
+            AuthenticatedMemberContext(USER_ID, "other@example.test", "Member", WORKSPACE_ID, "member"),
+            AuthenticatedMemberContext(USER_ID, EMAIL, "Member", OTHER_WORKSPACE_ID, "member"),
+            AuthenticatedMemberContext(USER_ID, EMAIL, "Member", WORKSPACE_ID, "owner"),
+        )
+        for actor in actors:
+            with self.subTest(actor_type=type(actor).__name__):
+                with self.assertRaises(team_authority.TeamAuthorityError):
+                    self.runtime.prove_provisioned_member(actor)
+        self.assertEqual(self.owner_calls, [])
+
+    def test_tokenless_member_proof_requires_every_authoritative_record(self) -> None:
+        self.accept_fixture()
+        baseline = dict(self.values)
+        for key in (
+            *self.invitation_keys, self.member_key, self.pointer_key,
+            self.members_key, self.pending_key,
+        ):
+            with self.subTest(missing_key=key):
+                self.values = dict(baseline)
+                self.values.pop(key)
+                with self.assertRaises(team_authority.TeamAuthorityError):
+                    self.runtime.prove_provisioned_member(self.member)
+        self.assertEqual(self.owner_calls, [])
+
+    def test_tokenless_member_proof_rejects_removed_or_mixed_incarnations(self) -> None:
+        self.accept_fixture()
+        baseline = dict(self.values)
+        mutations = (
+            (self.member_key, {"status": "removed"}),
+            (self.member_key, {"revokedAt": 1_600}),
+            (self.member_key, {"sourceInvitationId": "tinv_newer"}),
+            (self.member_key, {"memberUserId": OTHER_USER_ID}),
+            (self.member_key, {"acceptedAt": 1_499}),
+            (self.pointer_key, {"status": "removed"}),
+            (self.pointer_key, {"sourceInvitationId": "tinv_newer"}),
+            (self.pointer_key, {"email": "other@example.test"}),
+        )
+        for key, changes in mutations:
+            with self.subTest(changes=changes):
+                self.values = dict(baseline)
+                record = json.loads(self.values[key])
+                record.update(changes)
+                self.values[key] = self.wire(record)
+                with self.assertRaises(team_authority.TeamAuthorityError):
+                    self.runtime.prove_provisioned_member(self.member)
+        self.assertEqual(self.owner_calls, [])
+
+    def test_tokenless_member_proof_rechecks_pointer_in_primary_snapshot(self) -> None:
+        self.accept_fixture()
+        self.before_snapshot = lambda: self.values.pop(self.pointer_key)
+        with self.assertRaises(team_authority.TeamAuthorityError):
+            self.runtime.prove_provisioned_member(self.member)
+        self.assertEqual(self.owner_calls, [])
+
+    def test_tokenless_member_proof_requires_current_owner_and_indexes(self) -> None:
+        self.accept_fixture()
+        for key, changed_value in (
+            (self.members_key, "[]"),
+            (self.pending_key, self.wire([self.invitation_id])),
+        ):
+            previous = self.values[key]
+            self.values[key] = changed_value
+            with self.assertRaises(team_authority.TeamAuthorityError):
+                self.runtime.prove_provisioned_member(self.member)
+            self.values[key] = previous
+        for owner_valid in (False, "unavailable"):
+            self.owner_valid = owner_valid
+            with self.assertRaises(team_authority.TeamAuthorityError):
+                self.runtime.prove_provisioned_member(self.member)
+
+    def test_tokenless_member_proof_rejects_invalid_acceptance_evidence(self) -> None:
+        self.accept_fixture()
+        baseline = dict(self.invitation)
+        for missing_field in ("acceptedAt", "acceptedByUserId", "acceptedByEmail"):
+            with self.subTest(missing_field=missing_field):
+                self.invitation = dict(baseline)
+                self.invitation.pop(missing_field)
+                self.store_invitation()
+                with self.assertRaises(team_authority.TeamAuthorityError):
+                    self.runtime.prove_provisioned_member(self.member)
+        for changes in (
+            {"status": "invited"},
+            {"cancelledAt": 1_600},
+            {"acceptedAt": baseline["expiresAt"], "updatedAt": baseline["expiresAt"]},
+            {"acceptedByUserId": OTHER_USER_ID},
+        ):
+            with self.subTest(changes=changes):
+                self.invitation = dict(baseline)
+                self.invitation.update(changes)
+                self.store_invitation()
+                with self.assertRaises(team_authority.TeamAuthorityError):
+                    self.runtime.prove_provisioned_member(self.member)
+
+    def test_tokenless_member_proof_store_failure_has_no_replica_fallback(self) -> None:
+        def unavailable(command: list[object]) -> dict[str, object]:
+            self.assertEqual(command[0], "EVAL")
+            raise TimeoutError("private store unavailable")
+        runtime = team_authority.RuntimeTeamAuthority(
+            unavailable, environment={}, now_ms=lambda: self.now,
+        )
+        with self.assertRaises(team_authority.TeamAuthorityError) as caught:
+            runtime.prove_provisioned_member(self.member)
+        self.assertEqual(caught.exception.code, "team_authority_unavailable")
+        self.assertNotIn("private", str(caught.exception))
 
 
 if __name__ == "__main__":

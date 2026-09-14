@@ -17,6 +17,7 @@ import re
 import secrets
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -62,6 +63,27 @@ CommandTransport = Callable[[list[object]], dict[str, object]]
 Clock = Callable[[], int]
 RandomBytes = Callable[[int], bytes]
 InviterOwnerValidator = Callable[[str, str], object]
+
+
+class TeamAuthorityError(Exception):
+    """Redacted failure at the server-only provisioning boundary."""
+
+    def __init__(self, code: str = "team_authority_unavailable") -> None:
+        self.code = code
+        super().__init__(code)
+
+
+@dataclass(frozen=True)
+class ProvisioningInvitation:
+    """Validated invitation metadata; it never contains the raw bearer."""
+
+    invitation_id: str
+    workspace_id: str
+    email: str
+    inviter_user_id: str
+    token_digest: str = field(repr=False)
+    status: str
+    expires_at: int
 
 
 def _error(code: str, message: str) -> TeamError:
@@ -845,6 +867,15 @@ ATOMIC_MUTATION_SCRIPTS = {
 }
 
 
+_PROVISIONING_SNAPSHOT_LUA = r"""
+local values = {}
+for index = 1, #KEYS do
+  values[index] = redis.call('GET', KEYS[index]) or false
+end
+return values
+""".strip()
+
+
 def _normalize_index(raw: object) -> list[str] | None:
     if raw is None:
         return []
@@ -975,6 +1006,241 @@ class RuntimeTeamAuthority:
         if type(result) is not str:
             return None, _unavailable_error()
         return result, None
+
+    def _provisioning_snapshot(self, keys: list[str]) -> list[str]:
+        # Normal EVAL provides one primary snapshot; no replica GET fallback.
+        values, error = self._command([
+            "EVAL", _PROVISIONING_SNAPSHOT_LUA, len(keys), *keys,
+        ])
+        if (
+            error
+            or type(values) is not list
+            or len(values) != len(keys)
+            or any(type(value) is not str for value in values)
+        ):
+            raise TeamAuthorityError()
+        return values
+
+    def _read_provisioning_invitation_record(
+        self, token: object, *, allow_accepted: bool,
+    ) -> tuple[dict[str, object], str]:
+        parsed = _parse_invitation_token(token)
+        if parsed is None or type(allow_accepted) is not bool:
+            raise TeamAuthorityError("invalid_invite")
+        invitation_id, _secret = parsed
+        digest = hashlib.sha256(str(token).encode("ascii")).hexdigest()
+        token_key = _invitation_token_key(invitation_id, digest)
+        raw, error = self._get_primary_raw(token_key)
+        invitation = _decode_record(raw, _normalize_invitation_record)
+        if error:
+            raise TeamAuthorityError()
+        if (
+            invitation is None
+            or raw is None
+            or invitation["id"] != invitation_id
+            or invitation["tokenDigest"] != digest
+            or not verify_invitation_token(token, digest)
+            or raw != _canonical_json(invitation)
+        ):
+            raise TeamAuthorityError("invalid_invite")
+        snapshots = self._provisioning_snapshot([
+            token_key,
+            _workspace_invitation_key(str(invitation["workspaceId"]), invitation_id),
+            _workspace_recipient_invitation_key(
+                str(invitation["workspaceId"]), str(invitation["inviteeEmail"]),
+            ),
+        ])
+        if any(value != raw for value in snapshots):
+            raise TeamAuthorityError("conflict")
+        self._validate_provisioning_invitation_status(
+            invitation, allow_accepted=allow_accepted,
+        )
+        return invitation, raw
+
+    def _validate_provisioning_invitation_status(
+        self, invitation: dict[str, object], *, allow_accepted: bool,
+    ) -> None:
+        now_ms = self._now_ms()
+        if type(now_ms) is not int or now_ms < int(invitation["createdAt"]):
+            raise TeamAuthorityError()
+        if invitation["status"] == "accepted" and allow_accepted:
+            accepted_at = invitation.get("acceptedAt")
+            if (
+                not _valid_member_user_id(invitation.get("acceptedByUserId"))
+                or invitation.get("acceptedByEmail") != invitation["inviteeEmail"]
+                or invitation["acceptedByUserId"] == invitation["createdByUserId"]
+                or type(accepted_at) is not int
+                or not int(invitation["createdAt"]) <= accepted_at
+                < int(invitation["expiresAt"])
+                or invitation["updatedAt"] != accepted_at
+                or accepted_at > now_ms
+                or "declinedAt" in invitation
+                or "cancelledAt" in invitation
+            ):
+                raise TeamAuthorityError("invalid_invite")
+        else:
+            terminal_error = self._terminal_error(invitation, now_ms)
+            if terminal_error:
+                raise TeamAuthorityError(terminal_error["code"])
+            if any(
+                name in invitation
+                for name in (
+                    "acceptedAt", "acceptedByUserId", "acceptedByEmail",
+                    "declinedAt", "cancelledAt",
+                )
+            ):
+                raise TeamAuthorityError("invalid_invite")
+
+    def _require_provisioning_inviter(self, invitation: dict[str, object]) -> None:
+        authorized, error = self._inviter_is_active_owner(invitation)
+        if not authorized:
+            raise TeamAuthorityError(
+                error["code"] if error else "team_authority_unavailable",
+            )
+
+    def read_provisioning_invitation(
+        self, token: str, *, allow_accepted: bool = False,
+    ) -> ProvisioningInvitation:
+        """Read server-only intent; accepted metadata alone grants no authority."""
+        invitation, _raw = self._read_provisioning_invitation_record(
+            token, allow_accepted=allow_accepted,
+        )
+        self._require_provisioning_inviter(invitation)
+        return self._project_provisioning_invitation(invitation)
+
+    @staticmethod
+    def _project_provisioning_invitation(
+        invitation: dict[str, object],
+    ) -> ProvisioningInvitation:
+        return ProvisioningInvitation(
+            invitation_id=str(invitation["id"]),
+            workspace_id=str(invitation["workspaceId"]),
+            email=str(invitation["inviteeEmail"]),
+            inviter_user_id=str(invitation["createdByUserId"]),
+            token_digest=str(invitation["tokenDigest"]),
+            status=str(invitation["status"]),
+            expires_at=int(invitation["expiresAt"]),
+        )
+
+    def prove_provisioning_acceptance(
+        self, token: str, actor: AuthenticatedMemberContext,
+        expected_invitation_id: str,
+    ) -> bool:
+        """Prove an exact accepted incarnation without replaying any mutation."""
+        try:
+            recipient = _require_actor(actor)
+        except (TypeError, ValueError):
+            raise TeamAuthorityError("unauthorized") from None
+        invitation, raw = self._read_provisioning_invitation_record(
+            token, allow_accepted=True,
+        )
+        self._prove_accepted_provisioning_record(
+            recipient, invitation, raw, expected_invitation_id,
+        )
+        return True
+
+    def prove_provisioned_member(
+        self, actor: AuthenticatedMemberContext,
+    ) -> ProvisioningInvitation:
+        """Prove the current accepted incarnation for canonical account revalidation.
+
+        The caller must also verify that the returned invitation is the one
+        bound into the canonical account IDs; Team membership alone cannot
+        establish that original provisioning relationship.
+        """
+        try:
+            recipient = _require_actor(actor)
+        except (TypeError, ValueError):
+            raise TeamAuthorityError("unauthorized") from None
+        if (
+            recipient.membership_role != "member"
+            or not _valid_member_user_id(recipient.user_id)
+        ):
+            raise TeamAuthorityError("wrong_recipient")
+        pointer_raw, error = self._get_primary_raw(
+            _member_user_pointer_key(recipient.workspace_id, recipient.user_id),
+        )
+        pointer = _decode_record(pointer_raw, _normalize_member_user_pointer)
+        if error:
+            raise TeamAuthorityError()
+        if (
+            pointer is None
+            or pointer_raw != _canonical_json(pointer)
+            or pointer["workspaceId"] != recipient.workspace_id
+            or pointer["memberUserId"] != recipient.user_id
+            or pointer["email"] != _normalize_email(recipient.email)
+            or pointer["status"] != "active"
+        ):
+            raise TeamAuthorityError("team_member_not_active")
+        invitation_id = str(pointer["sourceInvitationId"])
+        raw, error = self._get_primary_raw(
+            _workspace_invitation_key(recipient.workspace_id, invitation_id),
+        )
+        invitation = _decode_record(raw, _normalize_invitation_record)
+        if error:
+            raise TeamAuthorityError()
+        if invitation is None or raw is None or raw != _canonical_json(invitation):
+            raise TeamAuthorityError("invalid_invite")
+        return self._prove_accepted_provisioning_record(
+            recipient, invitation, raw, invitation_id,
+        )
+
+    def _prove_accepted_provisioning_record(
+        self, recipient: AuthenticatedMemberContext,
+        invitation: dict[str, object], raw: str, expected_invitation_id: str,
+    ) -> ProvisioningInvitation:
+        self._validate_provisioning_invitation_status(invitation, allow_accepted=True)
+        workspace_id = str(invitation["workspaceId"])
+        email = str(invitation["inviteeEmail"])
+        if (
+            invitation["status"] != "accepted"
+            or not _valid_invitation_id(expected_invitation_id)
+            or invitation["id"] != expected_invitation_id
+            or recipient.workspace_id != workspace_id
+            or recipient.membership_role != "member"
+            or invitation["acceptedByUserId"] != recipient.user_id
+            or invitation["acceptedByEmail"] != _normalize_email(recipient.email)
+            or email != _normalize_email(recipient.email)
+        ):
+            raise TeamAuthorityError("wrong_recipient")
+        snapshots = self._provisioning_snapshot([
+            _invitation_token_key(expected_invitation_id, str(invitation["tokenDigest"])),
+            _workspace_invitation_key(workspace_id, expected_invitation_id),
+            _workspace_recipient_invitation_key(workspace_id, email),
+            _member_key(workspace_id, email),
+            _member_user_pointer_key(workspace_id, recipient.user_id),
+            _members_index_key(workspace_id),
+            _pending_index_key(workspace_id),
+        ])
+        if any(value != raw for value in snapshots[:3]):
+            raise TeamAuthorityError("conflict")
+        membership = _decode_record(snapshots[3], _normalize_membership_record)
+        pointer = _decode_record(snapshots[4], _normalize_member_user_pointer)
+        members = _normalize_index(snapshots[5])
+        pending = _normalize_index(snapshots[6])
+        if (
+            membership is None
+            or pointer is None
+            or snapshots[3] != _canonical_json(membership)
+            or snapshots[4] != _canonical_json(pointer)
+            or membership["status"] != "active"
+            or membership["workspaceId"] != workspace_id
+            or membership["email"] != email
+            or membership["memberUserId"] != recipient.user_id
+            or membership["sourceInvitationId"] != expected_invitation_id
+            or membership["createdAt"] != invitation["createdAt"]
+            or membership["acceptedAt"] != invitation["acceptedAt"]
+            or "removedAt" in membership
+            or "revokedAt" in membership
+            or pointer != _build_member_user_pointer(membership)
+            or members is None
+            or email not in members
+            or pending is None
+            or expected_invitation_id in pending
+        ):
+            raise TeamAuthorityError("team_member_not_active")
+        self._require_provisioning_inviter(invitation)
+        return self._project_provisioning_invitation(invitation)
 
     def _atomic(self, operation: str, keys: list[str], arguments: list[object]) -> tuple[str | None, TeamError | None]:
         script = ATOMIC_MUTATION_SCRIPTS[operation]
@@ -1674,7 +1940,9 @@ def build_runtime_team_authority(
 
 __all__ = (
     "ATOMIC_MUTATION_SCRIPTS",
+    "ProvisioningInvitation",
     "RuntimeTeamAuthority",
+    "TeamAuthorityError",
     "TEAM_ACCESS_LEVELS",
     "TEAM_AUTHORITY_SCHEMA_VERSION",
     "TEAM_INVITE_ID_BYTES",

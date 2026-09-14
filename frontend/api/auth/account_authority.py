@@ -675,8 +675,8 @@ def _authority_matches_candidate(
             and authority.authentication_identity.user_id == candidate.user_id
             and authority.authentication_identity.issuer == identity_key.issuer
             and authority.authentication_identity.subject == identity_key.subject
-            and authority.authentication_identity.method
-            is models.AuthenticationMethod.EMAIL_OTP
+            and type(authority.authentication_identity.method)
+            is models.AuthenticationMethod
             and authority.authentication_identity.status
             is models.AuthenticationIdentityStatus.ACTIVE
             and authority.authentication_identity.verified_email_id
@@ -894,8 +894,8 @@ def auth0_authority_matches(
         return (
             authority.authentication_identity.issuer == identity_key.issuer
             and authority.authentication_identity.subject == identity_key.subject
-            and authority.authentication_identity.method
-            is models.AuthenticationMethod.EMAIL_OTP
+            and type(authority.authentication_identity.method)
+            is models.AuthenticationMethod
             and authority.authentication_identity.status
             is models.AuthenticationIdentityStatus.ACTIVE
             and authority.authentication_identity.verified_email_id
@@ -915,3 +915,26 @@ def auth0_authority_matches(
         )
     except Exception:
         return False
+
+
+def build_runtime_team_invitee_repository(environment: Mapping[str, str]):
+    """Use a dedicated writer credential; never promote/fall back to the reader.
+
+    The existing URL parser and connection factory enforce bounded connection
+    time, TLS and non-autocommit operation. This path is composed only after
+    validated authentication and authoritative Team invitation proof.
+    """
+    from cuevion_db.postgresql_team_invitee_repository import (
+        PostgreSQLTeamInviteeRepository,
+    )
+
+    try:
+        writer_url = environment["CUEVION_AUTH_ACCOUNT_WRITER_DATABASE_URL"]
+        if writer_url == environment.get(_READER_DATABASE_URL_VARIABLE):
+            _raise_configuration_error()
+        parsed = parse_account_reader_database_url(
+            {_READER_DATABASE_URL_VARIABLE: writer_url}
+        )
+    except Exception:
+        _raise_configuration_error()
+    return PostgreSQLTeamInviteeRepository(AccountReaderConnectionFactory(parsed))

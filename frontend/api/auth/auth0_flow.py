@@ -67,6 +67,7 @@ _AUTH0_TIMEOUT_SECONDS = 5
 _BASE64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _PKCE_RE = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
 _VISIBLE_ASCII_RE = re.compile(r"^[!-~]+$")
+_TEAM_INVITE_TOKEN_RE = re.compile(r"tinv_[A-Za-z0-9_-]{1,64}\.[A-Za-z0-9_-]{43}")
 _EMAIL_RE = re.compile(
     r"[a-z0-9!#$%&'*+/=?^_`{|}~-]+"
     r"(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@"
@@ -133,6 +134,7 @@ class AuthTransaction:
     code_verifier: str
     issued_at: int
     expires_at: int
+    team_invite_token: str | None = None
 
     def __repr__(self) -> str:
         return "AuthTransaction(<redacted>)"
@@ -384,6 +386,7 @@ def _new_transaction(
     code_verifier: object,
     issued_at: object,
     expires_at: object,
+    team_invite_token: object = None,
 ) -> AuthTransaction:
     if (
         not _is_exact_opaque_value(state)
@@ -395,6 +398,13 @@ def _new_transaction(
         or type(expires_at) is not int
         or not 0 <= issued_at < expires_at <= _MAX_UNIX_TIMESTAMP
         or expires_at - issued_at != AUTH_TRANSACTION_TTL_SECONDS
+        or (
+            team_invite_token is not None
+            and (
+                type(team_invite_token) is not str
+                or _TEAM_INVITE_TOKEN_RE.fullmatch(team_invite_token) is None
+            )
+        )
     ):
         _fail("invalid_transaction")
     return AuthTransaction(
@@ -403,6 +413,7 @@ def _new_transaction(
         code_verifier=code_verifier,
         issued_at=issued_at,
         expires_at=expires_at,
+        team_invite_token=team_invite_token,
     )
 
 
@@ -415,6 +426,8 @@ def _transaction_plaintext(transaction: AuthTransaction) -> bytes:
         "state": transaction.state,
         "v": _TRANSACTION_VERSION,
     }
+    if transaction.team_invite_token is not None:
+        value["team_invite_token"] = transaction.team_invite_token
     encoded = json.dumps(
         value,
         allow_nan=False,
@@ -454,6 +467,8 @@ def build_authorization_request(
     configuration: Auth0Configuration,
     now: int,
     random_bytes: Callable[[int], bytes] = secrets.token_bytes,
+    *,
+    team_invite_token: str | None = None,
 ) -> AuthorizationRequest:
     """Create one Auth0 authorize URL and its encrypted PKCE transaction."""
 
@@ -461,6 +476,11 @@ def build_authorization_request(
     issued_at = _require_timestamp(now, error_code="internal_error")
     if issued_at > _MAX_UNIX_TIMESTAMP - AUTH_TRANSACTION_TTL_SECONDS:
         _fail("internal_error")
+    if team_invite_token is not None and (
+        type(team_invite_token) is not str
+        or _TEAM_INVITE_TOKEN_RE.fullmatch(team_invite_token) is None
+    ):
+        _fail("invalid_transaction")
 
     state = _base64url_encode(_random_bytes(random_bytes, _OPAQUE_VALUE_BYTES))
     nonce = _base64url_encode(_random_bytes(random_bytes, _OPAQUE_VALUE_BYTES))
@@ -473,6 +493,7 @@ def build_authorization_request(
         code_verifier=code_verifier,
         issued_at=issued_at,
         expires_at=issued_at + AUTH_TRANSACTION_TTL_SECONDS,
+        team_invite_token=team_invite_token,
     )
     code_challenge = _base64url_encode(
         hashlib.sha256(code_verifier.encode("ascii")).digest()
@@ -566,14 +587,23 @@ def decrypt_transaction_cookie(
         maximum_bytes=_MAX_TRANSACTION_PLAINTEXT_BYTES,
         error_code="invalid_transaction",
     )
-    if type(payload) is not dict or set(payload) != {
+    required_fields = {
         "code_verifier",
         "expires_at",
         "issued_at",
         "nonce",
         "state",
         "v",
-    }:
+    }
+    if type(payload) is not dict or set(payload) not in (
+        required_fields,
+        required_fields | {"team_invite_token"},
+    ):
+        _fail("invalid_transaction")
+    if "team_invite_token" in payload and (
+        type(payload["team_invite_token"]) is not str
+        or _TEAM_INVITE_TOKEN_RE.fullmatch(payload["team_invite_token"]) is None
+    ):
         _fail("invalid_transaction")
     if type(payload["v"]) is not int or payload["v"] != _TRANSACTION_VERSION:
         _fail("invalid_transaction")
@@ -583,6 +613,7 @@ def decrypt_transaction_cookie(
         code_verifier=payload["code_verifier"],
         issued_at=payload["issued_at"],
         expires_at=payload["expires_at"],
+        team_invite_token=payload.get("team_invite_token"),
     )
     if not transaction.issued_at <= current_time < transaction.expires_at:
         _fail("invalid_transaction")

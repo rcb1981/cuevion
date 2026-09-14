@@ -54,7 +54,7 @@ def _random_source():
     return lambda length: next(values)
 
 
-def _new_session(commands: MemoryCommands, now: int = 1_000):
+def _new_session(commands: MemoryCommands, now: int = 1_000, *, workspace_role="owner"):
     store = session_store.AuthSessionStore(commands)
     record, cookie = session_store.create_server_session(
         store,
@@ -66,6 +66,7 @@ def _new_session(commands: MemoryCommands, now: int = 1_000):
         subject=SUBJECT,
         now=now,
         random_bytes=_random_source(),
+        workspace_role=workspace_role,
     )
     cookie_value = cookie.split(";", 1)[0]
     return store, record, cookie, Headers(cookie_value)
@@ -91,6 +92,7 @@ class ServerSessionTests(unittest.TestCase):
                 "sessionId",
                 "userId",
                 "workspaceId",
+                "workspaceRole",
                 "securityEpoch",
                 "issuer",
                 "subject",
@@ -99,6 +101,50 @@ class ServerSessionTests(unittest.TestCase):
                 "bindingDigest",
             },
         )
+        self.assertEqual(stored["workspaceRole"], "owner")
+
+    def test_workspace_roles_roundtrip_without_owner_promotion(self):
+        for role in ("owner", "admin", "member"):
+            with self.subTest(role=role):
+                commands = MemoryCommands()
+                store, record, _cookie, headers = _new_session(commands, workspace_role=role)
+                loaded, _lookup = session_store.load_server_session(
+                    store, headers=headers, secret=SECRET, now=1_001,
+                )
+                self.assertEqual(record.workspace_role, role)
+                self.assertEqual(loaded.workspace_role, role)
+                self.assertEqual(json.loads(commands.commands[0][2])["workspaceRole"], role)
+
+    def test_legacy_session_without_role_retains_owner_compatibility(self):
+        commands = MemoryCommands()
+        store, record, _cookie, headers = _new_session(commands)
+        key = next(iter(commands.values))
+        payload = json.loads(commands.values[key])
+        del payload["workspaceRole"]
+        commands.values[key] = json.dumps(payload)
+        loaded, _lookup = session_store.load_server_session(
+            store, headers=headers, secret=SECRET, now=1_001,
+        )
+        self.assertEqual(loaded, record)
+        self.assertEqual(loaded.workspace_role, "owner")
+
+    def test_malformed_present_role_fails_closed_and_cannot_be_written(self):
+        for role in (None, True, 1, "OWNER", "guest", "", " member ", [], {}):
+            with self.subTest(role_type=type(role).__name__):
+                commands = MemoryCommands()
+                store, _record, _cookie, headers = _new_session(commands)
+                key = next(iter(commands.values))
+                payload = json.loads(commands.values[key])
+                payload["workspaceRole"] = role
+                commands.values[key] = json.dumps(payload)
+                with self.assertRaises(session_store.SessionStoreUnavailable):
+                    session_store.load_server_session(
+                        store, headers=headers, secret=SECRET, now=1_001,
+                    )
+                new_commands = MemoryCommands()
+                with self.assertRaises(ValueError):
+                    _new_session(new_commands, workspace_role=role)
+                self.assertEqual(new_commands.commands, [])
 
     def test_cookie_flags_and_eight_hour_lifetime_are_exact(self):
         commands = MemoryCommands()
