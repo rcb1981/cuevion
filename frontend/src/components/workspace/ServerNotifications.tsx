@@ -24,7 +24,9 @@ export function ServerNotifications({ store, state, onOpen, preview = false }: S
       {ids.map(id => {
         const row = state.byId.get(id)!;
         return <button key={id} type="button" onClick={() => onOpen(row)} className="flex w-full flex-wrap items-start justify-between gap-x-4 gap-y-2 rounded-xl px-3 py-4 text-left hover:bg-[var(--workspace-surface-hover)] focus-visible:outline focus-visible:outline-2" data-notification-id={id}>
-          <span className="min-w-0 flex-1 basis-48 break-words text-[var(--workspace-text)]">{notificationCopy(row)}{row.readAt === null ? <span className="ml-2 inline-block rounded border border-current px-1.5 text-xs font-semibold">Unread</span> : null}</span>
+          <span className="min-w-0 flex-1 basis-48 break-words text-[var(--workspace-text)]">{notificationCopy(row)}{row.readAt === null ? <span className="ml-2 inline-block rounded border border-current px-1.5 text-xs font-semibold">Unread</span> : null}
+            {row.attention === "mention" ? <span className="mt-1 block text-xs font-medium text-[var(--workspace-accent-text)]">Mentioned you</span> : null}
+          </span>
           <time dateTime={new Date(row.createdAt).toISOString()} className="text-xs text-[var(--workspace-text-soft)]">{new Date(row.createdAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</time>
         </button>;
       })}
