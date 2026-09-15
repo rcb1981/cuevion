@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import type { MailboxSyncPresentation } from "../../../lib/mailboxRefreshSemantics";
 
 export type MobileWorkspaceMessage = {
   id: string;
@@ -51,7 +52,7 @@ type MobileWorkspaceShellProps = {
   accountEmail: string;
   connectedInboxCount: number;
   syncFeedbackMessage?: string | null;
-  syncingMailboxId?: string | null;
+  mailboxSyncPresentation: Partial<Record<string, MailboxSyncPresentation>>;
   mailboxes: MobileWorkspaceMailbox[];
   priorityMessages: MobileWorkspaceMessage[];
   onLogoutClick: () => void;
@@ -86,6 +87,23 @@ type MobileWorkspaceShellProps = {
 function formatMessageBody(message: MobileWorkspaceMessage) {
   const bodyLines = message.body.filter((line) => line.trim().length > 0);
   return bodyLines.length > 0 ? bodyLines : [message.snippet || "No preview available."];
+}
+
+function resolveMobileMailboxRefreshStatus(
+  presentation: MailboxSyncPresentation | undefined,
+  refreshStatus?: string | null,
+) {
+  if (!presentation?.message) return refreshStatus;
+
+  const requested = refreshStatus === "↻ Refresh requested…";
+  const timedOut = refreshStatus?.startsWith("Refresh is taking longer than expected");
+  const redundantPendingStatus =
+    (presentation.inboxRefreshing && requested) ||
+    (presentation.inboxUpdated && (requested || timedOut));
+
+  return [presentation.message, redundantPendingStatus ? null : refreshStatus]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function MobileMark() {
@@ -218,7 +236,7 @@ export function MobileWorkspaceShell({
   accountEmail,
   connectedInboxCount,
   syncFeedbackMessage,
-  syncingMailboxId,
+  mailboxSyncPresentation,
   mailboxes,
   priorityMessages,
   onLogoutClick,
@@ -277,8 +295,17 @@ export function MobileWorkspaceShell({
     (activeTab === "inboxes"
       ? connectedFirstMailboxes.find((mailbox) => mailbox.connected) ?? null
       : null);
+  const activeMailboxSyncPresentation = activeMailbox
+    ? mailboxSyncPresentation[activeMailbox.id]
+    : undefined;
   const isActiveMailboxSyncing =
-    activeMailbox !== null && syncingMailboxId === activeMailbox.id;
+    activeMailboxSyncPresentation?.operationInFlight ?? false;
+  const isActiveInboxRefreshing =
+    activeMailboxSyncPresentation?.inboxRefreshing ?? false;
+  const activeMailboxRefreshStatus = resolveMobileMailboxRefreshStatus(
+    activeMailboxSyncPresentation,
+    activeMailbox?.refreshStatus,
+  );
 
   const openTab = (tab: MobileTab) => {
     setActiveTab(tab);
@@ -350,7 +377,11 @@ export function MobileWorkspaceShell({
               {view.kind === "mailbox" && activeMailbox ? (
                 <button
                   type="button"
-                  aria-label={isActiveMailboxSyncing ? "Syncing inbox" : "Sync inbox"}
+                  aria-label={
+                    isActiveMailboxSyncing
+                      ? activeMailboxSyncPresentation?.message ?? "Refreshing Inbox"
+                      : "Sync mailbox"
+                  }
                   disabled={!activeMailbox.connected || isActiveMailboxSyncing || !onSyncMailbox}
                   onClick={() => {
                     void onSyncMailbox?.(activeMailbox.id);
@@ -360,7 +391,7 @@ export function MobileWorkspaceShell({
                   <svg
                     aria-hidden="true"
                     viewBox="0 0 16 16"
-                    className={`h-4 w-4 ${isActiveMailboxSyncing ? "animate-spin [animation-direction:reverse]" : ""}`}
+                    className={`h-4 w-4 ${isActiveInboxRefreshing ? "animate-spin [animation-direction:reverse]" : ""}`}
                     fill="none"
                     stroke="currentColor"
                     strokeWidth="1.7"
@@ -379,7 +410,7 @@ export function MobileWorkspaceShell({
             <div className="w-12" />
           )}
         </div>
-        {syncFeedbackMessage ? (
+        {syncFeedbackMessage && !(view.kind === "mailbox" && activeMailboxSyncPresentation?.message) ? (
           <div className="mt-2 truncate rounded-full border border-[color:rgba(232,211,174,0.24)] bg-[color:rgba(255,250,239,0.12)] px-3 py-1.5 text-center text-[0.72rem] font-medium text-[color:rgba(255,248,236,0.88)]">
             {syncFeedbackMessage}
           </div>
@@ -493,9 +524,9 @@ export function MobileWorkspaceShell({
         ) : activeTab === "inboxes" ? (
           view.kind === "mailbox" && activeMailbox ? (
             <>
-              {activeMailbox.refreshStatus ? (
+              {activeMailboxRefreshStatus ? (
                 <div className="border-b border-[color:rgba(86,69,46,0.08)] bg-[color:rgba(255,250,239,0.6)] px-5 py-2 text-[0.72rem] text-[color:rgba(49,92,75,0.82)] dark:border-[color:rgba(232,211,174,0.08)] dark:bg-[color:rgba(19,17,15,0.5)] dark:text-[color:rgba(184,225,197,0.82)] whitespace-pre-wrap break-all">
-                  {activeMailbox.refreshStatus}
+                  {activeMailboxRefreshStatus}
                 </div>
               ) : null}
               <MessageList
@@ -512,6 +543,10 @@ export function MobileWorkspaceShell({
             <div className="overflow-hidden border-y border-[color:rgba(86,69,46,0.08)] bg-[color:rgba(255,251,244,0.5)] dark:border-[color:rgba(232,211,174,0.08)] dark:bg-[color:rgba(19,17,15,0.72)]">
               {connectedFirstMailboxes.map((mailbox) => {
                 const unreadCount = mailbox.messages.filter((message) => message.unread).length;
+                const refreshStatus = resolveMobileMailboxRefreshStatus(
+                  mailboxSyncPresentation[mailbox.id],
+                  mailbox.refreshStatus,
+                );
                 const visibleMessageLabel =
                   mailbox.syncError &&
                   mailbox.messages.length === 0 &&
@@ -546,9 +581,9 @@ export function MobileWorkspaceShell({
                           refresh failures should not persist as a permanent orange warning
                           on every inbox row. The refreshStatus (auto-dismissed after a few
                           seconds) conveys the result of a user-triggered sync instead. */}
-                      {mailbox.refreshStatus ? (
+                      {refreshStatus ? (
                         <span className="mt-0.5 block truncate text-[0.68rem] text-[color:rgba(49,92,75,0.76)] dark:text-[color:rgba(184,225,197,0.76)]">
-                          {mailbox.refreshStatus}
+                          {refreshStatus}
                         </span>
                       ) : null}
                     </span>

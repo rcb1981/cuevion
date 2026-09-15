@@ -226,6 +226,7 @@ import {
   createGmailUnreadIntentAuthority,
   createGmailArchiveReconciliationCoordinator,
   resolveMailboxRefreshPlan,
+  resolveMailboxSyncPresentation,
   resolveProviderArchiveRefreshSemantics,
   removeProvenGmailInboxReentriesFromArchive,
   resolveSuccessfulInboxRefreshPresentation,
@@ -234,6 +235,8 @@ import {
   summarizeStartupMailboxRefreshResults,
   type MailboxRefreshReason,
   type MailboxRefreshResult,
+  type MailboxInboxReadiness,
+  type MailboxSyncPresentation,
   type GmailArchiveReconciliationCoordinator,
   type GmailUnreadIntentToken,
   type ProviderArchiveCapability,
@@ -17158,6 +17161,7 @@ function MailboxView({
   onReconcileProviderImapTrash,
   onSyncMailbox,
   isSyncingMailbox,
+  mailboxSyncPresentation,
   onSyncUnreadOverrides,
   onBeginGmailUnreadIntent,
   onFailGmailUnreadIntent,
@@ -17309,6 +17313,7 @@ function MailboxView({
   ) => Promise<boolean>;
   onSyncMailbox: () => void;
   isSyncingMailbox: boolean;
+  mailboxSyncPresentation: MailboxSyncPresentation;
   onSyncUnreadOverrides: (messages: MessageIdentitySource[], unread: boolean) => void;
   onBeginGmailUnreadIntent: (
     mailboxId: string,
@@ -28047,14 +28052,14 @@ function MailboxView({
             Compose
           </button>
           <MailToolbarIconButton
-            label={isSyncingMailbox ? "Syncing" : "Sync"}
+            label={isSyncingMailbox ? mailboxSyncPresentation.message ?? "Syncing" : "Sync"}
             onClick={onSyncMailbox}
             disabled={isSyncingMailbox}
           >
             <svg
               aria-hidden="true"
               viewBox="0 0 16 16"
-              className={`h-4 w-4 ${isSyncingMailbox ? "animate-spin [animation-direction:reverse]" : ""}`}
+              className={`h-4 w-4 ${mailboxSyncPresentation.inboxRefreshing ? "animate-spin [animation-direction:reverse]" : ""}`}
               fill="none"
               stroke="currentColor"
               strokeWidth="1.7"
@@ -28067,6 +28072,11 @@ function MailboxView({
               <path d="M12.5 13.5v-2h-2" />
             </svg>
           </MailToolbarIconButton>
+          {mailboxSyncPresentation.message ? (
+            <span role="status" className="text-xs text-[var(--workspace-text-faint)]">
+              {mailboxSyncPresentation.message}
+            </span>
+          ) : null}
           <MailToolbarIconButton
             label="Reply"
             disabled={!hasSingleSelection}
@@ -45286,6 +45296,7 @@ export function WorkspaceShell({
       (providerTrashFetchSequenceByMailboxRef.current[mailboxId] ?? 0) + 1;
     providerTrashFetchSequenceByMailboxRef.current[mailboxId] = sequence;
     providerTrashFetchMailboxIdsRef.current.add(mailboxId);
+    publishMailboxSyncActivity();
 
     try {
       const response = await fetchProviderImapTrash({ mailboxId });
@@ -45345,6 +45356,7 @@ export function WorkspaceShell({
         providerTrashFetchSequenceByMailboxRef.current[mailboxId] === sequence
       ) {
         providerTrashFetchMailboxIdsRef.current.delete(mailboxId);
+        publishMailboxSyncActivity();
       }
     }
   };
@@ -45400,6 +45412,7 @@ export function WorkspaceShell({
       (providerTrashFetchSequenceByMailboxRef.current[mailboxId] ?? 0) + 1;
     providerTrashFetchSequenceByMailboxRef.current[mailboxId] = sequence;
     providerTrashFetchMailboxIdsRef.current.add(mailboxId);
+    publishMailboxSyncActivity();
 
     try {
       const response = await fetchGmailTrash(managedMailbox.id);
@@ -45445,6 +45458,7 @@ export function WorkspaceShell({
         providerTrashFetchSequenceByMailboxRef.current[mailboxId] === sequence
       ) {
         providerTrashFetchMailboxIdsRef.current.delete(mailboxId);
+        publishMailboxSyncActivity();
       }
     }
   };
@@ -45483,6 +45497,7 @@ export function WorkspaceShell({
       (providerTrashFetchSequenceByMailboxRef.current[mailboxId] ?? 0) + 1;
     providerTrashFetchSequenceByMailboxRef.current[mailboxId] = sequence;
     providerTrashFetchMailboxIdsRef.current.add(mailboxId);
+    publishMailboxSyncActivity();
 
     try {
       const [inboxResponse, trashResponse] = await Promise.all([
@@ -45558,6 +45573,7 @@ export function WorkspaceShell({
         providerTrashFetchSequenceByMailboxRef.current[mailboxId] === sequence
       ) {
         providerTrashFetchMailboxIdsRef.current.delete(mailboxId);
+        publishMailboxSyncActivity();
       }
     }
   };
@@ -45626,6 +45642,57 @@ export function WorkspaceShell({
     useState<LearningLaunchRequest>(null);
   const [syncingMailboxId, setSyncingMailboxId] = useState<InboxId | null>(null);
   const syncingMailboxIdsRef = useRef<Set<InboxId>>(new Set());
+  // Rerender on lock activity, without replacing or releasing any provider lock.
+  const [, setMailboxSyncActivityRevision] = useState(0);
+  const publishMailboxSyncActivity = () =>
+    setMailboxSyncActivityRevision((current) => current + 1);
+  // Scope freshness to the member, exact mailbox and connection incarnation.
+  // Old async completions can only update their own presentation scope.
+  const [mailboxInboxReadiness, updateMailboxInboxReadiness] = useState<
+    Partial<Record<string, MailboxInboxReadiness>>
+  >({});
+  const readMailboxSyncPresentationScope = (mailboxId: InboxId) =>
+    JSON.stringify([
+      learningStorageKey,
+      mailboxId,
+      providerArchiveCurrentConnectionKeysRef.current[mailboxId] ?? null,
+      providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0,
+    ]);
+  const setMailboxInboxReadiness = (
+    scope: string,
+    readiness: MailboxInboxReadiness,
+    onlyIfRefreshing = false,
+  ) => {
+    updateMailboxInboxReadiness((current) =>
+      onlyIfRefreshing && current[scope] !== "refreshing"
+        ? current
+        : { ...current, [scope]: readiness },
+    );
+  };
+  const mailboxSyncPresentation: Partial<Record<InboxId, MailboxSyncPresentation>> =
+    Object.fromEntries(
+      (hasAuthenticatedMemberAuthority ? orderedMailboxes : []).map((mailbox) => [
+        mailbox.id,
+        resolveMailboxSyncPresentation({
+          operationInFlight: syncingMailboxIdsRef.current.has(mailbox.id),
+          archiveInFlight: providerArchiveFetchMailboxIdsRef.current.has(mailbox.id),
+          trashInFlight: providerTrashFetchMailboxIdsRef.current.has(mailbox.id),
+          inboxReadiness: mailboxInboxReadiness[readMailboxSyncPresentationScope(mailbox.id)],
+          folderNeedsAttention: Boolean(
+            providerArchiveFolderStatusMessages[mailbox.id] ||
+            providerTrashFolderStatusMessages[mailbox.id],
+          ),
+        }),
+      ]),
+    );
+  const activeSyncMailboxIds = orderedMailboxes
+    .filter((mailbox) => {
+      const presentation = mailboxSyncPresentation[mailbox.id];
+      return presentation?.operationInFlight ||
+        providerArchiveFetchMailboxIdsRef.current.has(mailbox.id) ||
+        providerTrashFetchMailboxIdsRef.current.has(mailbox.id);
+    })
+    .map((mailbox) => mailbox.id);
   const pendingGmailArchiveReconciliationMailboxIdsRef = useRef<Set<InboxId>>(
     new Set(),
   );
@@ -45675,7 +45742,7 @@ export function WorkspaceShell({
     activeSection === "Dashboard" &&
     !activeMailbox &&
     !visibleActiveTarget &&
-    (!areMailboxCountsHydrated || Boolean(syncingMailboxId));
+    (!areMailboxCountsHydrated || activeSyncMailboxIds.length > 0);
   const handleProductAccessChange = (nextAccess: ProductAccess) => {
     writeStoredProductAccess(nextAccess);
     setProductAccess(nextAccess);
@@ -45693,38 +45760,14 @@ export function WorkspaceShell({
     }
   }, [activeTarget, isDemoWorkspace]);
 
-  const startupSyncProgressMessage = (() => {
-    if (startupSyncStatus !== "running" || !syncingMailboxId) {
-      return null;
-    }
-
-    const currentSyncIndex = startupSyncMailboxIds.indexOf(syncingMailboxId);
-
-    if (currentSyncIndex === -1 || startupSyncMailboxIds.length === 0) {
-      return null;
-    }
-
-    const syncingMailboxTitle =
-      orderedMailboxes.find((mailbox) => mailbox.id === syncingMailboxId)?.title ??
-      null;
-
-    if (!syncingMailboxTitle) {
-      return null;
-    }
-
-    return `Syncing ${currentSyncIndex + 1} of ${startupSyncMailboxIds.length} · ${syncingMailboxTitle}`;
-  })();
-  const dashboardSyncStatusMessage =
-    shouldShowDashboardSyncStatus
-      ? startupSyncProgressMessage ??
-        mailboxSyncFeedbackMessage ??
-        (syncingMailboxId
-          ? `Refreshing ${
-              orderedMailboxes.find((mailbox) => mailbox.id === syncingMailboxId)?.title ??
-              "inbox"
-            }`
-          : "Syncing inboxes...")
-      : null;
+  const dashboardSyncStatusMessage = shouldShowDashboardSyncStatus
+    ? activeSyncMailboxIds.length > 0
+      ? activeSyncMailboxIds.map((mailboxId) => {
+          const title = orderedMailboxes.find((mailbox) => mailbox.id === mailboxId)?.title ?? "Inbox";
+          return `${title}: ${mailboxSyncPresentation[mailboxId]?.message ?? "Sync in progress"}`;
+        }).join(" · ")
+      : mailboxSyncFeedbackMessage ?? "Syncing inboxes..."
+    : null;
   const [mailboxSyncErrors, setMailboxSyncErrors] = useState<
     Partial<Record<InboxId, string>>
   >({});
@@ -45753,7 +45796,7 @@ export function WorkspaceShell({
   const connectedInboxStatusContext =
     connectedInboxCount === 0
       ? "No connected inboxes yet"
-      : !areMailboxCountsHydrated || Boolean(syncingMailboxId)
+      : !areMailboxCountsHydrated || activeSyncMailboxIds.length > 0
         ? "Sync in progress"
         : hasConnectedInboxNeedingAttention
           ? "Some inboxes need attention"
@@ -52888,6 +52931,7 @@ export function WorkspaceShell({
     }
 
     providerArchiveFetchMailboxIdsRef.current.add(mailboxId);
+    publishMailboxSyncActivity();
 
     try {
       const archiveResponse = await fetchProviderArchive(managedMailbox.id);
@@ -52955,6 +52999,7 @@ export function WorkspaceShell({
     } finally {
       providerArchiveFetchMailboxIdsRef.current.delete(mailboxId);
       drainGmailArchiveReconciliation(mailboxId);
+      publishMailboxSyncActivity();
     }
   };
 
@@ -53039,7 +53084,10 @@ export function WorkspaceShell({
       canUseGmailOAuthFetch ? "google" : "custom_imap",
     );
     syncingMailboxIdsRef.current.add(mailboxId);
+    publishMailboxSyncActivity();
     setSyncingMailboxId(mailboxId);
+    const inboxReadinessScope = readMailboxSyncPresentationScope(mailboxId);
+    setMailboxInboxReadiness(inboxReadinessScope, "refreshing");
     if (!isProviderReconciliation) {
       clearMailboxSyncError(mailboxId);
     }
@@ -53226,6 +53274,7 @@ export function WorkspaceShell({
         if (isProviderReconciliation) {
           return "failed";
         }
+        setMailboxInboxReadiness(inboxReadinessScope, "not_updated");
         completeMailboxHealthCheck(mailboxHealthOperation, {
           ok: false,
           errorCode: response.error?.code,
@@ -53637,6 +53686,14 @@ export function WorkspaceShell({
           clearMailboxSyncError(mailboxId);
         }
       }
+      // The accepted response has passed the existing guards, persistence and
+      // mailbox publication path. This status never releases the operation lock.
+      if (orderedMailboxes.some((mailbox) => mailbox.id === mailboxId)) {
+        setMailboxInboxReadiness(
+          inboxReadinessScope,
+          refreshPresentation.result === "partial" ? "partial" : "updated",
+        );
+      }
       // Write diagnostic so onSyncMailbox can surface it on mobile.
       lastRefreshDiagnosticRef.current[mailboxId] = {
         email: managedMailbox.email.trim(),
@@ -53660,6 +53717,7 @@ export function WorkspaceShell({
       }
 	      return refreshPresentation.result;
     } finally {
+      setMailboxInboxReadiness(inboxReadinessScope, "not_updated", true);
       if (reconciliationArchivePromise) {
         await reconciliationArchivePromise.catch(() => undefined);
       }
@@ -53673,6 +53731,7 @@ export function WorkspaceShell({
       syncingMailboxIdsRef.current.delete(mailboxId);
       setSyncingMailboxId((current) => (current === mailboxId ? null : current));
       drainGmailArchiveReconciliation(mailboxId);
+      publishMailboxSyncActivity();
     }
   };
 
@@ -56370,7 +56429,7 @@ export function WorkspaceShell({
           accountEmail={activeWorkspaceEmail}
           connectedInboxCount={connectedInboxCount}
           syncFeedbackMessage={mailboxSyncFeedbackMessage}
-          syncingMailboxId={syncingMailboxId}
+          mailboxSyncPresentation={mailboxSyncPresentation}
           mailboxes={mobileMailboxes}
           priorityMessages={mobilePriorityMessages}
           onLogoutClick={() => setIsLogoutConfirmationOpen(true)}
@@ -56423,7 +56482,7 @@ export function WorkspaceShell({
                 const count = mailboxStore[mailboxId as InboxId]?.Inbox.length ?? 0;
                 const statusLine =
                   result === "synced"
-                    ? `✓ Refresh complete (${count} cached)`
+                    ? `✓ Inbox updated (${count} cached)`
                     : `⚠ Partial refresh — quota limit (${count} cached)`;
                 setMobileMailboxRefreshStatus((prev) => ({
                   ...prev,
@@ -56693,7 +56752,13 @@ export function WorkspaceShell({
                     reconcileProviderImapTrashById
                   }
                   onSyncMailbox={handleSyncActiveMailbox}
-                  isSyncingMailbox={syncingMailboxId === activeMailbox.id}
+                  isSyncingMailbox={syncingMailboxIdsRef.current.has(activeMailbox.id)}
+                  mailboxSyncPresentation={mailboxSyncPresentation[activeMailbox.id] ?? {
+                    operationInFlight: false,
+                    inboxRefreshing: false,
+                    inboxUpdated: false,
+                    message: null,
+                  }}
                   onSyncUnreadOverrides={syncUnreadOverrides}
                   onBeginGmailUnreadIntent={beginGmailUnreadIntent}
                   onFailGmailUnreadIntent={failGmailUnreadIntent}
@@ -56927,7 +56992,7 @@ export function WorkspaceShell({
 		            </div>
 		          </div>
 		        ) : null}
-		        {mailboxSyncFeedbackMessage && !shouldShowDashboardSyncStatus ? (
+		        {mailboxSyncFeedbackMessage && !shouldShowDashboardSyncStatus && !(activeMailbox && startupSyncStatus === "running") ? (
 		          <div className="pointer-events-none fixed bottom-6 right-6 z-[341]">
 		            <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.84rem] leading-6 text-[var(--workspace-text)] shadow-panel">
 		              {mailboxSyncFeedbackMessage}

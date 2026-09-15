@@ -1602,7 +1602,7 @@ assert.match(
 );
 assert.match(
   mobileRefresh,
-  /result === "synced"[\s\S]*`✓ Refresh complete/,
+  /result === "synced"[\s\S]*`✓ Inbox updated/,
 );
 
 assert.match(source, /filterLegacyArchiveHydration<MailMessage>/);

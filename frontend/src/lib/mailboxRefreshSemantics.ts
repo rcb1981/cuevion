@@ -1,6 +1,52 @@
 import type { ProviderId } from "../types/onboarding";
 
 export type MailboxRefreshResult = "synced" | "skipped" | "failed" | "partial";
+export type MailboxInboxReadiness = "refreshing" | "updated" | "partial" | "not_updated";
+export type MailboxSyncPresentation = {
+  operationInFlight: boolean;
+  inboxRefreshing: boolean;
+  inboxUpdated: boolean;
+  message: string | null;
+};
+
+// Presentation only. Provider locks and refresh planning remain authoritative.
+export function resolveMailboxSyncPresentation({
+  operationInFlight,
+  archiveInFlight,
+  trashInFlight,
+  inboxReadiness,
+  folderNeedsAttention,
+}: {
+  operationInFlight: boolean;
+  archiveInFlight: boolean;
+  trashInFlight: boolean;
+  inboxReadiness?: MailboxInboxReadiness;
+  folderNeedsAttention: boolean;
+}): MailboxSyncPresentation {
+  const inboxRefreshing =
+    operationInFlight && (!inboxReadiness || inboxReadiness === "refreshing");
+  const backgroundInFlight =
+    archiveInFlight || trashInFlight || (operationInFlight && !inboxRefreshing);
+  const messages: string[] = [];
+  if (inboxRefreshing) {
+    messages.push("Refreshing Inbox…");
+  } else if (inboxReadiness === "updated") {
+    messages.push("Inbox updated");
+  } else if (inboxReadiness === "partial") {
+    messages.push("Inbox updated with warnings");
+  } else if (inboxReadiness === "not_updated") {
+    messages.push("Inbox not updated");
+  }
+  if (backgroundInFlight) messages.push("Background folders syncing");
+  if (folderNeedsAttention) messages.push("Some folders need attention");
+  return {
+    operationInFlight,
+    inboxRefreshing,
+    inboxUpdated: inboxReadiness === "updated" || inboxReadiness === "partial",
+    message: messages.join(" · ") || null,
+  };
+}
+
 export type StartupSyncStatus = "idle" | "running" | "done" | "partial_error";
 export type ProviderArchiveCapability = "available" | "unavailable" | "unknown";
 export type MailboxRefreshReason =
