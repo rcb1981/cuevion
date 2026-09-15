@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { MailboxSyncPresentation } from "../../../lib/mailboxRefreshSemantics";
+import { resolveMailboxSyncPresentation, type MailboxSyncPresentation } from "../../../lib/mailboxRefreshSemantics";
 import type { MobileWorkspaceMailbox } from "./MobileWorkspaceShell";
 
 // Render the production component with the same automatic JSX runtime as Vite.
@@ -108,18 +108,31 @@ test("mobile fresh Inbox stops spinning while the provider operation stays locke
   assert.doesNotMatch(html, /Refresh requested|Refresh complete|Everything is synced/);
 });
 
-test("mobile background failure preserves fresh Inbox presentation and rows", () => {
-  const html = render({ a: {
-    operationInFlight: false,
-    inboxRefreshing: false,
-    inboxUpdated: true,
-    message: "Some folders couldn’t update",
-  } });
-  assert.match(html, /Some folders couldn’t update/);
-  assertMessageAvailable(html);
-  assert.doesNotMatch(syncButton(html, "Sync mailbox"), /disabled=/);
-  assert.doesNotMatch(html, /animate-spin|Refresh complete/);
-});
+for (const folders of ["Archive", "Trash", "Archive + Trash"]) {
+  test(`mobile ${folders} background failure uses the same quiet Inbox status as desktop`, () => {
+    for (const operationInFlight of [true, false]) {
+      for (const showUpdated of [true, false]) {
+        const presentation = resolveMailboxSyncPresentation({
+          operationInFlight,
+          archiveInFlight: operationInFlight && folders.includes("Archive"),
+          trashInFlight: operationInFlight && folders.includes("Trash"),
+          inboxReadiness: "updated",
+          folderNeedsAttention: true,
+          showUpdated,
+        });
+        const html = render({ a: presentation });
+        assert.equal(presentation.message, showUpdated ? "Updated" : null);
+        if (showUpdated) assert.match(html, /Updated/);
+        else assert.doesNotMatch(html, /Updated/);
+        assert.doesNotMatch(html, /Some folders|couldn’t update|animate-spin|Refresh complete/);
+        assertMessageAvailable(html);
+        const button = syncButton(html, "Sync mailbox");
+        if (operationInFlight) assert.match(button, /disabled=""/);
+        else assert.doesNotMatch(button, /disabled=/);
+      }
+    }
+  });
+}
 
 test("mobile failed Inbox refresh keeps rows without claiming an update", () => {
   const html = render({ a: {

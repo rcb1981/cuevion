@@ -13,7 +13,6 @@ const source = readFileSync(resolve(__dirname, "WorkspaceShell.tsx"), "utf8");
 const parsed = ts.createSourceFile("WorkspaceShell.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const declarations = new Map<string, string>();
 let setup = "";
-let attentionEffect = "";
 function visit(node: ts.Node) {
   if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
     declarations.set(node.name.text, `const ${node.name.text} = ${node.initializer.getText(parsed)};`);
@@ -24,7 +23,6 @@ function visit(node: ts.Node) {
   if (ts.isCallExpression(node) && node.expression.getText(parsed) === "useEffect") {
     const callback = node.arguments[0]?.getText(parsed) ?? "";
     if (callback.includes("const timers = createMailboxSyncSuccessTimers")) setup = callback;
-    if (callback.includes("JSON.parse(mailboxSyncAttentionScopes)")) attentionEffect = callback;
   }
   ts.forEachChild(node, visit);
 }
@@ -68,7 +66,7 @@ function harness(run: (h: any) => void) {
     providerTrashFetchMailboxIdsRef: { current: new Set() },
     providerArchiveFolderStatusMessages: {}, providerTrashFolderStatusMessages: {},
   };
-  assert.ok(setup && attentionEffect, "Production timer setup, cleanup and error effect exist");
+  assert.ok(setup, "Production timer setup and cleanup exist");
   const mount = () => evaluate(`return (${setup})();`, deps);
   let cleanup = mount();
   const scope = (id: string) => evaluate(`${select(["readMailboxSyncPresentationScope"])} return readMailboxSyncPresentationScope(${JSON.stringify(id)});`, deps);
@@ -76,8 +74,7 @@ function harness(run: (h: any) => void) {
     evaluate(`${select(["setMailboxInboxReadiness"])} return setMailboxInboxReadiness;`, deps)(scope(id), value, fallback);
   };
   const render = () => {
-    const rendered = evaluate(`${select(["readMailboxSyncPresentationScope", "mailboxSyncPresentation", "mailboxSyncAttentionScopes"])} return { mailboxSyncPresentation, mailboxSyncAttentionScopes };`, { ...deps, mailboxInboxReadiness: readiness });
-    evaluate(`(${attentionEffect})();`, { ...deps, ...rendered });
+    const rendered = evaluate(`${select(["readMailboxSyncPresentationScope", "mailboxSyncPresentation"])} return { mailboxSyncPresentation };`, { ...deps, mailboxInboxReadiness: readiness });
     return rendered.mailboxSyncPresentation;
   };
   try {
@@ -151,22 +148,57 @@ test("new sync removes success immediately; cancelled callback cannot expire rep
   assert.equal(h.render().a.message, null);
 }));
 
-test("Inbox errors cancel success; folder errors preserve readiness without resurfacing success", () => harness((h) => {
+test("Inbox failure and partial Inbox failure cancel success", () => harness((h) => {
   h.set("a", "updated");
   h.set("a", "not_updated");
   assert.equal(h.pending, 0);
   assert.equal(h.render().a.message, "Couldn’t update inbox");
   h.set("a", "updated");
-  h.deps.providerTrashFolderStatusMessages.a = "Raw provider implementation detail";
-  assert.equal(h.render().a.message, "Some folders couldn’t update");
-  assert.equal(h.render().a.inboxUpdated, true);
-  assert.equal(h.pending, 0);
-  delete h.deps.providerTrashFolderStatusMessages.a;
-  assert.equal(h.render().a.message, null);
   h.set("a", "partial");
+  assert.equal(h.pending, 0);
   assert.equal(h.render().a.message, "Couldn’t fully update inbox");
   assert.equal(h.render().a.inboxUpdated, true);
 }));
+
+for (const folders of [["Archive"], ["Trash"], ["Archive", "Trash"]]) {
+  test(`${folders.join(" + ")} diagnostics stay internal and do not interrupt Inbox success or idle`, () => harness((h) => {
+    const diagnostics = folders.map((folder) => ({
+      state: h.deps[`provider${folder}FolderStatusMessages`],
+      message: `${folder} provider discovery/snapshot warning`,
+    }));
+    const publishDiagnostics = () => {
+      for (const { state, message } of diagnostics) state.a = message;
+    };
+    const assertDiagnostics = () => {
+      for (const { state, message } of diagnostics) assert.equal(state.a, message);
+    };
+    publishDiagnostics();
+    assert.equal(h.render().a.message, null, "Background errors alone leave idle silent");
+    h.deps.syncingMailboxIdsRef.current.add("a");
+    h.set("a", "refreshing");
+    assert.equal(h.render().a.message, "Syncing…");
+    h.set("a", "updated");
+    h.advance(1000);
+    publishDiagnostics();
+    assert.equal(h.render().a.message, "Updated", "Background errors cannot replace success");
+    assert.equal(h.pending, 1, "Background errors cannot cancel success timer");
+    assertDiagnostics();
+    h.advance(999);
+    assert.equal(h.render().a.message, "Updated");
+    h.advance(1);
+    assert.equal(h.render().a.message, null);
+    assert.equal(h.render().a.inboxUpdated, true);
+    assert.equal(h.render().a.operationInFlight, true, "Provider lock is unchanged");
+    publishDiagnostics();
+    assert.equal(h.render().a.message, null, "Late background errors cannot narrate idle");
+    assertDiagnostics();
+    h.set("a", "not_updated");
+    assert.equal(h.render().a.message, "Couldn’t update inbox");
+    h.set("a", "partial");
+    assert.equal(h.render().a.message, "Couldn’t fully update inbox");
+    assertDiagnostics();
+  }));
+}
 
 test("concurrent mailbox timers and switching selection cannot leak or expire each other", () => harness((h) => {
   h.set("a", "updated");
@@ -235,11 +267,13 @@ test("desktop renders actual Sync control and temporary status without changing 
   assert.match(render(), /role="status"[^>]*>Syncing…<\/span>/);
   assert.match(render(), /animate-spin/);
   h.set("a", "updated");
+  h.deps.providerArchiveFolderStatusMessages.a = "Archive snapshot warning";
+  h.deps.providerTrashFolderStatusMessages.a = "Trash snapshot warning";
   assert.match(render(), /role="status"[^>]*>Updated<\/span>/);
   assert.doesNotMatch(render(), /animate-spin/);
   assert.match(render(), /disabled=""/);
   h.advance(2000);
-  assert.doesNotMatch(render(), /role="status"|Updated|Syncing…|animate-spin/);
+  assert.doesNotMatch(render(), /role="status"|Updated|Syncing…|animate-spin|Some folders|snapshot warning/);
   assert.match(render(), /disabled=""/);
   h.deps.syncingMailboxIdsRef.current.delete("a");
   assert.doesNotMatch(render(), /disabled=""/);

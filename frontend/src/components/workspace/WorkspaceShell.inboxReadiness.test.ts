@@ -282,7 +282,7 @@ async function main() {
     assert.equal(h.activityRevision, 6, "Every started/finished provider activity requests a render");
   });
 
-  await test("Trash failure preserves published Inbox and reports folder attention", async () => {
+  await test("Trash failure preserves published Inbox and internal diagnostics without replacing success", async () => {
     const h = createHarness();
     h.archive.a.resolve(true);
     const operation = h.refresh("a", { reason: "manual" });
@@ -292,7 +292,8 @@ async function main() {
     assert.equal(await operation, "synced");
     assert.equal(h.readiness.a, "updated");
     assert.equal(h.mailboxStore.a.Inbox[0].id, "fresh");
-    assert.equal(h.presentation("a").message, "Some folders couldn’t update");
+    assert.equal(h.presentation("a").message, "Updated");
+    assert.equal(h.folderErrors.a, "Trash refresh failed");
   });
 
   await test("Inbox failure never labels cached rows fresh, including during slow Trash", async () => {

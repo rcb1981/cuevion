@@ -45710,20 +45710,6 @@ export function WorkspaceShell({
         }),
       ]),
     );
-  const mailboxSyncAttentionScopes = JSON.stringify(
-    (hasAuthenticatedMemberAuthority ? orderedMailboxes : [])
-      .filter((mailbox) =>
-        providerArchiveFolderStatusMessages[mailbox.id] ||
-        providerTrashFolderStatusMessages[mailbox.id],
-      )
-      .map((mailbox) => readMailboxSyncPresentationScope(mailbox.id)),
-  );
-  useEffect(() => {
-    // Errors already override success in render; also prevent it resurfacing.
-    for (const scope of JSON.parse(mailboxSyncAttentionScopes) as string[]) {
-      mailboxSyncSuccessTimersRef.current?.clear(scope);
-    }
-  }, [mailboxSyncAttentionScopes, mailboxInboxReadiness]);
   const activeSyncMailboxIds = orderedMailboxes
     .filter((mailbox) => {
       const presentation = mailboxSyncPresentation[mailbox.id];

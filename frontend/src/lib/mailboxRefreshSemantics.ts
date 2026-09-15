@@ -13,7 +13,6 @@ export type MailboxSyncPresentation = {
 export function resolveMailboxSyncPresentation({
   operationInFlight,
   inboxReadiness,
-  folderNeedsAttention,
   showUpdated = false,
 }: {
   operationInFlight: boolean;
@@ -32,11 +31,11 @@ export function resolveMailboxSyncPresentation({
     message = "Couldn’t update inbox";
   } else if (inboxReadiness === "partial") {
     message = "Couldn’t fully update inbox";
-  } else if (folderNeedsAttention) {
-    message = "Some folders couldn’t update";
   } else if (inboxReadiness === "updated" && showUpdated) {
     message = "Updated";
   }
+  // Background folder diagnostics belong to their existing folder surfaces;
+  // they do not replace Inbox feedback or change its transient success lifetime.
   return {
     operationInFlight,
     inboxRefreshing,
