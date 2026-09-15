@@ -1,3 +1,11 @@
+export type ConversationOrder = "newest-first" | "oldest-first";
+
+export const CONVERSATION_ORDER_STORAGE_KEY = "cuevion-conversation-order";
+
+export function normalizeConversationOrder(value: unknown): ConversationOrder {
+  return value === "oldest-first" ? "oldest-first" : "newest-first";
+}
+
 export type UserAccountConfig = {
   v?: number;
   email?: string;
@@ -11,6 +19,7 @@ export type UserAccountConfig = {
   smartFolders?: unknown[];
   uiPreferences?: {
     themeMode?: "Light" | "Dark" | "System" | "light" | "dark";
+    conversationOrder?: ConversationOrder;
     aiSuggestionsEnabled?: boolean;
     inboxChangesEnabled?: boolean;
     teamActivityEnabled?: boolean;
@@ -65,6 +74,9 @@ function isUiPreferences(value: unknown): boolean {
   return (
     (value.themeMode === undefined ||
       (typeof value.themeMode === "string" && VALID_THEME_MODES.has(value.themeMode))) &&
+    (value.conversationOrder === undefined ||
+      value.conversationOrder === "newest-first" ||
+      value.conversationOrder === "oldest-first") &&
     (value.aiSuggestionsEnabled === undefined ||
       typeof value.aiSuggestionsEnabled === "boolean") &&
     (value.inboxChangesEnabled === undefined ||

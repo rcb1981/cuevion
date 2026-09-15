@@ -17,9 +17,11 @@ import {
   type TeamLifecycleFailureStatus,
 } from "./lib/teamInviteApi";
 import {
+  CONVERSATION_ORDER_STORAGE_KEY,
   completeUserOnboarding,
   loadUserAccountConfig,
   loadUserAccountConfigAfterPendingWrites,
+  normalizeConversationOrder,
   saveUserAccountConfig,
   setUserAccountConfigHydrationEchoExpectation,
   type UserAccountConfig,
@@ -1649,6 +1651,9 @@ function buildAccountConfigFromLocalStorage(
     smartFolders: parseStoredJsonValue(SMART_FOLDERS_STORAGE_KEY, [], storage),
     uiPreferences: {
       themeMode,
+      conversationOrder: normalizeConversationOrder(
+        storage.getItem(CONVERSATION_ORDER_STORAGE_KEY),
+      ),
       aiSuggestionsEnabled:
         storage.getItem(AI_SUGGESTIONS_STORAGE_KEY) !== "false",
       inboxChangesEnabled:
@@ -3050,6 +3055,10 @@ function writeFoundAccountConfigToLocalStorage(
   }
 
   const uiPreferences = config.uiPreferences ?? {};
+  storage.setItem(
+    CONVERSATION_ORDER_STORAGE_KEY,
+    normalizeConversationOrder(uiPreferences.conversationOrder),
+  );
   const themeMode = normalizeStoredWorkspaceThemeMode(uiPreferences.themeMode);
   if (themeMode) {
     storage.setItem(WORKSPACE_THEME_MODE_STORAGE_KEY, themeMode);

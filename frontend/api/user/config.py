@@ -280,6 +280,10 @@ class _OnboardingSessionValidationError(ValueError):
     pass
 
 
+class _UiPreferencesValidationError(ValueError):
+    pass
+
+
 class _StoredUserConfigValidationError(ValueError):
     pass
 
@@ -701,6 +705,10 @@ def _sanitize_managed_inboxes(value):
     ]
 
 
+def _is_valid_conversation_order(value) -> bool:
+    return isinstance(value, str) and value in {"newest-first", "oldest-first"}
+
+
 def _sanitize_user_config(payload: dict, owner_email: str) -> dict:
     source_config = payload.get("config") if isinstance(payload.get("config"), dict) else payload
     sanitized: dict = {
@@ -714,6 +722,13 @@ def _sanitize_user_config(payload: dict, owner_email: str) -> dict:
             continue
 
         value = source_config[key]
+        if (
+            key == "uiPreferences"
+            and isinstance(value, dict)
+            and "conversationOrder" in value
+            and not _is_valid_conversation_order(value["conversationOrder"])
+        ):
+            raise _UiPreferencesValidationError
         if key == "onboardingSession":
             sanitized[key] = _validate_onboarding_session_write(value)
         elif key == "managedInboxes":
@@ -1006,6 +1021,10 @@ def _has_valid_known_stored_config_shapes(record: dict) -> bool:
     ui_preferences = record.get("uiPreferences")
     if "uiPreferences" in record:
         if not isinstance(ui_preferences, dict):
+            return False
+        if "conversationOrder" in ui_preferences and not _is_valid_conversation_order(
+            ui_preferences["conversationOrder"]
+        ):
             return False
         theme_mode = ui_preferences.get("themeMode")
         if "themeMode" in ui_preferences and (
@@ -1778,6 +1797,16 @@ class handler(BaseHTTPRequestHandler):
                     _build_error(
                         "invalid_onboarding_session",
                         "Onboarding session is invalid.",
+                    ),
+                )
+                return
+            except _UiPreferencesValidationError:
+                _send_json(
+                    self,
+                    400,
+                    _build_error(
+                        "config_invalid",
+                        "Conversation order is invalid.",
                     ),
                 )
                 return

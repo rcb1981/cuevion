@@ -303,9 +303,12 @@ import {
   updateScopedFreshTeamInviteUrls,
 } from "../../lib/teamAuthorityUi";
 import {
+  CONVERSATION_ORDER_STORAGE_KEY,
   createUserAccountConfigConflictRetryQueue,
   loadUserAccountConfig,
+  normalizeConversationOrder,
   projectWorkspaceUserAccountConfigForSave,
+  type ConversationOrder,
   type UserAccountConfig,
 } from "../../lib/userConfigApi";
 import {
@@ -13307,6 +13310,30 @@ function reconcileDesktopThreadDisclosureState(
       };
 }
 
+function getThreadMessagesForDisplay(
+  chronologicalMessages: readonly MailMessage[],
+  conversationOrder: ConversationOrder,
+) {
+  if (conversationOrder === "oldest-first") {
+    return [...chronologicalMessages];
+  }
+
+  // Reverse chronological groups without reversing the established order of ties.
+  const now = new Date();
+  const dates = chronologicalMessages.map((message) => resolveMailDateMs(message, now));
+  const displayMessages: MailMessage[] = [];
+  let groupEnd = chronologicalMessages.length;
+  while (groupEnd > 0) {
+    let groupStart = groupEnd - 1;
+    while (groupStart > 0 && dates[groupStart - 1] === dates[groupEnd - 1]) {
+      groupStart -= 1;
+    }
+    displayMessages.push(...chronologicalMessages.slice(groupStart, groupEnd));
+    groupEnd = groupStart;
+  }
+  return displayMessages;
+}
+
 function resolveInitialExpandedThreadMessageIds(messageIds: string[]) {
   return messageIds.length <= 2 ? [...messageIds] : messageIds.slice(-1);
 }
@@ -13383,7 +13410,7 @@ function resolveDesktopThreadTimestamp(
   };
 }
 
-function resolveMailDateMs(message: MailMessage) {
+function resolveMailDateMs(message: MailMessage, referenceDate?: Date) {
   if (message.createdAt) {
     const directDate = new Date(message.createdAt).getTime();
 
@@ -13392,7 +13419,7 @@ function resolveMailDateMs(message: MailMessage) {
     }
   }
 
-  const now = new Date();
+  const now = referenceDate ?? new Date();
   const timestamp = message.timestamp.trim();
   const relativeMinuteMatch = timestamp.match(/(\d+)\s+minutes?\s+ago/i);
 
@@ -17284,6 +17311,7 @@ function MailboxView({
   setMailboxStore,
   inboxSignatures,
   themeMode,
+  conversationOrder,
   aiSuggestionsEnabled,
   notificationNavigationRequest,
   serverNotificationDisplay,
@@ -17395,6 +17423,7 @@ function MailboxView({
   setMailboxStore: Dispatch<SetStateAction<MailboxStore>>;
   inboxSignatures: InboxSignatureStore;
   themeMode: "light" | "dark";
+  conversationOrder: ConversationOrder;
   aiSuggestionsEnabled: boolean;
   notificationNavigationRequest?: NotificationNavigationRequest | null;
   serverNotificationDisplay?: NotificationDisplayRequest<MailMessage> | null;
@@ -20275,6 +20304,7 @@ function MailboxView({
         )
       : null;
     const threadSourceMessages = scopedContext?.threadMessages ?? mailboxThreadMessages;
+    const chronologyNow = new Date();
 
     return [
       message,
@@ -20307,7 +20337,10 @@ function MailboxView({
           candidates.findIndex((entry) => entry.id === candidate.id) === index,
       )
       .sort((firstMessage, secondMessage) => {
-        return resolveMailDateMs(firstMessage) - resolveMailDateMs(secondMessage);
+        return (
+          resolveMailDateMs(firstMessage, chronologyNow) -
+          resolveMailDateMs(secondMessage, chronologyNow)
+        );
       });
   };
   const selectedMessageThreadMessages = getThreadMessages(selectedMessage);
@@ -20739,6 +20772,11 @@ function MailboxView({
     const initiallyExpandedMessageIds = resolveInitialExpandedThreadMessageIds(
       threadMessages.map((threadMessage) => threadMessage.id),
     );
+    const latestThreadMessageId = threadMessages[threadMessages.length - 1]?.id;
+    const displayThreadMessages = getThreadMessagesForDisplay(
+      threadMessages,
+      conversationOrder,
+    );
     const labelledById =
       density === "full" ? "full-message-modal-title" : "conversation-title";
 
@@ -20752,9 +20790,9 @@ function MailboxView({
         data-thread-conversation
         className="space-y-3.5"
       >
-        {threadMessages.map((threadMessage, threadIndex) => {
+        {displayThreadMessages.map((threadMessage) => {
           const isLatestThreadMessage =
-            threadIndex === threadMessages.length - 1;
+            threadMessage.id === latestThreadMessageId;
           const expanded =
             initiallyExpandedMessageIds.includes(threadMessage.id) ||
             activeDesktopThreadDisclosureState.expandedMemberIds.includes(
@@ -38735,6 +38773,8 @@ const MailSettingsCard = memo(function MailSettingsCard({
   inboxOutOfOffice,
   themeMode,
   showOutOfOfficeSettings,
+  conversationOrder,
+  onChangeConversationOrder,
   onManageSignature,
   onManageOutOfOffice,
 }: {
@@ -38742,6 +38782,8 @@ const MailSettingsCard = memo(function MailSettingsCard({
   inboxOutOfOffice: InboxOutOfOfficeStore;
   themeMode: "light" | "dark";
   showOutOfOfficeSettings: boolean;
+  conversationOrder: ConversationOrder;
+  onChangeConversationOrder: (order: ConversationOrder) => void;
   onManageSignature: (inbox: ManagedWorkspaceInbox) => void;
   onManageOutOfOffice: (inbox: ManagedWorkspaceInbox) => void;
 }) {
@@ -38763,6 +38805,42 @@ const MailSettingsCard = memo(function MailSettingsCard({
         </div>
 
         <div className="space-y-3.5">
+          <div className={settingsCardSectionClass}>
+            <div
+              id="conversation-order-label"
+              className="text-[0.92rem] font-medium text-[var(--workspace-text)]"
+            >
+              Conversation order
+            </div>
+            <p
+              id="conversation-order-description"
+              className="mt-1 text-[0.82rem] leading-6 text-[var(--workspace-text-muted)]"
+            >
+              Choose which message appears at the top of a conversation.
+            </p>
+            <div
+              role="group"
+              aria-labelledby="conversation-order-label"
+              aria-describedby="conversation-order-description"
+              className="mt-3 flex flex-wrap gap-2"
+            >
+              {([
+                { value: "newest-first", label: "Newest first" },
+                { value: "oldest-first", label: "Oldest first" },
+              ] as const).map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => onChangeConversationOrder(option.value)}
+                  aria-pressed={conversationOrder === option.value}
+                  className={settingsPillButtonClass(conversationOrder === option.value)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div className={settingsCardSectionClass}>
             <div className="mb-3 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
               Signatures
@@ -39837,6 +39915,8 @@ function SettingsView({
   inboxOutOfOffice,
   showOutOfOfficeSettings,
   onChangeWorkspaceMode,
+  conversationOrder,
+  onChangeConversationOrder,
   aiSuggestionsEnabled,
   onToggleAiSuggestions,
   inboxChangesEnabled,
@@ -39882,6 +39962,8 @@ function SettingsView({
   inboxOutOfOffice: InboxOutOfOfficeStore;
   showOutOfOfficeSettings: boolean;
   onChangeWorkspaceMode: (mode: SettingsMode) => void;
+  conversationOrder: ConversationOrder;
+  onChangeConversationOrder: (order: ConversationOrder) => void;
   aiSuggestionsEnabled: boolean;
   onToggleAiSuggestions: () => void;
   inboxChangesEnabled: boolean;
@@ -40087,6 +40169,8 @@ function SettingsView({
             inboxOutOfOffice={inboxOutOfOffice}
             themeMode={themeMode}
             showOutOfOfficeSettings={showOutOfOfficeSettings}
+            conversationOrder={conversationOrder}
+            onChangeConversationOrder={onChangeConversationOrder}
             onManageSignature={(mailbox) => {
               setActiveSignatureInboxId(mailbox.id);
             }}
@@ -46182,6 +46266,13 @@ export function WorkspaceShell({
   const [activeSmartFolderId, setActiveSmartFolderId] = useState<string | null>(null);
   const [smartFolderDeleteId, setSmartFolderDeleteId] = useState<string | null>(null);
   const [lastViewedGuidance, setLastViewedGuidance] = useState<string | null>(null);
+  const [conversationOrder, setConversationOrder] = useState<ConversationOrder>(() =>
+    normalizeConversationOrder(
+      typeof window === "undefined"
+        ? undefined
+        : window.localStorage.getItem(CONVERSATION_ORDER_STORAGE_KEY),
+    ),
+  );
   const [aiSuggestionsEnabled, setAiSuggestionsEnabled] = useState(() => {
     if (typeof window === "undefined") {
       return true;
@@ -55446,6 +55537,10 @@ export function WorkspaceShell({
   }, [workspaceMode]);
 
   useEffect(() => {
+    window.localStorage.setItem(CONVERSATION_ORDER_STORAGE_KEY, conversationOrder);
+  }, [conversationOrder]);
+
+  useEffect(() => {
     window.localStorage.setItem(
       AI_SUGGESTIONS_STORAGE_KEY,
       String(aiSuggestionsEnabled),
@@ -55551,6 +55646,7 @@ export function WorkspaceShell({
           smartFolders,
           uiPreferences: {
             themeMode: workspaceMode,
+            conversationOrder,
             aiSuggestionsEnabled,
             inboxChangesEnabled,
             teamActivityEnabled,
@@ -55608,6 +55704,7 @@ export function WorkspaceShell({
   }, [
     aiSuggestionsEnabled,
     authenticatedUser,
+    conversationOrder,
     hasAuthenticatedMemberAuthority,
     inboxChangesEnabled,
     inboxSignatures,
@@ -56678,6 +56775,7 @@ export function WorkspaceShell({
                   setMailboxStore={setMailboxStore}
                   inboxSignatures={inboxSignatures}
                   themeMode={resolvedTheme}
+                  conversationOrder={conversationOrder}
                   aiSuggestionsEnabled={aiSuggestionsEnabled}
                   serverNotificationDisplay={serverNotificationDisplay?.ticket.isCurrent() ? serverNotificationDisplay : null}
                   notificationNavigationRequest={notificationNavigationRequest}
@@ -56926,6 +57024,8 @@ export function WorkspaceShell({
                   inboxOutOfOffice={inboxOutOfOffice}
                   showOutOfOfficeSettings={isDemoWorkspace}
                   onChangeWorkspaceMode={setWorkspaceMode}
+                  conversationOrder={conversationOrder}
+                  onChangeConversationOrder={setConversationOrder}
                   aiSuggestionsEnabled={aiSuggestionsEnabled}
                   onToggleAiSuggestions={() =>
                     setAiSuggestionsEnabled((current) => !current)

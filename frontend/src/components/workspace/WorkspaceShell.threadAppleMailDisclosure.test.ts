@@ -191,11 +191,22 @@ expectContract(
   "collapsed members must show an attachment indicator only for real visible attachments",
 );
 expectContract(
-  /resolveInitialExpandedThreadMessageIds\(\s*threadMessages\.map/.test(
-    threadTimelineSource,
-  ) &&
-    /threadIndex\s*===\s*threadMessages\.length - 1/.test(threadTimelineSource),
-  "the shared timeline must apply the one/two/three-plus initial member policy",
+  /const threadMessages = getThreadMessages\(message\)/.test(threadTimelineSource) &&
+    /resolveInitialExpandedThreadMessageIds\(\s*threadMessages\.map/.test(
+      threadTimelineSource,
+    ) &&
+    /const latestThreadMessageId = threadMessages\[threadMessages\.length - 1\]\?\.id/.test(
+      threadTimelineSource,
+    ) &&
+    /threadMessage\.id\s*===\s*latestThreadMessageId/.test(threadTimelineSource) &&
+    /initiallyExpandedMessageIds\.includes\(threadMessage\.id\)/.test(
+      threadTimelineSource,
+    ) &&
+    /canCollapse:\s*threadMessages\.length >= 3 && !isLatestThreadMessage/.test(
+      threadTimelineSource,
+    ) &&
+    /collapsed:\s*!expanded/.test(threadTimelineSource),
+  "the shared timeline must apply the one/two/three-plus initial member policy using canonical chronological identity regardless of display order",
 );
 expectContract(
   /setDesktopThreadDisclosureState/.test(threadMessageSource + threadTimelineSource),
