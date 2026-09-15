@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass
 from email import message_from_bytes
 from email.errors import MessageError
@@ -21,6 +23,7 @@ GMAIL_ARCHIVE_QUERY = (
 )
 DEFAULT_GMAIL_SNAPSHOT_LIMIT = 50
 MAX_GMAIL_SNAPSHOT_LIMIT = 100
+GMAIL_DETAIL_CONCURRENCY = 4
 _ARCHIVE_EXCLUDED_LABELS = {"INBOX", "TRASH", "SPAM", "DRAFT", "SENT"}
 _INBOX_EXCLUDED_LABELS = _ARCHIVE_EXCLUDED_LABELS - {"INBOX"}
 
@@ -28,6 +31,137 @@ GmailRequestWithOneRefresh = Callable[
     [dict, str],
     tuple[dict | None, dict | None, dict, dict | None],
 ]
+GmailRawRequest = Callable[[str, str], tuple[dict | None, dict | None]]
+GmailContextRefresh = Callable[[dict], dict]
+
+
+class _GmailSnapshotRequests:
+    """Caller-thread authority; workers receive only a token string and path.
+
+    Refresh and the single transport retry are decided in Gmail list order.
+    The initial list and legacy callbacks retain their sequential contract.
+    """
+
+    def __init__(
+        self,
+        context: dict,
+        request_with_one_refresh: GmailRequestWithOneRefresh,
+        gmail_request: GmailRawRequest | None,
+        refresh_context: GmailContextRefresh | None,
+    ):
+        self.context = context
+        self.request_with_one_refresh = request_with_one_refresh
+        self.gmail_request = gmail_request
+        self.refresh_context = refresh_context
+        self.transport_retry_available = True
+        self.generation = 0
+        self.refresh_attempted = False
+
+    def _with_transport_retry(self, result, retry):
+        _payload, error, self.context, refresh_failure = result
+        if (
+            self.transport_retry_available
+            and refresh_failure is None
+            and isinstance(error, dict)
+            and error.get("code") == "gmail_unavailable"
+        ):
+            self.transport_retry_available = False
+            result = retry()
+            self.context = result[2]
+        return result
+
+    def sequential_request(self, path):
+        def request():
+            return self.request_with_one_refresh(self.context, path)
+
+        result = self._with_transport_retry(request(), request)
+        if self.gmail_request is not None:
+            self.refresh_attempted = bool(self.context.get("refresh_attempted"))
+        return result
+
+    def _detail_once(self, path, response=None):
+        if response is None:
+            response = self.gmail_request(self.context["access_token"], path)
+        payload, error = response
+        if (
+            error
+            and error.get("code") == "gmail_token_invalid"
+            and not self.refresh_attempted
+        ):
+            # Only the ordered consumer can enter this branch. Reserve the
+            # attempt before invoking the authoritative route capability.
+            self.refresh_attempted = True
+            refreshed = self.refresh_context(self.context)
+            if refreshed["status"] != "ok":
+                return None, error, self.context, refreshed
+            self.context = refreshed["context"]
+            self.generation += 1
+            payload, error = self.gmail_request(self.context["access_token"], path)
+        return payload, error, self.context, None
+
+    @contextmanager
+    def details(self, message_ids):
+        def path_for(message_id):
+            return f"/messages/{quote(message_id, safe='')}?format=raw"
+
+        if self.gmail_request is None or not message_ids:
+            yield (
+                (index, message_id, self.sequential_request(path_for(message_id)))
+                for index, message_id in enumerate(message_ids)
+            )
+            return
+
+        window_size = min(GMAIL_DETAIL_CONCURRENCY, len(message_ids))
+        executor = ThreadPoolExecutor(
+            max_workers=window_size,
+            thread_name_prefix="gmail-detail",
+        )
+        pending = {}
+
+        def submit(index):
+            # Neither context nor coordinator is passed to a worker.
+            pending[index] = (
+                self.generation,
+                executor.submit(
+                    self.gmail_request,
+                    self.context["access_token"],
+                    path_for(message_ids[index]),
+                ),
+            )
+
+        def ordered_results():
+            for index, message_id in enumerate(message_ids):
+                generation, future = pending.pop(index)
+                # Await even a stale request before replaying it: at most
+                # window_size - 1 speculative requests can still be in flight.
+                wait((future,))
+                # Replay every stale outcome, including successes and worker
+                # exceptions: sequential code would use the new context here.
+                response = (
+                    future.result() if generation == self.generation else None
+                )
+                path = path_for(message_id)
+                result = self._with_transport_retry(
+                    self._detail_once(path, response),
+                    lambda: self._detail_once(path),
+                )
+                yield index, message_id, result
+                # Resume only after the caller parsed/accounted for this row.
+                # A terminal error or truncation never admits another request.
+                next_index = index + window_size
+                if next_index < len(message_ids):
+                    submit(next_index)
+
+        try:
+            for index in range(window_size):
+                submit(index)
+            yield ordered_results()
+        finally:
+            for _generation, future in pending.values():
+                future.cancel()
+            # Running speculative requests may finish, but never outlive the
+            # snapshot return (including parser/worker exceptions).
+            executor.shutdown(wait=True, cancel_futures=True)
 
 
 class GmailExactMessageRecoveryResult(str, Enum):
@@ -402,12 +536,15 @@ def read_gmail_folder_snapshot(
     strict: bool = False,
     required_message_id: str | None = None,
     message_parser=message_from_bytes,
+    gmail_request: GmailRawRequest | None = None,
+    refresh_context: GmailContextRefresh | None = None,
 ) -> dict:
     """Read and normalize one bounded Gmail folder snapshot.
 
-    The injected request callback owns authenticated transport and the single
-    permitted token-refresh attempt. Every return includes the latest context,
-    a snapshot or provider error, and any structured refresh failure.
+    The initial list retains the injected authenticated callback. Routes can
+    additionally provide raw transport and refresh capabilities for bounded
+    detail overlap; opaque legacy callbacks stay sequential. Every return
+    includes the latest ordered context and any provider or refresh failure.
     """
 
     if (
@@ -417,6 +554,10 @@ def read_gmail_folder_snapshot(
         or limit < 1
         or limit > MAX_GMAIL_SNAPSHOT_LIMIT
         or not callable(request_with_one_refresh)
+        or (
+            (gmail_request is not None or refresh_context is not None)
+            and (not callable(gmail_request) or not callable(refresh_context))
+        )
         or (
             required_message_id is not None
             and (
@@ -430,32 +571,12 @@ def read_gmail_folder_snapshot(
             error={"code": "gmail_snapshot_invalid_request"},
         )
 
-    transport_retry_available = True
-
-    def request_snapshot_path(
-        request_context: dict,
-        path: str,
-    ) -> tuple[dict | None, dict | None, dict, dict | None]:
-        nonlocal transport_retry_available
-
-        payload, error, next_context, refresh_failure = (
-            request_with_one_refresh(request_context, path)
-        )
-        if (
-            transport_retry_available
-            and refresh_failure is None
-            and isinstance(error, dict)
-            and error.get("code") == "gmail_unavailable"
-        ):
-            transport_retry_available = False
-            return request_with_one_refresh(next_context, path)
-        return payload, error, next_context, refresh_failure
+    requests = _GmailSnapshotRequests(
+        context, request_with_one_refresh, gmail_request, refresh_context,
+    )
 
     list_payload, list_error, context, refresh_failure = (
-        request_snapshot_path(
-            context,
-            _list_path(provider_folder, limit),
-        )
+        requests.sequential_request(_list_path(provider_folder, limit))
     )
     if refresh_failure is not None:
         return _result(
@@ -496,66 +617,59 @@ def read_gmail_folder_snapshot(
     message_separator_size = len(
         json.JSONEncoder().item_separator.encode("utf-8")
     )
-    for index, requested_message_id in enumerate(message_ids):
-        detail_payload, detail_error, context, refresh_failure = (
-            request_snapshot_path(
-                context,
-                (
-                    f"/messages/{quote(requested_message_id, safe='')}"
-                    "?format=raw"
-                ),
-            )
-        )
-        if refresh_failure is not None:
-            return _result(
-                context,
-                error=detail_error,
-                refresh_failure=refresh_failure,
-            )
-        if detail_error is not None:
-            return _result(context, error=detail_error)
-        parsed = _parse_gmail_message_detail_with_candidate_source(
-            detail_payload,
-            context=context,
-            provider_folder=provider_folder,
-            requested_message_id=requested_message_id,
-            index=index,
-            focus_preferences=focus_preferences,
-            strict=strict,
-            message_parser=message_parser,
-        )
-        if parsed is None:
-            if strict:
-                return _invalid_response(context)
-            continue
-        preview, priority_candidate_source = parsed
-
-        try:
-            if snapshot_size is None:
-                # Keep serialization lazy: empty/all-invalid snapshots were
-                # never size-checked. The empty wrapper already includes [].
-                snapshot_size = len(json.dumps(snapshot).encode("utf-8"))
-            # Default json.dumps encodes each list element identically on its
-            # own, with item_separator only between elements. Preserve those
-            # exact UTF-8 bytes without serializing accepted prefixes again.
-            candidate_size = (
-                snapshot_size
-                + len(json.dumps(preview).encode("utf-8"))
-                + (message_separator_size if messages else 0)
-            )
-        except (TypeError, ValueError):
-            raise
-        if candidate_size > MAX_GMAIL_RESPONSE_BYTES:
-            if strict:
+    with requests.details(message_ids) as details:
+        for index, requested_message_id, detail_result in details:
+            detail_payload, detail_error, context, refresh_failure = detail_result
+            if refresh_failure is not None:
                 return _result(
                     context,
-                    error={"code": "gmail_response_too_large"},
+                    error=detail_error,
+                    refresh_failure=refresh_failure,
                 )
-            break
-        messages.append(preview)
-        snapshot_size = candidate_size
-        if provider_folder == "Inbox":
-            priority_candidate_sources.append(priority_candidate_source)
+            if detail_error is not None:
+                return _result(context, error=detail_error)
+            parsed = _parse_gmail_message_detail_with_candidate_source(
+                detail_payload,
+                context=context,
+                provider_folder=provider_folder,
+                requested_message_id=requested_message_id,
+                index=index,
+                focus_preferences=focus_preferences,
+                strict=strict,
+                message_parser=message_parser,
+            )
+            if parsed is None:
+                if strict:
+                    return _invalid_response(context)
+                continue
+            preview, priority_candidate_source = parsed
+
+            try:
+                if snapshot_size is None:
+                    # Keep serialization lazy: empty/all-invalid snapshots were
+                    # never size-checked. The empty wrapper already includes [].
+                    snapshot_size = len(json.dumps(snapshot).encode("utf-8"))
+                # Default json.dumps encodes each list element identically on its
+                # own, with item_separator only between elements. Preserve those
+                # exact UTF-8 bytes without serializing accepted prefixes again.
+                candidate_size = (
+                    snapshot_size
+                    + len(json.dumps(preview).encode("utf-8"))
+                    + (message_separator_size if messages else 0)
+                )
+            except (TypeError, ValueError):
+                raise
+            if candidate_size > MAX_GMAIL_RESPONSE_BYTES:
+                if strict:
+                    return _result(
+                        context,
+                        error={"code": "gmail_response_too_large"},
+                    )
+                break
+            messages.append(preview)
+            snapshot_size = candidate_size
+            if provider_folder == "Inbox":
+                priority_candidate_sources.append(priority_candidate_source)
 
     return _result(
         context,

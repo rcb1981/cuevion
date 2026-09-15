@@ -359,6 +359,7 @@ class GmailSnapshotTransportRetryTests(unittest.TestCase):
             "_priorityCandidateSources": [{"private": "source"}],
         }
         request_handler = SimpleNamespace(headers={})
+        member = object()
         sent: list[tuple[int, dict]] = []
         with patch.object(
             fetch_gmail,
@@ -370,17 +371,20 @@ class GmailSnapshotTransportRetryTests(unittest.TestCase):
             return_value={
                 "status": "ok",
                 "context": gmail_context(),
-                "memberAuthority": object(),
+                "memberAuthority": member,
             },
         ), patch.object(
             fetch_gmail,
             "read_gmail_folder_snapshot",
             return_value=snapshot_result,
-        ), patch.object(
+        ) as snapshot_read, patch.object(
             fetch_gmail,
             "populate_runtime_priority_candidates",
             side_effect=RuntimeError("candidate store offline"),
-        ), patch.object(
+        ) as populate, patch.object(
+            fetch_gmail,
+            "_run_gmail_priority_candidate_recovery",
+        ) as recovery, patch.object(
             fetch_gmail,
             "read_new_inbound_client_mode",
             return_value="off",
@@ -393,6 +397,29 @@ class GmailSnapshotTransportRetryTests(unittest.TestCase):
         ):
             fetch_gmail.handler._handle_post(request_handler)
 
+        snapshot_read.assert_called_once_with(
+            gmail_context(),
+            provider_folder="Inbox",
+            request_with_one_refresh=fetch_gmail._request_with_one_refresh,
+            gmail_request=fetch_gmail._gmail_request,
+            refresh_context=fetch_gmail.refresh_gmail_context,
+            limit=50,
+            focus_preferences=None,
+            strict=False,
+            message_parser=fetch_gmail.message_from_bytes,
+        )
+        populate.assert_called_once_with(
+            member=member,
+            mailbox_id=MAILBOX_ID,
+            mailbox_account_identity=MAILBOX_EMAIL,
+            provider="google",
+            sources=snapshot_result["_priorityCandidateSources"],
+        )
+        recovery.assert_called_once_with(
+            member=member,
+            context=gmail_context(),
+            focus_preferences=None,
+        )
         self.assertEqual(
             sent,
             [
@@ -449,6 +476,106 @@ class GmailSnapshotTransportRetryTests(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertEqual(result["error"]["code"], error_code)
         self.assertEqual(len(paths), 1)
+
+
+class GmailInboxSnapshotRouteContractTests(unittest.TestCase):
+    def call_route(self, snapshot_result, *, request_fields=None):
+        target = SimpleNamespace(headers={})
+        sent = []
+        with patch.object(
+            fetch_gmail,
+            "read_json_body",
+            return_value=({"mailboxId": MAILBOX_ID, **(request_fields or {})}, None),
+        ), patch.object(
+            fetch_gmail,
+            "resolve_authenticated_gmail",
+            return_value={
+                "status": "ok",
+                "context": gmail_context(),
+                "memberAuthority": object(),
+            },
+        ), patch.object(
+            fetch_gmail,
+            "read_gmail_folder_snapshot",
+            return_value=snapshot_result,
+        ) as snapshot_read, patch.object(
+            fetch_gmail,
+            "populate_runtime_priority_candidates",
+        ) as populate, patch.object(
+            fetch_gmail,
+            "_run_gmail_priority_candidate_recovery",
+        ) as recovery, patch.object(
+            fetch_gmail,
+            "send_json",
+            side_effect=lambda _target, status, payload: sent.append((status, payload)),
+        ):
+            fetch_gmail.handler._handle_post(target)
+        return sent, snapshot_read, populate, recovery
+
+    def test_inbox_limit_and_focus_contract_is_unchanged(self):
+        for request_fields, expected_limit in (
+            ({}, 50),
+            ({"limit": None}, 50),
+            ({"limit": -1}, 1),
+            ({"limit": 1}, 1),
+            ({"limit": 73}, 73),
+            ({"limit": 101}, 100),
+        ):
+            with self.subTest(request_fields=request_fields):
+                _, snapshot_read, _, _ = self.call_route(
+                    {"error": {"code": "gmail_permission_denied"}},
+                    request_fields={
+                        **request_fields,
+                        "focusPreferences": {"finance": "high"},
+                    },
+                )
+                snapshot_read.assert_called_once_with(
+                    gmail_context(),
+                    provider_folder="Inbox",
+                    request_with_one_refresh=fetch_gmail._request_with_one_refresh,
+                    gmail_request=fetch_gmail._gmail_request,
+                    refresh_context=fetch_gmail.refresh_gmail_context,
+                    limit=expected_limit,
+                    focus_preferences={"finance": "high"},
+                    strict=False,
+                    message_parser=fetch_gmail.message_from_bytes,
+                )
+
+    def test_inbox_provider_and_refresh_failures_keep_exact_public_contract(self):
+        for internal_code, status, public_code, message in (
+            ("gmail_token_invalid", 401, "reconnect_required", "Reconnect this Gmail inbox to continue."),
+            ("gmail_permission_denied", 403, "gmail_permission_denied", "Gmail did not permit this operation."),
+            ("gmail_rate_limited", 502, "gmail_rate_limited", "Gmail is temporarily rate limited."),
+            ("gmail_unavailable", 502, "gmail_unavailable", "Gmail is temporarily unavailable."),
+            ("gmail_response_invalid", 502, "gmail_response_invalid", "Gmail returned an invalid response."),
+            ("gmail_response_too_large", 502, "gmail_response_too_large", "Gmail returned a response that is too large."),
+            ("gmail_message_not_found", 502, "gmail_fetch_failed", "Gmail inbox could not be loaded."),
+        ):
+            with self.subTest(internal_code=internal_code):
+                sent, _, populate, recovery = self.call_route({
+                    "error": {"code": internal_code},
+                    "_priorityCandidateSources": [{"private": "unused"}],
+                })
+                self.assertEqual(sent, [(status, fetch_gmail.error_payload(public_code, message))])
+                populate.assert_not_called()
+                recovery.assert_not_called()
+
+        refresh_failure = {
+            "status": "error",
+            "status_code": 503,
+            "error": fetch_gmail.error_payload(
+                "gmail_token_store_unavailable",
+                "Gmail authorization storage is temporarily unavailable.",
+            ),
+        }
+        sent, _, populate, recovery = self.call_route({
+            "error": {"code": "gmail_token_invalid"},
+            "refresh_failure": refresh_failure,
+            "_priorityCandidateSources": [{"private": "unused"}],
+        })
+        self.assertEqual(sent, [(503, refresh_failure["error"])])
+        populate.assert_not_called()
+        recovery.assert_not_called()
 
 
 class GmailSnapshotSizeAccountingTests(unittest.TestCase):

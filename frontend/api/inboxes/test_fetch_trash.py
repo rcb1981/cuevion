@@ -575,6 +575,8 @@ class FetchTrashRouteTests(unittest.TestCase):
             gmail_context(),
             provider_folder="Trash",
             request_with_one_refresh=fetch_trash._request_with_one_refresh,
+            gmail_request=fetch_trash._gmail_request,
+            refresh_context=fetch_trash.refresh_gmail_context,
             limit=100,
             focus_preferences=None,
             strict=True,

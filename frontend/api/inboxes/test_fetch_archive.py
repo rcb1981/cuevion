@@ -490,6 +490,8 @@ class FetchArchiveGmailTests(unittest.TestCase):
             context,
             provider_folder="Archive",
             request_with_one_refresh=fetch_archive._request_with_one_refresh,
+            gmail_request=fetch_archive._gmail_request,
+            refresh_context=fetch_archive.refresh_gmail_context,
             limit=100,
             focus_preferences=None,
             strict=True,

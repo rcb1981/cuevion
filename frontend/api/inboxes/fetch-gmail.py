@@ -316,6 +316,8 @@ class handler(BaseHTTPRequestHandler):
             context,
             provider_folder="Inbox",
             request_with_one_refresh=_request_with_one_refresh,
+            gmail_request=_gmail_request,
+            refresh_context=refresh_gmail_context,
             limit=limit,
             focus_preferences=focus_preferences,
             strict=False,

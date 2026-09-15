@@ -445,6 +445,8 @@ def _perform_gmail_archive_snapshot(
         context,
         provider_folder="Archive",
         request_with_one_refresh=_request_with_one_refresh,
+        gmail_request=_gmail_request,
+        refresh_context=refresh_gmail_context,
         limit=ARCHIVE_SNAPSHOT_LIMIT,
         focus_preferences=None,
         strict=True,
