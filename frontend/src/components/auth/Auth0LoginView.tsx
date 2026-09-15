@@ -25,7 +25,7 @@ export function Auth0LoginView() {
               Sign in to Cuevion
             </h1>
             <p className="mx-auto mt-4 max-w-[25rem] text-[0.96rem] leading-7 text-[rgba(88,80,71,0.84)] dark:text-[rgba(222,211,200,0.76)]">
-              We&apos;ll send a secure sign-in code to your email address.
+              Continue securely to access your Cuevion workspace.
             </p>
           </div>
 
@@ -42,9 +42,9 @@ export function Auth0LoginView() {
             <button
               type="button"
               onClick={() => window.location.assign(AUTH0_LOGIN_ENDPOINT)}
-              className="inline-flex h-11 items-center justify-center rounded-full border border-[rgba(218,194,142,0.56)] bg-[linear-gradient(180deg,rgba(237,222,184,0.98),rgba(199,166,104,0.96))] px-6 text-[0.74rem] font-semibold uppercase tracking-[0.15em] text-[rgba(29,58,48,0.96)] shadow-[inset_0_1px_0_rgba(255,252,240,0.66),inset_0_-1px_0_rgba(119,82,38,0.14),0_10px_22px_rgba(15,36,30,0.18)] transition-[background-image,border-color,transform,box-shadow] duration-150 hover:-translate-y-px hover:border-[rgba(231,207,156,0.66)] hover:bg-[linear-gradient(180deg,rgba(242,228,192,0.98),rgba(184,149,88,0.98))] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(38,66,56,0.32)] focus-visible:ring-offset-2 active:translate-y-0 active:scale-[0.99]"
+              className="inline-flex h-10 items-center justify-center rounded-full border border-[rgba(218,194,142,0.56)] bg-[linear-gradient(180deg,rgba(237,222,184,0.98),rgba(199,166,104,0.96))] px-5 text-[0.8125rem] font-medium tracking-normal text-[rgba(29,58,48,0.96)] shadow-[inset_0_1px_0_rgba(255,252,240,0.66),inset_0_-1px_0_rgba(119,82,38,0.14),0_6px_14px_rgba(15,36,30,0.14)] transition-[background-image,border-color,transform,box-shadow] duration-150 hover:-translate-y-px hover:border-[rgba(231,207,156,0.66)] hover:bg-[linear-gradient(180deg,rgba(242,228,192,0.98),rgba(184,149,88,0.98))] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#264238] focus-visible:ring-offset-2 dark:focus-visible:ring-[#e9d8b4] dark:focus-visible:ring-offset-[#211c18] active:translate-y-0 active:scale-[0.99]"
             >
-              Sign in with email
+              Sign in
             </button>
           </div>
         </section>

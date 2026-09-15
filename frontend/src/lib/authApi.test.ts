@@ -242,8 +242,13 @@ const loginSource = fs.readFileSync(
   "utf8",
 );
 assert.equal((loginSource.match(/<button\b/g) ?? []).length, 1);
-assert.equal(loginSource.includes("Sign in with email"), true);
-assert.equal(loginSource.includes("secure sign-in code"), true);
+assert.match(loginSource, />\s*Sign in\s*<\/button>/);
+assert.equal(
+  loginSource.includes("Continue securely to access your Cuevion workspace."),
+  true,
+);
+assert.equal(loginSource.includes("Sign in with email"), false);
+assert.equal(loginSource.includes("secure sign-in code"), false);
 assert.equal(loginSource.includes("<input"), false);
 assert.equal(loginSource.includes("localStorage"), false);
 assert.equal(loginSource.includes("sessionStorage"), false);
