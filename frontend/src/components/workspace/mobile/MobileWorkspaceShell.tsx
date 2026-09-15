@@ -23,8 +23,7 @@ export type MobileWorkspaceMailbox = {
   detail: string;
   connected: boolean;
   syncError?: string | null;
-  /** Transient refresh diagnostic set by the onSyncMailbox callback in WorkspaceShell.
-   *  Shows the result of the last explicit per-mailbox refresh. */
+  /** Legacy manual-refresh diagnostic; visible status uses mailboxSyncPresentation. */
   refreshStatus?: string | null;
   cachedMessageCount?: number;
   messages: MobileWorkspaceMessage[];
@@ -91,19 +90,10 @@ function formatMessageBody(message: MobileWorkspaceMessage) {
 
 function resolveMobileMailboxRefreshStatus(
   presentation: MailboxSyncPresentation | undefined,
-  refreshStatus?: string | null,
 ) {
-  if (!presentation?.message) return refreshStatus;
-
-  const requested = refreshStatus === "↻ Refresh requested…";
-  const timedOut = refreshStatus?.startsWith("Refresh is taking longer than expected");
-  const redundantPendingStatus =
-    (presentation.inboxRefreshing && requested) ||
-    (presentation.inboxUpdated && (requested || timedOut));
-
-  return [presentation.message, redundantPendingStatus ? null : refreshStatus]
-    .filter(Boolean)
-    .join("\n");
+  // Use the same scoped, transient status as desktop. Manual diagnostics can
+  // finish after Inbox publication and must not resurrect success or leak details.
+  return presentation?.message ?? null;
 }
 
 function MobileMark() {
@@ -304,7 +294,6 @@ export function MobileWorkspaceShell({
     activeMailboxSyncPresentation?.inboxRefreshing ?? false;
   const activeMailboxRefreshStatus = resolveMobileMailboxRefreshStatus(
     activeMailboxSyncPresentation,
-    activeMailbox?.refreshStatus,
   );
 
   const openTab = (tab: MobileTab) => {
@@ -378,8 +367,8 @@ export function MobileWorkspaceShell({
                 <button
                   type="button"
                   aria-label={
-                    isActiveMailboxSyncing
-                      ? activeMailboxSyncPresentation?.message ?? "Refreshing Inbox"
+                    isActiveInboxRefreshing
+                      ? "Syncing…"
                       : "Sync mailbox"
                   }
                   disabled={!activeMailbox.connected || isActiveMailboxSyncing || !onSyncMailbox}
@@ -410,7 +399,7 @@ export function MobileWorkspaceShell({
             <div className="w-12" />
           )}
         </div>
-        {syncFeedbackMessage && !(view.kind === "mailbox" && activeMailboxSyncPresentation?.message) ? (
+        {syncFeedbackMessage && activeTab !== "inboxes" ? (
           <div className="mt-2 truncate rounded-full border border-[color:rgba(232,211,174,0.24)] bg-[color:rgba(255,250,239,0.12)] px-3 py-1.5 text-center text-[0.72rem] font-medium text-[color:rgba(255,248,236,0.88)]">
             {syncFeedbackMessage}
           </div>
@@ -545,7 +534,6 @@ export function MobileWorkspaceShell({
                 const unreadCount = mailbox.messages.filter((message) => message.unread).length;
                 const refreshStatus = resolveMobileMailboxRefreshStatus(
                   mailboxSyncPresentation[mailbox.id],
-                  mailbox.refreshStatus,
                 );
                 const visibleMessageLabel =
                   mailbox.syncError &&
@@ -577,10 +565,7 @@ export function MobileWorkspaceShell({
                           {visibleMessageLabel}
                         </span>
                       ) : null}
-                      {/* syncError is intentionally omitted from list cards — background
-                          refresh failures should not persist as a permanent orange warning
-                          on every inbox row. The refreshStatus (auto-dismissed after a few
-                          seconds) conveys the result of a user-triggered sync instead. */}
+                      {/* Share desktop's scoped status and success lifetime. */}
                       {refreshStatus ? (
                         <span className="mt-0.5 block truncate text-[0.68rem] text-[color:rgba(49,92,75,0.76)] dark:text-[color:rgba(184,225,197,0.76)]">
                           {refreshStatus}

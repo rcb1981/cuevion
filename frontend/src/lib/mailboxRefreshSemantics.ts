@@ -12,38 +12,66 @@ export type MailboxSyncPresentation = {
 // Presentation only. Provider locks and refresh planning remain authoritative.
 export function resolveMailboxSyncPresentation({
   operationInFlight,
-  archiveInFlight,
-  trashInFlight,
   inboxReadiness,
   folderNeedsAttention,
+  showUpdated = false,
 }: {
   operationInFlight: boolean;
   archiveInFlight: boolean;
   trashInFlight: boolean;
   inboxReadiness?: MailboxInboxReadiness;
   folderNeedsAttention: boolean;
+  showUpdated?: boolean;
 }): MailboxSyncPresentation {
   const inboxRefreshing =
     operationInFlight && (!inboxReadiness || inboxReadiness === "refreshing");
-  const backgroundInFlight =
-    archiveInFlight || trashInFlight || (operationInFlight && !inboxRefreshing);
-  const messages: string[] = [];
+  let message: string | null = null;
   if (inboxRefreshing) {
-    messages.push("Refreshing Inbox…");
-  } else if (inboxReadiness === "updated") {
-    messages.push("Inbox updated");
-  } else if (inboxReadiness === "partial") {
-    messages.push("Inbox updated with warnings");
+    message = "Syncing…";
   } else if (inboxReadiness === "not_updated") {
-    messages.push("Inbox not updated");
+    message = "Couldn’t update inbox";
+  } else if (inboxReadiness === "partial") {
+    message = "Couldn’t fully update inbox";
+  } else if (folderNeedsAttention) {
+    message = "Some folders couldn’t update";
+  } else if (inboxReadiness === "updated" && showUpdated) {
+    message = "Updated";
   }
-  if (backgroundInFlight) messages.push("Background folders syncing");
-  if (folderNeedsAttention) messages.push("Some folders need attention");
   return {
     operationInFlight,
     inboxRefreshing,
     inboxUpdated: inboxReadiness === "updated" || inboxReadiness === "partial",
-    message: messages.join(" · ") || null,
+    message,
+  };
+}
+
+// UI lifetime only: no readiness, provider locks, or persisted state live here.
+export function createMailboxSyncSuccessTimers(onExpire: () => void) {
+  const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  let disposed = false;
+  const clear = (scope: string) => {
+    const timer = timers.get(scope);
+    if (timer !== undefined) clearTimeout(timer);
+    timers.delete(scope);
+  };
+  return {
+    has: (scope: string) => timers.has(scope),
+    clear,
+    show(scope: string) {
+      if (disposed) return;
+      clear(scope);
+      const timer = setTimeout(() => {
+        // A cancelled callback must not expire a later success in this scope.
+        if (disposed || timers.get(scope) !== timer) return;
+        timers.delete(scope);
+        onExpire();
+      }, 2000);
+      timers.set(scope, timer);
+    },
+    dispose() {
+      disposed = true;
+      for (const scope of timers.keys()) clear(scope);
+    },
   };
 }
 

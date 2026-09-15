@@ -6,6 +6,7 @@ import { transform } from "sucrase";
 import { pruneInboxSnapshot } from "../../lib/inboxEngine";
 import {
   createCustomImapInboxAuthority,
+  createMailboxSyncSuccessTimers,
   createGmailInboxAuthority,
   createGmailUnreadIntentAuthority,
   resolveMailboxRefreshPlan,
@@ -152,6 +153,7 @@ function createHarness(
     syncingMailboxIdsRef, providerArchiveFetchMailboxIdsRef, providerTrashFetchMailboxIdsRef,
     syncingMailboxId: null,
     setSyncingMailboxId: (next: any) => { scalarSyncingMailboxId = update(scalarSyncingMailboxId, next); },
+    mailboxSyncSuccessTimersRef: { current: createMailboxSyncSuccessTimers(() => {}) },
     updateMailboxInboxReadiness: (next: any) => { scopedReadiness = update(scopedReadiness, next); },
     setMailboxSyncActivityRevision: (next: any) => { activityRevision = update(activityRevision, next); },
     beginMailboxHealthCheck: (id: string) => ({ id }), completeMailboxHealthCheck: () => {}, cancelMailboxHealthCheck: () => {},
@@ -261,7 +263,7 @@ async function main() {
     assert.equal(h.mailboxStore.a.Inbox[0].id, "fresh");
     assert.equal(h.presentation("a").inboxRefreshing, false);
     assert.equal(h.presentation("a").inboxUpdated, true);
-    assert.equal(h.presentation("a").message, "Inbox updated · Background folders syncing");
+    assert.equal(h.presentation("a").message, "Updated");
     assert.equal(h.syncingMailboxIdsRef.current.has("a"), true);
     assert.equal(h.activity.a.trash, true);
     for (const reason of ["manual", "interval", "mailbox_open"]) {
@@ -273,10 +275,10 @@ async function main() {
     assert.equal(await operation, "synced");
     assert.equal(h.syncingMailboxIdsRef.current.has("a"), false);
     assert.equal(h.activity.a.archive, true);
-    assert.equal(h.presentation("a").message, "Inbox updated · Background folders syncing");
+    assert.equal(h.presentation("a").message, "Updated");
     h.archive.a.resolve(true);
     await flush();
-    assert.equal(h.presentation("a").message, "Inbox updated");
+    assert.equal(h.presentation("a").message, "Updated");
     assert.equal(h.activityRevision, 6, "Every started/finished provider activity requests a render");
   });
 
@@ -290,7 +292,7 @@ async function main() {
     assert.equal(await operation, "synced");
     assert.equal(h.readiness.a, "updated");
     assert.equal(h.mailboxStore.a.Inbox[0].id, "fresh");
-    assert.equal(h.presentation("a").message, "Inbox updated · Some folders need attention");
+    assert.equal(h.presentation("a").message, "Some folders couldn’t update");
   });
 
   await test("Inbox failure never labels cached rows fresh, including during slow Trash", async () => {
@@ -303,7 +305,7 @@ async function main() {
     assert.equal(h.mailboxStore.a.Inbox[0].id, "cached");
     assert.equal(h.publications.length, 0);
     assert.equal(h.syncingMailboxIdsRef.current.has("a"), true);
-    assert.equal(h.presentation("a").message, "Inbox not updated · Background folders syncing");
+    assert.equal(h.presentation("a").message, "Couldn’t update inbox");
     h.trash.a.resolve(true);
     assert.equal(await operation, "failed");
     assert.equal(h.readiness.a, "not_updated");

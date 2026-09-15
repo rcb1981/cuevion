@@ -225,6 +225,7 @@ import {
   createGmailInboxAuthority,
   createGmailUnreadIntentAuthority,
   createGmailArchiveReconciliationCoordinator,
+  createMailboxSyncSuccessTimers,
   resolveMailboxRefreshPlan,
   resolveMailboxSyncPresentation,
   resolveProviderArchiveRefreshSemantics,
@@ -28052,7 +28053,7 @@ function MailboxView({
             Compose
           </button>
           <MailToolbarIconButton
-            label={isSyncingMailbox ? mailboxSyncPresentation.message ?? "Syncing" : "Sync"}
+            label={mailboxSyncPresentation.inboxRefreshing ? "Syncing…" : "Sync"}
             onClick={onSyncMailbox}
             disabled={isSyncingMailbox}
           >
@@ -45646,6 +45647,19 @@ export function WorkspaceShell({
   const [, setMailboxSyncActivityRevision] = useState(0);
   const publishMailboxSyncActivity = () =>
     setMailboxSyncActivityRevision((current) => current + 1);
+  const mailboxSyncSuccessTimersRef = useRef<
+    ReturnType<typeof createMailboxSyncSuccessTimers> | null
+  >(null);
+  useEffect(() => {
+    const timers = createMailboxSyncSuccessTimers(() =>
+      setMailboxSyncActivityRevision((current) => current + 1),
+    );
+    mailboxSyncSuccessTimersRef.current = timers;
+    return () => {
+      timers.dispose();
+      mailboxSyncSuccessTimersRef.current = null;
+    };
+  }, []);
   // Scope freshness to the member, exact mailbox and connection incarnation.
   // Old async completions can only update their own presentation scope.
   const [mailboxInboxReadiness, updateMailboxInboxReadiness] = useState<
@@ -45663,6 +45677,14 @@ export function WorkspaceShell({
     readiness: MailboxInboxReadiness,
     onlyIfRefreshing = false,
   ) => {
+    // The finally fallback must not restart or erase a published success.
+    if (!onlyIfRefreshing) {
+      if (readiness === "updated") {
+        mailboxSyncSuccessTimersRef.current?.show(scope);
+      } else {
+        mailboxSyncSuccessTimersRef.current?.clear(scope);
+      }
+    }
     updateMailboxInboxReadiness((current) =>
       onlyIfRefreshing && current[scope] !== "refreshing"
         ? current
@@ -45678,6 +45700,9 @@ export function WorkspaceShell({
           archiveInFlight: providerArchiveFetchMailboxIdsRef.current.has(mailbox.id),
           trashInFlight: providerTrashFetchMailboxIdsRef.current.has(mailbox.id),
           inboxReadiness: mailboxInboxReadiness[readMailboxSyncPresentationScope(mailbox.id)],
+          showUpdated: mailboxSyncSuccessTimersRef.current?.has(
+            readMailboxSyncPresentationScope(mailbox.id),
+          ),
           folderNeedsAttention: Boolean(
             providerArchiveFolderStatusMessages[mailbox.id] ||
             providerTrashFolderStatusMessages[mailbox.id],
@@ -45685,6 +45710,20 @@ export function WorkspaceShell({
         }),
       ]),
     );
+  const mailboxSyncAttentionScopes = JSON.stringify(
+    (hasAuthenticatedMemberAuthority ? orderedMailboxes : [])
+      .filter((mailbox) =>
+        providerArchiveFolderStatusMessages[mailbox.id] ||
+        providerTrashFolderStatusMessages[mailbox.id],
+      )
+      .map((mailbox) => readMailboxSyncPresentationScope(mailbox.id)),
+  );
+  useEffect(() => {
+    // Errors already override success in render; also prevent it resurfacing.
+    for (const scope of JSON.parse(mailboxSyncAttentionScopes) as string[]) {
+      mailboxSyncSuccessTimersRef.current?.clear(scope);
+    }
+  }, [mailboxSyncAttentionScopes, mailboxInboxReadiness]);
   const activeSyncMailboxIds = orderedMailboxes
     .filter((mailbox) => {
       const presentation = mailboxSyncPresentation[mailbox.id];
@@ -56992,7 +57031,7 @@ export function WorkspaceShell({
 		            </div>
 		          </div>
 		        ) : null}
-		        {mailboxSyncFeedbackMessage && !shouldShowDashboardSyncStatus && !(activeMailbox && startupSyncStatus === "running") ? (
+		        {mailboxSyncFeedbackMessage && !shouldShowDashboardSyncStatus && !activeMailbox ? (
 		          <div className="pointer-events-none fixed bottom-6 right-6 z-[341]">
 		            <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.84rem] leading-6 text-[var(--workspace-text)] shadow-panel">
 		              {mailboxSyncFeedbackMessage}
