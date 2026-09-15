@@ -677,6 +677,7 @@ type HelpTopic = {
   id: string;
   section: string;
   title: string;
+  previousTitles?: string[];
   intro: string;
   points: string[];
   tip?: string;
@@ -686,313 +687,120 @@ type HelpTopic = {
 
 const helpTopics: HelpTopic[] = [
   {
-    id: "getting-started",
-    section: "Basics",
-    title: "Getting started",
-    intro:
-      "Use Cuevion as your working email surface first: connect an inbox, scan the main lanes, then tune settings as you go.",
-    points: [
-      "Start with your normal email workflow so the workspace feels familiar.",
-      "Use Dashboard for a high-level view, For You for recommended attention, and Priority for threads that need faster review.",
-      "Open Inboxes when you want to work from a specific connected mailbox.",
-      "Use Settings to adjust inbox setup, signatures, and workspace preferences.",
-      "Use Help for guidance and Contact when something needs a person from Cuevion.",
-    ],
-    tip: "For testing, avoid changing too many settings at once. One change at a time makes issues easier to report.",
-    keywords: ["start", "setup", "overview", "dashboard", "first run", "guide"],
-    popular: true,
-  },
-  {
     id: "navigation-overview",
     section: "Basics",
-    title: "Navigation overview",
+    title: "How Cuevion organizes your inbox",
+    previousTitles: ["Getting started", "Navigation overview", "Smart Folders", "Messages are not showing", "Private beta mailbox actions"],
     intro:
-      "The sidebar separates daily email work from setup, support, and account utilities.",
+      "Work with your connected mailboxes from Inboxes in the sidebar.",
     points: [
-      "Dashboard summarizes the current workspace state.",
-      "For You highlights messages and actions Cuevion thinks may deserve attention.",
-      "Priority focuses on messages that are likely time-sensitive or important.",
-      "Inboxes shows connected mailboxes and smart folder views.",
-      "Settings, Help, and Contact live in the utility area at the bottom of the sidebar.",
+      "Open a mailbox to read and send email. Its folders include Inbox, Drafts, Sent, Archive, Spam, and Trash.",
+      "Inbox includes Filtered and Shared views. Use Smart Folders to return to saved filters.",
+      "Related messages are grouped into conversations so you can read replies together.",
+      "Use Priority for conversations needing attention, For You for learning controls, and Notifications for updates.",
     ],
-    keywords: ["sidebar", "navigation", "menu", "dashboard", "inboxes", "where"],
-  },
-  {
-    id: "connected-inboxes",
-    section: "Inbox setup",
-    title: "Managing connected inboxes",
-    intro:
-      "Connected inboxes define which mailboxes Cuevion can show and how each mailbox appears in the workspace.",
-    points: [
-      "Open Settings and use Connected inboxes to review mailbox status.",
-      "Use the inbox row actions to reconnect, edit, or inspect setup details when available.",
-      "Keep mailbox names recognizable so message lists and filters stay easy to scan.",
-      "Check whether the inbox is connected before troubleshooting missing messages.",
-      "Do not remove or reconnect an inbox unless you are intentionally testing that flow.",
-    ],
-    tip: "If a setting changes but the UI still looks old, refresh the workspace once before reporting it.",
-    keywords: ["inbox", "mailbox", "connected", "connection", "settings", "edit inbox"],
+    keywords: ["navigation", "mailbox", "folders", "dashboard", "messages", "smart folders"],
     popular: true,
   },
   {
-    id: "gmail-google-reconnect",
-    section: "Inbox setup",
-    title: "Gmail and Google reconnect",
+    id: "working-with-priority",
+    section: "Daily workflow",
+    title: "Working with Priority",
     intro:
-      "Gmail inboxes use a Google connection flow. If access expires or changes, reconnect from the existing inbox controls.",
+      "Priority brings together conversations that may need your attention.",
     points: [
-      "Open Settings, then Connected inboxes.",
-      "Find the Gmail or Google inbox that needs attention.",
-      "Use Reconnect Gmail if that action is shown for the inbox.",
-      "Complete the Google flow in the same account you want Cuevion to use.",
-      "Return to Cuevion and confirm the inbox status updates before testing message sync again.",
+      "Use Mark as priority in a message's actions to add it, or This is not priority to remove it.",
+      "Conversations awaiting a reply can stay in Priority. A reply from the other person can bring the conversation back to your attention.",
+      "Active collaborations can also appear in Priority.",
+      "Choose Mark as done when the current work is finished. This clears the Priority item without deleting the email.",
     ],
-    tip: "If Reconnect Gmail is not visible, report the inbox name and what status you see.",
-    keywords: ["gmail", "google", "oauth", "reconnect", "authorize", "authorization", "access"],
+    keywords: ["important", "waiting", "returned reply", "done", "completed"],
     popular: true,
   },
   {
-    id: "custom-imap",
-    section: "Inbox setup",
-    title: "Custom IMAP setup",
+    id: "priority-for-you-ai",
+    section: "Daily workflow",
+    title: "Understanding AI suggestions",
+    previousTitles: ["Priority, For You, and AI suggestions", "An email appears in the wrong category", "Testing Cuevion"],
     intro:
-      "Custom IMAP is for providers that are not connected through the Google flow.",
+      "Use For You to review and refine Cuevion's label and priority suggestions. You choose whether to confirm or change a suggestion.",
     points: [
-      "Confirm the IMAP host and port from your mail provider.",
-      "Check whether the provider expects SSL or another security option.",
-      "Use the username format your provider requires, often the full email address.",
-      "Use an app password when your provider requires one for external mail clients.",
-      "Save the inbox, then verify the connection status in Connected inboxes.",
+      "Open Refine Cuevion to review a message, choose Yes, correct, or change its label or priority.",
+      "Choose how Cuevion should handle future emails from that sender, or select Do not learn from this sender.",
+      "Use Paste sender or domain to set future handling, and Recent learning decisions to review earlier choices.",
+      "Turn AI Suggestions on or off in Settings → Workspace → AI Behavior.",
     ],
-    tip: "Common IMAP issues are a wrong port, SSL mismatch, or using the account password when an app password is required.",
-    keywords: ["imap", "custom", "host", "port", "ssl", "username", "password", "app password", "provider"],
+    keywords: ["for you", "learning", "labels", "feedback", "sender", "domain"],
     popular: true,
   },
   {
     id: "working-with-messages",
     section: "Daily workflow",
-    title: "Working with messages",
+    title: "Working with conversations",
+    previousTitles: ["Working with messages"],
     intro:
-      "Message views are designed for scanning, opening a thread, and taking the next obvious action.",
+      "Cuevion groups related messages into conversations so you can follow an email exchange in one place.",
     points: [
-      "Use the message list to scan sender, subject, preview, and category signals.",
-      "Open a message to read the full thread and review any available suggestions.",
-      "Use category and priority cues as guidance, then verify the message content before acting.",
-      "When a message looks wrong, note the sender, subject, current category, and expected category.",
-      "Keep an eye on whether the issue appears in one inbox or across multiple inboxes.",
+      "The default conversation order is Newest first, with the latest message at the top.",
+      "Go to Settings → Mail → Conversation order to choose Newest first or Oldest first.",
+      "Changing the order only changes how the conversation is displayed. It does not change the messages themselves.",
+      "Use Reply, Reply All, or Forward on the message you want to respond to or share by email.",
     ],
-    keywords: ["message", "email", "thread", "category", "label", "read", "reply", "detail"],
-  },
-  {
-    id: "private-beta-mailbox-actions",
-    section: "Daily workflow",
-    title: "Private beta mailbox actions",
-    intro:
-      "During private beta, Cuevion keeps some organization state inside the workspace so testers can use the product safely while provider behavior is still being expanded.",
-    points: [
-      "Archive, trash, spam, read state, manual priority, manual labels, and Smart Folder rules may be saved inside Cuevion during beta.",
-      "Your original provider mailbox may not be changed for every organization action.",
-      "Gmail and IMAP connections can still show real mailbox data where configured.",
-      "Sending can be real where the connected mailbox supports it and has been configured.",
-      "When testing, compare with the provider inbox if you need to confirm whether a specific action changed the original mailbox.",
-    ],
-    tip: "This keeps private beta testing practical without implying every mailbox action has provider-side sync yet.",
-    keywords: [
-      "private beta",
-      "local",
-      "local only",
-      "archive",
-      "trash",
-      "spam",
-      "read state",
-      "unread",
-      "manual priority",
-      "manual labels",
-      "smart folders",
-      "provider mailbox",
-    ],
-  },
-  {
-    id: "priority-for-you-ai",
-    section: "Daily workflow",
-    title: "Priority, For You, and AI suggestions",
-    intro:
-      "Priority and For You help surface work, while AI suggestions provide supporting context for decisions.",
-    points: [
-      "Use Priority when you want to focus on messages that likely need timely attention.",
-      "Use For You to review suggested next actions and learning opportunities.",
-      "Treat AI suggestions as recommendations, not final decisions.",
-      "Check the original message before applying a suggestion or changing behavior.",
-      "Report suggestions that feel confusing, stale, or mismatched to the message.",
-    ],
-    tip: "Good feedback includes what Cuevion suggested and what you expected instead.",
-    keywords: ["priority", "for you", "ai", "suggestion", "suggestions", "recommended", "learning"],
-    popular: true,
-  },
-  {
-    id: "smart-folders",
-    section: "Daily workflow",
-    title: "Smart Folders",
-    intro:
-      "Smart Folders create lightweight views for recurring work without changing the underlying mailbox.",
-    points: [
-      "Open Inboxes in the sidebar to access Smart Folders.",
-      "Use Add smart folder to create a focused view when that control is available.",
-      "Name folders clearly so the purpose is obvious later.",
-      "Edit or delete a folder from its folder controls.",
-      "Use Smart Folders for review patterns you repeat often, not one-off searches.",
-    ],
-    keywords: ["smart folder", "smart folders", "folder", "folders", "view", "saved view"],
+    keywords: ["thread", "sort", "reading", "reply", "forward"],
     popular: true,
   },
   {
     id: "team-collaboration",
     section: "Workspace",
-    title: "Team and collaboration",
+    title: "Collaborating with your team",
+    previousTitles: ["Team and collaboration"],
     intro:
-      "Team areas help testers review access and collaboration flows from inside the workspace.",
+      "Discuss an email with the people you add to its collaboration.",
     points: [
-      "Open Team to inspect workspace members and invitations.",
-      "Check whether member status, role labels, and invitation state are clear.",
-      "Use collaboration views only for the message or inbox access shown in the UI.",
-      "Report any flow where it is unclear who can see or act on a message.",
-      "Do not assume hidden sharing behavior beyond what the workspace displays.",
+      "Choose Collaboration… from a message's actions to start or open a discussion. Team access is limited to explicitly shared conversations; it does not grant inbox access.",
+      "Use Internal for notes visible to your team participants. Shared messages are also visible to external guests added to the collaboration.",
+      "Type @ and choose a collaborator to mention them in your message.",
+      "The collaboration owner can resolve it in its Settings tab when work is finished, then reopen it to continue the discussion.",
     ],
-    keywords: ["team", "collaboration", "invite", "member", "role", "access", "shared"],
+    keywords: ["team", "collaboration", "mentions", "participants", "resolve", "reopen", "access"],
   },
   {
     id: "settings-signatures",
     section: "Workspace",
-    title: "Settings and signatures",
+    title: "Managing your inbox settings",
+    previousTitles: ["Managing connected inboxes", "Settings and signatures", "I changed inbox settings but do not see the result"],
     intro:
-      "Settings centralizes account preferences, connected inbox setup, signatures, and workspace controls.",
+      "Open Settings from the sidebar to manage your inboxes and preferences.",
     points: [
-      "Use Connected inboxes for mailbox setup and connection status.",
-      "Use signature settings to review or adjust the saved signature shown for the workspace.",
-      "After saving a setting, confirm the UI shows the updated value.",
-      "If a setting appears unchanged, refresh once and note exactly which setting did not update.",
+      "In Inboxes, select a connected mailbox. Use Details to edit its Inbox title, Receiving for the incoming connection, and Sending for outgoing mail settings.",
+      "In Workspace, use Manage to choose a Light, Dark, or System theme. AI Suggestions is under AI Behavior.",
+      "In Mail, manage each inbox's signature and choose your Conversation order.",
+      "In Notifications, turn Inbox changes and Team activity alerts on or off.",
     ],
-    keywords: ["settings", "signature", "signatures", "preferences", "save"],
-    popular: true,
+    keywords: ["settings", "preferences", "appearance", "name", "connection", "signature", "notifications"],
   },
   {
     id: "troubleshooting-sync",
     section: "Troubleshooting",
-    title: "Troubleshooting sync and connection issues",
+    title: "Fixing sync or connection issues",
+    previousTitles: ["Gmail and Google reconnect", "Custom IMAP setup", "Troubleshooting sync and connection issues", "Gmail needs reconnecting", "Custom IMAP will not connect"],
     intro:
-      "Start with the visible connection state before assuming messages are lost or a sync has failed.",
+      "If mail is missing, check the mailbox's connection status in Settings → Inboxes. Use Sync in the mailbox to refresh its messages.",
     points: [
-      "Check Connected inboxes for the mailbox status.",
-      "For Gmail, use Reconnect Gmail if it is available.",
-      "For custom IMAP, confirm host, port, SSL, username, and password or app password.",
-      "Refresh the workspace once after reconnecting or saving connection settings.",
-      "If the issue continues, open Contact from the sidebar and include the inbox name and action you tried.",
+      "For Gmail / Google Workspace, open Receiving and use Reconnect Gmail when shown. Complete the Google connection flow and check the inbox status.",
+      "For Custom IMAP incoming mail, check Receiving against your provider's host, port, and sign-in details. SSL/TLS is required; apply the corrected settings.",
+      "If Custom IMAP receives mail but cannot send, check Sending → Outgoing SMTP. Incoming IMAP settings do not configure outgoing mail.",
+      "If the issue continues, open Settings → Account → Contact support. Include the inbox name, error, and action you tried; never include passwords.",
     ],
-    keywords: ["sync", "connection", "connect", "offline", "stuck", "refresh", "troubleshoot", "troubleshooting"],
-    popular: true,
-  },
-  {
-    id: "gmail-needs-reconnecting",
-    section: "Troubleshooting",
-    title: "Gmail needs reconnecting",
-    intro:
-      "A Gmail inbox may need reconnecting when permissions expire, the Google account changes, or the inbox shows a disconnected state.",
-    points: [
-      "Open Settings, then Connected inboxes.",
-      "Find the Gmail inbox with the warning or disconnected state.",
-      "Click Reconnect Gmail if the action is shown.",
-      "Complete Google authorization with the intended mailbox account.",
-      "Return to Cuevion and verify the inbox status before checking messages again.",
-    ],
-    keywords: ["gmail", "google", "reconnect", "disconnected", "permission", "oauth", "auth"],
-  },
-  {
-    id: "custom-imap-will-not-connect",
-    section: "Troubleshooting",
-    title: "Custom IMAP will not connect",
-    intro:
-      "IMAP connection failures usually come from provider settings or credentials that do not match the mailbox.",
-    points: [
-      "Verify the IMAP host exactly matches the provider documentation.",
-      "Check the port and SSL setting together; they need to match.",
-      "Confirm the username, especially whether the provider requires the full email address.",
-      "Use an app password if the provider requires one for mail apps.",
-      "Try saving again, then report the provider, host, port, SSL setting, and visible error state if it still fails.",
-    ],
-    keywords: ["imap", "custom", "will not connect", "cannot connect", "host", "port", "ssl", "password"],
-  },
-  {
-    id: "messages-not-showing",
-    section: "Troubleshooting",
-    title: "Messages are not showing",
-    intro:
-      "When messages are missing, first narrow down whether the issue is a mailbox connection, view, filter, or timing problem.",
-    points: [
-      "Confirm the inbox is connected in Settings.",
-      "Check whether you are viewing Dashboard, Priority, For You, a specific inbox, or a Smart Folder.",
-      "Refresh the workspace once to rule out a stale view.",
-      "Compare with the provider inbox if you are testing a live mailbox.",
-      "Report the inbox, expected message subject, and where you expected it to appear.",
-    ],
-    keywords: ["messages", "not showing", "missing", "empty", "sync", "filter", "inbox", "view"],
-  },
-  {
-    id: "wrong-category",
-    section: "Troubleshooting",
-    title: "An email appears in the wrong category",
-    intro:
-      "Category signals help route work, but testers should report messages that look misclassified.",
-    points: [
-      "Open the message and confirm the sender, subject, and body context.",
-      "Note the current category or UI signal you see.",
-      "Write down the category you expected and why.",
-      "Include whether the message has links or attachments that may affect classification.",
-      "Use Contact from the sidebar if the issue blocks testing or affects a live workflow.",
-    ],
-    tip: "A useful report says: inbox, sender, subject, current category, expected category, and why.",
-    keywords: ["wrong category", "category", "classification", "label", "demo", "promo", "priority", "misclassified"],
-  },
-  {
-    id: "settings-change-not-visible",
-    section: "Troubleshooting",
-    title: "I changed inbox settings but do not see the result",
-    intro:
-      "Some settings need the workspace view to refresh before the visible state catches up.",
-    points: [
-      "Confirm the setting was saved and the form did not show an error.",
-      "Return to Connected inboxes and check the current value or status.",
-      "Refresh the workspace once if the old value still appears.",
-      "Avoid making another change until you know whether the first one applied.",
-      "Report the inbox, setting name, old value, new value, and what the UI showed after saving.",
-    ],
-    keywords: ["settings", "changed", "not visible", "save", "saved", "result", "refresh", "inbox settings"],
-  },
-  {
-    id: "testing-cuevion",
-    section: "Tester feedback",
-    title: "Testing Cuevion",
-    intro:
-      "Test Cuevion by using it like your real email workspace, then call out where the product helps or gets in the way.",
-    points: [
-      "Try your normal workflow first before looking for edge cases.",
-      "Note where Cuevion saves time or causes confusion.",
-      "Check connected inboxes, message handling, settings, and reconnect flows.",
-      "Use Contact if something feels wrong, unclear, or blocks testing.",
-      "When reporting feedback, include the inbox, action, what happened, and what you expected.",
-    ],
-    tip: "The best tester notes are specific enough that someone else can repeat the same path.",
-    keywords: ["test", "tester", "testing", "feedback", "report", "qa", "support"],
-    popular: true,
+    keywords: ["sync", "connection", "gmail", "google", "imap", "smtp", "refresh", "support"],
   },
 ];
 
 const helpTopicSections = [
   "Basics",
-  "Inbox setup",
   "Daily workflow",
   "Workspace",
   "Troubleshooting",
-  "Tester feedback",
 ] as const;
 
 type TeamAccessLevel = TeamRole;
@@ -40522,11 +40330,11 @@ function UtilityView({
       eyebrow: "Support guidance",
       title: "Help",
       summary:
-        "Find product guidance, usage help, and operational pointers without breaking out of the workspace context.",
+        "Find quick guidance for inboxes, Priority, conversations, collaboration, settings, and connection issues.",
       items: [
-        "Workflow guidance is available close to where work happens",
-        "Support references stay accessible from the utility area",
-        "Help content opens as a calm continuation of the shell",
+        "Find messages and work with conversations",
+        "Review Priority and learning controls",
+        "Manage inbox settings and connection issues",
       ],
     },
     Contact: {
@@ -40553,11 +40361,17 @@ function UtilityView({
   const selectedHelpTopic =
     selectedHelpSuggestion === null
       ? null
-      : helpTopics.find((topic) => topic.title === selectedHelpSuggestion) ?? null;
+      : helpTopics.find((topic) =>
+          topic.title === selectedHelpSuggestion ||
+          topic.previousTitles?.includes(selectedHelpSuggestion),
+        ) ?? null;
   const lastViewedHelpTopic =
     lastViewedGuidance === null
       ? null
-      : helpTopics.find((topic) => topic.title === lastViewedGuidance) ?? null;
+      : helpTopics.find((topic) =>
+          topic.title === lastViewedGuidance ||
+          topic.previousTitles?.includes(lastViewedGuidance),
+        ) ?? null;
   const trimmedHelpSearchQuery = helpSearchQuery.trim().toLowerCase();
   const filteredHelpTopics = useMemo(() => {
     if (trimmedHelpSearchQuery.length === 0) {
@@ -40982,7 +40796,8 @@ function UtilityView({
             <input
               type="text"
               value={helpSearchQuery}
-              placeholder="Search for inbox, Gmail, IMAP, priority, smart folders, or settings"
+              aria-label="Search Help"
+              placeholder="Search inboxes, Priority, conversations, collaboration, or settings"
               className={helpSearchFieldClass}
               onChange={(event) => {
                 setHelpSearchQuery(event.target.value);
@@ -41051,11 +40866,10 @@ function UtilityView({
       {section === "Help" ? (
         <div className="max-w-3xl rounded-[22px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 py-4 text-[0.9rem] leading-6 text-[var(--workspace-text-muted)]">
           <span className="font-medium text-[var(--workspace-text)]">
-            Private beta note:
+            Need more help?
           </span>{" "}
-          Some organization actions, such as archive, trash, spam, read state,
-          manual priority, and Smart Folders, are saved inside Cuevion during
-          beta. Your original mailbox may not be changed for every action.
+          Open Settings → Account → Contact support to send Cuevion a private
+          support request.
         </div>
       ) : null}
 
@@ -41068,7 +40882,7 @@ function UtilityView({
             <p className="mt-1 text-[0.9rem] leading-6 text-[var(--workspace-text-soft)]">
               {selectedHelpTopic
                 ? "Focused steps for the topic you selected."
-                : "Common tester paths and setup questions."}
+                : "Quick answers for everyday email work."}
             </p>
           </div>
           {selectedHelpTopic || trimmedHelpSearchQuery.length > 0 ? (
@@ -41160,7 +40974,7 @@ function UtilityView({
               No help topic found
             </div>
             <p className="mx-auto mt-2 max-w-xl text-[0.92rem] leading-7 text-[var(--workspace-text-muted)]">
-              Try searching for inbox, Gmail, IMAP, priority, smart folders, or settings.
+              Try a broader term such as conversation, Priority, Gmail, or SMTP, or clear your search.
             </p>
           </div>
         ) : (
