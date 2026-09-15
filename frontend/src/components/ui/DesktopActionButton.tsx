@@ -14,11 +14,11 @@ export interface DesktopActionButtonProps
 }
 
 const baseClassName =
-  "inline-flex items-center justify-center rounded-full px-4 text-[0.8125rem] font-medium tracking-normal transition-[background-color,background-image,border-color,color,transform,box-shadow] duration-150 enabled:active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] disabled:pointer-events-none disabled:cursor-not-allowed disabled:scale-100 disabled:opacity-50 disabled:shadow-none";
+  "inline-flex items-center justify-center transition-[background-color,background-image,border-color,color,transform,box-shadow] duration-150 enabled:active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] disabled:pointer-events-none disabled:cursor-not-allowed disabled:scale-100 disabled:opacity-50 disabled:shadow-none";
 
-const sizeClassNames: Record<DesktopActionButtonSize, string> = {
-  regular: "h-9",
-  compact: "h-8 px-3 text-xs",
+export const desktopActionButtonGeometry: Record<DesktopActionButtonSize, string> = {
+  regular: "h-9 px-4 rounded-full text-[0.8125rem] leading-5 font-medium tracking-normal",
+  compact: "h-8 px-3 rounded-full text-xs leading-4 font-medium tracking-normal",
 };
 
 const variantClassNames: Record<DesktopActionButtonVariant, string> = {
@@ -42,7 +42,7 @@ export function DesktopActionButton({
   return (
     <button
       type={type}
-      className={`${baseClassName} ${sizeClassNames[size]} ${variantClassNames[variant]} ${className ?? ""}`.trim()}
+      className={`${baseClassName} ${desktopActionButtonGeometry[size]} ${variantClassNames[variant]} ${className ?? ""}`.trim()}
       {...buttonProps}
     />
   );

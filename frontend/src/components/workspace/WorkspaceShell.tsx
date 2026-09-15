@@ -91,7 +91,10 @@ import {
 } from "../../types/onboarding";
 import type { UserConfig } from "../../types/userConfig";
 import { NavigationBar } from "../onboarding/NavigationBar";
-import { DesktopActionButton } from "../ui/DesktopActionButton";
+import {
+  DesktopActionButton,
+  desktopActionButtonGeometry,
+} from "../ui/DesktopActionButton";
 import {
   applyProviderDefaults,
   createDefaultCustomSmtpSettings,
@@ -13330,6 +13333,9 @@ const mailboxSecondaryActionButtonClass =
 
 const primaryActionSurfaceClass =
   "border border-[color:rgba(66,99,69,0.52)] bg-[linear-gradient(180deg,rgba(103,141,103,0.98),rgba(69,103,72,0.98))] text-[color:rgba(251,248,242,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_8px_18px_rgba(66,99,69,0.12)] transition-[background-image,border-color,transform,box-shadow] duration-150 hover:border-[color:rgba(58,88,62,0.6)] hover:bg-[linear-gradient(180deg,rgba(93,130,95,0.98),rgba(61,95,65,0.98))] active:scale-[0.99] focus-visible:outline-none";
+
+const desktopConfirmationPrimaryActionClass =
+  `inline-flex items-center justify-center ${desktopActionButtonGeometry.regular} ${primaryActionSurfaceClass}`;
 
 const closeActionButtonClass =
   `inline-flex items-center gap-2 rounded-full px-4 py-2 text-[0.68rem] font-medium uppercase tracking-[0.16em] ${primaryActionSurfaceClass}`;
@@ -33145,7 +33151,7 @@ function WorkbenchView({
                 <button
                   type="button"
                   onClick={() => setActiveTeamConfirmation(null)}
-                  className="inline-flex h-10 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)] active:scale-[0.99] focus-visible:outline-none"
+                  className={`inline-flex items-center justify-center ${desktopActionButtonGeometry.regular} border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)] active:scale-[0.99] focus-visible:outline-none`}
                 >
                   No
                 </button>
@@ -33330,8 +33336,8 @@ function WorkbenchView({
                   }}
                   className={
                     isSendingTeamInvite
-                      ? `${mailboxPrimaryActionButtonClass} cursor-default opacity-60`
-                      : mailboxPrimaryActionButtonClass
+                      ? `${desktopConfirmationPrimaryActionClass} cursor-default opacity-60`
+                      : desktopConfirmationPrimaryActionClass
                   }
                 >
                   {isSendingTeamInvite ? "Sending..." : "Confirm"}
@@ -56389,8 +56395,14 @@ export function WorkspaceShell({
                   disabled={!inviteReplyDraft.trim()}
                   className={
                     inviteReplyDraft.trim()
-                      ? `${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`
-                      : "inline-flex h-10 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
+                      ? isMobileWorkspaceViewport
+                        ? `inline-flex h-9 items-center justify-center rounded-full px-5 text-[0.72rem] font-medium uppercase tracking-[0.18em] ${primaryActionSurfaceClass}`
+                        : desktopConfirmationPrimaryActionClass
+                      : `inline-flex cursor-not-allowed items-center justify-center ${
+                          isMobileWorkspaceViewport
+                            ? "h-10 rounded-full px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em]"
+                            : desktopActionButtonGeometry.regular
+                        } border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none`
                   }
                 >
                   Send reply
@@ -56399,7 +56411,11 @@ export function WorkspaceShell({
                   <button
                     type="button"
                     onClick={markInviteFlowDone}
-                    className={modalSecondaryActionButtonClass}
+                    className={
+                      isMobileWorkspaceViewport
+                        ? modalSecondaryActionButtonClass
+                        : `inline-flex items-center justify-center ${desktopActionButtonGeometry.regular} border border-[var(--workspace-border)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface-strong)] active:scale-[0.99] focus-visible:outline-none`
+                    }
                   >
                     Mark as done
                   </button>
@@ -57042,14 +57058,14 @@ export function WorkspaceShell({
           <button
             type="button"
             onClick={() => setPriorityWorkflowFailure(null)}
-            className={settingsPairedSecondaryActionClass}
+            className={`inline-flex w-[7.5rem] items-center justify-center ${desktopActionButtonGeometry.regular} border border-[var(--workspace-border)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition-[background-color,border-color,color,transform,box-shadow] duration-150 hover:border-[color:rgba(120,104,89,0.22)] hover:bg-[color:rgba(245,238,229,0.86)] hover:text-[var(--workspace-text)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_18px_rgba(120,104,89,0.08)] active:scale-[0.99] focus-visible:outline-none dark:hover:border-[var(--workspace-border-hover)] dark:hover:bg-[var(--workspace-hover-surface-strong)] dark:hover:text-[var(--workspace-text)] dark:hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_8px_18px_rgba(0,0,0,0.16)]`}
           >
             Close
           </button>
           <button
             type="button"
             onClick={() => priorityWorkflowFailure?.retry()}
-            className={settingsPrimaryActionClass}
+            className={desktopConfirmationPrimaryActionClass}
           >
             Try again
           </button>
@@ -57072,7 +57088,7 @@ export function WorkspaceShell({
           <button
             type="button"
             onClick={() => setPrioritySemanticNewInboundDismissalFailure(null)}
-            className={settingsPrimaryActionClass}
+            className={desktopConfirmationPrimaryActionClass}
           >
             OK
           </button>
@@ -57095,7 +57111,7 @@ export function WorkspaceShell({
           <button
             type="button"
             onClick={() => setManualChangeConfirmationMessage(null)}
-            className={settingsPrimaryActionClass}
+            className={desktopConfirmationPrimaryActionClass}
           >
             OK
           </button>

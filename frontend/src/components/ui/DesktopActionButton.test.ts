@@ -18,7 +18,7 @@ for (const variant of ["primary", "secondary", "tertiary", "destructive"] as con
 assert.match(buttonSource, /<button\b/, "the primitive must render a native button");
 assert.match(
   buttonSource,
-  /regular:\s*"h-9"/,
+  /regular:\s*"h-9(?:\s|")/,
   "regular height must remain 36px",
 );
 assert.match(buttonSource, /compact:\s*"h-8(?:\s|")/, "compact height must be 32px");
@@ -74,3 +74,6 @@ assert.match(
   /variant=\{confirmVariant\}/,
   "confirmVariant must control confirm button rendering",
 );
+
+// Compile the actual Tailwind utilities, including their cascade order.
+import "../workspace/WorkspaceShell.ctaGeometry.test";
