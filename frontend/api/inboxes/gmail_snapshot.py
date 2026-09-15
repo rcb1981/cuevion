@@ -492,6 +492,10 @@ def read_gmail_folder_snapshot(
         "messages": messages,
         "uidValidity": GMAIL_API_UID_VALIDITY,
     }
+    snapshot_size: int | None = None
+    message_separator_size = len(
+        json.JSONEncoder().item_separator.encode("utf-8")
+    )
     for index, requested_message_id in enumerate(message_ids):
         detail_payload, detail_error, context, refresh_failure = (
             request_snapshot_path(
@@ -526,13 +530,18 @@ def read_gmail_folder_snapshot(
             continue
         preview, priority_candidate_source = parsed
 
-        candidate_snapshot = {
-            **snapshot,
-            "messages": [*messages, preview],
-        }
         try:
-            candidate_size = len(
-                json.dumps(candidate_snapshot).encode("utf-8")
+            if snapshot_size is None:
+                # Keep serialization lazy: empty/all-invalid snapshots were
+                # never size-checked. The empty wrapper already includes [].
+                snapshot_size = len(json.dumps(snapshot).encode("utf-8"))
+            # Default json.dumps encodes each list element identically on its
+            # own, with item_separator only between elements. Preserve those
+            # exact UTF-8 bytes without serializing accepted prefixes again.
+            candidate_size = (
+                snapshot_size
+                + len(json.dumps(preview).encode("utf-8"))
+                + (message_separator_size if messages else 0)
             )
         except (TypeError, ValueError):
             raise
@@ -544,6 +553,7 @@ def read_gmail_folder_snapshot(
                 )
             break
         messages.append(preview)
+        snapshot_size = candidate_size
         if provider_folder == "Inbox":
             priority_candidate_sources.append(priority_candidate_source)
 

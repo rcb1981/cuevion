@@ -4,6 +4,7 @@ import base64
 import importlib
 import io
 import json
+import random
 import sys
 import unittest
 from pathlib import Path
@@ -448,6 +449,272 @@ class GmailSnapshotTransportRetryTests(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertEqual(result["error"]["code"], error_code)
         self.assertEqual(len(paths), 1)
+
+
+class GmailSnapshotSizeAccountingTests(unittest.TestCase):
+    LIST_PATHS = {
+        "Inbox": "/messages?labelIds=INBOX&maxResults=50",
+        "Archive": (
+            "/messages?q=-label%3Ainbox+-label%3Atrash+-label%3Aspam"
+            "+-label%3Adrafts+-label%3Asent&maxResults=50"
+        ),
+        "Trash": "/messages?labelIds=TRASH&includeSpamTrash=true&maxResults=50",
+    }
+
+    @staticmethod
+    def _snapshot(folder, rows, mailbox_id=MAILBOX_ID):
+        return {
+            "providerFolder": folder,
+            "serverMailboxId": mailbox_id,
+            "messages": rows,
+            "uidValidity": "gmail-api",
+        }
+
+    @staticmethod
+    def _source(index):
+        return {"providerMessageId": f"message-{index}", "private": "sidecar"}
+
+    def _reference(self, rows, folder, strict, size_limit):
+        """The previous complete candidate-wrapper serialization algorithm."""
+        messages = []
+        sources = []
+        snapshot = self._snapshot(folder, messages)
+        events = [("request", self.LIST_PATHS[folder])]
+        error = None
+        overflow = False
+        for index, preview in enumerate(rows):
+            message_id = f"message-{index}"
+            events.extend([
+                ("request", f"/messages/{message_id}?format=raw"),
+                ("parse", message_id),
+            ])
+            if preview is None:
+                if strict:
+                    error = {"code": "gmail_response_invalid"}
+                    break
+                continue
+            candidate_snapshot = {**snapshot, "messages": [*messages, preview]}
+            candidate_size = len(json.dumps(candidate_snapshot).encode("utf-8"))
+            if candidate_size > size_limit:
+                overflow = True
+                if strict:
+                    error = {"code": "gmail_response_too_large"}
+                break
+            messages.append(preview)
+            if folder == "Inbox":
+                sources.append(self._source(index))
+        result = {
+            "status": "error" if error else "ok",
+            "context": gmail_context(),
+            "snapshot": None if error else snapshot,
+            "error": error,
+            "refresh_failure": None,
+        }
+        if error is None:
+            result["_priorityCandidateSources"] = sources
+        return result, events, len(messages), overflow
+
+    def _optimized(self, rows, folder, strict, size_limit, *, context=None):
+        events = []
+        parsed_rows = []
+
+        def request(request_context, path):
+            events.append(("request", path))
+            if path.startswith("/messages?"):
+                payload = {
+                    "messages": [{"id": f"message-{i}"} for i in range(len(rows))]
+                }
+            else:
+                payload = {"id": path.split("/")[-1].split("?")[0]}
+            return payload, None, request_context, None
+
+        def parse(_detail, *, requested_message_id, index, **_kwargs):
+            events.append(("parse", requested_message_id))
+            preview = rows[index]
+            if preview is None:
+                return None
+            parsed_rows.append(preview)
+            return preview, self._source(index)
+
+        with patch.object(
+            gmail_snapshot, "MAX_GMAIL_RESPONSE_BYTES", size_limit
+        ), patch.object(
+            gmail_snapshot,
+            "_parse_gmail_message_detail_with_candidate_source",
+            side_effect=parse,
+        ):
+            result = gmail_snapshot.read_gmail_folder_snapshot(
+                gmail_context() if context is None else context,
+                provider_folder=folder,
+                strict=strict,
+                request_with_one_refresh=request,
+            )
+        overflow = result["error"] == {"code": "gmail_response_too_large"}
+        if result["snapshot"] is not None:
+            accepted_count = len(result["snapshot"]["messages"])
+            overflow = len(parsed_rows) > accepted_count
+        else:
+            accepted_count = len(parsed_rows) - int(overflow)
+        return result, events, accepted_count, overflow
+
+    def test_generated_reference_parity_at_every_prefix_boundary(self):
+        randomizer = random.Random(902103)
+        fragments = [
+            "plain ASCII", "café naïve 中文 Ελληνικά", "😀🚀🧑🏽‍💻",
+            'quotes: "double" and \'single\'', "back\\slash\\", "line1\nline2\r\n\t",
+            '<div class="mail">Hello &amp; <b>world</b></div>', "", "\x00\b\f",
+            "isolated surrogate: \ud800", "combining: e\u0301", "slash / end",
+        ]
+        comparisons = 0
+        for case in range(48):
+            rows = []
+            for index in range(1 + case % 7):
+                body = fragments[(case + index) % len(fragments)]
+                body += "".join(randomizer.choices(fragments, k=4))
+                if case % 12 == 0:
+                    body *= 128
+                rows.append({
+                    "id": f"message-{index}",
+                    "subject": randomizer.choice(fragments),
+                    "body": body,
+                    "bodyHtml": None if index % 2 else f"<p>{body}</p>",
+                    "attachments": [
+                        {
+                            "id": f"attachment-{index}-{attachment}",
+                            "filename": randomizer.choice(fragments) + ".txt",
+                            "contentType": "text/plain",
+                            "size": randomizer.randrange(100000),
+                            "contentId": None,
+                            "inline": bool(attachment % 2),
+                        }
+                        for attachment in range(case % 3)
+                    ],
+                    "empty": {"string": "", "list": [], "object": {}, "null": None},
+                    "flags": [True, False, 0, -1, 1.25, -0.0],
+                })
+            for folder, strict in (("Inbox", False), ("Archive", True), ("Trash", True)):
+                sizes = [
+                    len(json.dumps(self._snapshot(folder, rows[:count])).encode("utf-8"))
+                    for count in range(len(rows) + 1)
+                ]
+                limits = {0, gmail_snapshot.MAX_GMAIL_RESPONSE_BYTES}
+                limits.update(size + offset for size in sizes for offset in (-1, 0, 1))
+                for size_limit in sorted(limits):
+                    with self.subTest(case=case, folder=folder, size_limit=size_limit):
+                        expected = self._reference(rows, folder, strict, size_limit)
+                        actual = self._optimized(rows, folder, strict, size_limit)
+                        # Includes complete fields, accepted count, overflow,
+                        # list/detail count/order and sequential parse events.
+                        self.assertEqual(actual, expected)
+                        self.assertEqual(
+                            json.dumps(actual[0]).encode("utf-8"),
+                            json.dumps(expected[0]).encode("utf-8"),
+                        )
+                        comparisons += 1
+        self.assertEqual(comparisons, 2421)
+
+    def test_skipped_invalid_rows_keep_the_same_comma_and_truncation_boundary(self):
+        rows = [None, {"body": "é😀\n"}, None, {"body": '"\\'}, None]
+        for folder in self.LIST_PATHS:
+            valid_rows = [row for row in rows if row is not None]
+            boundary = len(json.dumps(self._snapshot(folder, valid_rows)).encode("utf-8"))
+            for strict in (False, True):
+                for size_limit in (boundary - 1, boundary, boundary + 1):
+                    with self.subTest(folder=folder, strict=strict, size_limit=size_limit):
+                        self.assertEqual(
+                            self._optimized(rows, folder, strict, size_limit),
+                            self._reference(rows, folder, strict, size_limit),
+                        )
+
+    def test_empty_or_invalid_rows_do_not_serialize_wrapper_metadata(self):
+        context = {**gmail_context(), "mailbox_id": object()}
+        for folder in self.LIST_PATHS:
+            for rows in ([], [None, None]):
+                for strict in (False, True):
+                    with self.subTest(folder=folder, rows=rows, strict=strict), patch.object(
+                        gmail_snapshot.json, "dumps", side_effect=AssertionError("serialized")
+                    ) as serialize:
+                        result, _events, count, overflow = self._optimized(
+                            rows, folder, strict, 0, context=context
+                        )
+                        serialize.assert_not_called()
+                        self.assertEqual(count, 0)
+                        self.assertFalse(overflow)
+                        if strict and rows:
+                            self.assertEqual(result["error"], {"code": "gmail_response_invalid"})
+                        else:
+                            self.assertEqual(result["snapshot"]["messages"], [])
+                            self.assertIs(result["snapshot"]["serverMailboxId"], context["mailbox_id"])
+
+    def test_provider_error_precedes_wrapper_serialization(self):
+        context = {**gmail_context(), "mailbox_id": object()}
+        for before_detail in (False, True):
+            responses = [(None, {"code": "gmail_permission_denied"})]
+            if before_detail:
+                responses.insert(0, ({"messages": [{"id": "message-1"}]}, None))
+            paths = []
+            with self.subTest(before_detail=before_detail), patch.object(
+                gmail_snapshot.json, "dumps", side_effect=AssertionError("serialized")
+            ) as serialize:
+                result = gmail_snapshot.read_gmail_folder_snapshot(
+                    context,
+                    provider_folder="Inbox",
+                    request_with_one_refresh=snapshot_request(responses, paths),
+                )
+                serialize.assert_not_called()
+                self.assertEqual(result["error"], {"code": "gmail_permission_denied"})
+                self.assertEqual(len(paths), 1 + int(before_detail))
+
+    def test_serialization_errors_still_propagate_at_first_valid_row(self):
+        circular = {}
+        circular["self"] = circular
+        for preview in ({"invalid": object()}, circular, {("invalid",): 1}):
+            for folder, strict in (("Inbox", False), ("Archive", True), ("Trash", True)):
+                with self.subTest(preview_type=type(preview), folder=folder):
+                    try:
+                        self._reference([preview], folder, strict, 10**9)
+                    except (TypeError, ValueError) as error:
+                        error_type, error_message = type(error), str(error)
+                    else:
+                        self.fail("reference should fail serialization")
+                    with self.assertRaises(error_type) as actual:
+                        self._optimized([preview], folder, strict, 10**9)
+                    self.assertEqual(str(actual.exception), error_message)
+
+        context = {**gmail_context(), "mailbox_id": object()}
+        with self.assertRaises(TypeError):
+            self._optimized([None, {}], "Inbox", False, 10**9, context=context)
+
+    def test_each_preview_serializes_once_and_wrapper_stays_empty_for_accounting(self):
+        rows = [{"id": f"row-{index}", "body": "payload" * 100} for index in range(12)]
+        serialize = json.dumps
+        serialized_shapes = []
+
+        def record_serialization(value, *args, **kwargs):
+            if "messages" in value:
+                serialized_shapes.append(("wrapper", len(value["messages"])))
+            else:
+                serialized_shapes.append(("preview", value["id"]))
+            return serialize(value, *args, **kwargs)
+
+        with patch.object(gmail_snapshot.json, "dumps", side_effect=record_serialization):
+            result, _events, count, overflow = self._optimized(rows, "Inbox", False, 10**9)
+        self.assertEqual(count, len(rows))
+        self.assertFalse(overflow)
+        self.assertEqual(result["snapshot"]["messages"], rows)
+        self.assertEqual(
+            serialized_shapes,
+            [("wrapper", 0)] + [("preview", row["id"]) for row in rows],
+        )
+
+    def test_private_priority_sidecar_is_not_part_of_bounded_snapshot(self):
+        rows = [{"body": "small"}]
+        size_limit = len(json.dumps(self._snapshot("Inbox", rows)).encode("utf-8"))
+        with patch.object(self, "_source", return_value={"private": "x" * (size_limit * 10)}):
+            result, _events, count, overflow = self._optimized(rows, "Inbox", False, size_limit)
+        self.assertEqual(count, 1)
+        self.assertFalse(overflow)
+        self.assertGreater(len(json.dumps(result).encode("utf-8")), size_limit)
 
 
 class GmailExactMessageRecoveryTests(unittest.TestCase):

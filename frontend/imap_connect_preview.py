@@ -999,8 +999,9 @@ def fetch_recent_messages(
     }
 
 
-def get_message_body(message: Message) -> str:
-    html_body = get_html_body(message)
+def get_message_body(message: Message, *, html_body: str | None = None) -> str:
+    if html_body is None:
+        html_body = get_html_body(message)
 
     if html_body:
         return html_to_text(html_body)
@@ -1179,6 +1180,8 @@ def resolve_preview_routing(
     email_address: str,
     internal_role: str | None = None,
     focus_preferences: dict[str, Any] | None = None,
+    *,
+    body: str | None = None,
 ) -> dict[str, Any]:
     resolve_start = time.perf_counter()
     try:
@@ -1230,7 +1233,8 @@ def resolve_preview_routing(
         from_header = decode_mime_words(message.get("From", ""))
         sender_name, sender_email = parseaddr(from_header)
         sender_name = decode_mime_words(sender_name)
-        body = get_message_body(message)
+        if body is None:
+            body = get_message_body(message)
         subject_lower = subject.lower()
         body_lower = body.lower()
         sender_lower = sender_email.lower()
@@ -1634,8 +1638,8 @@ def to_message_preview(
     to_header = decode_mime_words(message.get("To", ""))
     cc_header = decode_mime_words(message.get("Cc", ""))
     sender_name, sender_email = parseaddr(from_header)
-    body = get_message_body(message)
     html_body = get_html_body(message)
+    body = get_message_body(message, html_body=html_body)
     attachments = get_message_attachments(message)
     snippet = clean_text(body.replace("\n", " "))[:220]
     created_at, display_timestamp = format_timestamp(message.get("Date", ""))
@@ -1650,6 +1654,7 @@ def to_message_preview(
         email_address,
         internal_role=internal_role,
         focus_preferences=focus_preferences,
+        body=body,
     )
     if all(
         key in preview_routing
