@@ -390,6 +390,7 @@ class SessionContractImportTests(unittest.TestCase):
                 "callback.py",
                 "email_address.py",
                 "http.py",
+                "identity-inventory-diagnostic.py",
                 "login.py",
                 "logout.py",
                 "models.py",

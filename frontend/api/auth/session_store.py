@@ -759,7 +759,11 @@ def load_server_session(
     headers: object,
     secret: str,
     now: int,
+    delete_invalid: bool = True,
 ) -> tuple[ServerSessionRecord | None, str | None]:
+    """Validate a credential; diagnostics can explicitly suppress cleanup."""
+    if type(delete_invalid) is not bool:
+        raise SessionConfigurationError()
     derived = derive_session_credential(headers, secret)
     if derived is None:
         return None, None
@@ -774,7 +778,8 @@ def load_server_session(
         and record.created_at <= now < record.expires_at
     )
     if not valid:
-        store.delete(lookup_digest)
+        if delete_invalid:
+            store.delete(lookup_digest)
         return None, lookup_digest
     return record, lookup_digest
 
