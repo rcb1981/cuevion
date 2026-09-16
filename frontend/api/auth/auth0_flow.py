@@ -43,6 +43,7 @@ SESSION_TTL_SECONDS = 8 * 60 * 60
 
 _AUTHORIZATION_SCOPE = "openid profile email"
 _AUTHORIZATION_CONNECTION = "email"
+DATABASE_CONNECTION = "Username-Password-Authentication"
 _AUTHORIZATION_PROMPT = "login"
 _TRANSACTION_VERSION = 1
 _TRANSACTION_COOKIE_VERSION = "v1"
@@ -122,6 +123,7 @@ class Auth0Configuration:
     client_id: str
     client_secret: str
     session_secret: str
+    login_connection: str = _AUTHORIZATION_CONNECTION
 
     def __repr__(self) -> str:
         return "Auth0Configuration(<redacted>)"
@@ -135,6 +137,7 @@ class AuthTransaction:
     issued_at: int
     expires_at: int
     team_invite_token: str | None = None
+    owner_migration_id: str | None = None
 
     def __repr__(self) -> str:
         return "AuthTransaction(<redacted>)"
@@ -209,6 +212,8 @@ def _validate_configuration(configuration: object) -> Auth0Configuration:
     try:
         valid = (
             configuration.domain == AUTH0_DOMAIN
+            and type(configuration.login_connection) is str
+            and configuration.login_connection in (_AUTHORIZATION_CONNECTION, DATABASE_CONNECTION)
             and _is_bounded_visible_ascii(configuration.client_id, 512)
             and _is_bounded_visible_ascii(configuration.client_secret, 4_096)
             and type(configuration.session_secret) is str
@@ -230,7 +235,7 @@ def _validate_configuration(configuration: object) -> Auth0Configuration:
 
 
 def parse_auth0_configuration(values: Mapping[str, str]) -> Auth0Configuration:
-    """Parse only the four reviewed Auth0 variables from a supplied mapping."""
+    """Parse credentials and the closed server-authorized login connection."""
 
     names = (
         "CUEVION_AUTH0_DOMAIN",
@@ -249,12 +254,20 @@ def parse_auth0_configuration(values: Mapping[str, str]) -> Auth0Configuration:
             client_id=snapshot["CUEVION_AUTH0_CLIENT_ID"],
             client_secret=snapshot["CUEVION_AUTH0_CLIENT_SECRET"],
             session_secret=snapshot["CUEVION_AUTH_SESSION_SECRET"],
+            login_connection=parse_login_connection(values),
         )
         return _validate_configuration(configuration)
     except Auth0FlowError:
         raise
     except Exception:
         _fail("invalid_configuration")
+
+
+def parse_login_connection(values: Mapping[str, str]) -> str:
+    value = values.get("CUEVION_AUTH0_LOGIN_CONNECTION", _AUTHORIZATION_CONNECTION)
+    if type(value) is not str or value not in (_AUTHORIZATION_CONNECTION, DATABASE_CONNECTION):
+        _fail("invalid_configuration")
+    return value
 
 
 def _require_timestamp(value: object, *, error_code: str) -> int:
@@ -387,6 +400,7 @@ def _new_transaction(
     issued_at: object,
     expires_at: object,
     team_invite_token: object = None,
+    owner_migration_id: object = None,
 ) -> AuthTransaction:
     if (
         not _is_exact_opaque_value(state)
@@ -398,6 +412,9 @@ def _new_transaction(
         or type(expires_at) is not int
         or not 0 <= issued_at < expires_at <= _MAX_UNIX_TIMESTAMP
         or expires_at - issued_at != AUTH_TRANSACTION_TTL_SECONDS
+        or (owner_migration_id is not None and (
+            not _is_exact_opaque_value(owner_migration_id) or team_invite_token is not None
+        ))
         or (
             team_invite_token is not None
             and (
@@ -414,6 +431,7 @@ def _new_transaction(
         issued_at=issued_at,
         expires_at=expires_at,
         team_invite_token=team_invite_token,
+        owner_migration_id=owner_migration_id,
     )
 
 
@@ -428,6 +446,8 @@ def _transaction_plaintext(transaction: AuthTransaction) -> bytes:
     }
     if transaction.team_invite_token is not None:
         value["team_invite_token"] = transaction.team_invite_token
+    if transaction.owner_migration_id is not None:
+        value["owner_migration_id"] = transaction.owner_migration_id
     encoded = json.dumps(
         value,
         allow_nan=False,
@@ -469,6 +489,7 @@ def build_authorization_request(
     random_bytes: Callable[[int], bytes] = secrets.token_bytes,
     *,
     team_invite_token: str | None = None,
+    owner_migration_id: str | None = None,
 ) -> AuthorizationRequest:
     """Create one Auth0 authorize URL and its encrypted PKCE transaction."""
 
@@ -494,6 +515,7 @@ def build_authorization_request(
         issued_at=issued_at,
         expires_at=issued_at + AUTH_TRANSACTION_TTL_SECONDS,
         team_invite_token=team_invite_token,
+        owner_migration_id=owner_migration_id,
     )
     code_challenge = _base64url_encode(
         hashlib.sha256(code_verifier.encode("ascii")).digest()
@@ -504,7 +526,7 @@ def build_authorization_request(
             ("client_id", validated.client_id),
             ("redirect_uri", CALLBACK_URI),
             ("scope", _AUTHORIZATION_SCOPE),
-            ("connection", _AUTHORIZATION_CONNECTION),
+            ("connection", DATABASE_CONNECTION if owner_migration_id is not None else validated.login_connection),
             ("code_challenge", code_challenge),
             ("code_challenge_method", "S256"),
             ("prompt", _AUTHORIZATION_PROMPT),
@@ -598,12 +620,15 @@ def decrypt_transaction_cookie(
     if type(payload) is not dict or set(payload) not in (
         required_fields,
         required_fields | {"team_invite_token"},
+        required_fields | {"owner_migration_id"},
     ):
         _fail("invalid_transaction")
     if "team_invite_token" in payload and (
         type(payload["team_invite_token"]) is not str
         or _TEAM_INVITE_TOKEN_RE.fullmatch(payload["team_invite_token"]) is None
     ):
+        _fail("invalid_transaction")
+    if "owner_migration_id" in payload and not _is_exact_opaque_value(payload["owner_migration_id"]):
         _fail("invalid_transaction")
     if type(payload["v"]) is not int or payload["v"] != _TRANSACTION_VERSION:
         _fail("invalid_transaction")
@@ -614,6 +639,7 @@ def decrypt_transaction_cookie(
         issued_at=payload["issued_at"],
         expires_at=payload["expires_at"],
         team_invite_token=payload.get("team_invite_token"),
+        owner_migration_id=payload.get("owner_migration_id"),
     )
     if not transaction.issued_at <= current_time < transaction.expires_at:
         _fail("invalid_transaction")

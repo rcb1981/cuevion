@@ -555,6 +555,17 @@ class AuthSessionStore:
             return False
         raise SessionStoreUnavailable()
 
+    def transaction_consumed(self, transaction_id: str, secret: str) -> bool:
+        """Read the same replay marker without consuming or extending it."""
+        if type(transaction_id) is not str or _BASE64URL_32_RE.fullmatch(transaction_id) is None:
+            raise SessionStoreUnavailable()
+        key = _derive_key(secret, _TRANSACTION_KEY_INFO)
+        digest = _base64url(hmac.new(key, transaction_id.encode("ascii"), hashlib.sha256).digest())
+        result = self._command(["GET", TRANSACTION_USE_KEY_PREFIX + digest])
+        if result not in (None, "1"):
+            raise SessionStoreUnavailable()
+        return result == "1"
+
     def put_team_invite_continuation(
         self, record: TeamInviteContinuationRecord, *, secret: str, now: int,
     ) -> bool:

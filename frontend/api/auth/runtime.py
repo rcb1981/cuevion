@@ -464,6 +464,7 @@ def callback_response(
     random_bytes: Callable[[int], bytes] = secrets.token_bytes,
     team_authority_factory: Callable[[Mapping[str, str]], object] | None = None,
     invitee_repository_factory: Callable[[Mapping[str, str]], object] | None = None,
+    migration_dependencies: dict | None = None,
 ) -> http.PublicResponse:
     clear_transaction = auth0_flow.clear_transaction_cookie()
     source = os.environ if environment is None else environment
@@ -519,6 +520,16 @@ def callback_response(
                 timestamp,
                 transport=jwks_transport,
             )
+        if transaction.owner_migration_id is not None:
+            from cuevion_migration.owner_passkey import complete_migration
+
+            try:
+                return complete_migration(transaction, identity, headers, source, timestamp,
+                    clock=(None if now is None else lambda: now), **(migration_dependencies or {}))
+            except Exception:
+                # All dual-proof failures use the ordinary generic callback
+                # failure; never disclose which original/target proof failed.
+                raise ValueError("invalid migration callback") from None
         identity_key = AuthenticationIdentityLookupKey(
             issuer=identity.issuer,
             subject=identity.subject,

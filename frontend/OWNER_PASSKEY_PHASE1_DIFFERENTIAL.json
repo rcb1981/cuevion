@@ -1,0 +1,595 @@
+{
+  "baseline": {
+    "collected": 1741,
+    "counts": {
+      "": 3482,
+      "deselected": 1,
+      "failed": 17,
+      "passed": 1735,
+      "subtests passed": 9044
+    },
+    "exitStatus": 1
+  },
+  "baselineCommit": "9dfae08ab329614961e66b77a156603a43fd8080",
+  "baselineFailureSetSha256": "94f79275c5d9aa8fd0d9fd622060dc14aab2e1d3e489cd5c48d54b061403f4f0",
+  "baselineIntegrity": {
+    "allowedTrackedFrontendFiles": 674,
+    "cleanPrivateWorktree": true,
+    "gitBlobMatches": 674,
+    "privateGitIndexOmittedPaths": 9224,
+    "rootGitignoreBlob": "1c6cc4984d4eaab7b9fb7f825ca93832ef132700"
+  },
+  "canonicalFailureSetSha256": "94f79275c5d9aa8fd0d9fd622060dc14aab2e1d3e489cd5c48d54b061403f4f0",
+  "changedFailures": [],
+  "comparisonRule": "Exact equality of node ID, subtest parameters, test phase, exception type, comparison message, crash location, and every assertion/traceback location. The pre-existing runtime import assertion embeds the complete runtime source as its operand; only that source operand is replaced with <runtime source operand>. Both raw message SHA-256 values are retained. All other exception messages compare byte-for-byte.",
+  "failures": [
+    {
+      "assertionLocations": [
+        {
+          "line": 442,
+          "message": "in test_actual_team_snapshot_uses_two_exact_reads_and_rejects_removed_or_rebound_members",
+          "path": "api/collaboration/test_summary.py"
+        }
+      ],
+      "baselineMessageSha256": "a25623851f758b326757137baf628d42fa4e46da030953c01ed609728c864ea1",
+      "comparisonMessage": "AssertionError: 'unavailable' != 'ok'\n- unavailable\n+ ok\n : {'status': 'unavailable', 'context': None, 'error': {'code': 'storage_unavailable'}}",
+      "crashLine": 703,
+      "crashPath": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/unittest/case.py",
+      "exception": "AssertionError",
+      "nodeid": "api/collaboration/test_summary.py::SummaryContractTests::test_actual_team_snapshot_uses_two_exact_reads_and_rejects_removed_or_rebound_members",
+      "phase1MessageSha256": "a25623851f758b326757137baf628d42fa4e46da030953c01ed609728c864ea1",
+      "rawMessageIdentical": true,
+      "subtest": {},
+      "when": "call"
+    },
+    {
+      "assertionLocations": [
+        {
+          "line": 608,
+          "message": "in test_records_have_exact_fields_and_exact_public_signatures",
+          "path": "tests/cuevion_auth/test_account_repository_contract.py"
+        },
+        {
+          "line": 3278,
+          "message": "in signature",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 3026,
+          "message": "in from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 2477,
+          "message": "in _signature_from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        }
+      ],
+      "baselineMessageSha256": "4dfaada92a92dabffbd87ae11b4a379db76b1942864869bda0c0865b8b6eb21b",
+      "comparisonMessage": "TypeError: unexpected object '(schema_version, user_id, verified_email_id, authentication_identity_id, workspace_id, security_event_id)' in __signature__ attribute",
+      "crashLine": 2477,
+      "crashPath": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py",
+      "exception": "TypeError",
+      "nodeid": "tests/cuevion_auth/test_account_repository_contract.py::PublicSurfaceTests::test_records_have_exact_fields_and_exact_public_signatures",
+      "phase1MessageSha256": "4dfaada92a92dabffbd87ae11b4a379db76b1942864869bda0c0865b8b6eb21b",
+      "rawMessageIdentical": true,
+      "subtest": {
+        "record": "'InitialAccountCreationReceipt'"
+      },
+      "when": "call"
+    },
+    {
+      "assertionLocations": [
+        {
+          "line": 608,
+          "message": "in test_records_have_exact_fields_and_exact_public_signatures",
+          "path": "tests/cuevion_auth/test_account_repository_contract.py"
+        },
+        {
+          "line": 3278,
+          "message": "in signature",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 3026,
+          "message": "in from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 2477,
+          "message": "in _signature_from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        }
+      ],
+      "baselineMessageSha256": "b13acbb09cb9999443bad4df6a948df8a3d62143d0e3884e343bcd6299bace1b",
+      "comparisonMessage": "TypeError: unexpected object '(request_version, operation_reference, user, verified_email, authentication_identity, workspace, workspace_membership, authentication_evidence, security_event)' in __signature__ attribute",
+      "crashLine": 2477,
+      "crashPath": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py",
+      "exception": "TypeError",
+      "nodeid": "tests/cuevion_auth/test_account_repository_contract.py::PublicSurfaceTests::test_records_have_exact_fields_and_exact_public_signatures",
+      "phase1MessageSha256": "b13acbb09cb9999443bad4df6a948df8a3d62143d0e3884e343bcd6299bace1b",
+      "rawMessageIdentical": true,
+      "subtest": {
+        "record": "'InitialAccountCreationRequest'"
+      },
+      "when": "call"
+    },
+    {
+      "assertionLocations": [
+        {
+          "line": 608,
+          "message": "in test_records_have_exact_fields_and_exact_public_signatures",
+          "path": "tests/cuevion_auth/test_account_repository_contract.py"
+        },
+        {
+          "line": 3278,
+          "message": "in signature",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 3026,
+          "message": "in from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 2477,
+          "message": "in _signature_from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        }
+      ],
+      "baselineMessageSha256": "d252507d87d0a39fffdce5a1948c1f89853322442039d7d9150eb40f70582ea2",
+      "comparisonMessage": "TypeError: unexpected object '(outcome, conflict_reason, receipt)' in __signature__ attribute",
+      "crashLine": 2477,
+      "crashPath": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py",
+      "exception": "TypeError",
+      "nodeid": "tests/cuevion_auth/test_account_repository_contract.py::PublicSurfaceTests::test_records_have_exact_fields_and_exact_public_signatures",
+      "phase1MessageSha256": "d252507d87d0a39fffdce5a1948c1f89853322442039d7d9150eb40f70582ea2",
+      "rawMessageIdentical": true,
+      "subtest": {
+        "record": "'InitialAccountCreationResult'"
+      },
+      "when": "call"
+    },
+    {
+      "assertionLocations": [
+        {
+          "line": 608,
+          "message": "in test_records_have_exact_fields_and_exact_public_signatures",
+          "path": "tests/cuevion_auth/test_account_repository_contract.py"
+        },
+        {
+          "line": 3278,
+          "message": "in signature",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 3026,
+          "message": "in from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 2477,
+          "message": "in _signature_from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        }
+      ],
+      "baselineMessageSha256": "407c16d28ac968ab4f0e5fd1e30a6701575539080bd7c39214bfabeddd07caac",
+      "comparisonMessage": "TypeError: unexpected object '(schema_version, derivation_key_epoch, operation_digest)' in __signature__ attribute",
+      "crashLine": 2477,
+      "crashPath": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py",
+      "exception": "TypeError",
+      "nodeid": "tests/cuevion_auth/test_account_repository_contract.py::PublicSurfaceTests::test_records_have_exact_fields_and_exact_public_signatures",
+      "phase1MessageSha256": "407c16d28ac968ab4f0e5fd1e30a6701575539080bd7c39214bfabeddd07caac",
+      "rawMessageIdentical": true,
+      "subtest": {
+        "record": "'InitialAccountOperationReference'"
+      },
+      "when": "call"
+    },
+    {
+      "assertionLocations": [
+        {
+          "line": 608,
+          "message": "in test_records_have_exact_fields_and_exact_public_signatures",
+          "path": "tests/cuevion_auth/test_account_repository_contract.py"
+        },
+        {
+          "line": 3278,
+          "message": "in signature",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 3026,
+          "message": "in from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 2477,
+          "message": "in _signature_from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        }
+      ],
+      "baselineMessageSha256": "2a7053ef6d1b6f12becded53e28dae8121a10d724007f5abb7325f3043e569ad",
+      "comparisonMessage": "TypeError: unexpected object '(schema_version, event_id, event_type)' in __signature__ attribute",
+      "crashLine": 2477,
+      "crashPath": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py",
+      "exception": "TypeError",
+      "nodeid": "tests/cuevion_auth/test_account_repository_contract.py::PublicSurfaceTests::test_records_have_exact_fields_and_exact_public_signatures",
+      "phase1MessageSha256": "2a7053ef6d1b6f12becded53e28dae8121a10d724007f5abb7325f3043e569ad",
+      "rawMessageIdentical": true,
+      "subtest": {
+        "record": "'InitialSecurityEventRequest'"
+      },
+      "when": "call"
+    },
+    {
+      "assertionLocations": [
+        {
+          "line": 608,
+          "message": "in test_records_have_exact_fields_and_exact_public_signatures",
+          "path": "tests/cuevion_auth/test_account_repository_contract.py"
+        },
+        {
+          "line": 3278,
+          "message": "in signature",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 3026,
+          "message": "in from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 2477,
+          "message": "in _signature_from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        }
+      ],
+      "baselineMessageSha256": "4e6eef6874ade257bdab290bc00bdfce1b644c975e2de834098b9bb1b42533a6",
+      "comparisonMessage": "TypeError: unexpected object '(schema_version, trust_domain, verification_coordinator_id, assertion_id, issuer, subject, authentication_method, canonical_verified_email, verified_at, issued_at, expires_at)' in __signature__ attribute",
+      "crashLine": 2477,
+      "crashPath": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py",
+      "exception": "TypeError",
+      "nodeid": "tests/cuevion_auth/test_account_repository_contract.py::PublicSurfaceTests::test_records_have_exact_fields_and_exact_public_signatures",
+      "phase1MessageSha256": "4e6eef6874ade257bdab290bc00bdfce1b644c975e2de834098b9bb1b42533a6",
+      "rawMessageIdentical": true,
+      "subtest": {
+        "record": "'VerifiedAuthenticationEvidence'"
+      },
+      "when": "call"
+    },
+    {
+      "assertionLocations": [
+        {
+          "line": 326,
+          "message": "in test_records_have_exact_fields_signatures_and_hints",
+          "path": "tests/cuevion_auth/test_current_account_repository_contract.py"
+        },
+        {
+          "line": 3278,
+          "message": "in signature",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 3026,
+          "message": "in from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 2477,
+          "message": "in _signature_from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        }
+      ],
+      "baselineMessageSha256": "063c2f327bbe4c0b749ec72f7e0a1d379044f8dcbf3ee1d1e088808eda100892",
+      "comparisonMessage": "TypeError: unexpected object '(issuer, subject)' in __signature__ attribute",
+      "crashLine": 2477,
+      "crashPath": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py",
+      "exception": "TypeError",
+      "nodeid": "tests/cuevion_auth/test_current_account_repository_contract.py::PublicSurfaceTests::test_records_have_exact_fields_signatures_and_hints",
+      "phase1MessageSha256": "063c2f327bbe4c0b749ec72f7e0a1d379044f8dcbf3ee1d1e088808eda100892",
+      "rawMessageIdentical": true,
+      "subtest": {
+        "record": "'AuthenticationIdentityLookupKey'"
+      },
+      "when": "call"
+    },
+    {
+      "assertionLocations": [
+        {
+          "line": 326,
+          "message": "in test_records_have_exact_fields_signatures_and_hints",
+          "path": "tests/cuevion_auth/test_current_account_repository_contract.py"
+        },
+        {
+          "line": 3278,
+          "message": "in signature",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 3026,
+          "message": "in from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 2477,
+          "message": "in _signature_from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        }
+      ],
+      "baselineMessageSha256": "5de384c3886d2c350f92e5e7f5b942ca5a6801966e254548e2ba8b8288f42de7",
+      "comparisonMessage": "TypeError: unexpected object '(user, primary_verified_email, authentication_identity, workspace, workspace_membership)' in __signature__ attribute",
+      "crashLine": 2477,
+      "crashPath": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py",
+      "exception": "TypeError",
+      "nodeid": "tests/cuevion_auth/test_current_account_repository_contract.py::PublicSurfaceTests::test_records_have_exact_fields_signatures_and_hints",
+      "phase1MessageSha256": "5de384c3886d2c350f92e5e7f5b942ca5a6801966e254548e2ba8b8288f42de7",
+      "rawMessageIdentical": true,
+      "subtest": {
+        "record": "'CurrentAccountAuthority'"
+      },
+      "when": "call"
+    },
+    {
+      "assertionLocations": [
+        {
+          "line": 326,
+          "message": "in test_records_have_exact_fields_signatures_and_hints",
+          "path": "tests/cuevion_auth/test_current_account_repository_contract.py"
+        },
+        {
+          "line": 3278,
+          "message": "in signature",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 3026,
+          "message": "in from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 2477,
+          "message": "in _signature_from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        }
+      ],
+      "baselineMessageSha256": "bfe8f1fdcc8743f8d9fce5ac4cb0fba761301b6ea05d6fef9fc8f6f6f98cd75c",
+      "comparisonMessage": "TypeError: unexpected object '(outcome, authority)' in __signature__ attribute",
+      "crashLine": 2477,
+      "crashPath": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py",
+      "exception": "TypeError",
+      "nodeid": "tests/cuevion_auth/test_current_account_repository_contract.py::PublicSurfaceTests::test_records_have_exact_fields_signatures_and_hints",
+      "phase1MessageSha256": "bfe8f1fdcc8743f8d9fce5ac4cb0fba761301b6ea05d6fef9fc8f6f6f98cd75c",
+      "rawMessageIdentical": true,
+      "subtest": {
+        "record": "'CurrentAccountAuthorityResult'"
+      },
+      "when": "call"
+    },
+    {
+      "assertionLocations": [
+        {
+          "line": 326,
+          "message": "in test_records_have_exact_fields_signatures_and_hints",
+          "path": "tests/cuevion_auth/test_current_account_repository_contract.py"
+        },
+        {
+          "line": 3278,
+          "message": "in signature",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 3026,
+          "message": "in from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 2477,
+          "message": "in _signature_from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        }
+      ],
+      "baselineMessageSha256": "2a0210b1b274a1da5ab93fcdde92df6a4fb5b097e4b7107ce66600fc90bba52d",
+      "comparisonMessage": "TypeError: unexpected object '(user, primary_verified_email, workspace, workspace_membership)' in __signature__ attribute",
+      "crashLine": 2477,
+      "crashPath": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py",
+      "exception": "TypeError",
+      "nodeid": "tests/cuevion_auth/test_current_account_repository_contract.py::PublicSurfaceTests::test_records_have_exact_fields_signatures_and_hints",
+      "phase1MessageSha256": "2a0210b1b274a1da5ab93fcdde92df6a4fb5b097e4b7107ce66600fc90bba52d",
+      "rawMessageIdentical": true,
+      "subtest": {
+        "record": "'CurrentAccountByUserAuthority'"
+      },
+      "when": "call"
+    },
+    {
+      "assertionLocations": [
+        {
+          "line": 326,
+          "message": "in test_records_have_exact_fields_signatures_and_hints",
+          "path": "tests/cuevion_auth/test_current_account_repository_contract.py"
+        },
+        {
+          "line": 3278,
+          "message": "in signature",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 3026,
+          "message": "in from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        },
+        {
+          "line": 2477,
+          "message": "in _signature_from_callable",
+          "path": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py"
+        }
+      ],
+      "baselineMessageSha256": "bfe8f1fdcc8743f8d9fce5ac4cb0fba761301b6ea05d6fef9fc8f6f6f98cd75c",
+      "comparisonMessage": "TypeError: unexpected object '(outcome, authority)' in __signature__ attribute",
+      "crashLine": 2477,
+      "crashPath": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/inspect.py",
+      "exception": "TypeError",
+      "nodeid": "tests/cuevion_auth/test_current_account_repository_contract.py::PublicSurfaceTests::test_records_have_exact_fields_signatures_and_hints",
+      "phase1MessageSha256": "bfe8f1fdcc8743f8d9fce5ac4cb0fba761301b6ea05d6fef9fc8f6f6f98cd75c",
+      "rawMessageIdentical": true,
+      "subtest": {
+        "record": "'CurrentAccountByUserAuthorityResult'"
+      },
+      "when": "call"
+    },
+    {
+      "assertionLocations": [
+        {
+          "line": 2644,
+          "message": "in test_requirements_allow_only_the_reviewed_foundation_dependencies",
+          "path": "tests/cuevion_auth/test_relational_account_store_contract.py"
+        }
+      ],
+      "baselineMessageSha256": "083ce70949665efb5157f3bec422d2546b653cc3315f3996ee64eecf506a2534",
+      "comparisonMessage": "AssertionError: Tuples differ: ('cry[16 chars]0', 'openai==3.3.1', 'psycopg[binary]~=3.3.4',[17 chars].51') != ('cry[16 chars]0', 'psycopg[binary]~=3.3.4', 'SQLAlchemy~=2.0.51')\n\nFirst differing element 1:\n'openai==3.3.1'\n'psycopg[binary]~=3.3.4'\n\nFirst tuple contains 1 additional elements.\nFirst extra element 3:\n'SQLAlchemy~=2.0.51'\n\n+ ('cryptography~=46.0.0', 'psycopg[binary]~=3.3.4', 'SQLAlchemy~=2.0.51')\n- ('cryptography~=46.0.0',\n-  'openai==3.3.1',\n-  'psycopg[binary]~=3.3.4',\n-  'SQLAlchemy~=2.0.51')",
+      "crashLine": 703,
+      "crashPath": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/unittest/case.py",
+      "exception": "AssertionError",
+      "nodeid": "tests/cuevion_auth/test_relational_account_store_contract.py::InactivityAndDocumentationTests::test_requirements_allow_only_the_reviewed_foundation_dependencies",
+      "phase1MessageSha256": "083ce70949665efb5157f3bec422d2546b653cc3315f3996ee64eecf506a2534",
+      "rawMessageIdentical": true,
+      "subtest": {},
+      "when": "call"
+    },
+    {
+      "assertionLocations": [
+        {
+          "line": 513,
+          "message": "in test_canonical_identity_namespace_and_exact_file_scope",
+          "path": "tests/cuevion_auth/test_session_credentials.py"
+        }
+      ],
+      "baselineMessageSha256": "fc7621181a709851ffe433064a5ce39c12b932056ddcfb4f964e5b78d7ef2f14",
+      "comparisonMessage": "AssertionError: Items in the first set but not the second:\n'identity_inventory_diagnostic.py'",
+      "crashLine": 703,
+      "crashPath": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/unittest/case.py",
+      "exception": "AssertionError",
+      "nodeid": "tests/cuevion_auth/test_session_credentials.py::ModuleIdentityAndInactivityTests::test_canonical_identity_namespace_and_exact_file_scope",
+      "phase1MessageSha256": "fc7621181a709851ffe433064a5ce39c12b932056ddcfb4f964e5b78d7ef2f14",
+      "rawMessageIdentical": true,
+      "subtest": {},
+      "when": "call"
+    },
+    {
+      "assertionLocations": [
+        {
+          "line": 88,
+          "message": "in test_python_and_dependency_contract_is_exact",
+          "path": "tests/cuevion_db/test_inactivity.py"
+        }
+      ],
+      "baselineMessageSha256": "bf4b3d74a324a7febc359a6b5763ca98817a997bc6c7067875d67656c3eeef9e",
+      "comparisonMessage": "AssertionError: Lists differ: ['cry[16 chars]0', 'openai==3.3.1', 'psycopg[binary]~=3.3.4',[17 chars].51'] != ['cry[16 chars]0', 'psycopg[binary]~=3.3.4', 'SQLAlchemy~=2.0.51']\n\nFirst differing element 1:\n'openai==3.3.1'\n'psycopg[binary]~=3.3.4'\n\nFirst list contains 1 additional elements.\nFirst extra element 3:\n'SQLAlchemy~=2.0.51'\n\n+ ['cryptography~=46.0.0', 'psycopg[binary]~=3.3.4', 'SQLAlchemy~=2.0.51']\n- ['cryptography~=46.0.0',\n-  'openai==3.3.1',\n-  'psycopg[binary]~=3.3.4',\n-  'SQLAlchemy~=2.0.51']",
+      "crashLine": 703,
+      "crashPath": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/unittest/case.py",
+      "exception": "AssertionError",
+      "nodeid": "tests/cuevion_db/test_inactivity.py::DatabaseFoundationInactivityTests::test_python_and_dependency_contract_is_exact",
+      "phase1MessageSha256": "bf4b3d74a324a7febc359a6b5763ca98817a997bc6c7067875d67656c3eeef9e",
+      "rawMessageIdentical": true,
+      "subtest": {},
+      "when": "call"
+    },
+    {
+      "assertionLocations": [
+        {
+          "line": 51,
+          "message": "in test_tracked_active_api_scan_never_reads_protected_untracked_file",
+          "path": "tests/cuevion_db/test_inactivity.py"
+        }
+      ],
+      "baselineMessageSha256": "1cba0dbd0e0f3f7ebb22fc4c1bfa1620b72bacde0ba5e0f1fd28af58a33f0e02",
+      "comparisonMessage": "AssertionError: 'cuevion_db' unexpectedly found in <runtime source operand>",
+      "crashLine": 703,
+      "crashPath": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/unittest/case.py",
+      "exception": "AssertionError",
+      "nodeid": "tests/cuevion_db/test_inactivity.py::DatabaseFoundationInactivityTests::test_tracked_active_api_scan_never_reads_protected_untracked_file",
+      "phase1MessageSha256": "ea2d10c8e9fe8df1a833d7c3bb6f10eeeace0e677ab1b4af3b799f179437aa9c",
+      "rawMessageIdentical": false,
+      "subtest": {},
+      "when": "call"
+    },
+    {
+      "assertionLocations": [
+        {
+          "line": 755,
+          "message": "in test_wrong_authentication_method_is_rejected",
+          "path": "tests/cuevion_db/test_provision_initial_auth0_account.py"
+        }
+      ],
+      "baselineMessageSha256": "cc217dac4efebb0c4283b06f3ee18e77f2d24f0e61a59dc50e163e2879899fbb",
+      "comparisonMessage": "AssertionError: <GraphState.EXACT: 'exact'> is not <GraphState.CONFLICT: 'conflict'>",
+      "crashLine": 703,
+      "crashPath": "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/unittest/case.py",
+      "exception": "AssertionError",
+      "nodeid": "tests/cuevion_db/test_provision_initial_auth0_account.py::ConflictClassificationTests::test_wrong_authentication_method_is_rejected",
+      "phase1MessageSha256": "cc217dac4efebb0c4283b06f3ee18e77f2d24f0e61a59dc50e163e2879899fbb",
+      "rawMessageIdentical": true,
+      "subtest": {},
+      "when": "call"
+    }
+  ],
+  "newFailures": [],
+  "otherGates": {
+    "build": "passed",
+    "existingLegacyTestsModified": false,
+    "focusedSubtestsPassed": 187,
+    "focusedTestsPassed": 142,
+    "gitDiffCachedCheck": "passed",
+    "gitDiffCheck": "passed",
+    "newTestsPassed": 45,
+    "teamRoster": "passed",
+    "teamRouteScenarios": 43,
+    "testBase": "passed"
+  },
+  "phase1": {
+    "collected": 1786,
+    "counts": {
+      "": 3572,
+      "deselected": 1,
+      "failed": 17,
+      "passed": 1780,
+      "subtests passed": 9077
+    },
+    "exitStatus": 1
+  },
+  "phase1FailureSetSha256": "94f79275c5d9aa8fd0d9fd622060dc14aab2e1d3e489cd5c48d54b061403f4f0",
+  "removedFailures": [],
+  "runLogSha256": {
+    "cuevion-baseline-full.log": "3f86d569931d2583055e99875f2b4729974b94666cec0fd946a8a076e86f4c68",
+    "cuevion-phase1-build.log": "c5e17b9d9dedb894b94d0f73cd973c7d79dfb1eece679c3efa862c06f593d08e",
+    "cuevion-phase1-final-migration.log": "d260a68aa5b22f6ebdb136a6ade7ac3b78d99bb81dad8a5ad7a38426cfca0137",
+    "cuevion-phase1-full.log": "8678478629c032984800971168243cb0e6109806e832966750a46eaf03557ad7",
+    "cuevion-phase1-team-ui.log": "51683910331f50996deeba557853906b7499df5272288f4b6aa54ccd938e0c5d",
+    "cuevion-phase1-test-base.log": "6ed31d8b8598f332f17dd2946d25f8e4d81014cd2f1073ea469dc760a4d5a133"
+  },
+  "runtimeImportAssertionTrigger": {
+    "baseline": [
+      "    from cuevion_db.postgresql_team_invitee_repository import (",
+      "    from cuevion_db.postgresql_team_invitee_repository import ("
+    ],
+    "identical": true,
+    "phase1": [
+      "    from cuevion_db.postgresql_team_invitee_repository import (",
+      "    from cuevion_db.postgresql_team_invitee_repository import ("
+    ]
+  },
+  "sameFailingTestsAndSubtests": true,
+  "sameFailureClassificationsMessagesAndLocations": true,
+  "testedSourceSha256": {
+    "frontend/api/auth/auth0_flow.py": "3975389a70902bf5e1433cc8b7aebba82b40146114cb474bac6e4511b07a14ed",
+    "frontend/api/auth/passkey-migration/start.py": "6bd809d2f71be64d573be7afe9161cb47c588d58f7ceb1f8233055edf5db601e",
+    "frontend/api/auth/passkey-migration/status.py": "58f5d0037b2a05d39665382a6bd987dd9280a2bd6e96b457eaa3a287f0f230a4",
+    "frontend/api/auth/runtime.py": "1e07d0ce787d7de77aa1a6def23f6dc9f28c806217ef28c2d598f046f59bd1dd",
+    "frontend/api/auth/session_store.py": "444fd29b923e5ff6cdd339346c9a1965dfa7945641e30a363812ab690351f6fa",
+    "frontend/cuevion_db/postgresql_owner_passkey_migration.py": "aa369b1ce9f1f299d489f4a90d0fec9f475ae0dd9da965fbc0cfb0a1d77103f5",
+    "frontend/cuevion_migration/owner_passkey.py": "cc7b18618f2e9d6f57f3c98cd8ebba510db28f87539fd03b49d345caa4049677",
+    "frontend/tests/cuevion_db/test_postgresql_owner_passkey_migration.py": "a04d172e92ab744486181f1514b73cedb160fbdbfd17e198670bebc504cea06b",
+    "frontend/tests/cuevion_migration/test_owner_passkey_migration.py": "9f6b046b9fd9701f91c91236d4f74e501792d7e14fdd8d65bc6486481e86c401"
+  }
+}
