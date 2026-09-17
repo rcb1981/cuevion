@@ -1,10 +1,11 @@
 """Signed, short-lived Team Invite registration proof for Auth0 pre-registration.
 
 The proof is transported only in OIDC ``acr_values`` for invite-bound database
-signup. It binds the Cuevion client, normalized invitee email, canonical Team
-invitation id/digest and a short expiry. The Auth0 Action validates the HMAC
-before permitting database registration; Cuevion still re-proves the live Team
-invitation during callback before provisioning any account authority.
+signup. It binds the Cuevion client, exact OAuth transaction state, normalized
+invitee email, canonical Team invitation id/digest and a short expiry. The Auth0
+Action validates the HMAC before permitting database registration; Cuevion still
+re-proves the live Team invitation during callback before provisioning account
+authority.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ _MIN_SECRET_BYTES = 32
 _INVITATION_ID_RE = re.compile(r"tinv_[A-Za-z0-9_-]{1,64}")
 _TOKEN_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _CLIENT_ID_RE = re.compile(r"[!-~]{1,512}")
+_OAUTH_STATE_RE = re.compile(r"[A-Za-z0-9_-]{43}")
 _BASE64URL_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 
@@ -49,6 +51,7 @@ def build_invite_registration_acr(
     environment: Mapping[str, str],
     *,
     client_id: str,
+    oauth_state: str,
     email: str,
     invitation_id: str,
     token_digest: str,
@@ -61,6 +64,8 @@ def build_invite_registration_acr(
     if (
         type(client_id) is not str
         or _CLIENT_ID_RE.fullmatch(client_id) is None
+        or type(oauth_state) is not str
+        or _OAUTH_STATE_RE.fullmatch(oauth_state) is None
         or not is_valid_auth_email(normalized_email)
         or type(invitation_id) is not str
         or _INVITATION_ID_RE.fullmatch(invitation_id) is None
@@ -83,6 +88,8 @@ def build_invite_registration_acr(
         "exp": expires_at,
         "iat": now,
         "invitation_id": invitation_id,
+        "source": "team_invite",
+        "state": oauth_state,
         "token_digest": token_digest,
         "v": 1,
     }
