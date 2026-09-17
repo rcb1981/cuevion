@@ -31,16 +31,20 @@ def decorate_team_invite_redirect(
     """Add one signed invite ACR only to a successful invite-bound redirect.
 
     ``runtime.login_response`` remains the request/authentication boundary and
-    validates the raw Team bearer before this decorator runs.  This function
+    validates the raw Team bearer before this decorator runs. This function
     repeats the authoritative invitation read so the proof is minted only from
-    current server-side invitation metadata.  Any ambiguity fails closed.
+    current server-side invitation metadata. Any ambiguity fails closed.
     """
+
+    # Preserve every non-success response byte-for-byte. In particular,
+    # malformed invite queries must keep runtime.login_response's 400/403
+    # semantics rather than being reinterpreted by this decorator.
+    if response.status not in (302, 303):
+        return response
 
     try:
         token = runtime._parse_login_invite(raw_path)
         if token is None:
-            return response
-        if response.status not in (302, 303):
             return response
 
         location = _response_header(response, "location")
