@@ -1,8 +1,9 @@
 """Temporary, read-only OWNER allowlist runtime diagnostic.
 
-This module exposes only counts/booleans and a first-mismatch position. It never
-returns the raw allowlist, HMAC key, subjects, database identifiers, or mailbox
-identifiers, and it reuses the production OWNER migration authorization boundary.
+This module exposes only counts/booleans and the first mismatch position plus the
+two characters at that one position. It never returns the raw allowlist, HMAC
+key, subjects, database identifiers, or mailbox identifiers, and it reuses the
+production OWNER migration authorization boundary.
 """
 
 import hmac
@@ -65,10 +66,17 @@ def diagnostic_response(method, raw_headers, path, *, environment=None, now=None
         )
 
         mismatch_position = None
+        mismatch_expected_character = None
+        mismatch_actual_character = None
         single_non_old_length_matches = None
         if not new_present and len(non_old) == 1:
             mismatch_position = _first_mismatch_position(new_owner, non_old[0])
             single_non_old_length_matches = len(new_owner) == len(non_old[0])
+            if (mismatch_position is not None
+                    and mismatch_position <= len(new_owner)
+                    and mismatch_position <= len(non_old[0])):
+                mismatch_expected_character = new_owner[mismatch_position - 1]
+                mismatch_actual_character = non_old[0][mismatch_position - 1]
 
         kv.read([])
         checked_at = int(time.time()) if now is None else now
@@ -78,13 +86,15 @@ def diagnostic_response(method, raw_headers, path, *, environment=None, now=None
 
         return http.json_response(200, {
             "temporaryOwnerMigration": True,
-            "diagnostic": "owner_allowlist_runtime_v1",
+            "diagnostic": "owner_allowlist_runtime_v2",
             "ownerAllowlistEntryCount": len(owners),
             "oldOwnerPresent": old_present,
             "newOwnerPresent": new_present,
             "nonOldOwnerEntryCount": len(non_old),
             "singleNonOldEntryLengthMatchesExpected": single_non_old_length_matches,
             "singleNonOldEntryFirstMismatchPosition": mismatch_position,
+            "singleNonOldEntryExpectedMismatchCharacter": mismatch_expected_character,
+            "singleNonOldEntryActualMismatchCharacter": mismatch_actual_character,
         })
     except http.HttpBoundaryError as error:
         return migration._failure(error.status)
