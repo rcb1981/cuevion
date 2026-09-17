@@ -1,7 +1,6 @@
 from http.server import BaseHTTPRequestHandler
 
-from api.auth import http, runtime
-from api.auth.invite_registration_redirect import decorate_team_invite_redirect
+from api.auth import http, registration_authority
 
 
 class handler(BaseHTTPRequestHandler):
@@ -10,12 +9,11 @@ class handler(BaseHTTPRequestHandler):
             raw_headers = http.snapshot_request_headers(self)
         except http.HttpBoundaryError:
             raw_headers = ()
-        response = runtime.login_response(
+        response = registration_authority.login_response(
             self.command,
             raw_headers,
             self.path,
         )
-        response = decorate_team_invite_redirect(response, self.path)
         http.send_public_response(self, response)
 
     do_GET = _respond
