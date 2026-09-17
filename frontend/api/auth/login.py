@@ -1,6 +1,7 @@
 from http.server import BaseHTTPRequestHandler
 
 from api.auth import http, runtime
+from api.auth.invite_registration_redirect import decorate_team_invite_redirect
 
 
 class handler(BaseHTTPRequestHandler):
@@ -14,6 +15,7 @@ class handler(BaseHTTPRequestHandler):
             raw_headers,
             self.path,
         )
+        response = decorate_team_invite_redirect(response, self.path)
         http.send_public_response(self, response)
 
     do_GET = _respond
