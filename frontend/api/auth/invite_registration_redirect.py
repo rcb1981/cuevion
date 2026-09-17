@@ -28,18 +28,27 @@ def decorate_team_invite_redirect(
     now: int | None = None,
     team_authority_factory=None,
 ) -> http.PublicResponse:
-    """Add one signed invite ACR only to a successful invite-bound redirect.
+    """Add one signed invite ACR only to the Auth0 invite redirect.
 
     ``runtime.login_response`` remains the request/authentication boundary and
     validates the raw Team bearer before this decorator runs. This function
     repeats the authoritative invitation read so the proof is minted only from
-    current server-side invitation metadata. Any ambiguity fails closed.
+    current server-side invitation metadata. Non-Auth0 responses are preserved.
     """
 
-    # Preserve every non-success response byte-for-byte. In particular,
-    # malformed invite queries must keep runtime.login_response's 400/403
-    # semantics rather than being reinterpreted by this decorator.
     if response.status not in (302, 303):
+        return response
+
+    location = _response_header(response, "location")
+    if location is None:
+        return response
+    parsed = urlsplit(location)
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != auth0_flow.AUTH0_DOMAIN
+        or parsed.path != "/authorize"
+        or parsed.fragment
+    ):
         return response
 
     try:
@@ -47,17 +56,6 @@ def decorate_team_invite_redirect(
         if token is None:
             return response
 
-        location = _response_header(response, "location")
-        if location is None:
-            raise ValueError("missing redirect location")
-        parsed = urlsplit(location)
-        if (
-            parsed.scheme != "https"
-            or parsed.netloc != auth0_flow.AUTH0_DOMAIN
-            or parsed.path != "/authorize"
-            or parsed.fragment
-        ):
-            raise ValueError("unexpected redirect location")
         pairs = parse_qsl(
             parsed.query,
             keep_blank_values=True,
