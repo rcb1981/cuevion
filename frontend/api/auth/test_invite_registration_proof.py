@@ -144,7 +144,7 @@ class InviteRegistrationRedirectTests(unittest.TestCase):
             set_cookies=("__Host-cuevion_auth_tx=test; Secure; HttpOnly; SameSite=Lax",),
         )
 
-    def test_valid_invite_adds_one_signed_acr_and_preserves_transaction_cookie(self):
+    def test_valid_invite_adds_signed_acr_and_correlation_binding(self):
         team = SimpleNamespace(read_provisioning_invitation=lambda token, allow_accepted=False: self._invite())
         response = decorate_team_invite_redirect(
             self._auth0_response(),
@@ -157,6 +157,7 @@ class InviteRegistrationRedirectTests(unittest.TestCase):
         location = _header(response, "location")[0]
         query = parse_qs(urlsplit(location).query)
         self.assertEqual(query["state"], [OAUTH_STATE])
+        self.assertEqual(query["correlation_id"], [OAUTH_STATE])
         self.assertEqual(len(query["acr_values"]), 1)
         proof = query["acr_values"][0]
         self.assertTrue(proof.startswith(ACR_PREFIX))
@@ -198,7 +199,7 @@ class InviteRegistrationRedirectTests(unittest.TestCase):
             original,
         )
 
-    def test_missing_secret_existing_acr_or_bad_transaction_context_fails_closed(self):
+    def test_missing_secret_existing_context_or_bad_transaction_context_fails_closed(self):
         team = SimpleNamespace(read_provisioning_invitation=lambda token, allow_accepted=False: self._invite())
         no_secret = {key: value for key, value in ENVIRONMENT.items() if key != ENV_NAME}
         response = decorate_team_invite_redirect(
@@ -211,6 +212,7 @@ class InviteRegistrationRedirectTests(unittest.TestCase):
         self.assertEqual(response.status, 503)
         variants = (
             self._auth0_response(extra_query=(("acr_values", "foreign"),)),
+            self._auth0_response(extra_query=(("correlation_id", "foreign"),)),
             self._auth0_response(extra_query=(("state", OAUTH_STATE),)),
             self._auth0_response(state="short-state"),
             self._auth0_response(client_id="other-client"),

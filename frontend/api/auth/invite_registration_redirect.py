@@ -37,7 +37,10 @@ def decorate_team_invite_redirect(
     ``runtime.login_response`` remains the request/authentication boundary and
     validates the raw Team bearer before this decorator runs. This function
     repeats the authoritative invitation read so the proof is minted only from
-    current server-side invitation metadata. Non-Auth0 responses are preserved.
+    current server-side invitation metadata. The same opaque OAuth state is also
+    sent as Auth0 ``correlation_id`` because Pre User Registration Actions expose
+    that transaction field reliably even when ``transaction.state`` is omitted.
+    Non-Auth0 responses are preserved.
     """
 
     if response.status not in (302, 303):
@@ -68,7 +71,7 @@ def decorate_team_invite_redirect(
             encoding="utf-8",
             errors="strict",
         )
-        if any(name == "acr_values" for name, _value in pairs):
+        if any(name in {"acr_values", "correlation_id"} for name, _value in pairs):
             raise ValueError("ambiguous authorization context")
         states = [value for name, value in pairs if name == "state"]
         if len(states) != 1 or _OAUTH_STATE_RE.fullmatch(states[0]) is None:
@@ -92,6 +95,7 @@ def decorate_team_invite_redirect(
             now=issued_at,
             invitation_expires_at_ms=invitation.expires_at,
         )
+        pairs.append(("correlation_id", states[0]))
         pairs.append(("acr_values", proof))
         decorated = urlunsplit(
             (parsed.scheme, parsed.netloc, parsed.path, urlencode(pairs), "")
