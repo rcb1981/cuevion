@@ -21,9 +21,11 @@ from cuevion_auth import identity_inventory_diagnostic as owner_diagnostic
 ROUTE = "/api/auth/writer-capability-diagnostic"
 _READER_ENV = "CUEVION_AUTH_ACCOUNT_READER_DATABASE_URL"
 _WRITER_ENV = "CUEVION_AUTH_ACCOUNT_WRITER_DATABASE_URL"
+_EXPECTED_WRITER_ROLE = "cuevion_auth_writer"
 
 _PRIVILEGE_SQL = """
 SELECT
+    current_user = 'cuevion_auth_writer',
     has_schema_privilege(current_user, 'cuevion_account', 'USAGE'),
     has_table_privilege(current_user, 'cuevion_account.workspaces', 'SELECT')
       AND has_table_privilege(current_user, 'cuevion_account.users', 'SELECT')
@@ -56,6 +58,7 @@ def _default_result() -> dict[str, bool]:
         "writerConnects": False,
         "writerTlsActive": False,
         "writerTransactionReady": False,
+        "writerRoleIsCuevionAuthWriter": False,
         "writerSchemaUsage": False,
         "writerRequiredSelectPrivileges": False,
         "writerRequiredInsertPrivileges": False,
@@ -94,11 +97,12 @@ def _inspect_writer() -> dict[str, bool]:
             type(rows) is not list
             or len(rows) != 1
             or type(rows[0]) is not tuple
-            or len(rows[0]) != 5
+            or len(rows[0]) != 6
             or any(type(value) is not bool for value in rows[0])
         ):
             return result
         (
+            result["writerRoleIsCuevionAuthWriter"],
             result["writerSchemaUsage"],
             result["writerRequiredSelectPrivileges"],
             result["writerRequiredInsertPrivileges"],
