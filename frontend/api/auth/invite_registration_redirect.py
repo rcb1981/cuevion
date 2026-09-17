@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from collections.abc import Mapping
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from api.auth import auth0_flow, http, runtime
 from api.auth.invite_registration_proof import build_invite_registration_acr
+
+
+_OAUTH_STATE_RE = re.compile(r"[A-Za-z0-9_-]{43}")
 
 
 def _response_header(response: http.PublicResponse, name: str) -> str | None:
@@ -66,15 +70,22 @@ def decorate_team_invite_redirect(
         )
         if any(name == "acr_values" for name, _value in pairs):
             raise ValueError("ambiguous authorization context")
+        states = [value for name, value in pairs if name == "state"]
+        if len(states) != 1 or _OAUTH_STATE_RE.fullmatch(states[0]) is None:
+            raise ValueError("invalid authorization state")
 
         source = os.environ if environment is None else environment
         configuration = auth0_flow.parse_auth0_configuration(source)
+        client_ids = [value for name, value in pairs if name == "client_id"]
+        if client_ids != [configuration.client_id]:
+            raise ValueError("invalid authorization client")
         team = runtime._team_authority(source, team_authority_factory)
         invitation = team.read_provisioning_invitation(token, allow_accepted=True)
         issued_at = int(time.time()) if now is None else now
         proof = build_invite_registration_acr(
             source,
             client_id=configuration.client_id,
+            oauth_state=states[0],
             email=invitation.email,
             invitation_id=invitation.invitation_id,
             token_digest=invitation.token_digest,
