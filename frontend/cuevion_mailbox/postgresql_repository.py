@@ -26,6 +26,7 @@ from cuevion_mailbox.repository_contract import (
     MessageProjection,
     OutboxEvent,
     OutboxEventType,
+    OutboxStorageScope,
     ProviderDeltaCommit,
     SyncCursor,
     derive_locator_digest,
@@ -724,39 +725,24 @@ class PostgreSQLMailboxRepository(MailboxRepository):
             for row in rows:
                 if len(row) != 10:
                     raise RuntimeError("mailbox repository storage corruption")
-                scope = MailboxScope(
-                    workspace_id=row[1],
-                    owner_user_id=row[2],
-                    mailbox_id=row[3],
-                    source_generation=row[4],
-                    provider=MailboxProvider.GOOGLE,  # replaced below from message scope is not persisted here
-                    provider_account_identity="placeholder@example.invalid",
+                events.append(
+                    OutboxEvent(
+                        event_id=row[0],
+                        scope=OutboxStorageScope(
+                            workspace_id=row[1],
+                            owner_user_id=row[2],
+                            mailbox_id=row[3],
+                            source_generation=row[4],
+                        ),
+                        message_id=row[5],
+                        message_row_version=row[6],
+                        event_type=OutboxEventType(row[7]),
+                        attempt_count=row[8],
+                        claim_token=row[9],
+                    )
                 )
-                # Outbox deliberately carries no provider credentials; consumers resolve
-                # current mailbox authority before provider work. The scope object here
-                # is therefore not safe to construct without that authority.
-                del scope
-                events.append(row)
             getattr(connection, "commit")()
-            return tuple(
-                OutboxEvent(
-                    event_id=row[0],
-                    scope=MailboxScope(
-                        workspace_id=row[1],
-                        owner_user_id=row[2],
-                        mailbox_id=row[3],
-                        source_generation=row[4],
-                        provider=MailboxProvider.GOOGLE,
-                        provider_account_identity="placeholder@example.invalid",
-                    ),
-                    message_id=row[5],
-                    message_row_version=row[6],
-                    event_type=OutboxEventType(row[7]),
-                    attempt_count=row[8],
-                    claim_token=row[9],
-                )
-                for row in events
-            )
+            return tuple(events)
         finally:
             if cursor is not None:
                 getattr(cursor, "close")()
