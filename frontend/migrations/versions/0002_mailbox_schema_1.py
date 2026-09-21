@@ -155,6 +155,8 @@ r"""CREATE TABLE cuevion_mailbox.mailbox_change_outbox (
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
     attempt_count INTEGER NOT NULL,
     next_attempt_at TIMESTAMP WITH TIME ZONE,
+    claim_token VARCHAR(64) COLLATE "C",
+    claim_expires_at TIMESTAMP WITH TIME ZONE,
     processed_at TIMESTAMP WITH TIME ZONE,
     last_error_code VARCHAR(128) COLLATE "C",
     CONSTRAINT pk_mailbox_change_outbox PRIMARY KEY (event_id),
@@ -164,6 +166,8 @@ r"""CREATE TABLE cuevion_mailbox.mailbox_change_outbox (
     CONSTRAINT ck_mailbox_change_outbox_source_generation_positive CHECK (source_generation > 0),
     CONSTRAINT ck_mailbox_change_outbox_message_row_version_positive CHECK (message_row_version > 0),
     CONSTRAINT ck_mailbox_change_outbox_attempt_count_nonnegative CHECK (attempt_count >= 0),
+    CONSTRAINT ck_mailbox_change_outbox_claim_shape CHECK ((claim_token IS NULL AND claim_expires_at IS NULL) OR (claim_token IS NOT NULL AND claim_expires_at IS NOT NULL)),
+    CONSTRAINT ck_mailbox_change_outbox_claim_token_bounded CHECK (claim_token IS NULL OR octet_length(claim_token) BETWEEN 16 AND 64),
     CONSTRAINT ck_mailbox_change_outbox_event_type_supported CHECK (event_type IN ('message_added','message_changed','message_deleted')),
     CONSTRAINT ck_mailbox_change_outbox_last_error_code_bounded CHECK (last_error_code IS NULL OR octet_length(last_error_code) BETWEEN 1 AND 128)
 )""",
@@ -174,7 +178,7 @@ _INDEX_DDL = (
     r"""CREATE INDEX ix_mailbox_messages_visible_order ON cuevion_mailbox.mailbox_messages (workspace_id, owner_user_id, mailbox_id, source_generation, provider_deleted, provider_timestamp)""",
     r"""CREATE UNIQUE INDEX ux_mailbox_messages_gmail_identity ON cuevion_mailbox.mailbox_messages (workspace_id, owner_user_id, mailbox_id, source_generation, provider_message_id) WHERE provider = 'google' AND provider_message_id IS NOT NULL""",
     r"""CREATE UNIQUE INDEX ux_mailbox_messages_imap_identity ON cuevion_mailbox.mailbox_messages (workspace_id, owner_user_id, mailbox_id, source_generation, provider_folder, imap_uid_validity, imap_uid) WHERE provider = 'custom_imap' AND imap_uid_validity IS NOT NULL AND imap_uid IS NOT NULL""",
-    r"""CREATE INDEX ix_mailbox_change_outbox_ready ON cuevion_mailbox.mailbox_change_outbox (processed_at, next_attempt_at, created_at)""",
+    r"""CREATE INDEX ix_mailbox_change_outbox_ready ON cuevion_mailbox.mailbox_change_outbox (processed_at, next_attempt_at, claim_expires_at, created_at)""",
 )
 
 _PUBLIC_ACL_DDL = (
