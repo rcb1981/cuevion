@@ -23,6 +23,7 @@ from cuevion_mailbox.repository_contract import (
     OutboxEventType,
     ProviderDeltaCommit,
     SyncCursor,
+    derive_locator_digest,
 )
 from cuevion_mailbox.schema import (
     MAILBOX_SCHEMA,
@@ -104,7 +105,8 @@ class MailboxSchemaTests(unittest.TestCase):
                 self.assertIn(column, sql)
         self.assertIn("provider_message_id", gmail)
         self.assertIn("where provider = 'google'", gmail)
-        self.assertIn("provider_folder", imap)
+        self.assertIn("provider_folder_digest", imap)
+        self.assertNotIn("provider_folder,", imap)
         self.assertIn("imap_uid_validity", imap)
         self.assertIn("imap_uid", imap)
         self.assertIn("where provider = 'custom_imap'", imap)
@@ -130,6 +132,20 @@ class MailboxSchemaTests(unittest.TestCase):
             "event_type in ('message_added','message_changed','message_deleted')",
             sql,
         )
+
+    def test_wide_provider_locators_are_hashed_before_indexing(self):
+        value = "Folder/" + ("é" * 4_000)
+        digest = derive_locator_digest(value)
+        self.assertEqual(len(digest), 64)
+        self.assertEqual(digest, derive_locator_digest(value))
+        cursor_sql = _compiled(CreateTable(MAILBOX_TABLES[1])).casefold()
+        self.assertIn("scope_key_digest", cursor_sql)
+        self.assertIn(
+            "primary key (workspace_id, owner_user_id, mailbox_id, "
+            "source_generation, scope_key_digest)",
+            cursor_sql,
+        )
+
 
 
 class MailboxMigrationTests(unittest.TestCase):
@@ -259,6 +275,23 @@ class RepositoryContractTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "invalid tombstone mutation"):
             mutation.validate_for(MailboxProvider.GOOGLE)
+
+        invalid_upsert = MessageMutation(
+            kind=MessageMutationKind.UPSERT,
+            projection=MessageProjection(
+                identity=identity,
+                provider_thread_id="thread-1",
+                metadata_hash="a" * 64,
+                body_state=BodyState.STALE,
+                unread=False,
+                starred=False,
+                provider_deleted=True,
+                row_version=3,
+            ),
+            outbox_event_type=OutboxEventType.MESSAGE_DELETED,
+        )
+        with self.assertRaisesRegex(ValueError, "invalid upsert mutation"):
+            invalid_upsert.validate_for(MailboxProvider.GOOGLE)
 
     def test_delta_commit_binds_cursor_provider_scope_and_generation(self):
         identity = MessageIdentity(
