@@ -20,7 +20,8 @@ _TABLES = (
 class MailboxRolePlan:
     reader_role: str
     writer_role: str
-    statements: tuple[str, ...]
+    creation_statements: tuple[str, ...]
+    grant_statements: tuple[str, ...]
 
 
 def _role(value: str) -> str:
@@ -36,7 +37,11 @@ def build_mailbox_role_plan(reader_role: str, writer_role: str) -> MailboxRolePl
         raise ValueError("mailbox database roles must be distinct")
 
     tables = ", ".join(f"cuevion_mailbox.{name}" for name in _TABLES)
-    statements = (
+    creation_statements = (
+        f"CREATE ROLE {reader} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS",
+        f"CREATE ROLE {writer} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS",
+    )
+    grant_statements = (
         f"REVOKE ALL ON SCHEMA cuevion_mailbox FROM {reader}",
         f"REVOKE ALL ON ALL TABLES IN SCHEMA cuevion_mailbox FROM {reader}",
         f"GRANT USAGE ON SCHEMA cuevion_mailbox TO {reader}",
@@ -46,7 +51,12 @@ def build_mailbox_role_plan(reader_role: str, writer_role: str) -> MailboxRolePl
         f"GRANT USAGE ON SCHEMA cuevion_mailbox TO {writer}",
         f"GRANT SELECT, INSERT, UPDATE ON {tables} TO {writer}",
     )
-    return MailboxRolePlan(reader, writer, statements)
+    return MailboxRolePlan(
+        reader,
+        writer,
+        creation_statements,
+        grant_statements,
+    )
 
 
 __all__ = ("MailboxRolePlan", "build_mailbox_role_plan")
