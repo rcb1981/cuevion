@@ -403,6 +403,8 @@ mailbox_change_outbox = sa.Table(
     sa.Column("created_at", _TIMESTAMP, nullable=False),
     sa.Column("attempt_count", sa.Integer(), nullable=False),
     sa.Column("next_attempt_at", _TIMESTAMP, nullable=True),
+    sa.Column("claim_token", sa.String(64, collation="C"), nullable=True),
+    sa.Column("claim_expires_at", _TIMESTAMP, nullable=True),
     sa.Column("processed_at", _TIMESTAMP, nullable=True),
     sa.Column("last_error_code", _CODE, nullable=True),
     sa.PrimaryKeyConstraint("event_id", name="pk_mailbox_change_outbox"),
@@ -431,6 +433,15 @@ mailbox_change_outbox = sa.Table(
     sa.CheckConstraint("message_row_version > 0", name="message_row_version_positive"),
     sa.CheckConstraint("attempt_count >= 0", name="attempt_count_nonnegative"),
     sa.CheckConstraint(
+        "(claim_token IS NULL AND claim_expires_at IS NULL) OR "
+        "(claim_token IS NOT NULL AND claim_expires_at IS NOT NULL)",
+        name="claim_shape",
+    ),
+    sa.CheckConstraint(
+        "claim_token IS NULL OR octet_length(claim_token) BETWEEN 16 AND 64",
+        name="claim_token_bounded",
+    ),
+    sa.CheckConstraint(
         "event_type IN ('message_added','message_changed','message_deleted')",
         name="event_type_supported",
     ),
@@ -444,6 +455,7 @@ sa.Index(
     "ix_mailbox_change_outbox_ready",
     mailbox_change_outbox.c.processed_at,
     mailbox_change_outbox.c.next_attempt_at,
+    mailbox_change_outbox.c.claim_expires_at,
     mailbox_change_outbox.c.created_at,
 )
 
