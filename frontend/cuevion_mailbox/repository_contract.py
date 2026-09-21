@@ -1,4 +1,4 @@
-"""Provider-neutral contracts for the inactive durable mailbox repository.
+"""Provider-neutral contracts for the durable mailbox repository.
 
 The contracts define data and atomicity boundaries only. They do not open
 connections, read environment variables, call providers, enqueue jobs, or
@@ -7,7 +7,9 @@ activate routes.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol, Sequence
@@ -61,16 +63,136 @@ class DeltaCommitOutcome(str, Enum):
     NOT_FOUND = "not_found"
 
 
-def derive_locator_digest(value: str) -> str:
-    if type(value) is not str or not value:
-        raise ValueError("invalid mailbox locator")
+class GenerationActivationOutcome(str, Enum):
+    CREATED = "created"
+    CURRENT = "current"
+    CONFLICT = "conflict"
+
+
+class BodyCacheOutcome(str, Enum):
+    STORED = "stored"
+    CONFLICT = "conflict"
+    STALE_GENERATION = "stale_generation"
+    NOT_FOUND = "not_found"
+
+
+_HEX = frozenset("0123456789abcdef")
+_BASE64URL = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+)
+_MAX_LOCATOR_BYTES = 16_384
+_MAX_TEXT_BYTES = 1_048_576
+_MAX_HEADER_BYTES = 131_072
+_MAX_PARTIES = 2_048
+_MAX_LABELS = 1_024
+_MAX_REFERENCES = 2_048
+_MAX_LABEL_BYTES = 4_096
+_MAX_ADDRESS_BYTES = 320
+_MAX_DISPLAY_BYTES = 4_096
+_MAX_PROVIDER_ID_BYTES = 1_024
+_MAX_RFC_ID_BYTES = 8_192
+_MAX_MAILBOX_ID_BYTES = 160
+
+
+def _utf8_bytes(value: str) -> bytes:
+    if type(value) is not str:
+        raise ValueError("invalid mailbox text")
     try:
-        encoded = value.encode("utf-8", errors="strict")
+        return value.encode("utf-8", errors="strict")
     except UnicodeError:
-        raise ValueError("invalid mailbox locator") from None
-    if not 1 <= len(encoded) <= 16_384:
+        raise ValueError("invalid mailbox text") from None
+
+
+def _bounded_text(
+    value: object,
+    *,
+    minimum: int = 0,
+    maximum: int,
+) -> str:
+    if type(value) is not str:
+        raise ValueError("invalid mailbox text")
+    encoded = _utf8_bytes(value)
+    if not minimum <= len(encoded) <= maximum:
+        raise ValueError("invalid mailbox text")
+    return value
+
+
+def _canonical_hash(value: object) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in _HEX for character in value)
+    ):
+        raise ValueError("invalid mailbox hash")
+    return value
+
+
+def _canonical_internal_id(value: object, prefix: str) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 26
+        or not value.startswith(prefix)
+    ):
+        raise ValueError("invalid mailbox record identifier")
+    suffix = value[len(prefix):]
+    if (
+        len(suffix) != 22
+        or any(character not in _BASE64URL for character in suffix)
+    ):
+        raise ValueError("invalid mailbox record identifier")
+    try:
+        decoded = base64.b64decode(
+            suffix.encode("ascii") + b"==",
+            altchars=b"-_",
+            validate=True,
+        )
+    except Exception:
+        raise ValueError("invalid mailbox record identifier") from None
+    if len(decoded) != 16:
+        raise ValueError("invalid mailbox record identifier")
+    return value
+
+
+def _derived_id(prefix: str, domain: str, values: tuple[object, ...]) -> str:
+    payload = json.dumps(
+        [domain, *values],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    digest = hashlib.sha256(payload).digest()[:16]
+    suffix = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    value = prefix + suffix
+    return _canonical_internal_id(value, prefix)
+
+
+def derive_locator_digest(value: str) -> str:
+    encoded = _utf8_bytes(value)
+    if not 1 <= len(encoded) <= _MAX_LOCATOR_BYTES:
         raise ValueError("invalid mailbox locator")
     return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class MailboxBinding:
+    workspace_id: str
+    owner_user_id: str
+    mailbox_id: str
+    provider: MailboxProvider
+    provider_account_identity: str
+
+    def __post_init__(self) -> None:
+        for value, maximum in (
+            (self.workspace_id, 26),
+            (self.owner_user_id, 26),
+            (self.mailbox_id, _MAX_MAILBOX_ID_BYTES),
+            (self.provider_account_identity, 320),
+        ):
+            _bounded_text(value, minimum=1, maximum=maximum)
+        if (
+            self.provider_account_identity
+            != self.provider_account_identity.casefold()
+        ):
+            raise ValueError("invalid mailbox binding")
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,22 +205,32 @@ class MailboxScope:
     provider_account_identity: str
 
     def __post_init__(self) -> None:
-        if (
-            any(
-                type(value) is not str or not value
-                for value in (
-                    self.workspace_id,
-                    self.owner_user_id,
-                    self.mailbox_id,
-                    self.provider_account_identity,
-                )
-            )
-            or type(self.source_generation) is not int
-            or self.source_generation < 1
-            or self.provider_account_identity
-            != self.provider_account_identity.casefold()
-        ):
+        MailboxBinding(
+            workspace_id=self.workspace_id,
+            owner_user_id=self.owner_user_id,
+            mailbox_id=self.mailbox_id,
+            provider=self.provider,
+            provider_account_identity=self.provider_account_identity,
+        )
+        if type(self.source_generation) is not int or self.source_generation < 1:
             raise ValueError("invalid mailbox scope")
+
+    @property
+    def binding(self) -> MailboxBinding:
+        return MailboxBinding(
+            workspace_id=self.workspace_id,
+            owner_user_id=self.owner_user_id,
+            mailbox_id=self.mailbox_id,
+            provider=self.provider,
+            provider_account_identity=self.provider_account_identity,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationActivation:
+    outcome: GenerationActivationOutcome
+    scope: MailboxScope | None
+    state_row_version: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,10 +247,12 @@ class SyncCursor:
     row_version: int
 
     def __post_init__(self) -> None:
+        derive_locator_digest(self.scope_key)
         google_shape = (
             self.provider is MailboxProvider.GOOGLE
             and self.scope_key == "gmail-account"
-            and isinstance(self.gmail_history_id, str)
+            and type(self.gmail_history_id) is str
+            and bool(self.gmail_history_id)
             and self.gmail_history_id.isdigit()
             and self.imap_uid_validity is None
             and self.imap_highest_uid is None
@@ -126,10 +260,8 @@ class SyncCursor:
         )
         imap_shape = (
             self.provider is MailboxProvider.CUSTOM_IMAP
-            and type(self.scope_key) is str
-            and bool(self.scope_key)
             and self.gmail_history_id is None
-            and isinstance(self.imap_uid_validity, str)
+            and type(self.imap_uid_validity) is str
             and self.imap_uid_validity.isdigit()
             and not self.imap_uid_validity.startswith("0")
             and type(self.imap_highest_uid) is int
@@ -148,15 +280,32 @@ class SyncCursor:
             or self.cursor_generation < 1
             or type(self.row_version) is not int
             or self.row_version < 1
-            or (
-                self.backfill_cursor is not None
-                and (
-                    type(self.backfill_cursor) is not str
-                    or not self.backfill_cursor
-                )
-            )
         ):
             raise ValueError("invalid sync cursor")
+        if self.backfill_cursor is not None:
+            _bounded_text(
+                self.backfill_cursor,
+                minimum=1,
+                maximum=_MAX_LOCATOR_BYTES,
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class MailboxParty:
+    address: str
+    display_name: str | None = None
+
+    def __post_init__(self) -> None:
+        _bounded_text(
+            self.address,
+            minimum=1,
+            maximum=_MAX_ADDRESS_BYTES,
+        )
+        if self.display_name is not None:
+            _bounded_text(
+                self.display_name,
+                maximum=_MAX_DISPLAY_BYTES,
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,34 +316,95 @@ class MessageIdentity:
     imap_uid_validity: str | None
     imap_uid: int | None
 
-    def validate_for(self, provider: MailboxProvider) -> None:
-        if (
-            type(self.message_id) is not str
-            or not self.message_id
-            or type(self.provider_folder) is not str
-            or not self.provider_folder
-        ):
-            raise ValueError("invalid message identity")
+    def validate_for(
+        self,
+        provider: MailboxProvider,
+        scope: MailboxScope | None = None,
+    ) -> None:
+        _canonical_internal_id(self.message_id, "mbm_")
+        derive_locator_digest(self.provider_folder)
 
         if provider is MailboxProvider.GOOGLE:
             if (
                 type(self.provider_message_id) is not str
                 or not self.provider_message_id
+                or len(_utf8_bytes(self.provider_message_id))
+                > _MAX_PROVIDER_ID_BYTES
                 or self.imap_uid_validity is not None
                 or self.imap_uid is not None
             ):
                 raise ValueError("invalid Gmail message identity")
-            return
+        elif provider is MailboxProvider.CUSTOM_IMAP:
+            if (
+                self.provider_message_id is not None
+                or type(self.imap_uid_validity) is not str
+                or not self.imap_uid_validity.isdigit()
+                or self.imap_uid_validity.startswith("0")
+                or type(self.imap_uid) is not int
+                or not 1 <= self.imap_uid <= 4_294_967_295
+            ):
+                raise ValueError("invalid IMAP message identity")
+        else:
+            raise ValueError("invalid message provider")
 
+        if scope is not None:
+            expected = derive_message_id(
+                scope,
+                provider_message_id=self.provider_message_id,
+                provider_folder=self.provider_folder,
+                imap_uid_validity=self.imap_uid_validity,
+                imap_uid=self.imap_uid,
+            )
+            if self.message_id != expected:
+                raise ValueError("invalid derived message identity")
+
+
+def derive_message_id(
+    scope: MailboxScope,
+    *,
+    provider_message_id: str | None,
+    provider_folder: str,
+    imap_uid_validity: str | None,
+    imap_uid: int | None,
+) -> str:
+    derive_locator_digest(provider_folder)
+    if scope.provider is MailboxProvider.GOOGLE:
         if (
-            self.provider_message_id is not None
-            or type(self.imap_uid_validity) is not str
-            or not self.imap_uid_validity.isdigit()
-            or self.imap_uid_validity.startswith("0")
-            or type(self.imap_uid) is not int
-            or not 1 <= self.imap_uid <= 4_294_967_295
+            type(provider_message_id) is not str
+            or not provider_message_id
+            or imap_uid_validity is not None
+            or imap_uid is not None
+        ):
+            raise ValueError("invalid Gmail message identity")
+        provider_identity = ("gmail", provider_message_id)
+    else:
+        if (
+            provider_message_id is not None
+            or type(imap_uid_validity) is not str
+            or not imap_uid_validity.isdigit()
+            or imap_uid_validity.startswith("0")
+            or type(imap_uid) is not int
+            or not 1 <= imap_uid <= 4_294_967_295
         ):
             raise ValueError("invalid IMAP message identity")
+        provider_identity = (
+            "imap",
+            derive_locator_digest(provider_folder),
+            imap_uid_validity,
+            imap_uid,
+        )
+    return _derived_id(
+        "mbm_",
+        "cuevion.mailbox-message.v1",
+        (
+            scope.workspace_id,
+            scope.owner_user_id,
+            scope.mailbox_id,
+            scope.source_generation,
+            scope.provider.value,
+            *provider_identity,
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,16 +418,21 @@ class MessageProjection:
     provider_deleted: bool
     row_version: int
 
-    def validate_for(self, provider: MailboxProvider) -> None:
-        self.identity.validate_for(provider)
-        if (
-            type(self.metadata_hash) is not str
-            or len(self.metadata_hash) != 64
-            or any(
-                character not in "0123456789abcdef"
-                for character in self.metadata_hash
+    def validate_for(
+        self,
+        provider: MailboxProvider,
+        scope: MailboxScope | None = None,
+    ) -> None:
+        self.identity.validate_for(provider, scope)
+        _canonical_hash(self.metadata_hash)
+        if self.provider_thread_id is not None:
+            _bounded_text(
+                self.provider_thread_id,
+                minimum=1,
+                maximum=_MAX_PROVIDER_ID_BYTES,
             )
-            or type(self.unread) is not bool
+        if (
+            type(self.unread) is not bool
             or type(self.starred) is not bool
             or type(self.provider_deleted) is not bool
             or type(self.row_version) is not int
@@ -227,22 +442,89 @@ class MessageProjection:
 
 
 @dataclass(frozen=True, slots=True)
+class MessageWrite:
+    projection: MessageProjection
+    provider_labels: tuple[str, ...]
+    rfc_message_id: str | None
+    in_reply_to: str | None
+    references: tuple[str, ...]
+    sender: MailboxParty | None
+    to: tuple[MailboxParty, ...]
+    cc: tuple[MailboxParty, ...]
+    subject: str
+    snippet: str
+    provider_timestamp_millis: int
+
+    def validate_for(
+        self,
+        provider: MailboxProvider,
+        scope: MailboxScope,
+    ) -> None:
+        self.projection.validate_for(provider, scope)
+        if self.projection.provider_deleted:
+            raise ValueError("invalid live message write")
+        if (
+            type(self.provider_labels) is not tuple
+            or len(self.provider_labels) > _MAX_LABELS
+            or type(self.references) is not tuple
+            or len(self.references) > _MAX_REFERENCES
+            or type(self.to) is not tuple
+            or len(self.to) > _MAX_PARTIES
+            or type(self.cc) is not tuple
+            or len(self.cc) > _MAX_PARTIES
+        ):
+            raise ValueError("invalid message collection")
+        for label in self.provider_labels:
+            _bounded_text(label, minimum=1, maximum=_MAX_LABEL_BYTES)
+        for value in self.references:
+            _bounded_text(value, minimum=1, maximum=_MAX_RFC_ID_BYTES)
+        for party in (*self.to, *self.cc):
+            if type(party) is not MailboxParty:
+                raise ValueError("invalid message party")
+        if self.sender is not None and type(self.sender) is not MailboxParty:
+            raise ValueError("invalid message sender")
+        for value in (self.rfc_message_id, self.in_reply_to):
+            if value is not None:
+                _bounded_text(
+                    value,
+                    minimum=1,
+                    maximum=_MAX_RFC_ID_BYTES,
+                )
+        _bounded_text(self.subject, maximum=_MAX_HEADER_BYTES)
+        _bounded_text(self.snippet, maximum=_MAX_TEXT_BYTES)
+        if (
+            type(self.provider_timestamp_millis) is not int
+            or self.provider_timestamp_millis < 0
+            or self.provider_timestamp_millis > 253_402_300_799_999
+        ):
+            raise ValueError("invalid provider timestamp")
+
+
+@dataclass(frozen=True, slots=True)
 class MessageMutation:
     kind: MessageMutationKind
     projection: MessageProjection
+    write: MessageWrite | None
     outbox_event_type: OutboxEventType
 
-    def validate_for(self, provider: MailboxProvider) -> None:
-        self.projection.validate_for(provider)
+    def validate_for(
+        self,
+        provider: MailboxProvider,
+        scope: MailboxScope,
+    ) -> None:
+        self.projection.validate_for(provider, scope)
         if self.kind is MessageMutationKind.TOMBSTONE:
             if (
-                self.outbox_event_type is not OutboxEventType.MESSAGE_DELETED
+                self.write is not None
+                or self.outbox_event_type is not OutboxEventType.MESSAGE_DELETED
                 or self.projection.provider_deleted is not True
             ):
                 raise ValueError("invalid tombstone mutation")
             return
         if (
             self.kind is not MessageMutationKind.UPSERT
+            or type(self.write) is not MessageWrite
+            or self.write.projection != self.projection
             or self.outbox_event_type
             not in {
                 OutboxEventType.MESSAGE_ADDED,
@@ -251,6 +533,7 @@ class MessageMutation:
             or self.projection.provider_deleted is not False
         ):
             raise ValueError("invalid upsert mutation")
+        self.write.validate_for(provider, scope)
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,12 +546,12 @@ class ProviderDeltaCommit:
     mutations: tuple[MessageMutation, ...]
     next_cursor: SyncCursor
     next_bootstrap_state: BootstrapState
+    committed_at_millis: int
 
     def __post_init__(self) -> None:
+        derive_locator_digest(self.scope_key)
         if (
-            type(self.scope_key) is not str
-            or not self.scope_key
-            or type(self.expected_state_row_version) is not int
+            type(self.expected_state_row_version) is not int
             or self.expected_state_row_version < 1
             or (
                 self.expected_cursor_row_version is not None
@@ -283,11 +566,14 @@ class ProviderDeltaCommit:
             or self.next_cursor.provider is not self.scope.provider
             or self.next_cursor.cursor_generation
             != self.expected_cursor_generation
+            or type(self.mutations) is not tuple
+            or type(self.committed_at_millis) is not int
+            or self.committed_at_millis < 0
         ):
             raise ValueError("invalid provider delta commit")
 
         for mutation in self.mutations:
-            mutation.validate_for(self.scope.provider)
+            mutation.validate_for(self.scope.provider, self.scope)
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +584,46 @@ class CachedBody:
     content_hash: str
     body_version: int
     row_version: int
+
+    def __post_init__(self) -> None:
+        _canonical_internal_id(self.message_id, "mbm_")
+        _canonical_hash(self.content_hash)
+        if (
+            self.body_text is None
+            and self.body_html is None
+        ):
+            raise ValueError("invalid cached body")
+        for value in (self.body_text, self.body_html):
+            if value is not None:
+                _bounded_text(value, maximum=16_777_216)
+        if (
+            type(self.body_version) is not int
+            or self.body_version < 1
+            or type(self.row_version) is not int
+            or self.row_version < 1
+        ):
+            raise ValueError("invalid cached body")
+
+
+@dataclass(frozen=True, slots=True)
+class BodyWrite:
+    body_text: str | None
+    body_html: str | None
+    content_hash: str
+    body_version: int
+    fetched_at_millis: int
+
+    def __post_init__(self) -> None:
+        CachedBody(
+            message_id="mbm_AAAAAAAAAAAAAAAAAAAAAA",
+            body_text=self.body_text,
+            body_html=self.body_html,
+            content_hash=self.content_hash,
+            body_version=self.body_version,
+            row_version=1,
+        )
+        if type(self.fetched_at_millis) is not int or self.fetched_at_millis < 0:
+            raise ValueError("invalid body fetch time")
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,15 +636,57 @@ class OutboxEvent:
     attempt_count: int
     claim_token: str
 
+    def __post_init__(self) -> None:
+        _canonical_internal_id(self.event_id, "mbe_")
+        _canonical_internal_id(self.message_id, "mbm_")
+        if (
+            type(self.message_row_version) is not int
+            or self.message_row_version < 1
+            or type(self.attempt_count) is not int
+            or self.attempt_count < 0
+            or type(self.claim_token) is not str
+            or not 16 <= len(self.claim_token) <= 64
+        ):
+            raise ValueError("invalid outbox event")
+
+
+def derive_outbox_event_id(
+    scope: MailboxScope,
+    *,
+    message_id: str,
+    message_row_version: int,
+    event_type: OutboxEventType,
+) -> str:
+    _canonical_internal_id(message_id, "mbm_")
+    if type(message_row_version) is not int or message_row_version < 1:
+        raise ValueError("invalid outbox row version")
+    return _derived_id(
+        "mbe_",
+        "cuevion.mailbox-outbox-event.v1",
+        (
+            scope.workspace_id,
+            scope.owner_user_id,
+            scope.mailbox_id,
+            scope.source_generation,
+            message_id,
+            message_row_version,
+            event_type.value,
+        ),
+    )
+
 
 class MailboxRepository(Protocol):
-    """Durable repository boundary.
+    """Durable repository boundary."""
 
-    commit_provider_delta MUST use one PostgreSQL transaction. It must compare
-    expected state/cursor versions and generations, apply every message
-    mutation, insert the idempotent outbox rows, and advance the cursor before
-    commit. A conflict or exception must publish none of those changes.
-    """
+    def activate_generation(
+        self,
+        binding: MailboxBinding,
+        *,
+        bootstrap_state: BootstrapState,
+        activated_at_millis: int,
+        backfill_cutoff_millis: int | None,
+    ) -> GenerationActivation:
+        ...
 
     def read_cursor(
         self,
@@ -343,10 +711,21 @@ class MailboxRepository(Protocol):
     ) -> CachedBody | None:
         ...
 
+    def cache_message_body(
+        self,
+        scope: MailboxScope,
+        message_id: str,
+        *,
+        expected_message_row_version: int,
+        body: BodyWrite,
+    ) -> BodyCacheOutcome:
+        ...
+
     def commit_provider_delta(
         self,
         commit: ProviderDeltaCommit,
     ) -> DeltaCommitOutcome:
+        """Atomically persist messages, outbox events and the next cursor."""
         ...
 
     def claim_outbox_batch(
@@ -356,7 +735,6 @@ class MailboxRepository(Protocol):
         now_millis: int,
         lease_millis: int,
     ) -> Sequence[OutboxEvent]:
-        """Atomically claim due events and return their persisted claim tokens."""
         ...
 
     def mark_outbox_processed(
@@ -366,7 +744,6 @@ class MailboxRepository(Protocol):
         claim_token: str,
         processed_at_millis: int,
     ) -> bool:
-        """Complete only when the current persisted claim token still matches."""
         ...
 
     def mark_outbox_retry(
@@ -377,17 +754,24 @@ class MailboxRepository(Protocol):
         next_attempt_at_millis: int,
         safe_error_code: str,
     ) -> bool:
-        """Release only the caller's claim and schedule the next bounded retry."""
         ...
 
 
 __all__ = (
     "BackfillState",
+    "BodyCacheOutcome",
     "BodyState",
+    "BodyWrite",
     "BootstrapState",
     "CachedBody",
     "DeltaCommitOutcome",
     "derive_locator_digest",
+    "derive_message_id",
+    "derive_outbox_event_id",
+    "GenerationActivation",
+    "GenerationActivationOutcome",
+    "MailboxBinding",
+    "MailboxParty",
     "MailboxProvider",
     "MailboxRepository",
     "MailboxScope",
@@ -395,6 +779,7 @@ __all__ = (
     "MessageMutation",
     "MessageMutationKind",
     "MessageProjection",
+    "MessageWrite",
     "OutboxEvent",
     "OutboxEventType",
     "ProviderDeltaCommit",
