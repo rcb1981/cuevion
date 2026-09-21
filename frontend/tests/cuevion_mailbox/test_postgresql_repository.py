@@ -41,6 +41,18 @@ class MailboxRolePolicyTests(unittest.TestCase):
         self.assertIn("grant usage on schema cuevion_mailbox", sql)
         self.assertIn("grant select on cuevion_mailbox.mailbox_sync_state", sql)
         self.assertIn("grant select, insert, update on cuevion_mailbox.mailbox_sync_state", sql)
+        reader_select = next(
+            statement.casefold()
+            for statement in plan.grant_statements
+            if statement.casefold().startswith("grant select on ")
+        )
+        self.assertNotIn("mailbox_change_outbox", reader_select)
+        writer_grant = next(
+            statement.casefold()
+            for statement in plan.grant_statements
+            if statement.casefold().startswith("grant select, insert, update on ")
+        )
+        self.assertIn("mailbox_change_outbox", writer_grant)
         for forbidden in (
             " delete ",
             " truncate ",
