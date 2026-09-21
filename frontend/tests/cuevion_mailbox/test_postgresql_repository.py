@@ -189,11 +189,18 @@ class RepositorySourceBoundaryTests(unittest.TestCase):
         for forbidden in (
             "psycopg",
             "os.environ",
-            "password",
             "cuevion_auth_writer",
             "cuevion_production_current_account_reader_v1",
         ):
             self.assertNotIn(forbidden, source)
+
+        creation_sql = "\n".join(
+            role_creation_statements(
+                "cuevion_test_mailbox_reader_v1",
+                "cuevion_test_mailbox_writer_v1",
+            )
+        ).casefold()
+        self.assertNotIn("password", creation_sql)
 
 
 class DeterministicIdentifierTests(unittest.TestCase):
