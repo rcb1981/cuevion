@@ -7,13 +7,13 @@ from dataclasses import dataclass
 
 
 _ROLE = re.compile(r"^[a-z][a-z0-9_]{2,62}$")
-_TABLES = (
+_READER_TABLES = (
     "mailbox_sync_state",
     "mailbox_sync_cursor",
     "mailbox_messages",
     "mailbox_message_bodies",
-    "mailbox_change_outbox",
 )
+_WRITER_TABLES = _READER_TABLES + ("mailbox_change_outbox",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,7 +36,12 @@ def build_mailbox_role_plan(reader_role: str, writer_role: str) -> MailboxRolePl
     if reader == writer:
         raise ValueError("mailbox database roles must be distinct")
 
-    tables = ", ".join(f"cuevion_mailbox.{name}" for name in _TABLES)
+    reader_tables = ", ".join(
+        f"cuevion_mailbox.{name}" for name in _READER_TABLES
+    )
+    writer_tables = ", ".join(
+        f"cuevion_mailbox.{name}" for name in _WRITER_TABLES
+    )
     creation_statements = (
         f"CREATE ROLE {reader} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS",
         f"CREATE ROLE {writer} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS",
@@ -45,11 +50,11 @@ def build_mailbox_role_plan(reader_role: str, writer_role: str) -> MailboxRolePl
         f"REVOKE ALL ON SCHEMA cuevion_mailbox FROM {reader}",
         f"REVOKE ALL ON ALL TABLES IN SCHEMA cuevion_mailbox FROM {reader}",
         f"GRANT USAGE ON SCHEMA cuevion_mailbox TO {reader}",
-        f"GRANT SELECT ON {tables} TO {reader}",
+        f"GRANT SELECT ON {reader_tables} TO {reader}",
         f"REVOKE ALL ON SCHEMA cuevion_mailbox FROM {writer}",
         f"REVOKE ALL ON ALL TABLES IN SCHEMA cuevion_mailbox FROM {writer}",
         f"GRANT USAGE ON SCHEMA cuevion_mailbox TO {writer}",
-        f"GRANT SELECT, INSERT, UPDATE ON {tables} TO {writer}",
+        f"GRANT SELECT, INSERT, UPDATE ON {writer_tables} TO {writer}",
     )
     return MailboxRolePlan(
         reader,
