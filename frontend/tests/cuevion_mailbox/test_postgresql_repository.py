@@ -143,6 +143,124 @@ class RoleGrantTests(unittest.TestCase):
             role_grant_statements("same", "same")
 
 
+class SqlBindingArityTests(unittest.TestCase):
+    def setUp(self):
+        self.scope = contract.MailboxScope(
+            workspace_id="wsp_AAAAAAAAAAAAAAAAAAAAAA",
+            owner_user_id="usr_BBBBBBBBBBBBBBBBBBBBBB",
+            mailbox_id="main",
+            source_generation=1,
+            provider=contract.MailboxProvider.GOOGLE,
+            provider_account_identity="owner@example.com",
+        )
+        message_id = contract.derive_message_id(
+            self.scope,
+            provider_message_id="provider-arity",
+            provider_folder="INBOX",
+            imap_uid_validity=None,
+            imap_uid=None,
+        )
+        projection = contract.MessageProjection(
+            identity=contract.MessageIdentity(
+                message_id=message_id,
+                provider_message_id="provider-arity",
+                provider_folder="INBOX",
+                imap_uid_validity=None,
+                imap_uid=None,
+            ),
+            provider_thread_id="thread-arity",
+            metadata_hash="a" * 64,
+            body_state=contract.BodyState.NOT_CACHED,
+            unread=True,
+            starred=False,
+            provider_deleted=False,
+            row_version=1,
+        )
+        self.write = contract.MessageWrite(
+            projection=projection,
+            provider_labels=("INBOX",),
+            rfc_message_id="<arity@example.com>",
+            in_reply_to=None,
+            references=(),
+            sender=contract.MailboxParty("sender@example.com"),
+            to=(contract.MailboxParty("owner@example.com"),),
+            cc=(),
+            subject="Arity",
+            snippet="Arity snippet",
+            provider_timestamp_millis=1_700_000_000_000,
+        )
+
+    def test_message_and_cursor_binding_arities_match_sql(self):
+        committed_at = repository._dt(1_700_000_100_000)
+        insert_values = repository.PostgreSQLMailboxRepository._message_insert_values(
+            self.scope,
+            self.write,
+            committed_at,
+        )
+        self.assertEqual(
+            repository._INSERT_MESSAGE.count("%s"),
+            len(insert_values),
+        )
+
+        changed_projection = contract.MessageProjection(
+            identity=self.write.projection.identity,
+            provider_thread_id=self.write.projection.provider_thread_id,
+            metadata_hash=self.write.projection.metadata_hash,
+            body_state=self.write.projection.body_state,
+            unread=False,
+            starred=True,
+            provider_deleted=False,
+            row_version=2,
+        )
+        changed_write = contract.MessageWrite(
+            projection=changed_projection,
+            provider_labels=self.write.provider_labels,
+            rfc_message_id=self.write.rfc_message_id,
+            in_reply_to=self.write.in_reply_to,
+            references=self.write.references,
+            sender=self.write.sender,
+            to=self.write.to,
+            cc=self.write.cc,
+            subject=self.write.subject,
+            snippet=self.write.snippet,
+            provider_timestamp_millis=self.write.provider_timestamp_millis,
+        )
+        update_values = repository.PostgreSQLMailboxRepository._message_update_values(
+            self.scope,
+            changed_write,
+            committed_at,
+            1,
+        )
+        self.assertEqual(
+            repository._UPDATE_MESSAGE.count("%s"),
+            len(update_values),
+        )
+
+        cursor = contract.SyncCursor(
+            scope_key="gmail-account",
+            cursor_generation=1,
+            provider=contract.MailboxProvider.GOOGLE,
+            gmail_history_id="12345",
+            imap_uid_validity=None,
+            imap_highest_uid=None,
+            imap_uidnext_observed=None,
+            backfill_state=contract.BackfillState.RUNNING,
+            backfill_cursor=None,
+            row_version=1,
+        )
+        digest = contract.derive_locator_digest(cursor.scope_key)
+        cursor_insert = repository.PostgreSQLMailboxRepository._cursor_insert_values(
+            self.scope,
+            cursor,
+            digest,
+            committed_at,
+        )
+        self.assertEqual(
+            repository._INSERT_CURSOR.count("%s"),
+            len(cursor_insert),
+        )
+
+
 class RepositoryImportTests(unittest.TestCase):
     def test_concrete_adapter_imports_and_exposes_closed_errors(self):
         self.assertTrue(callable(repository.PostgreSQLMailboxRepository))
