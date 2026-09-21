@@ -120,7 +120,7 @@ class SyncCursor:
             and self.imap_uid_validity.isdigit()
             and not self.imap_uid_validity.startswith("0")
             and type(self.imap_highest_uid) is int
-            and 1 <= self.imap_highest_uid <= 4_294_967_295
+            and 0 <= self.imap_highest_uid <= 4_294_967_295
             and (
                 self.imap_uidnext_observed is None
                 or (
