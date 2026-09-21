@@ -862,7 +862,7 @@ def _offline_sql() -> str:
         mock.patch.object(socket, "socket", side_effect=AssertionError("socket")),
         mock.patch.object(socket, "create_connection", side_effect=AssertionError("socket")),
     ):
-        command.upgrade(configuration, "head", sql=True)
+        command.upgrade(configuration, "0001_account_schema_1", sql=True)
     return output.getvalue()
 
 
@@ -880,15 +880,22 @@ def _constraint(table, name: str):
 
 
 class MigrationHistoryTests(unittest.TestCase):
-    def test_exact_one_base_head_and_revision_identity(self):
+    def test_linear_history_preserves_account_base_and_adds_mailbox_head(self):
         configuration = Config(str(_INI))
         scripts = ScriptDirectory.from_config(configuration)
         revisions = tuple(scripts.walk_revisions())
-        self.assertEqual(len(revisions), 1)
-        self.assertEqual(scripts.get_heads(), ["0001_account_schema_1"])
+        self.assertEqual(len(revisions), 2)
+        self.assertEqual(scripts.get_heads(), ["0002_mailbox_schema_1"])
         self.assertEqual(scripts.get_bases(), ["0001_account_schema_1"])
-        revision = revisions[0]
-        self.assertEqual(revision.revision, "0001_account_schema_1")
+        self.assertEqual(
+            tuple(revision.revision for revision in revisions),
+            ("0002_mailbox_schema_1", "0001_account_schema_1"),
+        )
+        revision = next(
+            revision
+            for revision in revisions
+            if revision.revision == "0001_account_schema_1"
+        )
         self.assertIsNone(revision.down_revision)
         module = _revision_module()
         self.assertIsNone(module.branch_labels)
