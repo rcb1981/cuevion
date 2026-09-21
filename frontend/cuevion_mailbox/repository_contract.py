@@ -181,15 +181,21 @@ class MailboxBinding:
     provider_account_identity: str
 
     def __post_init__(self) -> None:
-        for value, maximum in (
-            (self.workspace_id, 26),
-            (self.owner_user_id, 26),
-            (self.mailbox_id, _MAX_MAILBOX_ID_BYTES),
-            (self.provider_account_identity, 320),
-        ):
-            _bounded_text(value, minimum=1, maximum=maximum)
+        _canonical_internal_id(self.workspace_id, "wsp_")
+        _canonical_internal_id(self.owner_user_id, "usr_")
+        _bounded_text(
+            self.mailbox_id,
+            minimum=1,
+            maximum=_MAX_MAILBOX_ID_BYTES,
+        )
+        _bounded_text(
+            self.provider_account_identity,
+            minimum=1,
+            maximum=320,
+        )
         if (
-            self.provider_account_identity
+            type(self.provider) is not MailboxProvider
+            or self.provider_account_identity
             != self.provider_account_identity.casefold()
         ):
             raise ValueError("invalid mailbox binding")
@@ -275,7 +281,8 @@ class SyncCursor:
             )
         )
         if (
-            not (google_shape or imap_shape)
+            type(self.provider) is not MailboxProvider
+            or not (google_shape or imap_shape)
             or type(self.cursor_generation) is not int
             or self.cursor_generation < 1
             or type(self.row_version) is not int
@@ -432,7 +439,8 @@ class MessageProjection:
                 maximum=_MAX_PROVIDER_ID_BYTES,
             )
         if (
-            type(self.unread) is not bool
+            type(self.body_state) is not BodyState
+            or type(self.unread) is not bool
             or type(self.starred) is not bool
             or type(self.provider_deleted) is not bool
             or type(self.row_version) is not int
@@ -567,6 +575,7 @@ class ProviderDeltaCommit:
             or self.next_cursor.cursor_generation
             != self.expected_cursor_generation
             or type(self.mutations) is not tuple
+            or type(self.next_bootstrap_state) is not BootstrapState
             or type(self.committed_at_millis) is not int
             or self.committed_at_millis < 0
         ):
@@ -639,6 +648,8 @@ class OutboxEvent:
     def __post_init__(self) -> None:
         _canonical_internal_id(self.event_id, "mbe_")
         _canonical_internal_id(self.message_id, "mbm_")
+        if type(self.scope) is not MailboxScope:
+            raise ValueError("invalid outbox event")
         if (
             type(self.message_row_version) is not int
             or self.message_row_version < 1
