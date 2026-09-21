@@ -20,6 +20,7 @@ r"""CREATE TABLE cuevion_mailbox.mailbox_sync_state (
     provider TEXT COLLATE "C" NOT NULL,
     provider_account_identity VARCHAR(320) COLLATE "C" NOT NULL,
     source_generation BIGINT NOT NULL,
+    is_current BOOLEAN NOT NULL,
     bootstrap_state TEXT COLLATE "C" NOT NULL,
     backfill_cutoff_at TIMESTAMP WITH TIME ZONE,
     backfill_oldest_indexed_at TIMESTAMP WITH TIME ZONE,
@@ -28,7 +29,7 @@ r"""CREATE TABLE cuevion_mailbox.mailbox_sync_state (
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
     row_version BIGINT NOT NULL,
-    CONSTRAINT pk_mailbox_sync_state PRIMARY KEY (workspace_id, owner_user_id, mailbox_id),
+    CONSTRAINT pk_mailbox_sync_state PRIMARY KEY (workspace_id, owner_user_id, mailbox_id, source_generation),
     CONSTRAINT uq_mailbox_sync_state_generation_provider UNIQUE (workspace_id, owner_user_id, mailbox_id, source_generation, provider),
     CONSTRAINT fk_mailbox_sync_state_active_membership_scope FOREIGN KEY(workspace_id, owner_user_id) REFERENCES cuevion_account.workspace_memberships (workspace_id, user_id),
     CONSTRAINT ck_mailbox_sync_state_schema_version_one CHECK (schema_version = 1),
@@ -70,7 +71,7 @@ r"""CREATE TABLE cuevion_mailbox.mailbox_sync_cursor (
     CONSTRAINT ck_mailbox_sync_cursor_provider_cursor_shape CHECK ((provider = 'google' AND scope_key = 'gmail-account' AND gmail_history_id IS NOT NULL AND imap_uid_validity IS NULL AND imap_highest_uid IS NULL AND imap_uidnext_observed IS NULL) OR (provider = 'custom_imap' AND gmail_history_id IS NULL AND imap_uid_validity IS NOT NULL AND imap_highest_uid IS NOT NULL)),
     CONSTRAINT ck_mailbox_sync_cursor_gmail_history_id_digits CHECK (gmail_history_id IS NULL OR gmail_history_id ~ '^[0-9]+$'),
     CONSTRAINT ck_mailbox_sync_cursor_imap_uid_validity_canonical CHECK (imap_uid_validity IS NULL OR imap_uid_validity ~ '^[1-9][0-9]{0,19}$'),
-    CONSTRAINT ck_mailbox_sync_cursor_imap_highest_uid_bounded CHECK (imap_highest_uid IS NULL OR imap_highest_uid BETWEEN 1 AND 4294967295),
+    CONSTRAINT ck_mailbox_sync_cursor_imap_highest_uid_bounded CHECK (imap_highest_uid IS NULL OR imap_highest_uid BETWEEN 0 AND 4294967295),
     CONSTRAINT ck_mailbox_sync_cursor_imap_uidnext_bounded CHECK (imap_uidnext_observed IS NULL OR imap_uidnext_observed BETWEEN 1 AND 4294967296),
     CONSTRAINT ck_mailbox_sync_cursor_backfill_cursor_bounded CHECK (backfill_cursor IS NULL OR octet_length(backfill_cursor) BETWEEN 1 AND 16384)
 )""",
@@ -169,6 +170,7 @@ r"""CREATE TABLE cuevion_mailbox.mailbox_change_outbox (
 )
 
 _INDEX_DDL = (
+    r"""CREATE UNIQUE INDEX ux_mailbox_sync_state_current ON cuevion_mailbox.mailbox_sync_state (workspace_id, owner_user_id, mailbox_id) WHERE is_current IS true""",
     r"""CREATE INDEX ix_mailbox_messages_visible_order ON cuevion_mailbox.mailbox_messages (workspace_id, owner_user_id, mailbox_id, source_generation, provider_deleted, provider_timestamp)""",
     r"""CREATE UNIQUE INDEX ux_mailbox_messages_gmail_identity ON cuevion_mailbox.mailbox_messages (workspace_id, owner_user_id, mailbox_id, source_generation, provider_message_id) WHERE provider = 'google' AND provider_message_id IS NOT NULL""",
     r"""CREATE UNIQUE INDEX ux_mailbox_messages_imap_identity ON cuevion_mailbox.mailbox_messages (workspace_id, owner_user_id, mailbox_id, source_generation, provider_folder, imap_uid_validity, imap_uid) WHERE provider = 'custom_imap' AND imap_uid_validity IS NOT NULL AND imap_uid IS NOT NULL""",
