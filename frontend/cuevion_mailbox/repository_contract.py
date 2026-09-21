@@ -84,15 +84,16 @@ class MailboxScope:
 
     def __post_init__(self) -> None:
         if (
-            any(
-                type(value) is not str or not value
-                for value in (
-                    self.workspace_id,
-                    self.owner_user_id,
-                    self.mailbox_id,
-                    self.provider_account_identity,
-                )
-            )
+            type(self.workspace_id) is not str
+            or len(self.workspace_id) != 26
+            or not self.workspace_id.startswith("wsp_")
+            or type(self.owner_user_id) is not str
+            or len(self.owner_user_id) != 26
+            or not self.owner_user_id.startswith("usr_")
+            or type(self.mailbox_id) is not str
+            or not 1 <= len(self.mailbox_id.encode("utf-8")) <= 160
+            or type(self.provider_account_identity) is not str
+            or not self.provider_account_identity
             or type(self.source_generation) is not int
             or self.source_generation < 1
             or self.provider_account_identity
@@ -170,7 +171,8 @@ class MessageIdentity:
     def validate_for(self, provider: MailboxProvider) -> None:
         if (
             type(self.message_id) is not str
-            or not self.message_id
+            or len(self.message_id) != 26
+            or not self.message_id.startswith("mbm_")
             or type(self.provider_folder) is not str
             or not self.provider_folder
         ):
@@ -289,7 +291,11 @@ class MessageMutation:
 
     def validate_for(self, provider: MailboxProvider) -> None:
         self.identity.validate_for(provider)
-        if type(self.event_id) is not str or not self.event_id:
+        if (
+            type(self.event_id) is not str
+            or len(self.event_id) != 26
+            or not self.event_id.startswith("mbe_")
+        ):
             raise ValueError("invalid message mutation")
         if self.kind is MessageMutationKind.UPSERT:
             if self.record is None:
@@ -377,9 +383,17 @@ class CachedBody:
 
 
 @dataclass(frozen=True, slots=True)
+class OutboxStorageScope:
+    workspace_id: str
+    owner_user_id: str
+    mailbox_id: str
+    source_generation: int
+
+
+@dataclass(frozen=True, slots=True)
 class OutboxEvent:
     event_id: str
-    scope: MailboxScope
+    scope: OutboxStorageScope
     message_id: str
     message_row_version: int
     event_type: OutboxEventType
@@ -473,6 +487,7 @@ __all__ = (
     "MessageMutationKind",
     "MessageProjection",
     "OutboxEvent",
+    "OutboxStorageScope",
     "OutboxEventType",
     "ProviderDeltaCommit",
     "SyncCursor",
