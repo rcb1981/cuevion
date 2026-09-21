@@ -286,6 +286,7 @@ class OutboxEvent:
     message_row_version: int
     event_type: OutboxEventType
     attempt_count: int
+    claim_token: str
 
 
 class MailboxRepository(Protocol):
@@ -331,24 +332,30 @@ class MailboxRepository(Protocol):
         *,
         limit: int,
         now_millis: int,
+        lease_millis: int,
     ) -> Sequence[OutboxEvent]:
+        """Atomically claim due events and return their persisted claim tokens."""
         ...
 
     def mark_outbox_processed(
         self,
         event_id: str,
         *,
+        claim_token: str,
         processed_at_millis: int,
     ) -> bool:
+        """Complete only when the current persisted claim token still matches."""
         ...
 
     def mark_outbox_retry(
         self,
         event_id: str,
         *,
+        claim_token: str,
         next_attempt_at_millis: int,
         safe_error_code: str,
     ) -> bool:
+        """Release only the caller's claim and schedule the next bounded retry."""
         ...
 
 
