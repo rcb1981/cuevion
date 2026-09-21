@@ -1,4 +1,10 @@
-"""Role-neutral least-privilege policy for mailbox runtime database roles."""
+"""Role-neutral least-privilege policy for mailbox runtime database roles.
+
+Creation statements are deliberately password-free. Credentials must be added
+through a secret-aware provisioning path that does not grant parent-role
+membership or broaden role attributes. A mailbox runtime login is invalid if it
+inherits or can SET ROLE into a more privileged database role.
+"""
 
 from __future__ import annotations
 
