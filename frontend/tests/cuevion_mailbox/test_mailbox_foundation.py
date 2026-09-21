@@ -78,6 +78,18 @@ class MailboxSchemaTests(unittest.TestCase):
             MAILBOX_TABLES,
         )
 
+    def test_exactly_one_current_generation_is_enforced_per_mailbox(self):
+        state_indexes = {
+            index.name: _compiled(CreateIndex(index)).casefold()
+            for index in MAILBOX_TABLES[0].indexes
+        }
+        current = state_indexes["ux_mailbox_sync_state_current"]
+        self.assertIn(
+            "(workspace_id, owner_user_id, mailbox_id)",
+            current,
+        )
+        self.assertIn("where is_current is true", current)
+
     def test_provider_identity_indexes_are_tenant_and_generation_scoped(self):
         indexes = {index.name: _compiled(CreateIndex(index)) for index in mailbox_messages.indexes}
         gmail = indexes["ux_mailbox_messages_gmail_identity"].casefold()
@@ -200,13 +212,13 @@ class RepositoryContractTests(unittest.TestCase):
             provider=MailboxProvider.CUSTOM_IMAP,
             gmail_history_id=None,
             imap_uid_validity="98765",
-            imap_highest_uid=1234,
-            imap_uidnext_observed=1235,
+            imap_highest_uid=0,
+            imap_uidnext_observed=1,
             backfill_state=BackfillState.COMPLETE,
             backfill_cursor=None,
             row_version=4,
         )
-        self.assertEqual(imap.imap_highest_uid, 1234)
+        self.assertEqual(imap.imap_highest_uid, 0)
 
         with self.assertRaisesRegex(ValueError, "invalid sync cursor"):
             SyncCursor(
