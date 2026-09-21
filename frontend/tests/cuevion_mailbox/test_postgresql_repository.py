@@ -6,6 +6,7 @@ from pathlib import Path
 import unittest
 
 from cuevion_mailbox import repository_contract as contract
+from cuevion_mailbox import postgresql_repository as repository
 from cuevion_mailbox.postgresql_access import (
     MAILBOX_READER_TABLES,
     MAILBOX_WRITER_TABLES,
@@ -140,6 +141,23 @@ class RoleGrantTests(unittest.TestCase):
                     role_grant_statements(invalid, "writer")
         with self.assertRaises(ValueError):
             role_grant_statements("same", "same")
+
+
+class RepositoryImportTests(unittest.TestCase):
+    def test_concrete_adapter_imports_and_exposes_closed_errors(self):
+        self.assertTrue(callable(repository.PostgreSQLMailboxRepository))
+        self.assertTrue(
+            issubclass(
+                repository.MailboxRepositoryUnavailableError,
+                RuntimeError,
+            )
+        )
+        self.assertTrue(
+            issubclass(
+                repository.MailboxRepositoryIntegrityError,
+                RuntimeError,
+            )
+        )
 
 
 class RepositorySourceBoundaryTests(unittest.TestCase):
