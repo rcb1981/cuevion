@@ -464,6 +464,7 @@ class MailboxRepository(Protocol):
         event_id: str,
         *,
         claim_token: str,
+        now_millis: int,
         next_attempt_at_millis: int,
         safe_error_code: str,
     ) -> bool:
