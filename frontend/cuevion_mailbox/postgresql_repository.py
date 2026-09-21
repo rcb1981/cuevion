@@ -630,6 +630,7 @@ def _is_concurrency(error: BaseException) -> bool:
         (
             psycopg.errors.SerializationFailure,
             psycopg.errors.DeadlockDetected,
+            psycopg.errors.UniqueViolation,
         ),
     )
 
@@ -1270,14 +1271,16 @@ class PostgreSQLMailboxRepository:
             stored_uid_validity,
             stored_uid,
             stored_row_version,
-            _stored_body_state,
+            stored_body_state,
             stored_deleted,
         ) = existing
+        stored_body_state_value = _body_state(stored_body_state)
         if (
             _provider(stored_provider) is not scope.provider
             or type(stored_row_version) is not int
             or stored_row_version < 1
             or type(stored_deleted) is not bool
+            or projection.body_state is not stored_body_state_value
         ):
             raise _StorageCorruption()
         if not self._provider_identity_matches(
