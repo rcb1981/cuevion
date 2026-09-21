@@ -84,15 +84,16 @@ class MailboxScope:
 
     def __post_init__(self) -> None:
         if (
-            any(
-                type(value) is not str or not value
-                for value in (
-                    self.workspace_id,
-                    self.owner_user_id,
-                    self.mailbox_id,
-                    self.provider_account_identity,
-                )
-            )
+            type(self.workspace_id) is not str
+            or len(self.workspace_id) != 26
+            or not self.workspace_id.startswith("wsp_")
+            or type(self.owner_user_id) is not str
+            or len(self.owner_user_id) != 26
+            or not self.owner_user_id.startswith("usr_")
+            or type(self.mailbox_id) is not str
+            or not 1 <= len(self.mailbox_id.encode("utf-8")) <= 160
+            or type(self.provider_account_identity) is not str
+            or not self.provider_account_identity
             or type(self.source_generation) is not int
             or self.source_generation < 1
             or self.provider_account_identity
@@ -170,7 +171,8 @@ class MessageIdentity:
     def validate_for(self, provider: MailboxProvider) -> None:
         if (
             type(self.message_id) is not str
-            or not self.message_id
+            or len(self.message_id) != 26
+            or not self.message_id.startswith("mbm_")
             or type(self.provider_folder) is not str
             or not self.provider_folder
         ):
@@ -195,6 +197,58 @@ class MessageIdentity:
             or not 1 <= self.imap_uid <= 4_294_967_295
         ):
             raise ValueError("invalid IMAP message identity")
+
+
+@dataclass(frozen=True, slots=True)
+class MessageRecord:
+    identity: MessageIdentity
+    provider_thread_id: str | None
+    provider_labels: tuple[str, ...]
+    rfc_message_id: str | None
+    in_reply_to: str | None
+    references: tuple[str, ...]
+    sender_address: str | None
+    sender_display: str | None
+    to_recipients: tuple[str, ...]
+    cc_recipients: tuple[str, ...]
+    subject: str
+    snippet: str
+    provider_timestamp_millis: int
+    unread: bool
+    starred: bool
+    body_state: BodyState
+    metadata_hash: str
+
+    def validate_for(self, provider: MailboxProvider) -> None:
+        self.identity.validate_for(provider)
+        if (
+            self.provider_thread_id is not None
+            and (type(self.provider_thread_id) is not str or not self.provider_thread_id)
+        ):
+            raise ValueError("invalid message record")
+        for values in (
+            self.provider_labels,
+            self.references,
+            self.to_recipients,
+            self.cc_recipients,
+        ):
+            if (
+                type(values) is not tuple
+                or any(type(value) is not str or not value for value in values)
+            ):
+                raise ValueError("invalid message record")
+        if (
+            type(self.subject) is not str
+            or type(self.snippet) is not str
+            or type(self.provider_timestamp_millis) is not int
+            or self.provider_timestamp_millis < 0
+            or type(self.unread) is not bool
+            or type(self.starred) is not bool
+            or type(self.metadata_hash) is not str
+            or len(self.metadata_hash) != 64
+            or any(character not in "0123456789abcdef" for character in self.metadata_hash)
+        ):
+            raise ValueError("invalid message record")
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,28 +283,44 @@ class MessageProjection:
 @dataclass(frozen=True, slots=True)
 class MessageMutation:
     kind: MessageMutationKind
-    projection: MessageProjection
+    identity: MessageIdentity
+    record: MessageRecord | None
+    expected_row_version: int | None
+    event_id: str
     outbox_event_type: OutboxEventType
 
     def validate_for(self, provider: MailboxProvider) -> None:
-        self.projection.validate_for(provider)
-        if self.kind is MessageMutationKind.TOMBSTONE:
-            if (
-                self.outbox_event_type is not OutboxEventType.MESSAGE_DELETED
-                or self.projection.provider_deleted is not True
+        self.identity.validate_for(provider)
+        if (
+            type(self.event_id) is not str
+            or len(self.event_id) != 26
+            or not self.event_id.startswith("mbe_")
+        ):
+            raise ValueError("invalid message mutation")
+        if self.kind is MessageMutationKind.UPSERT:
+            if self.record is None:
+                raise ValueError("invalid upsert mutation")
+            self.record.validate_for(provider)
+            if self.record.identity != self.identity:
+                raise ValueError("invalid upsert mutation")
+            if self.expected_row_version is None:
+                if self.outbox_event_type is not OutboxEventType.MESSAGE_ADDED:
+                    raise ValueError("invalid upsert mutation")
+            elif (
+                type(self.expected_row_version) is not int
+                or self.expected_row_version < 1
+                or self.outbox_event_type is not OutboxEventType.MESSAGE_CHANGED
             ):
-                raise ValueError("invalid tombstone mutation")
+                raise ValueError("invalid upsert mutation")
             return
         if (
-            self.kind is not MessageMutationKind.UPSERT
-            or self.outbox_event_type
-            not in {
-                OutboxEventType.MESSAGE_ADDED,
-                OutboxEventType.MESSAGE_CHANGED,
-            }
-            or self.projection.provider_deleted is not False
+            self.kind is not MessageMutationKind.TOMBSTONE
+            or self.record is not None
+            or type(self.expected_row_version) is not int
+            or self.expected_row_version < 1
+            or self.outbox_event_type is not OutboxEventType.MESSAGE_DELETED
         ):
-            raise ValueError("invalid upsert mutation")
+            raise ValueError("invalid tombstone mutation")
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +330,7 @@ class ProviderDeltaCommit:
     expected_state_row_version: int
     expected_cursor_row_version: int | None
     expected_cursor_generation: int
+    committed_at_millis: int
     mutations: tuple[MessageMutation, ...]
     next_cursor: SyncCursor
     next_bootstrap_state: BootstrapState
@@ -279,15 +350,26 @@ class ProviderDeltaCommit:
             )
             or type(self.expected_cursor_generation) is not int
             or self.expected_cursor_generation < 1
+            or type(self.committed_at_millis) is not int
+            or self.committed_at_millis < 0
             or self.next_cursor.scope_key != self.scope_key
             or self.next_cursor.provider is not self.scope.provider
             or self.next_cursor.cursor_generation
             != self.expected_cursor_generation
         ):
             raise ValueError("invalid provider delta commit")
+        if self.expected_cursor_row_version is None:
+            if self.next_cursor.row_version != 1:
+                raise ValueError("invalid provider delta commit")
+        elif self.next_cursor.row_version != self.expected_cursor_row_version + 1:
+            raise ValueError("invalid provider delta commit")
 
+        event_ids: set[str] = set()
         for mutation in self.mutations:
             mutation.validate_for(self.scope.provider)
+            if mutation.event_id in event_ids:
+                raise ValueError("invalid provider delta commit")
+            event_ids.add(mutation.event_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,9 +383,17 @@ class CachedBody:
 
 
 @dataclass(frozen=True, slots=True)
+class OutboxStorageScope:
+    workspace_id: str
+    owner_user_id: str
+    mailbox_id: str
+    source_generation: int
+
+
+@dataclass(frozen=True, slots=True)
 class OutboxEvent:
     event_id: str
-    scope: MailboxScope
+    scope: OutboxStorageScope
     message_id: str
     message_row_version: int
     event_type: OutboxEventType
@@ -311,14 +401,8 @@ class OutboxEvent:
     claim_token: str
 
 
-class MailboxRepository(Protocol):
-    """Durable repository boundary.
-
-    commit_provider_delta MUST use one PostgreSQL transaction. It must compare
-    expected state/cursor versions and generations, apply every message
-    mutation, insert the idempotent outbox rows, and advance the cursor before
-    commit. A conflict or exception must publish none of those changes.
-    """
+class MailboxReaderRepository(Protocol):
+    """Read-only durable mailbox boundary for cache/UI consumers."""
 
     def read_cursor(
         self,
@@ -342,6 +426,16 @@ class MailboxRepository(Protocol):
         message_id: str,
     ) -> CachedBody | None:
         ...
+
+
+class MailboxRepository(MailboxReaderRepository, Protocol):
+    """Read/write durable mailbox boundary for sync and outbox workers.
+
+    commit_provider_delta MUST use one PostgreSQL transaction. It must compare
+    expected state/cursor versions and generations, apply every message
+    mutation, insert the idempotent outbox rows, and advance the cursor before
+    commit. A conflict or exception must publish none of those changes.
+    """
 
     def commit_provider_delta(
         self,
@@ -374,6 +468,7 @@ class MailboxRepository(Protocol):
         event_id: str,
         *,
         claim_token: str,
+        now_millis: int,
         next_attempt_at_millis: int,
         safe_error_code: str,
     ) -> bool:
@@ -389,13 +484,16 @@ __all__ = (
     "DeltaCommitOutcome",
     "derive_locator_digest",
     "MailboxProvider",
+    "MailboxReaderRepository",
     "MailboxRepository",
     "MailboxScope",
     "MessageIdentity",
     "MessageMutation",
+    "MessageRecord",
     "MessageMutationKind",
     "MessageProjection",
     "OutboxEvent",
+    "OutboxStorageScope",
     "OutboxEventType",
     "ProviderDeltaCommit",
     "SyncCursor",

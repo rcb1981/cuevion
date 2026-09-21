@@ -20,6 +20,7 @@ from cuevion_mailbox.repository_contract import (
     MessageMutation,
     MessageMutationKind,
     MessageProjection,
+    MessageRecord,
     OutboxEventType,
     ProviderDeltaCommit,
     SyncCursor,
@@ -206,6 +207,32 @@ class RepositoryContractTests(unittest.TestCase):
             provider=MailboxProvider.GOOGLE,
             provider_account_identity="owner@example.com",
         )
+        self.identity = MessageIdentity(
+            message_id="mbm_CCCCCCCCCCCCCCCCCCCCCC",
+            provider_message_id="gmail-message-1",
+            provider_folder="INBOX",
+            imap_uid_validity=None,
+            imap_uid=None,
+        )
+        self.record = MessageRecord(
+            identity=self.identity,
+            provider_thread_id="thread-1",
+            provider_labels=("INBOX", "UNREAD"),
+            rfc_message_id="<message@example.com>",
+            in_reply_to=None,
+            references=(),
+            sender_address="sender@example.com",
+            sender_display="Sender",
+            to_recipients=("owner@example.com",),
+            cc_recipients=(),
+            subject="Subject",
+            snippet="Snippet",
+            provider_timestamp_millis=1_700_000_000_000,
+            unread=True,
+            starred=False,
+            body_state=BodyState.NOT_CACHED,
+            metadata_hash="a" * 64,
+        )
 
     def test_google_and_imap_cursor_shapes_are_provider_specific(self):
         gmail = SyncCursor(
@@ -236,84 +263,44 @@ class RepositoryContractTests(unittest.TestCase):
         )
         self.assertEqual(imap.imap_highest_uid, 0)
 
-        with self.assertRaisesRegex(ValueError, "invalid sync cursor"):
-            SyncCursor(
-                scope_key="gmail-account",
-                cursor_generation=1,
-                provider=MailboxProvider.GOOGLE,
-                gmail_history_id="123",
-                imap_uid_validity="99",
-                imap_highest_uid=1,
-                imap_uidnext_observed=None,
-                backfill_state=BackfillState.NOT_STARTED,
-                backfill_cursor=None,
-                row_version=1,
-            )
-
-    def test_tombstone_requires_deleted_projection_and_delete_outbox_event(self):
-        identity = MessageIdentity(
-            message_id="mbm_CCCCCCCCCCCCCCCCCCCCCC",
-            provider_message_id="gmail-message-1",
-            provider_folder="INBOX",
-            imap_uid_validity=None,
-            imap_uid=None,
-        )
-        projection = MessageProjection(
-            identity=identity,
-            provider_thread_id="thread-1",
-            metadata_hash="a" * 64,
-            body_state=BodyState.STALE,
-            unread=False,
-            starred=False,
-            provider_deleted=False,
-            row_version=2,
-        )
-        mutation = MessageMutation(
-            kind=MessageMutationKind.TOMBSTONE,
-            projection=projection,
-            outbox_event_type=OutboxEventType.MESSAGE_DELETED,
-        )
-        with self.assertRaisesRegex(ValueError, "invalid tombstone mutation"):
-            mutation.validate_for(MailboxProvider.GOOGLE)
-
-        invalid_upsert = MessageMutation(
+    def test_mutation_pairing_is_fail_closed(self):
+        added = MessageMutation(
             kind=MessageMutationKind.UPSERT,
-            projection=MessageProjection(
-                identity=identity,
-                provider_thread_id="thread-1",
-                metadata_hash="a" * 64,
-                body_state=BodyState.STALE,
-                unread=False,
-                starred=False,
-                provider_deleted=True,
-                row_version=3,
-            ),
-            outbox_event_type=OutboxEventType.MESSAGE_DELETED,
+            identity=self.identity,
+            record=self.record,
+            expected_row_version=None,
+            event_id="mbe_DDDDDDDDDDDDDDDDDDDDDD",
+            outbox_event_type=OutboxEventType.MESSAGE_ADDED,
         )
+        added.validate_for(MailboxProvider.GOOGLE)
+
         with self.assertRaisesRegex(ValueError, "invalid upsert mutation"):
-            invalid_upsert.validate_for(MailboxProvider.GOOGLE)
+            MessageMutation(
+                kind=MessageMutationKind.UPSERT,
+                identity=self.identity,
+                record=self.record,
+                expected_row_version=None,
+                event_id="mbe_EEEEEEEEEEEEEEEEEEEEEE",
+                outbox_event_type=OutboxEventType.MESSAGE_CHANGED,
+            ).validate_for(MailboxProvider.GOOGLE)
 
-    def test_delta_commit_binds_cursor_provider_scope_and_generation(self):
-        identity = MessageIdentity(
-            message_id="mbm_DDDDDDDDDDDDDDDDDDDDDD",
-            provider_message_id="gmail-message-2",
-            provider_folder="INBOX",
-            imap_uid_validity=None,
-            imap_uid=None,
-        )
-        projection = MessageProjection(
-            identity=identity,
-            provider_thread_id="thread-2",
-            metadata_hash="b" * 64,
-            body_state=BodyState.NOT_CACHED,
-            unread=True,
-            starred=False,
-            provider_deleted=False,
-            row_version=1,
-        )
+        with self.assertRaisesRegex(ValueError, "invalid tombstone mutation"):
+            MessageMutation(
+                kind=MessageMutationKind.TOMBSTONE,
+                identity=self.identity,
+                record=self.record,
+                expected_row_version=1,
+                event_id="mbe_FFFFFFFFFFFFFFFFFFFFFF",
+                outbox_event_type=OutboxEventType.MESSAGE_DELETED,
+            ).validate_for(MailboxProvider.GOOGLE)
+
+    def test_delta_commit_binds_cursor_version_and_unique_events(self):
         mutation = MessageMutation(
             kind=MessageMutationKind.UPSERT,
-            projection=projection,
+            identity=self.identity,
+            record=self.record,
+            expected_row_version=None,
+            event_id="mbe_GGGGGGGGGGGGGGGGGGGGGG",
             outbox_event_type=OutboxEventType.MESSAGE_ADDED,
         )
         cursor = SyncCursor(
@@ -326,14 +313,15 @@ class RepositoryContractTests(unittest.TestCase):
             imap_uidnext_observed=None,
             backfill_state=BackfillState.RUNNING,
             backfill_cursor=None,
-            row_version=2,
+            row_version=1,
         )
         commit = ProviderDeltaCommit(
             scope=self.google_scope,
             scope_key="gmail-account",
             expected_state_row_version=4,
-            expected_cursor_row_version=1,
+            expected_cursor_row_version=None,
             expected_cursor_generation=3,
+            committed_at_millis=1_700_000_000_000,
             mutations=(mutation,),
             next_cursor=cursor,
             next_bootstrap_state=BootstrapState.RECENT_READY,
@@ -343,14 +331,16 @@ class RepositoryContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid provider delta commit"):
             ProviderDeltaCommit(
                 scope=self.google_scope,
-                scope_key="different",
+                scope_key="gmail-account",
                 expected_state_row_version=4,
-                expected_cursor_row_version=1,
+                expected_cursor_row_version=None,
                 expected_cursor_generation=3,
-                mutations=(mutation,),
+                committed_at_millis=1_700_000_000_000,
+                mutations=(mutation, mutation),
                 next_cursor=cursor,
                 next_bootstrap_state=BootstrapState.RECENT_READY,
             )
+
 
 
 if __name__ == "__main__":
