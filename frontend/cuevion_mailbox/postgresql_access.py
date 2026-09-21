@@ -1,7 +1,9 @@
-"""Pure least-privilege PostgreSQL grants for Cuevion mailbox runtime roles.
+"""Least-privilege PostgreSQL role manifest for Cuevion mailbox runtime.
 
-Role creation and credentials remain environment operations. This module only
-defines the exact schema/table privileges the runtime roles may receive.
+Important: create these roles with the SQL returned here. Neon Console/API role
+creation is intentionally not supported because those roles inherit Neon's
+administrative role by default. Password provisioning is a separate secret
+operation after the SQL-created LOGIN role exists.
 """
 
 from __future__ import annotations
@@ -27,6 +29,24 @@ def _role(value: object) -> str:
     if type(value) is not str or _ROLE.fullmatch(value) is None:
         raise ValueError("invalid mailbox database role")
     return value
+
+
+def role_creation_statements(
+    reader_role: str,
+    writer_role: str,
+) -> tuple[str, ...]:
+    reader = _role(reader_role)
+    writer = _role(writer_role)
+    if reader == writer:
+        raise ValueError("mailbox database roles must be distinct")
+    attributes = (
+        "LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE "
+        "NOREPLICATION NOBYPASSRLS"
+    )
+    return (
+        f"CREATE ROLE {reader} {attributes}",
+        f"CREATE ROLE {writer} {attributes}",
+    )
 
 
 def role_grant_statements(
@@ -56,8 +76,20 @@ def role_grant_statements(
     )
 
 
+def role_provisioning_statements(
+    reader_role: str,
+    writer_role: str,
+) -> tuple[str, ...]:
+    return (
+        *role_creation_statements(reader_role, writer_role),
+        *role_grant_statements(reader_role, writer_role),
+    )
+
+
 __all__ = (
     "MAILBOX_READER_TABLES",
     "MAILBOX_WRITER_TABLES",
+    "role_creation_statements",
     "role_grant_statements",
+    "role_provisioning_statements",
 )
