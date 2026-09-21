@@ -50,6 +50,7 @@ mailbox_sync_state = sa.Table(
     sa.Column("provider", sa.Text(collation="C"), nullable=False),
     sa.Column("provider_account_identity", _EMAIL, nullable=False),
     sa.Column("source_generation", sa.BigInteger(), nullable=False),
+    sa.Column("is_current", sa.Boolean(), nullable=False),
     sa.Column("bootstrap_state", sa.Text(collation="C"), nullable=False),
     sa.Column("backfill_cutoff_at", _TIMESTAMP, nullable=True),
     sa.Column("backfill_oldest_indexed_at", _TIMESTAMP, nullable=True),
@@ -59,7 +60,7 @@ mailbox_sync_state = sa.Table(
     sa.Column("updated_at", _TIMESTAMP, nullable=False),
     sa.Column("row_version", sa.BigInteger(), nullable=False),
     sa.PrimaryKeyConstraint(
-        "workspace_id", "owner_user_id", "mailbox_id",
+        "workspace_id", "owner_user_id", "mailbox_id", "source_generation",
         name="pk_mailbox_sync_state",
     ),
     sa.UniqueConstraint(
@@ -99,6 +100,15 @@ mailbox_sync_state = sa.Table(
         "last_error_code IS NULL OR octet_length(last_error_code) BETWEEN 1 AND 128",
         name="last_error_code_bounded",
     ),
+)
+
+sa.Index(
+    "ux_mailbox_sync_state_current",
+    mailbox_sync_state.c.workspace_id,
+    mailbox_sync_state.c.owner_user_id,
+    mailbox_sync_state.c.mailbox_id,
+    unique=True,
+    postgresql_where=mailbox_sync_state.c.is_current.is_(True),
 )
 
 
@@ -179,7 +189,7 @@ mailbox_sync_cursor = sa.Table(
         name="imap_uid_validity_canonical",
     ),
     sa.CheckConstraint(
-        "imap_highest_uid IS NULL OR imap_highest_uid BETWEEN 1 AND 4294967295",
+        "imap_highest_uid IS NULL OR imap_highest_uid BETWEEN 0 AND 4294967295",
         name="imap_highest_uid_bounded",
     ),
     sa.CheckConstraint(
