@@ -9,7 +9,9 @@ from cuevion_mailbox import repository_contract as contract
 from cuevion_mailbox.postgresql_access import (
     MAILBOX_READER_TABLES,
     MAILBOX_WRITER_TABLES,
+    role_creation_statements,
     role_grant_statements,
+    role_provisioning_statements,
 )
 
 
@@ -74,6 +76,55 @@ class RoleGrantTests(unittest.TestCase):
             "default privileges",
         ):
             self.assertNotIn(forbidden, normalized)
+
+    def test_roles_are_created_without_neon_admin_inheritance(self):
+        statements = role_creation_statements(
+            "cuevion_test_mailbox_reader_v1",
+            "cuevion_test_mailbox_writer_v1",
+        )
+        self.assertEqual(len(statements), 2)
+        normalized = "\n".join(statements).casefold()
+        for required in (
+            "login",
+            "noinherit",
+            "nosuperuser",
+            "nocreatedb",
+            "nocreaterole",
+            "noreplication",
+            "nobypassrls",
+        ):
+            self.assertIn(required, normalized)
+        for forbidden in (
+            "neon_superuser",
+            "password",
+            "inherit ",
+            "createdb ",
+            "createrole ",
+            "bypassrls ",
+        ):
+            if forbidden.strip() in {
+                "inherit",
+                "createdb",
+                "createrole",
+                "bypassrls",
+            }:
+                continue
+            self.assertNotIn(forbidden, normalized)
+        provisioned = role_provisioning_statements(
+            "cuevion_test_mailbox_reader_v1",
+            "cuevion_test_mailbox_writer_v1",
+        )
+        self.assertEqual(
+            provisioned[:2],
+            statements,
+        )
+        self.assertEqual(
+            provisioned[2:],
+            role_grant_statements(
+                "cuevion_test_mailbox_reader_v1",
+                "cuevion_test_mailbox_writer_v1",
+            ),
+        )
 
     def test_role_names_are_closed_lowercase_postgresql_identifiers(self):
         for invalid in (
