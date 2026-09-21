@@ -509,6 +509,40 @@ class MessageWrite:
 
 
 @dataclass(frozen=True, slots=True)
+class MessageRecord:
+    projection: MessageProjection
+    provider_labels: tuple[str, ...]
+    rfc_message_id: str | None
+    in_reply_to: str | None
+    references: tuple[str, ...]
+    sender: MailboxParty | None
+    to: tuple[MailboxParty, ...]
+    cc: tuple[MailboxParty, ...]
+    subject: str
+    snippet: str
+    provider_timestamp_millis: int
+
+    def validate_for(
+        self,
+        provider: MailboxProvider,
+        scope: MailboxScope,
+    ) -> None:
+        MessageWrite(
+            projection=self.projection,
+            provider_labels=self.provider_labels,
+            rfc_message_id=self.rfc_message_id,
+            in_reply_to=self.in_reply_to,
+            references=self.references,
+            sender=self.sender,
+            to=self.to,
+            cc=self.cc,
+            subject=self.subject,
+            snippet=self.snippet,
+            provider_timestamp_millis=self.provider_timestamp_millis,
+        ).validate_for(provider, scope)
+
+
+@dataclass(frozen=True, slots=True)
 class MessageMutation:
     kind: MessageMutationKind
     projection: MessageProjection
@@ -712,7 +746,7 @@ class MailboxRepository(Protocol):
         *,
         limit: int,
         before_timestamp_millis: int | None = None,
-    ) -> Sequence[MessageProjection]:
+    ) -> Sequence[MessageRecord]:
         ...
 
     def read_cached_body(
@@ -790,6 +824,7 @@ __all__ = (
     "MessageMutation",
     "MessageMutationKind",
     "MessageProjection",
+    "MessageRecord",
     "MessageWrite",
     "OutboxEvent",
     "OutboxEventType",
