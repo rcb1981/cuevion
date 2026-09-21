@@ -14,16 +14,19 @@ from cuevion_mailbox.repository_contract import (
     BackfillState,
     BodyState,
     BootstrapState,
+    MailboxParty,
     MailboxProvider,
     MailboxScope,
     MessageIdentity,
     MessageMutation,
     MessageMutationKind,
     MessageProjection,
+    MessageWrite,
     OutboxEventType,
     ProviderDeltaCommit,
     SyncCursor,
     derive_locator_digest,
+    derive_message_id,
 )
 from cuevion_mailbox.schema import (
     MAILBOX_SCHEMA,
@@ -251,51 +254,99 @@ class RepositoryContractTests(unittest.TestCase):
             )
 
     def test_tombstone_requires_deleted_projection_and_delete_outbox_event(self):
-        identity = MessageIdentity(
-            message_id="mbm_CCCCCCCCCCCCCCCCCCCCCC",
+        message_id = derive_message_id(
+            self.google_scope,
             provider_message_id="gmail-message-1",
             provider_folder="INBOX",
             imap_uid_validity=None,
             imap_uid=None,
         )
-        projection = MessageProjection(
+        identity = MessageIdentity(
+            message_id=message_id,
+            provider_message_id="gmail-message-1",
+            provider_folder="INBOX",
+            imap_uid_validity=None,
+            imap_uid=None,
+        )
+        live_projection = MessageProjection(
             identity=identity,
             provider_thread_id="thread-1",
             metadata_hash="a" * 64,
-            body_state=BodyState.STALE,
+            body_state=BodyState.NOT_CACHED,
             unread=False,
             starred=False,
             provider_deleted=False,
-            row_version=2,
+            row_version=1,
         )
-        mutation = MessageMutation(
+        write = MessageWrite(
+            projection=live_projection,
+            provider_labels=("INBOX",),
+            rfc_message_id="<message-1@example.com>",
+            in_reply_to=None,
+            references=(),
+            sender=MailboxParty("sender@example.com", "Sender"),
+            to=(MailboxParty("owner@example.com"),),
+            cc=(),
+            subject="Subject",
+            snippet="Snippet",
+            provider_timestamp_millis=1_700_000_000_000,
+        )
+        invalid_tombstone = MessageMutation(
             kind=MessageMutationKind.TOMBSTONE,
-            projection=projection,
+            projection=live_projection,
+            write=None,
             outbox_event_type=OutboxEventType.MESSAGE_DELETED,
         )
         with self.assertRaisesRegex(ValueError, "invalid tombstone mutation"):
-            mutation.validate_for(MailboxProvider.GOOGLE)
+            invalid_tombstone.validate_for(
+                MailboxProvider.GOOGLE,
+                self.google_scope,
+            )
 
+        deleted_projection = MessageProjection(
+            identity=identity,
+            provider_thread_id="thread-1",
+            metadata_hash="a" * 64,
+            body_state=BodyState.NOT_CACHED,
+            unread=False,
+            starred=False,
+            provider_deleted=True,
+            row_version=2,
+        )
         invalid_upsert = MessageMutation(
             kind=MessageMutationKind.UPSERT,
-            projection=MessageProjection(
-                identity=identity,
-                provider_thread_id="thread-1",
-                metadata_hash="a" * 64,
-                body_state=BodyState.STALE,
-                unread=False,
-                starred=False,
-                provider_deleted=True,
-                row_version=3,
-            ),
+            projection=deleted_projection,
+            write=None,
             outbox_event_type=OutboxEventType.MESSAGE_DELETED,
         )
         with self.assertRaisesRegex(ValueError, "invalid upsert mutation"):
-            invalid_upsert.validate_for(MailboxProvider.GOOGLE)
+            invalid_upsert.validate_for(
+                MailboxProvider.GOOGLE,
+                self.google_scope,
+            )
+
+        valid_upsert = MessageMutation(
+            kind=MessageMutationKind.UPSERT,
+            projection=live_projection,
+            write=write,
+            outbox_event_type=OutboxEventType.MESSAGE_ADDED,
+        )
+        valid_upsert.validate_for(
+            MailboxProvider.GOOGLE,
+            self.google_scope,
+        )
+
 
     def test_delta_commit_binds_cursor_provider_scope_and_generation(self):
+        message_id = derive_message_id(
+            self.google_scope,
+            provider_message_id="gmail-message-2",
+            provider_folder="INBOX",
+            imap_uid_validity=None,
+            imap_uid=None,
+        )
         identity = MessageIdentity(
-            message_id="mbm_DDDDDDDDDDDDDDDDDDDDDD",
+            message_id=message_id,
             provider_message_id="gmail-message-2",
             provider_folder="INBOX",
             imap_uid_validity=None,
@@ -309,12 +360,26 @@ class RepositoryContractTests(unittest.TestCase):
             unread=True,
             starred=False,
             provider_deleted=False,
-            row_version=1,
+            row_version=2,
+        )
+        write = MessageWrite(
+            projection=projection,
+            provider_labels=("INBOX", "IMPORTANT"),
+            rfc_message_id="<message-2@example.com>",
+            in_reply_to=None,
+            references=(),
+            sender=MailboxParty("sender@example.com"),
+            to=(MailboxParty("owner@example.com"),),
+            cc=(),
+            subject="Subject 2",
+            snippet="Snippet 2",
+            provider_timestamp_millis=1_700_000_100_000,
         )
         mutation = MessageMutation(
             kind=MessageMutationKind.UPSERT,
             projection=projection,
-            outbox_event_type=OutboxEventType.MESSAGE_ADDED,
+            write=write,
+            outbox_event_type=OutboxEventType.MESSAGE_CHANGED,
         )
         cursor = SyncCursor(
             scope_key="gmail-account",
@@ -337,6 +402,7 @@ class RepositoryContractTests(unittest.TestCase):
             mutations=(mutation,),
             next_cursor=cursor,
             next_bootstrap_state=BootstrapState.RECENT_READY,
+            committed_at_millis=1_700_000_200_000,
         )
         self.assertEqual(commit.next_cursor.gmail_history_id, "555")
 
@@ -350,7 +416,9 @@ class RepositoryContractTests(unittest.TestCase):
                 mutations=(mutation,),
                 next_cursor=cursor,
                 next_bootstrap_state=BootstrapState.RECENT_READY,
+                committed_at_millis=1_700_000_200_000,
             )
+
 
 
 if __name__ == "__main__":
