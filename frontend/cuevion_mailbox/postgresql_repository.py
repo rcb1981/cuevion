@@ -40,58 +40,90 @@ class PostgreSQLConnectionFactory(Protocol):
 
 _SELECT_CURSOR_SQL = """
 SELECT
-    scope_key,
-    cursor_generation,
-    provider,
-    gmail_history_id,
-    imap_uid_validity,
-    imap_highest_uid,
-    imap_uidnext_observed,
-    backfill_state,
-    backfill_cursor,
-    row_version
-FROM cuevion_mailbox.mailbox_sync_cursor
-WHERE workspace_id = %s
-  AND owner_user_id = %s
-  AND mailbox_id = %s
-  AND source_generation = %s
-  AND provider = %s
-  AND scope_key_digest = %s
+    c.scope_key,
+    c.cursor_generation,
+    c.provider,
+    c.gmail_history_id,
+    c.imap_uid_validity,
+    c.imap_highest_uid,
+    c.imap_uidnext_observed,
+    c.backfill_state,
+    c.backfill_cursor,
+    c.row_version
+FROM cuevion_mailbox.mailbox_sync_cursor AS c
+JOIN cuevion_mailbox.mailbox_sync_state AS s
+  ON s.workspace_id = c.workspace_id
+ AND s.owner_user_id = c.owner_user_id
+ AND s.mailbox_id = c.mailbox_id
+ AND s.source_generation = c.source_generation
+ AND s.provider = c.provider
+WHERE c.workspace_id = %s
+  AND c.owner_user_id = %s
+  AND c.mailbox_id = %s
+  AND c.source_generation = %s
+  AND c.provider = %s
+  AND c.scope_key_digest = %s
+  AND s.provider_account_identity = %s
+  AND s.is_current = true
 """.strip()
 
 _LIST_MESSAGES_SQL = """
 SELECT
-    message_id,
-    provider_message_id,
-    provider_folder,
-    imap_uid_validity,
-    imap_uid,
-    provider_thread_id,
-    metadata_hash,
-    body_state,
-    unread,
-    starred,
-    provider_deleted,
-    row_version
-FROM cuevion_mailbox.mailbox_messages
-WHERE workspace_id = %s
-  AND owner_user_id = %s
-  AND mailbox_id = %s
-  AND source_generation = %s
-  AND provider = %s
-  AND provider_deleted = false
-  AND (%s IS NULL OR provider_timestamp < %s)
-ORDER BY provider_timestamp DESC, message_id DESC
+    m.message_id,
+    m.provider_message_id,
+    m.provider_folder,
+    m.imap_uid_validity,
+    m.imap_uid,
+    m.provider_thread_id,
+    m.metadata_hash,
+    m.body_state,
+    m.unread,
+    m.starred,
+    m.provider_deleted,
+    m.row_version
+FROM cuevion_mailbox.mailbox_messages AS m
+JOIN cuevion_mailbox.mailbox_sync_state AS s
+  ON s.workspace_id = m.workspace_id
+ AND s.owner_user_id = m.owner_user_id
+ AND s.mailbox_id = m.mailbox_id
+ AND s.source_generation = m.source_generation
+ AND s.provider = m.provider
+WHERE m.workspace_id = %s
+  AND m.owner_user_id = %s
+  AND m.mailbox_id = %s
+  AND m.source_generation = %s
+  AND m.provider = %s
+  AND s.provider_account_identity = %s
+  AND s.is_current = true
+  AND m.provider_deleted = false
+  AND (%s::timestamptz IS NULL OR m.provider_timestamp < %s::timestamptz)
+ORDER BY m.provider_timestamp DESC, m.message_id DESC
 LIMIT %s
 """.strip()
 
 _SELECT_BODY_SQL = """
-SELECT message_id, body_text, body_html, content_hash, body_version, row_version
-FROM cuevion_mailbox.mailbox_message_bodies
-WHERE workspace_id = %s
-  AND owner_user_id = %s
-  AND mailbox_id = %s
-  AND message_id = %s
+SELECT b.message_id, b.body_text, b.body_html, b.content_hash, b.body_version, b.row_version
+FROM cuevion_mailbox.mailbox_message_bodies AS b
+JOIN cuevion_mailbox.mailbox_messages AS m
+  ON m.workspace_id = b.workspace_id
+ AND m.owner_user_id = b.owner_user_id
+ AND m.mailbox_id = b.mailbox_id
+ AND m.message_id = b.message_id
+JOIN cuevion_mailbox.mailbox_sync_state AS s
+  ON s.workspace_id = m.workspace_id
+ AND s.owner_user_id = m.owner_user_id
+ AND s.mailbox_id = m.mailbox_id
+ AND s.source_generation = m.source_generation
+ AND s.provider = m.provider
+WHERE b.workspace_id = %s
+  AND b.owner_user_id = %s
+  AND b.mailbox_id = %s
+  AND b.message_id = %s
+  AND m.source_generation = %s
+  AND m.provider = %s
+  AND m.provider_deleted = false
+  AND s.provider_account_identity = %s
+  AND s.is_current = true
 """.strip()
 
 _LOCK_STATE_SQL = """
@@ -210,6 +242,14 @@ WHERE workspace_id = %s
   AND provider = %s
   AND message_id = %s
   AND row_version = %s
+  AND (
+        (provider = 'google' AND provider_message_id = %s)
+        OR
+        (provider = 'custom_imap'
+         AND provider_folder_digest = %s
+         AND imap_uid_validity = %s
+         AND imap_uid = %s)
+      )
 """.strip()
 
 _TOMBSTONE_MESSAGE_SQL = """
@@ -226,6 +266,14 @@ WHERE workspace_id = %s
   AND message_id = %s
   AND row_version = %s
   AND provider_deleted = false
+  AND (
+        (provider = 'google' AND provider_message_id = %s)
+        OR
+        (provider = 'custom_imap'
+         AND provider_folder_digest = %s
+         AND imap_uid_validity = %s
+         AND imap_uid = %s)
+      )
 """.strip()
 
 _INSERT_OUTBOX_SQL = """
@@ -252,7 +300,7 @@ WITH due AS (
     LIMIT %s
 )
 UPDATE cuevion_mailbox.mailbox_change_outbox AS o
-SET claim_token = %s || o.event_id,
+SET claim_token = replace(gen_random_uuid()::text, '-', ''),
     claim_expires_at = %s,
     attempt_count = o.attempt_count + 1
 FROM due
@@ -272,6 +320,7 @@ SET processed_at = %s,
 WHERE event_id = %s
   AND claim_token = %s
   AND processed_at IS NULL
+  AND claim_expires_at > %s
 """.strip()
 
 _MARK_OUTBOX_RETRY_SQL = """
@@ -283,6 +332,7 @@ SET next_attempt_at = %s,
 WHERE event_id = %s
   AND claim_token = %s
   AND processed_at IS NULL
+  AND claim_expires_at > %s
 """.strip()
 
 
@@ -338,7 +388,7 @@ class PostgreSQLMailboxRepository(MailboxRepository):
             cursor = getattr(connection, "cursor")()
             getattr(cursor, "execute")(
                 _SELECT_CURSOR_SQL,
-                _scope_params(scope) + (digest,),
+                _scope_params(scope) + (digest, scope.provider_account_identity),
             )
             rows = _fetchall(cursor)
             if len(rows) > 1:
@@ -382,7 +432,8 @@ class PostgreSQLMailboxRepository(MailboxRepository):
             cursor = getattr(connection, "cursor")()
             getattr(cursor, "execute")(
                 _LIST_MESSAGES_SQL,
-                _scope_params(scope) + (before, before, limit),
+                _scope_params(scope)
+                + (scope.provider_account_identity, before, before, limit),
             )
             rows = _fetchall(cursor)
             result = []
@@ -431,6 +482,9 @@ class PostgreSQLMailboxRepository(MailboxRepository):
                     scope.owner_user_id,
                     scope.mailbox_id,
                     message_id,
+                    scope.source_generation,
+                    scope.provider.value,
+                    scope.provider_account_identity,
                 ),
             )
             rows = _fetchall(cursor)
@@ -575,7 +629,14 @@ class PostgreSQLMailboxRepository(MailboxRepository):
                                 new_row_version,
                             )
                             + _scope_params(scope)
-                            + (identity.message_id, mutation.expected_row_version),
+                            + (
+                                identity.message_id,
+                                mutation.expected_row_version,
+                                identity.provider_message_id,
+                                folder_digest,
+                                identity.imap_uid_validity,
+                                identity.imap_uid,
+                            ),
                         )
                         if _rowcount(cursor) != 1:
                             getattr(connection, "rollback")()
@@ -589,7 +650,14 @@ class PostgreSQLMailboxRepository(MailboxRepository):
                             new_row_version,
                         )
                         + _scope_params(scope)
-                        + (mutation.identity.message_id, mutation.expected_row_version),
+                        + (
+                            mutation.identity.message_id,
+                            mutation.expected_row_version,
+                            mutation.identity.provider_message_id,
+                            derive_locator_digest(mutation.identity.provider_folder),
+                            mutation.identity.imap_uid_validity,
+                            mutation.identity.imap_uid,
+                        ),
                     )
                     if _rowcount(cursor) != 1:
                         getattr(connection, "rollback")()
@@ -711,14 +779,13 @@ class PostgreSQLMailboxRepository(MailboxRepository):
             raise ValueError("invalid outbox claim request")
         now = _dt(now_millis)
         expires = _dt(now_millis + lease_millis)
-        prefix = f"{now_millis:x}-"
         connection = self._connection()
         cursor = None
         try:
             cursor = getattr(connection, "cursor")()
             getattr(cursor, "execute")(
                 _CLAIM_OUTBOX_SQL,
-                (now, now, limit, prefix, expires),
+                (now, now, limit, expires),
             )
             rows = _fetchall(cursor)
             events = []
@@ -743,6 +810,9 @@ class PostgreSQLMailboxRepository(MailboxRepository):
                 )
             getattr(connection, "commit")()
             return tuple(events)
+        except Exception:
+            getattr(connection, "rollback")()
+            raise
         finally:
             if cursor is not None:
                 getattr(cursor, "close")()
@@ -755,9 +825,10 @@ class PostgreSQLMailboxRepository(MailboxRepository):
         claim_token: str,
         processed_at_millis: int,
     ) -> bool:
+        processed_at = _dt(processed_at_millis)
         return self._mark_outbox(
             _MARK_OUTBOX_PROCESSED_SQL,
-            (_dt(processed_at_millis), event_id, claim_token),
+            (processed_at, event_id, claim_token, processed_at),
         )
 
     def mark_outbox_retry(
@@ -765,6 +836,7 @@ class PostgreSQLMailboxRepository(MailboxRepository):
         event_id: str,
         *,
         claim_token: str,
+        now_millis: int,
         next_attempt_at_millis: int,
         safe_error_code: str,
     ) -> bool:
@@ -773,9 +845,17 @@ class PostgreSQLMailboxRepository(MailboxRepository):
             or not 1 <= len(safe_error_code.encode("utf-8")) <= 128
         ):
             raise ValueError("invalid safe error code")
+        if type(now_millis) is not int or now_millis < 0:
+            raise ValueError("invalid outbox retry time")
         return self._mark_outbox(
             _MARK_OUTBOX_RETRY_SQL,
-            (_dt(next_attempt_at_millis), safe_error_code, event_id, claim_token),
+            (
+                _dt(next_attempt_at_millis),
+                safe_error_code,
+                event_id,
+                claim_token,
+                _dt(now_millis),
+            ),
         )
 
     def _mark_outbox(self, sql: str, parameters: tuple[object, ...]) -> bool:
@@ -787,6 +867,9 @@ class PostgreSQLMailboxRepository(MailboxRepository):
             changed = _rowcount(cursor) == 1
             getattr(connection, "commit")()
             return changed
+        except Exception:
+            getattr(connection, "rollback")()
+            raise
         finally:
             if cursor is not None:
                 getattr(cursor, "close")()
