@@ -19,6 +19,7 @@ from cuevion_mailbox.repository_contract import (
     CachedBody,
     DeltaCommitOutcome,
     MailboxProvider,
+    MailboxReaderRepository,
     MailboxRepository,
     MailboxScope,
     MessageIdentity,
@@ -366,6 +367,42 @@ def _rowcount(cursor: object) -> int:
     if type(value) is not int:
         raise RuntimeError("mailbox repository storage corruption")
     return value
+
+
+class PostgreSQLMailboxReaderRepository(MailboxReaderRepository):
+    """Read-only public surface for the least-privilege mailbox reader role."""
+
+    __slots__ = ("_delegate",)
+
+    def __init__(self, connection_factory: PostgreSQLConnectionFactory) -> None:
+        object.__setattr__(
+            self,
+            "_delegate",
+            PostgreSQLMailboxRepository(connection_factory),
+        )
+
+    def read_cursor(self, scope: MailboxScope, scope_key: str) -> SyncCursor | None:
+        return self._delegate.read_cursor(scope, scope_key)
+
+    def list_messages(
+        self,
+        scope: MailboxScope,
+        *,
+        limit: int,
+        before_timestamp_millis: int | None = None,
+    ) -> Sequence[MessageProjection]:
+        return self._delegate.list_messages(
+            scope,
+            limit=limit,
+            before_timestamp_millis=before_timestamp_millis,
+        )
+
+    def read_cached_body(
+        self,
+        scope: MailboxScope,
+        message_id: str,
+    ) -> CachedBody | None:
+        return self._delegate.read_cached_body(scope, message_id)
 
 
 class PostgreSQLMailboxRepository(MailboxRepository):
@@ -878,5 +915,6 @@ class PostgreSQLMailboxRepository(MailboxRepository):
 
 __all__ = (
     "PostgreSQLConnectionFactory",
+    "PostgreSQLMailboxReaderRepository",
     "PostgreSQLMailboxRepository",
 )
