@@ -401,14 +401,8 @@ class OutboxEvent:
     claim_token: str
 
 
-class MailboxRepository(Protocol):
-    """Durable repository boundary.
-
-    commit_provider_delta MUST use one PostgreSQL transaction. It must compare
-    expected state/cursor versions and generations, apply every message
-    mutation, insert the idempotent outbox rows, and advance the cursor before
-    commit. A conflict or exception must publish none of those changes.
-    """
+class MailboxReaderRepository(Protocol):
+    """Read-only durable mailbox boundary for cache/UI consumers."""
 
     def read_cursor(
         self,
@@ -432,6 +426,16 @@ class MailboxRepository(Protocol):
         message_id: str,
     ) -> CachedBody | None:
         ...
+
+
+class MailboxRepository(MailboxReaderRepository, Protocol):
+    """Read/write durable mailbox boundary for sync and outbox workers.
+
+    commit_provider_delta MUST use one PostgreSQL transaction. It must compare
+    expected state/cursor versions and generations, apply every message
+    mutation, insert the idempotent outbox rows, and advance the cursor before
+    commit. A conflict or exception must publish none of those changes.
+    """
 
     def commit_provider_delta(
         self,
@@ -480,6 +484,7 @@ __all__ = (
     "DeltaCommitOutcome",
     "derive_locator_digest",
     "MailboxProvider",
+    "MailboxReaderRepository",
     "MailboxRepository",
     "MailboxScope",
     "MessageIdentity",
