@@ -1,0 +1,29 @@
+name: Temporary mailbox repository tests
+
+on:
+  push:
+    branches:
+      - feature/mailbox-postgres-repository
+
+permissions:
+  contents: read
+
+jobs:
+  mailbox-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: frontend/requirements.txt
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r frontend/requirements.txt alembic
+      - name: Run mailbox tests
+        working-directory: frontend
+        run: |
+          python -m unittest discover -s tests/cuevion_mailbox -p 'test_*.py' -v
