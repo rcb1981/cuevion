@@ -7,6 +7,7 @@ activate routes.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol, Sequence
@@ -58,6 +59,18 @@ class DeltaCommitOutcome(str, Enum):
     CONFLICT = "conflict"
     STALE_GENERATION = "stale_generation"
     NOT_FOUND = "not_found"
+
+
+def derive_locator_digest(value: str) -> str:
+    if type(value) is not str or not value:
+        raise ValueError("invalid mailbox locator")
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeError:
+        raise ValueError("invalid mailbox locator") from None
+    if not 1 <= len(encoded) <= 16_384:
+        raise ValueError("invalid mailbox locator")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,14 +234,23 @@ class MessageMutation:
 
     def validate_for(self, provider: MailboxProvider) -> None:
         self.projection.validate_for(provider)
-        if (
-            self.kind is MessageMutationKind.TOMBSTONE
-            and (
+        if self.kind is MessageMutationKind.TOMBSTONE:
+            if (
                 self.outbox_event_type is not OutboxEventType.MESSAGE_DELETED
                 or self.projection.provider_deleted is not True
-            )
+            ):
+                raise ValueError("invalid tombstone mutation")
+            return
+        if (
+            self.kind is not MessageMutationKind.UPSERT
+            or self.outbox_event_type
+            not in {
+                OutboxEventType.MESSAGE_ADDED,
+                OutboxEventType.MESSAGE_CHANGED,
+            }
+            or self.projection.provider_deleted is not False
         ):
-            raise ValueError("invalid tombstone mutation")
+            raise ValueError("invalid upsert mutation")
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,6 +387,7 @@ __all__ = (
     "BootstrapState",
     "CachedBody",
     "DeltaCommitOutcome",
+    "derive_locator_digest",
     "MailboxProvider",
     "MailboxRepository",
     "MailboxScope",
