@@ -5,7 +5,11 @@ from pathlib import Path
 import unittest
 
 from cuevion_mailbox import postgresql_repository as repository
-from cuevion_mailbox.repository_contract import OutboxStorageScope
+from cuevion_mailbox.repository_contract import (
+    MailboxProvider,
+    MailboxReadAuthority,
+    OutboxStorageScope,
+)
 from cuevion_mailbox.role_policy import build_mailbox_role_plan
 
 
@@ -70,6 +74,27 @@ class MailboxRolePolicyTests(unittest.TestCase):
             build_mailbox_role_plan("Reader-Unsafe", "writer_safe")
 
 
+class MailboxReadAuthorityTests(unittest.TestCase):
+    def test_authority_rejects_non_enum_provider_and_out_of_bounds_identity(self):
+        common = {
+            "workspace_id": "wsp_" + ("a" * 22),
+            "owner_user_id": "usr_" + ("b" * 22),
+            "mailbox_id": "mailbox-1",
+        }
+        with self.assertRaises(ValueError):
+            MailboxReadAuthority(
+                **common,
+                provider="google",  # type: ignore[arg-type]
+                provider_account_identity="user@example.com",
+            )
+        with self.assertRaises(ValueError):
+            MailboxReadAuthority(
+                **common,
+                provider=MailboxProvider.GOOGLE,
+                provider_account_identity="x",
+            )
+
+
 class PostgreSQLMailboxAdapterTests(unittest.TestCase):
     def test_module_has_no_runtime_configuration_or_network_boundary(self):
         source = _ADAPTER.read_text(encoding="utf-8")
@@ -109,6 +134,7 @@ class PostgreSQLMailboxAdapterTests(unittest.TestCase):
 
     def test_read_sql_reproves_current_mailbox_authority(self):
         for sql in (
+            repository._SELECT_CURRENT_SCOPE_SQL,
             repository._SELECT_CURSOR_SQL,
             repository._LIST_MESSAGES_SQL,
             repository._SELECT_BODY_SQL,
@@ -116,6 +142,20 @@ class PostgreSQLMailboxAdapterTests(unittest.TestCase):
             normalized = " ".join(sql.casefold().split())
             self.assertIn("provider_account_identity = %s", normalized)
             self.assertIn("is_current = true", normalized)
+
+    def test_current_scope_lookup_is_exact_and_current_only(self):
+        normalized = " ".join(
+            repository._SELECT_CURRENT_SCOPE_SQL.casefold().split()
+        )
+        for required in (
+            "workspace_id = %s",
+            "owner_user_id = %s",
+            "mailbox_id = %s",
+            "provider = %s",
+            "provider_account_identity = %s",
+            "is_current = true",
+        ):
+            self.assertIn(required, normalized)
 
     def test_mutation_sql_uses_cas_and_exact_provider_identity(self):
         for sql in (
@@ -145,6 +185,7 @@ class PostgreSQLMailboxAdapterTests(unittest.TestCase):
 
     def test_fixed_sql_placeholder_inventory(self):
         expected = {
+            "_SELECT_CURRENT_SCOPE_SQL": 5,
             "_SELECT_CURSOR_SQL": 7,
             "_LIST_MESSAGES_SQL": 9,
             "_SELECT_BODY_SQL": 7,

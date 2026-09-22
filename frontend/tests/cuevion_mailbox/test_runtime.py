@@ -96,10 +96,35 @@ class MailboxRuntimeConfigurationTests(unittest.TestCase):
         self.assertIsNone(config.reader_database_url)
         self.assertIsNone(config.writer_database_url)
 
-    def test_no_active_mode_exists(self):
+    def test_active_read_is_preview_reader_only_and_production_rejected(self):
+        preview_reader = _url(
+            "cuevion_preview_mailbox_reader_v1",
+            "reader-secret",
+        )
+        config = runtime.parse_mailbox_runtime_configuration(
+            {
+                "CUEVION_MAILBOX_POSTGRES_MODE": "active_read",
+                "VERCEL_ENV": "preview",
+                "CUEVION_MAILBOX_READER_DATABASE_URL": preview_reader,
+            }
+        )
+        self.assertIs(config.mode, runtime.MailboxRuntimeMode.ACTIVE_READ)
+        self.assertEqual(
+            config.reader_database_url.role,
+            "cuevion_preview_mailbox_reader_v1",
+        )
+        self.assertIsNone(config.writer_database_url)
+
         with self.assertRaises(runtime.MailboxRuntimeConfigurationError):
             runtime.parse_mailbox_runtime_configuration(
-                {"CUEVION_MAILBOX_POSTGRES_MODE": "active"}
+                {
+                    "CUEVION_MAILBOX_POSTGRES_MODE": "active_read",
+                    "VERCEL_ENV": "production",
+                    "CUEVION_MAILBOX_READER_DATABASE_URL": _url(
+                        _READER_ROLE,
+                        "reader-secret",
+                    ),
+                }
             )
 
     def test_shadow_requires_nonempty_exact_production_roles(self):
@@ -246,13 +271,31 @@ class MailboxConnectionFactoryTests(unittest.TestCase):
             factory()
         self.assertTrue(no_tls.closed)
 
+    def test_active_read_builder_requires_explicit_preview_mode(self):
+        environment = {
+            "CUEVION_MAILBOX_POSTGRES_MODE": "active_read",
+            "VERCEL_ENV": "preview",
+            "CUEVION_MAILBOX_READER_DATABASE_URL": _url(
+                "cuevion_preview_mailbox_reader_v1",
+                "reader-secret",
+            ),
+        }
+        reader = runtime.build_active_read_mailbox_reader(environment)
+        self.assertIsInstance(
+            reader,
+            runtime.PostgreSQLMailboxReaderRepository,
+        )
+
+        with self.assertRaises(runtime.MailboxRuntimeDisabledError):
+            runtime.build_active_read_mailbox_reader({})
+
     def test_shadow_builder_refuses_disabled_mode(self):
         with self.assertRaises(runtime.MailboxRuntimeDisabledError):
             runtime.build_shadow_mailbox_repositories({})
 
 
 class MailboxRuntimeStaticTests(unittest.TestCase):
-    def test_module_does_not_read_process_environment_or_expose_active_mode(self):
+    def test_module_does_not_read_process_environment_or_expose_network_clients(self):
         source = _RUNTIME.read_text(encoding="utf-8")
         tree = ast.parse(source)
         imported = {
@@ -270,7 +313,6 @@ class MailboxRuntimeStaticTests(unittest.TestCase):
         self.assertNotIn("socket", imported)
         self.assertNotIn("requests", imported)
         self.assertNotIn("httpx", imported)
-        self.assertNotIn("ACTIVE", source)
         self.assertNotIn("os.environ", source)
 
 

@@ -1,8 +1,8 @@
-"""Inactive runtime composition for the durable mailbox PostgreSQL repository.
+"""Runtime composition for controlled durable mailbox PostgreSQL reads.
 
 This module is deliberately outside `api/`: importing or deploying it exposes no
-route. The only pre-activation modes are disabled and shadow. There is no active
-mode in this slice.
+route. `active_read` is Preview-only and constructs a reader repository only.
+Provider writes and production activation remain unavailable in this slice.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ _DATABASE_URL_TOKEN = object()
 class MailboxRuntimeMode(str, Enum):
     DISABLED = "disabled"
     SHADOW = "shadow"
+    ACTIVE_READ = "active_read"
 
 
 class MailboxRuntimeConfigurationError(RuntimeError):
@@ -263,6 +264,17 @@ def parse_mailbox_runtime_configuration(
         environment.get(_READER_URL_VARIABLE),
         expected_role=expected_reader,
     )
+
+    if mode is MailboxRuntimeMode.ACTIVE_READ:
+        if vercel_environment != "preview":
+            _configuration_error()
+        return MailboxRuntimeConfiguration(
+            mode,
+            vercel_environment,
+            reader,
+            None,
+        )
+
     writer = _parse_database_url(
         environment.get(_WRITER_URL_VARIABLE),
         expected_role=expected_writer,
@@ -374,6 +386,28 @@ class MailboxConnectionFactory:
         return connection
 
 
+def build_active_read_mailbox_reader(
+    environment: Mapping[str, str],
+    *,
+    connect: _ConnectCallable | None = None,
+) -> PostgreSQLMailboxReaderRepository:
+    """Compose the bounded Preview-only active reader repository."""
+
+    config = parse_mailbox_runtime_configuration(environment)
+    if config.mode is not MailboxRuntimeMode.ACTIVE_READ:
+        raise MailboxRuntimeDisabledError()
+    reader_url = config.reader_database_url
+    if type(reader_url) is not MailboxDatabaseUrl:
+        _configuration_error()
+    return PostgreSQLMailboxReaderRepository(
+        MailboxConnectionFactory(
+            reader_url,
+            read_only=True,
+            connect=connect,
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ShadowMailboxRepositories:
     reader: PostgreSQLMailboxReaderRepository
@@ -425,6 +459,7 @@ __all__ = (
     "MailboxRuntimeDisabledError",
     "MailboxRuntimeMode",
     "ShadowMailboxRepositories",
+    "build_active_read_mailbox_reader",
     "build_shadow_mailbox_repositories",
     "parse_mailbox_runtime_configuration",
 )

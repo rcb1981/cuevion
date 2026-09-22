@@ -74,6 +74,35 @@ def derive_locator_digest(value: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class MailboxReadAuthority:
+    workspace_id: str
+    owner_user_id: str
+    mailbox_id: str
+    provider: MailboxProvider
+    provider_account_identity: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.workspace_id) is not str
+            or len(self.workspace_id) != 26
+            or not self.workspace_id.startswith("wsp_")
+            or type(self.owner_user_id) is not str
+            or len(self.owner_user_id) != 26
+            or not self.owner_user_id.startswith("usr_")
+            or type(self.mailbox_id) is not str
+            or not 1 <= len(self.mailbox_id.encode("utf-8")) <= 160
+            or type(self.provider) is not MailboxProvider
+            or type(self.provider_account_identity) is not str
+            or not 3 <= len(
+                self.provider_account_identity.encode("utf-8")
+            ) <= 320
+            or self.provider_account_identity
+            != self.provider_account_identity.casefold()
+        ):
+            raise ValueError("invalid mailbox read authority")
+
+
+@dataclass(frozen=True, slots=True)
 class MailboxScope:
     workspace_id: str
     owner_user_id: str
@@ -404,6 +433,13 @@ class OutboxEvent:
 class MailboxReaderRepository(Protocol):
     """Read-only durable mailbox boundary for cache/UI consumers."""
 
+    def resolve_current_scope(
+        self,
+        authority: MailboxReadAuthority,
+    ) -> MailboxScope | None:
+        """Resolve only the current generation for exact authenticated authority."""
+        ...
+
     def read_cursor(
         self,
         scope: MailboxScope,
@@ -484,6 +520,7 @@ __all__ = (
     "DeltaCommitOutcome",
     "derive_locator_digest",
     "MailboxProvider",
+    "MailboxReadAuthority",
     "MailboxReaderRepository",
     "MailboxRepository",
     "MailboxScope",
