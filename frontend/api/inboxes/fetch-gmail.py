@@ -27,6 +27,7 @@ _identity_sys.modules[_CANONICAL_MODULE_NAME] = _current_module
 _identity_sys.modules[_LEGACY_MODULE_NAME] = _current_module
 
 import json
+import os
 from email import message_from_bytes
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
@@ -69,6 +70,10 @@ from api.priority.candidate_store import build_runtime_candidate_store
 from api.priority.event_reference import resolve_priority_hmac_secret
 from api.priority.semantic_config import read_new_inbound_client_mode
 from api.priority.store import build_runtime_workflow_store
+from cuevion_mailbox.preview_active_read import (
+    preview_active_read_enabled,
+    run_preview_gmail_active_read,
+)
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
 DEFAULT_FETCH_LIMIT = 50
@@ -311,6 +316,33 @@ class handler(BaseHTTPRequestHandler):
             send_json(self, resolution["status_code"], resolution["error"])
             return
         context = resolution["context"]
+
+        if preview_active_read_enabled(os.environ):
+            member = resolution.get("memberAuthority")
+            try:
+                active_read = run_preview_gmail_active_read(
+                    environment=os.environ,
+                    workspace_id=getattr(member, "workspace_id"),
+                    owner_user_id=getattr(member, "user_id"),
+                    mailbox_id=context["mailbox_id"],
+                    mailbox_account_identity=context["mailbox_email"],
+                    limit=limit,
+                )
+            except Exception:
+                print("cuevion_mailbox_active_read gmail failed")
+                send_json(
+                    self,
+                    503,
+                    error_payload(
+                        "mailbox_read_unavailable",
+                        "Mailbox read validation is temporarily unavailable.",
+                    ),
+                )
+                return
+            print(
+                "cuevion_mailbox_active_read gmail "
+                + active_read.status
+            )
 
         snapshot_result = read_gmail_folder_snapshot(
             context,
