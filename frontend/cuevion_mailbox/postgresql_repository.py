@@ -19,6 +19,7 @@ from cuevion_mailbox.repository_contract import (
     CachedBody,
     DeltaCommitOutcome,
     MailboxProvider,
+    MailboxReadAuthority,
     MailboxReaderRepository,
     MailboxRepository,
     MailboxScope,
@@ -32,6 +33,18 @@ from cuevion_mailbox.repository_contract import (
     SyncCursor,
     derive_locator_digest,
 )
+
+
+_SELECT_CURRENT_SCOPE_SQL = """
+SELECT source_generation
+FROM cuevion_mailbox.mailbox_sync_state
+WHERE workspace_id = %s
+  AND owner_user_id = %s
+  AND mailbox_id = %s
+  AND provider = %s
+  AND provider_account_identity = %s
+  AND is_current = true
+""".strip()
 
 
 class PostgreSQLConnectionFactory(Protocol):
@@ -380,6 +393,52 @@ class PostgreSQLMailboxReaderRepository(MailboxReaderRepository):
             "_delegate",
             PostgreSQLMailboxRepository(connection_factory),
         )
+
+    def resolve_current_scope(
+        self,
+        authority: MailboxReadAuthority,
+    ) -> MailboxScope | None:
+        if type(authority) is not MailboxReadAuthority:
+            raise ValueError("invalid mailbox read authority")
+        connection = self._connection()
+        cursor = None
+        try:
+            cursor = getattr(connection, "cursor")()
+            getattr(cursor, "execute")(
+                _SELECT_CURRENT_SCOPE_SQL,
+                (
+                    authority.workspace_id,
+                    authority.owner_user_id,
+                    authority.mailbox_id,
+                    authority.provider.value,
+                    authority.provider_account_identity,
+                ),
+            )
+            rows = _fetchall(cursor)
+            if len(rows) > 1:
+                raise RuntimeError("mailbox repository storage corruption")
+            if not rows:
+                return None
+            row = rows[0]
+            if (
+                len(row) != 1
+                or type(row[0]) is not int
+                or row[0] < 1
+            ):
+                raise RuntimeError("mailbox repository storage corruption")
+            return MailboxScope(
+                workspace_id=authority.workspace_id,
+                owner_user_id=authority.owner_user_id,
+                mailbox_id=authority.mailbox_id,
+                source_generation=row[0],
+                provider=authority.provider,
+                provider_account_identity=authority.provider_account_identity,
+            )
+        finally:
+            if cursor is not None:
+                getattr(cursor, "close")()
+            getattr(connection, "rollback")()
+            getattr(connection, "close")()
 
     def read_cursor(self, scope: MailboxScope, scope_key: str) -> SyncCursor | None:
         return self._delegate.read_cursor(scope, scope_key)
