@@ -127,6 +127,50 @@ class MailboxRuntimeConfigurationTests(unittest.TestCase):
                 }
             )
 
+    def test_active_write_is_preview_only_and_requires_both_roles(self):
+        environment = {
+            "CUEVION_MAILBOX_POSTGRES_MODE": "active_write",
+            "VERCEL_ENV": "preview",
+            "CUEVION_MAILBOX_READER_DATABASE_URL": _url(
+                "cuevion_preview_mailbox_reader_v1",
+                "reader-secret",
+            ),
+            "CUEVION_MAILBOX_WRITER_DATABASE_URL": _url(
+                "cuevion_preview_mailbox_writer_v1",
+                "writer-secret",
+            ),
+        }
+        config = runtime.parse_mailbox_runtime_configuration(environment)
+        self.assertIs(config.mode, runtime.MailboxRuntimeMode.ACTIVE_WRITE)
+        self.assertEqual(
+            config.reader_database_url.role,
+            "cuevion_preview_mailbox_reader_v1",
+        )
+        self.assertEqual(
+            config.writer_database_url.role,
+            "cuevion_preview_mailbox_writer_v1",
+        )
+
+        missing_writer = dict(environment)
+        missing_writer.pop("CUEVION_MAILBOX_WRITER_DATABASE_URL")
+        with self.assertRaises(runtime.MailboxRuntimeConfigurationError):
+            runtime.parse_mailbox_runtime_configuration(missing_writer)
+
+        production = {
+            "CUEVION_MAILBOX_POSTGRES_MODE": "active_write",
+            "VERCEL_ENV": "production",
+            "CUEVION_MAILBOX_READER_DATABASE_URL": _url(
+                _READER_ROLE,
+                "reader-secret",
+            ),
+            "CUEVION_MAILBOX_WRITER_DATABASE_URL": _url(
+                _WRITER_ROLE,
+                "writer-secret",
+            ),
+        }
+        with self.assertRaises(runtime.MailboxRuntimeConfigurationError):
+            runtime.parse_mailbox_runtime_configuration(production)
+
     def test_shadow_requires_nonempty_exact_production_roles(self):
         environment = {
             "CUEVION_MAILBOX_POSTGRES_MODE": "shadow",
@@ -288,6 +332,34 @@ class MailboxConnectionFactoryTests(unittest.TestCase):
 
         with self.assertRaises(runtime.MailboxRuntimeDisabledError):
             runtime.build_active_read_mailbox_reader({})
+
+    def test_active_write_builder_requires_explicit_preview_mode(self):
+        environment = {
+            "CUEVION_MAILBOX_POSTGRES_MODE": "active_write",
+            "VERCEL_ENV": "preview",
+            "CUEVION_MAILBOX_READER_DATABASE_URL": _url(
+                "cuevion_preview_mailbox_reader_v1",
+                "reader-secret",
+            ),
+            "CUEVION_MAILBOX_WRITER_DATABASE_URL": _url(
+                "cuevion_preview_mailbox_writer_v1",
+                "writer-secret",
+            ),
+        }
+        repositories = runtime.build_active_write_mailbox_repositories(
+            environment
+        )
+        self.assertIsInstance(
+            repositories.reader,
+            runtime.PostgreSQLMailboxReaderRepository,
+        )
+        self.assertIsInstance(
+            repositories.writer,
+            runtime.PostgreSQLMailboxRepository,
+        )
+
+        with self.assertRaises(runtime.MailboxRuntimeDisabledError):
+            runtime.build_active_write_mailbox_repositories({})
 
     def test_shadow_builder_refuses_disabled_mode(self):
         with self.assertRaises(runtime.MailboxRuntimeDisabledError):
