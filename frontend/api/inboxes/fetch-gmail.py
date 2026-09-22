@@ -350,6 +350,22 @@ class handler(BaseHTTPRequestHandler):
                 + active_read.status
             )
 
+        durable_history = None
+        if preview_active_write_enabled(os.environ):
+            durable_history = read_gmail_account_history(
+                context,
+                request_with_one_refresh=_request_with_one_refresh,
+            )
+            context = durable_history.context
+            if (
+                durable_history.status != "ok"
+                or durable_history.history_id is None
+            ):
+                print(
+                    "cuevion_mailbox_active_write gmail history_"
+                    + durable_history.status
+                )
+
         snapshot_result = read_gmail_folder_snapshot(
             context,
             provider_folder="Inbox",
@@ -394,42 +410,36 @@ class handler(BaseHTTPRequestHandler):
 
         candidate_sources = snapshot_result.get("_priorityCandidateSources")
 
-        if preview_active_write_enabled(os.environ):
-            history = read_gmail_account_history(
-                context,
-                request_with_one_refresh=_request_with_one_refresh,
-            )
-            context = history.context
-            if history.status != "ok" or history.history_id is None:
-                print(
-                    "cuevion_mailbox_active_write gmail history_"
-                    + history.status
+        if (
+            preview_active_write_enabled(os.environ)
+            and durable_history is not None
+            and durable_history.status == "ok"
+            and durable_history.history_id is not None
+        ):
+            member = resolution.get("memberAuthority")
+            try:
+                durable_write = run_preview_gmail_durable_write(
+                    environment=os.environ,
+                    workspace_id=getattr(member, "workspace_id"),
+                    owner_user_id=getattr(member, "user_id"),
+                    mailbox_id=context["mailbox_id"],
+                    mailbox_account_identity=context["mailbox_email"],
+                    previews=previews,
+                    candidate_sources=(
+                        candidate_sources
+                        if isinstance(candidate_sources, list)
+                        else []
+                    ),
+                    gmail_history_id=durable_history.history_id,
+                    committed_at_millis=time.time_ns() // 1_000_000,
                 )
+            except Exception:
+                print("cuevion_mailbox_active_write gmail failed")
             else:
-                member = resolution.get("memberAuthority")
-                try:
-                    durable_write = run_preview_gmail_durable_write(
-                        environment=os.environ,
-                        workspace_id=getattr(member, "workspace_id"),
-                        owner_user_id=getattr(member, "user_id"),
-                        mailbox_id=context["mailbox_id"],
-                        mailbox_account_identity=context["mailbox_email"],
-                        previews=previews,
-                        candidate_sources=(
-                            candidate_sources
-                            if isinstance(candidate_sources, list)
-                            else []
-                        ),
-                        gmail_history_id=history.history_id,
-                        committed_at_millis=time.time_ns() // 1_000_000,
-                    )
-                except Exception:
-                    print("cuevion_mailbox_active_write gmail failed")
-                else:
-                    print(
-                        "cuevion_mailbox_active_write gmail "
-                        + durable_write.status
-                    )
+                print(
+                    "cuevion_mailbox_active_write gmail "
+                    + durable_write.status
+                )
 
         if isinstance(candidate_sources, list) and candidate_sources:
             try:
