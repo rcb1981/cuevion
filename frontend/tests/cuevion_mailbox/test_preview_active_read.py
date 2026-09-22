@@ -62,7 +62,7 @@ class PreviewActiveReadTests(unittest.TestCase):
 
     def _run(self, reader, *, environment=None, limit=50):
         return run_preview_gmail_active_read(
-            environment=environment or self._environment(),
+            environment=(self._environment() if environment is None else environment),
             workspace_id="wsp_" + ("a" * 22),
             owner_user_id="usr_" + ("b" * 22),
             mailbox_id="gmail-1",
