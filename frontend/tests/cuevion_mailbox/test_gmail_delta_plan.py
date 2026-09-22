@@ -224,6 +224,17 @@ class GmailDurableDeltaPlanTests(unittest.TestCase):
         self.assertNotEqual(first, next_version)
         self.assertEqual(len(first), 26)
 
+    def test_caller_cannot_claim_cached_body_via_metadata_projection(self):
+        record = _record()
+        from dataclasses import replace
+
+        with self.assertRaises(ValueError):
+            plan_gmail_message_mutations(
+                _scope(),
+                [replace(record, body_state=BodyState.CACHED)],
+                [],
+            )
+
     def test_duplicate_records_or_current_projections_fail_closed(self):
         record = _record()
         with self.assertRaises(ValueError):
