@@ -20,11 +20,13 @@ the user-visible response authority. The existing Gmail provider fetch remains
 authoritative.
 
 When `active_write` is explicitly enabled in Preview, the Gmail Inbox fetch
-route performs one bounded durable metadata write after a successful provider
-snapshot. It first binds an account-level Gmail `historyId` to the authenticated
-mailbox identity using `/profile`, then bootstraps/reads current durable state,
-projects the accepted Inbox snapshot, plans a CAS-protected
-`ProviderDeltaCommit`, and writes it through the restricted Preview writer.
+route first captures an account-level Gmail `historyId` baseline from
+`/profile` and binds it to the authenticated mailbox identity. It then reads the
+provider Inbox snapshot. Only after that snapshot succeeds does the route
+bootstrap/read current durable state, project the accepted Inbox snapshot, plan
+a CAS-protected `ProviderDeltaCommit`, and write it through the restricted
+Preview writer. Capturing the history baseline first prevents changes occurring
+during the snapshot from being skipped by a later History delta.
 
 This write remains observational: any durable write/history failure emits only a
 fixed Preview diagnostic and does not replace or mutate the existing Gmail API
@@ -92,21 +94,22 @@ rendered, serialized, pickled, returned from APIs, or added to exception text.
 
 ## Bounded Gmail write boundary
 
-The Preview Gmail write hook is allowed only after the provider Inbox snapshot
-has succeeded. It must:
+The Preview Gmail write hook must:
 
-1. request Gmail `/profile` through the existing one-refresh auth boundary;
+1. request Gmail `/profile` through the existing one-refresh auth boundary
+   before starting the provider Inbox snapshot;
 2. require profile `emailAddress` to match the authenticated mailbox identity;
 3. require a canonical numeric account-level `historyId`;
-4. initialize generation 1 only when no safe current durable state exists;
-5. reuse exact current state/cursor/message projections when already present;
-6. project at most 100 accepted Inbox messages;
-7. never infer tombstones from absence in the bounded snapshot;
-8. preserve existing durable body state during metadata refreshes;
-9. commit messages, cursor, state advance and outbox rows transactionally;
-10. short-circuit an exact repeat with unchanged history and metadata;
-11. never consume the outbox in this route;
-12. never change the Gmail response authority or response payload.
+4. write nothing unless the subsequent provider Inbox snapshot succeeds;
+5. initialize generation 1 only when no safe current durable state exists;
+6. reuse exact current state/cursor/message projections when already present;
+7. project at most 100 accepted Inbox messages;
+8. never infer tombstones from absence in the bounded snapshot;
+9. preserve existing durable body state during metadata refreshes;
+10. commit messages, cursor, state advance and outbox rows transactionally;
+11. short-circuit an exact repeat with unchanged history and metadata;
+12. never consume the outbox in this route;
+13. never change the Gmail response authority or response payload.
 
 Durable failures are intentionally observational in this first route hook:
 Preview logs a fixed non-sensitive marker and continues returning the successful
