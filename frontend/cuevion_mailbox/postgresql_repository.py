@@ -17,10 +17,13 @@ from cuevion_mailbox.repository_contract import (
     BackfillState,
     BodyState,
     CachedBody,
+    CurrentStateInitializationOutcome,
+    CurrentStateInitializationResult,
     DeltaCommitOutcome,
     MailboxProvider,
     MailboxReadAuthority,
     MailboxReaderRepository,
+    MailboxStateSnapshot,
     MailboxRepository,
     MailboxScope,
     MessageIdentity,
@@ -35,8 +38,8 @@ from cuevion_mailbox.repository_contract import (
 )
 
 
-_SELECT_CURRENT_SCOPE_SQL = """
-SELECT source_generation
+_SELECT_CURRENT_STATE_SQL = """
+SELECT source_generation, bootstrap_state, row_version
 FROM cuevion_mailbox.mailbox_sync_state
 WHERE workspace_id = %s
   AND owner_user_id = %s
@@ -44,6 +47,19 @@ WHERE workspace_id = %s
   AND provider = %s
   AND provider_account_identity = %s
   AND is_current = true
+""".strip()
+
+_INSERT_INITIAL_STATE_SQL = """
+INSERT INTO cuevion_mailbox.mailbox_sync_state (
+    schema_version, workspace_id, owner_user_id, mailbox_id, provider,
+    provider_account_identity, source_generation, is_current, bootstrap_state,
+    backfill_cutoff_at, backfill_oldest_indexed_at, last_successful_sync_at,
+    last_error_code, created_at, updated_at, row_version
+) VALUES (
+    1, %s, %s, %s, %s, %s, 1, true, 'not_started',
+    NULL, NULL, NULL, NULL, %s, %s, 1
+)
+ON CONFLICT DO NOTHING
 """.strip()
 
 
@@ -394,11 +410,18 @@ class PostgreSQLMailboxReaderRepository(MailboxReaderRepository):
             PostgreSQLMailboxRepository(connection_factory),
         )
 
+    def resolve_current_state(
+        self,
+        authority: MailboxReadAuthority,
+    ) -> MailboxStateSnapshot | None:
+        return self._delegate.resolve_current_state(authority)
+
     def resolve_current_scope(
         self,
         authority: MailboxReadAuthority,
     ) -> MailboxScope | None:
-        return self._delegate.resolve_current_scope(authority)
+        state = self.resolve_current_state(authority)
+        return None if state is None else state.scope
 
     def read_cursor(self, scope: MailboxScope, scope_key: str) -> SyncCursor | None:
         return self._delegate.read_cursor(scope, scope_key)
@@ -436,10 +459,10 @@ class PostgreSQLMailboxRepository(MailboxRepository):
             raise RuntimeError("mailbox repository requires transactional connection")
         return connection
 
-    def resolve_current_scope(
+    def resolve_current_state(
         self,
         authority: MailboxReadAuthority,
-    ) -> MailboxScope | None:
+    ) -> MailboxStateSnapshot | None:
         if type(authority) is not MailboxReadAuthority:
             raise ValueError("invalid mailbox read authority")
         connection = self._connection()
@@ -447,7 +470,7 @@ class PostgreSQLMailboxRepository(MailboxRepository):
         try:
             cursor = getattr(connection, "cursor")()
             getattr(cursor, "execute")(
-                _SELECT_CURRENT_SCOPE_SQL,
+                _SELECT_CURRENT_STATE_SQL,
                 (
                     authority.workspace_id,
                     authority.owner_user_id,
@@ -463,12 +486,14 @@ class PostgreSQLMailboxRepository(MailboxRepository):
                 return None
             row = rows[0]
             if (
-                len(row) != 1
+                len(row) != 3
                 or type(row[0]) is not int
                 or row[0] < 1
+                or type(row[2]) is not int
+                or row[2] < 1
             ):
                 raise RuntimeError("mailbox repository storage corruption")
-            return MailboxScope(
+            scope = MailboxScope(
                 workspace_id=authority.workspace_id,
                 owner_user_id=authority.owner_user_id,
                 mailbox_id=authority.mailbox_id,
@@ -476,10 +501,110 @@ class PostgreSQLMailboxRepository(MailboxRepository):
                 provider=authority.provider,
                 provider_account_identity=authority.provider_account_identity,
             )
+            return MailboxStateSnapshot(
+                scope=scope,
+                bootstrap_state=BootstrapState(row[1]),
+                row_version=row[2],
+            )
         finally:
             if cursor is not None:
                 getattr(cursor, "close")()
             getattr(connection, "rollback")()
+            getattr(connection, "close")()
+
+    def resolve_current_scope(
+        self,
+        authority: MailboxReadAuthority,
+    ) -> MailboxScope | None:
+        state = self.resolve_current_state(authority)
+        return None if state is None else state.scope
+
+    def initialize_current_state(
+        self,
+        authority: MailboxReadAuthority,
+        *,
+        initialized_at_millis: int,
+    ) -> CurrentStateInitializationResult:
+        if (
+            type(authority) is not MailboxReadAuthority
+            or type(initialized_at_millis) is not int
+            or initialized_at_millis < 0
+        ):
+            raise ValueError("invalid mailbox state initialization")
+        connection = self._connection()
+        cursor = None
+        try:
+            now = _dt(initialized_at_millis)
+            cursor = getattr(connection, "cursor")()
+            getattr(cursor, "execute")(
+                _INSERT_INITIAL_STATE_SQL,
+                (
+                    authority.workspace_id,
+                    authority.owner_user_id,
+                    authority.mailbox_id,
+                    authority.provider.value,
+                    authority.provider_account_identity,
+                    now,
+                    now,
+                ),
+            )
+            inserted = _rowcount(cursor)
+            if inserted not in (0, 1):
+                raise RuntimeError("mailbox repository storage corruption")
+
+            getattr(cursor, "execute")(
+                _SELECT_CURRENT_STATE_SQL,
+                (
+                    authority.workspace_id,
+                    authority.owner_user_id,
+                    authority.mailbox_id,
+                    authority.provider.value,
+                    authority.provider_account_identity,
+                ),
+            )
+            rows = _fetchall(cursor)
+            if len(rows) > 1:
+                raise RuntimeError("mailbox repository storage corruption")
+            if not rows:
+                getattr(connection, "rollback")()
+                return CurrentStateInitializationResult(
+                    CurrentStateInitializationOutcome.CONFLICT,
+                    None,
+                )
+            row = rows[0]
+            if (
+                len(row) != 3
+                or type(row[0]) is not int
+                or row[0] < 1
+                or type(row[2]) is not int
+                or row[2] < 1
+            ):
+                raise RuntimeError("mailbox repository storage corruption")
+            state = MailboxStateSnapshot(
+                scope=MailboxScope(
+                    workspace_id=authority.workspace_id,
+                    owner_user_id=authority.owner_user_id,
+                    mailbox_id=authority.mailbox_id,
+                    source_generation=row[0],
+                    provider=authority.provider,
+                    provider_account_identity=authority.provider_account_identity,
+                ),
+                bootstrap_state=BootstrapState(row[1]),
+                row_version=row[2],
+            )
+            if inserted == 1:
+                getattr(connection, "commit")()
+                outcome = CurrentStateInitializationOutcome.CREATED
+            else:
+                getattr(connection, "rollback")()
+                outcome = CurrentStateInitializationOutcome.EXISTING
+            return CurrentStateInitializationResult(outcome, state)
+        except Exception:
+            getattr(connection, "rollback")()
+            raise
+        finally:
+            if cursor is not None:
+                getattr(cursor, "close")()
             getattr(connection, "close")()
 
     def read_cursor(self, scope: MailboxScope, scope_key: str) -> SyncCursor | None:
