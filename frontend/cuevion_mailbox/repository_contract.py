@@ -61,6 +61,12 @@ class DeltaCommitOutcome(str, Enum):
     NOT_FOUND = "not_found"
 
 
+class CurrentStateInitializationOutcome(str, Enum):
+    CREATED = "created"
+    EXISTING = "existing"
+    CONFLICT = "conflict"
+
+
 def derive_locator_digest(value: str) -> str:
     if type(value) is not str or not value:
         raise ValueError("invalid mailbox locator")
@@ -129,6 +135,37 @@ class MailboxScope:
             != self.provider_account_identity.casefold()
         ):
             raise ValueError("invalid mailbox scope")
+
+
+@dataclass(frozen=True, slots=True)
+class MailboxStateSnapshot:
+    scope: MailboxScope
+    bootstrap_state: BootstrapState
+    row_version: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.scope) is not MailboxScope
+            or type(self.bootstrap_state) is not BootstrapState
+            or type(self.row_version) is not int
+            or self.row_version < 1
+        ):
+            raise ValueError("invalid mailbox state snapshot")
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentStateInitializationResult:
+    outcome: CurrentStateInitializationOutcome
+    state: MailboxStateSnapshot | None
+
+    def __post_init__(self) -> None:
+        if type(self.outcome) is not CurrentStateInitializationOutcome:
+            raise ValueError("invalid mailbox state initialization result")
+        if self.outcome is CurrentStateInitializationOutcome.CONFLICT:
+            if self.state is not None:
+                raise ValueError("invalid mailbox state initialization result")
+        elif type(self.state) is not MailboxStateSnapshot:
+            raise ValueError("invalid mailbox state initialization result")
 
 
 @dataclass(frozen=True, slots=True)
@@ -433,6 +470,13 @@ class OutboxEvent:
 class MailboxReaderRepository(Protocol):
     """Read-only durable mailbox boundary for cache/UI consumers."""
 
+    def resolve_current_state(
+        self,
+        authority: MailboxReadAuthority,
+    ) -> MailboxStateSnapshot | None:
+        """Resolve exact authenticated current state including CAS row version."""
+        ...
+
     def resolve_current_scope(
         self,
         authority: MailboxReadAuthority,
@@ -472,6 +516,15 @@ class MailboxRepository(MailboxReaderRepository, Protocol):
     mutation, insert the idempotent outbox rows, and advance the cursor before
     commit. A conflict or exception must publish none of those changes.
     """
+
+    def initialize_current_state(
+        self,
+        authority: MailboxReadAuthority,
+        *,
+        initialized_at_millis: int,
+    ) -> CurrentStateInitializationResult:
+        """Create generation 1 only when no safe current state already exists."""
+        ...
 
     def commit_provider_delta(
         self,
@@ -517,11 +570,14 @@ __all__ = (
     "BodyState",
     "BootstrapState",
     "CachedBody",
+    "CurrentStateInitializationOutcome",
+    "CurrentStateInitializationResult",
     "DeltaCommitOutcome",
     "derive_locator_digest",
     "MailboxProvider",
     "MailboxReadAuthority",
     "MailboxReaderRepository",
+    "MailboxStateSnapshot",
     "MailboxRepository",
     "MailboxScope",
     "MessageIdentity",
