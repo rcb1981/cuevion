@@ -1,0 +1,313 @@
+"""Pure Gmail durable delta planning.
+
+The planner turns already-projected Gmail MessageRecord values plus explicitly
+supplied current durable projections/cursor state into a validated
+ProviderDeltaCommit. It performs no I/O, reads no environment, generates no
+random values, and never infers deletion from a bounded Gmail snapshot.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+from dataclasses import replace
+
+from cuevion_mailbox.gmail_projection import derive_gmail_message_id
+from cuevion_mailbox.repository_contract import (
+    BodyState,
+    BootstrapState,
+    MailboxProvider,
+    MailboxScope,
+    MessageMutation,
+    MessageMutationKind,
+    MessageProjection,
+    MessageRecord,
+    OutboxEventType,
+    ProviderDeltaCommit,
+    SyncCursor,
+)
+
+
+_MAX_GMAIL_DELTA_MESSAGES = 100
+_GMAIL_SCOPE_KEY = "gmail-account"
+
+
+def _opaque_token(prefix: str, material: bytes) -> str:
+    token = base64.urlsafe_b64encode(
+        hashlib.sha256(material).digest()[:16]
+    ).decode("ascii").rstrip("=")
+    if len(token) != 22:
+        raise RuntimeError("invalid Gmail durable commit plan")
+    return prefix + token
+
+
+def derive_gmail_event_id(
+    scope: MailboxScope,
+    message_id: str,
+    resulting_row_version: int,
+    event_type: OutboxEventType,
+) -> str:
+    """Derive an idempotent outbox id for one resulting durable row version."""
+
+    if (
+        type(scope) is not MailboxScope
+        or scope.provider is not MailboxProvider.GOOGLE
+        or type(message_id) is not str
+        or len(message_id) != 26
+        or not message_id.startswith("mbm_")
+        or type(resulting_row_version) is not int
+        or resulting_row_version < 1
+        or type(event_type) is not OutboxEventType
+    ):
+        raise ValueError("invalid Gmail durable commit plan")
+    material = "\x1f".join(
+        (
+            scope.workspace_id,
+            scope.owner_user_id,
+            scope.mailbox_id,
+            str(scope.source_generation),
+            scope.provider.value,
+            scope.provider_account_identity,
+            message_id,
+            str(resulting_row_version),
+            event_type.value,
+        )
+    ).encode("utf-8", errors="strict")
+    return _opaque_token("mbe_", material)
+
+
+def _provider_message_id_from_record(
+    scope: MailboxScope,
+    record: MessageRecord,
+) -> str:
+    if type(record) is not MessageRecord:
+        raise ValueError("invalid Gmail durable commit plan")
+    record.validate_for(MailboxProvider.GOOGLE)
+    if record.body_state is not BodyState.NOT_CACHED:
+        raise ValueError("invalid Gmail durable commit plan")
+    provider_message_id = record.identity.provider_message_id
+    if type(provider_message_id) is not str or not provider_message_id:
+        raise ValueError("invalid Gmail durable commit plan")
+    if (
+        record.identity.message_id
+        != derive_gmail_message_id(scope, provider_message_id)
+    ):
+        raise ValueError("invalid Gmail durable commit plan")
+    return provider_message_id
+
+
+def _provider_message_id_from_projection(
+    scope: MailboxScope,
+    projection: MessageProjection,
+) -> str:
+    if type(projection) is not MessageProjection:
+        raise ValueError("invalid Gmail durable commit plan")
+    projection.validate_for(MailboxProvider.GOOGLE)
+    provider_message_id = projection.identity.provider_message_id
+    if type(provider_message_id) is not str or not provider_message_id:
+        raise ValueError("invalid Gmail durable commit plan")
+    if (
+        projection.identity.message_id
+        != derive_gmail_message_id(scope, provider_message_id)
+    ):
+        raise ValueError("invalid Gmail durable commit plan")
+    return provider_message_id
+
+
+def _current_projection_index(
+    scope: MailboxScope,
+    current_projections: list[MessageProjection] | tuple[MessageProjection, ...],
+) -> dict[str, MessageProjection]:
+    if (
+        type(current_projections) not in (list, tuple)
+        or len(current_projections) > _MAX_GMAIL_DELTA_MESSAGES
+    ):
+        raise ValueError("invalid Gmail durable commit plan")
+    result: dict[str, MessageProjection] = {}
+    for projection in current_projections:
+        provider_message_id = _provider_message_id_from_projection(
+            scope,
+            projection,
+        )
+        if provider_message_id in result:
+            raise ValueError("invalid Gmail durable commit plan")
+        result[provider_message_id] = projection
+    return result
+
+
+def _preserve_existing_body_state(
+    record: MessageRecord,
+    current: MessageProjection,
+) -> MessageRecord:
+    if current.provider_deleted:
+        return record
+    if record.body_state is not current.body_state:
+        return replace(record, body_state=current.body_state)
+    return record
+
+
+def _projection_matches_record(
+    projection: MessageProjection,
+    record: MessageRecord,
+) -> bool:
+    return (
+        projection.identity == record.identity
+        and projection.provider_thread_id == record.provider_thread_id
+        and projection.metadata_hash == record.metadata_hash
+        and projection.body_state is record.body_state
+        and projection.unread is record.unread
+        and projection.starred is record.starred
+        and projection.provider_deleted is False
+    )
+
+
+def plan_gmail_message_mutations(
+    scope: MailboxScope,
+    records: list[MessageRecord] | tuple[MessageRecord, ...],
+    current_projections: list[MessageProjection] | tuple[MessageProjection, ...],
+) -> tuple[MessageMutation, ...]:
+    """Plan bounded Gmail UPSERT mutations without inferring deletions."""
+
+    if (
+        type(scope) is not MailboxScope
+        or scope.provider is not MailboxProvider.GOOGLE
+        or type(records) not in (list, tuple)
+        or len(records) > _MAX_GMAIL_DELTA_MESSAGES
+    ):
+        raise ValueError("invalid Gmail durable commit plan")
+
+    current_by_provider_id = _current_projection_index(
+        scope,
+        current_projections,
+    )
+    seen_records: set[str] = set()
+    mutations: list[MessageMutation] = []
+
+    for record in records:
+        provider_message_id = _provider_message_id_from_record(scope, record)
+        if provider_message_id in seen_records:
+            raise ValueError("invalid Gmail durable commit plan")
+        seen_records.add(provider_message_id)
+
+        current = current_by_provider_id.get(provider_message_id)
+        if current is None:
+            resulting_row_version = 1
+            event_type = OutboxEventType.MESSAGE_ADDED
+            mutation = MessageMutation(
+                kind=MessageMutationKind.UPSERT,
+                identity=record.identity,
+                record=record,
+                expected_row_version=None,
+                event_id=derive_gmail_event_id(
+                    scope,
+                    record.identity.message_id,
+                    resulting_row_version,
+                    event_type,
+                ),
+                outbox_event_type=event_type,
+            )
+        else:
+            planned_record = _preserve_existing_body_state(record, current)
+            if _projection_matches_record(current, planned_record):
+                continue
+            resulting_row_version = current.row_version + 1
+            event_type = OutboxEventType.MESSAGE_CHANGED
+            mutation = MessageMutation(
+                kind=MessageMutationKind.UPSERT,
+                identity=planned_record.identity,
+                record=planned_record,
+                expected_row_version=current.row_version,
+                event_id=derive_gmail_event_id(
+                    scope,
+                    planned_record.identity.message_id,
+                    resulting_row_version,
+                    event_type,
+                ),
+                outbox_event_type=event_type,
+            )
+
+        mutation.validate_for(MailboxProvider.GOOGLE)
+        mutations.append(mutation)
+
+    return tuple(mutations)
+
+
+def _validate_cursor_transition(
+    current_cursor: SyncCursor | None,
+    next_cursor: SyncCursor,
+) -> int | None:
+    if (
+        type(next_cursor) is not SyncCursor
+        or next_cursor.provider is not MailboxProvider.GOOGLE
+        or next_cursor.scope_key != _GMAIL_SCOPE_KEY
+    ):
+        raise ValueError("invalid Gmail durable commit plan")
+
+    if current_cursor is None:
+        if next_cursor.row_version != 1:
+            raise ValueError("invalid Gmail durable commit plan")
+        return None
+
+    if (
+        type(current_cursor) is not SyncCursor
+        or current_cursor.provider is not MailboxProvider.GOOGLE
+        or current_cursor.scope_key != _GMAIL_SCOPE_KEY
+        or current_cursor.cursor_generation != next_cursor.cursor_generation
+        or next_cursor.row_version != current_cursor.row_version + 1
+        or int(next_cursor.gmail_history_id) < int(current_cursor.gmail_history_id)
+    ):
+        raise ValueError("invalid Gmail durable commit plan")
+    return current_cursor.row_version
+
+
+def build_gmail_delta_commit(
+    scope: MailboxScope,
+    records: list[MessageRecord] | tuple[MessageRecord, ...],
+    current_projections: list[MessageProjection] | tuple[MessageProjection, ...],
+    *,
+    expected_state_row_version: int,
+    current_cursor: SyncCursor | None,
+    next_cursor: SyncCursor,
+    committed_at_millis: int,
+    next_bootstrap_state: BootstrapState,
+) -> ProviderDeltaCommit:
+    """Build a validated Gmail ProviderDeltaCommit from explicit durable state."""
+
+    if (
+        type(scope) is not MailboxScope
+        or scope.provider is not MailboxProvider.GOOGLE
+        or type(expected_state_row_version) is not int
+        or expected_state_row_version < 1
+        or type(committed_at_millis) is not int
+        or committed_at_millis < 0
+        or type(next_bootstrap_state) is not BootstrapState
+    ):
+        raise ValueError("invalid Gmail durable commit plan")
+
+    expected_cursor_row_version = _validate_cursor_transition(
+        current_cursor,
+        next_cursor,
+    )
+    mutations = plan_gmail_message_mutations(
+        scope,
+        records,
+        current_projections,
+    )
+    return ProviderDeltaCommit(
+        scope=scope,
+        scope_key=_GMAIL_SCOPE_KEY,
+        expected_state_row_version=expected_state_row_version,
+        expected_cursor_row_version=expected_cursor_row_version,
+        expected_cursor_generation=next_cursor.cursor_generation,
+        committed_at_millis=committed_at_millis,
+        mutations=mutations,
+        next_cursor=next_cursor,
+        next_bootstrap_state=next_bootstrap_state,
+    )
+
+
+__all__ = (
+    "build_gmail_delta_commit",
+    "derive_gmail_event_id",
+    "plan_gmail_message_mutations",
+)
