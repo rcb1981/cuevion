@@ -1,47 +1,73 @@
 # Mailbox PostgreSQL runtime activation requirements
 
-## Status: active-read foundation, no route activation
+## Status: Preview active-read proven; Preview active-write runtime only
 
-The durable mailbox schema and PostgreSQL adapter exist, but mailbox runtime
-activation is not authorized by this slice.
+The durable mailbox schema, PostgreSQL adapter, Gmail durable projection, and
+pure Gmail delta planner exist.
 
-`cuevion_mailbox.runtime` lives outside `api/` and exposes no route. Its only
-supported modes are:
+`cuevion_mailbox.runtime` lives outside `api/`. Its supported modes are:
 
 - `disabled` — the default when the mode variable is absent;
-- `shadow` — explicit construction for controlled repository validation.
+- `shadow` — explicit reader/writer construction for controlled validation;
+- `active_read` — Preview-only reader construction;
+- `active_write` — Preview-only reader/writer construction.
 
-There is intentionally no `active` mode.
+Both active modes are rejected when `VERCEL_ENV=production`.
+
+The existing Gmail fetch route has a bounded Preview-only `active_read` hook.
+That hook proves durable scope/message reads but does not make the durable cache
+the user-visible response authority. The existing Gmail provider fetch remains
+authoritative.
+
+No existing Gmail or Custom IMAP route calls the active writer.
 
 ## Configuration boundary
 
-Shadow mode requires all of the following caller-supplied values:
+Shadow mode requires:
 
 - `CUEVION_MAILBOX_POSTGRES_MODE=shadow`
 - `VERCEL_ENV=production|preview`
 - `CUEVION_MAILBOX_READER_DATABASE_URL`
 - `CUEVION_MAILBOX_WRITER_DATABASE_URL`
 
-The two URLs must:
+Preview active-read requires:
+
+- `CUEVION_MAILBOX_POSTGRES_MODE=active_read`
+- `VERCEL_ENV=preview`
+- `CUEVION_MAILBOX_READER_DATABASE_URL`
+
+Preview active-write requires:
+
+- `CUEVION_MAILBOX_POSTGRES_MODE=active_write`
+- `VERCEL_ENV=preview`
+- `CUEVION_MAILBOX_READER_DATABASE_URL`
+- `CUEVION_MAILBOX_WRITER_DATABASE_URL`
+
+Database URLs must:
 
 - use `postgresql://`;
 - contain non-empty credentials;
 - require `sslmode=require` and `channel_binding=require`;
 - use a pooled Neon endpoint;
-- target the same endpoint and database;
-- bind to the exact environment-specific mailbox reader/writer role names.
+- bind to the exact environment-specific mailbox role;
+- for reader/writer pairs, target the same endpoint and database.
 
 Production role names are:
 
 - `cuevion_production_mailbox_reader_v1`
 - `cuevion_production_mailbox_writer_v1`
 
-Preview must use separately provisioned Preview roles and credentials. Production
-credentials must never be copied into Preview.
+Preview role names are:
+
+- `cuevion_preview_mailbox_reader_v1`
+- `cuevion_preview_mailbox_writer_v1`
+
+Preview and Production credentials remain separate. Production credentials must
+never be copied into Preview.
 
 ## Runtime connection boundary
 
-A shadow connection must prove:
+Every runtime connection must prove:
 
 - `autocommit=False`;
 - TLS is in use;
@@ -54,37 +80,42 @@ queries run.
 Database URLs are parser-controlled redacted objects and must not be logged,
 rendered, serialized, pickled, returned from APIs, or added to exception text.
 
-## Activation blockers
+## Active-write validation gate
 
-Before any existing Gmail or Custom IMAP route can read from or write to this
-repository, all of the following require a separate reviewed change:
+`active_write` only makes the already restricted Preview writer repository
+constructible. It does not authorize a provider route write by itself.
 
-1. create dedicated Preview mailbox reader/writer roles with the same proven
-   least-privilege matrix as Production;
-2. provision independent strong credentials for Preview and Production through
-   a secret-aware path;
-3. install encrypted environment variables in the matching Vercel environments;
-4. prove pooled connections using the real roles, including TLS, current user,
-   database binding and read-only reader behavior;
-5. prove transaction rollback, CAS conflict handling, source-generation
-   isolation and outbox lease/reclaim behavior through the actual adapter;
-6. add a separately reviewed read activation state — satisfied by the
-   Preview-only `active_read` foundation, but not enabled on a route by this slice;
-7. cut over one bounded read path first, with immediate fail-closed fallback or
-   rollback;
-8. only then move provider delta writes;
-9. only after provider writes are stable, activate outbox-to-Priority
+Before any existing Gmail route may write a provider delta:
+
+1. deploy the exact reviewed Preview head;
+2. explicitly set Preview mode to `active_write`;
+3. prove the real restricted Preview writer connection over pooled TLS;
+4. against synthetic Preview-only mailbox state, commit one bounded
+   `ProviderDeltaCommit` transaction;
+5. read the committed cursor/message back through the restricted Preview reader;
+6. verify the expected outbox row exists without consuming it;
+7. clean up the synthetic Preview data and any temporary proof endpoint;
+8. keep Production mode unable to parse `active_write`;
+9. add Gmail route writes only in a separate reviewed change.
+
+A bounded Gmail snapshot must never infer deletions solely from absence. Durable
+body state must not be downgraded by a metadata refresh. Cursor and message
+writes remain CAS-protected and source-generation scoped.
+
+## Remaining activation sequence
+
+After the synthetic active-write proof succeeds:
+
+1. add a separately reviewed Preview-only Gmail provider-write hook;
+2. keep the existing provider response authoritative while durable writes are
+   observed;
+3. prove repeated refreshes are idempotent and conflicts fail closed;
+4. introduce provider delta/history-based synchronization;
+5. only after provider writes are stable, activate outbox-to-Priority
    consumption;
-10. remove browser/local snapshot authority only after the server cache is proven
-    complete enough for the intended UX.
+6. only after the server cache is sufficiently complete, promote cache-first
+   server reads to user-visible authority;
+7. activate Production through a separate explicit gate.
 
 No route may interpret the mere presence of mailbox database environment
-variables as activation. Activation must require the explicit reviewed mode.
-
-## Current provider behavior
-
-Until the bounded route-read gate is completed, Gmail and Custom IMAP continue
-using their existing paths. `active_read` may construct only the Preview reader;
-this foundation does not call it from any existing route and cannot alter
-provider cursors, inbox UI authority, Priority behavior, or user-visible mailbox
-state.
+variables as activation. Activation always requires the explicit reviewed mode.
