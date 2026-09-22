@@ -14,6 +14,7 @@ from dataclasses import replace
 
 from cuevion_mailbox.gmail_projection import derive_gmail_message_id
 from cuevion_mailbox.repository_contract import (
+    BodyState,
     BootstrapState,
     MailboxProvider,
     MailboxScope,
@@ -82,6 +83,8 @@ def _provider_message_id_from_record(
     if type(record) is not MessageRecord:
         raise ValueError("invalid Gmail durable commit plan")
     record.validate_for(MailboxProvider.GOOGLE)
+    if record.body_state is not BodyState.NOT_CACHED:
+        raise ValueError("invalid Gmail durable commit plan")
     provider_message_id = record.identity.provider_message_id
     if type(provider_message_id) is not str or not provider_message_id:
         raise ValueError("invalid Gmail durable commit plan")
