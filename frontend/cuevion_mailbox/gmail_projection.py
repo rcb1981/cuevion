@@ -45,9 +45,16 @@ def _required_text(value: object, *, maximum_bytes: int | None = None) -> str:
 
 
 def _optional_text(value: object, *, maximum_bytes: int | None = None) -> str | None:
-    if value is None:
+    if value is None or value == "":
         return None
     return _required_text(value, maximum_bytes=maximum_bytes)
+
+
+def _string(value: object) -> str:
+    if type(value) is not str:
+        raise ValueError("invalid Gmail durable projection")
+    _utf8_size(value)
+    return value
 
 
 def _header_tuple(value: object) -> tuple[str, ...]:
@@ -210,8 +217,8 @@ def project_gmail_snapshot_message(
         maximum_bytes=_MAX_SENDER_ADDRESS_BYTES,
     )
     sender_display = _optional_text(source.get("senderDisplay"))
-    subject = _required_text(source.get("subject"))
-    snippet = _required_text(source.get("snippet"))
+    subject = _string(source.get("subject"))
+    snippet = _string(source.get("snippet"))
     unread = source.get("unread")
     starred = source.get("flagged")
     if type(unread) is not bool or type(starred) is not bool:
