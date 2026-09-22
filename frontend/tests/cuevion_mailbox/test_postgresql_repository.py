@@ -7,9 +7,12 @@ from unittest.mock import patch
 
 from cuevion_mailbox import postgresql_repository as repository
 from cuevion_mailbox.repository_contract import (
+    BootstrapState,
     CurrentStateInitializationOutcome,
     MailboxProvider,
     MailboxReadAuthority,
+    MailboxScope,
+    MailboxStateSnapshot,
     OutboxStorageScope,
 )
 from cuevion_mailbox.role_policy import build_mailbox_role_plan
@@ -98,7 +101,7 @@ class MailboxReadAuthorityTests(unittest.TestCase):
 
 
 class PostgreSQLMailboxReaderDelegationTests(unittest.TestCase):
-    def test_current_scope_lookup_delegates_to_repository(self):
+    def test_current_state_lookup_delegates_and_scope_is_derived_from_state(self):
         authority = MailboxReadAuthority(
             workspace_id="wsp_" + ("a" * 22),
             owner_user_id="usr_" + ("b" * 22),
@@ -106,15 +109,28 @@ class PostgreSQLMailboxReaderDelegationTests(unittest.TestCase):
             provider=MailboxProvider.GOOGLE,
             provider_account_identity="verified@gmail.com",
         )
-        expected = object()
+        state = MailboxStateSnapshot(
+            scope=MailboxScope(
+                workspace_id=authority.workspace_id,
+                owner_user_id=authority.owner_user_id,
+                mailbox_id=authority.mailbox_id,
+                source_generation=4,
+                provider=authority.provider,
+                provider_account_identity=authority.provider_account_identity,
+            ),
+            bootstrap_state=BootstrapState.RECENT_READY,
+            row_version=8,
+        )
         reader = repository.PostgreSQLMailboxReaderRepository(lambda: None)
         with patch.object(
             repository.PostgreSQLMailboxRepository,
-            "resolve_current_scope",
-            return_value=expected,
+            "resolve_current_state",
+            return_value=state,
         ) as resolve:
-            self.assertIs(reader.resolve_current_scope(authority), expected)
-        resolve.assert_called_once_with(authority)
+            self.assertIs(reader.resolve_current_state(authority), state)
+            self.assertIs(reader.resolve_current_scope(authority), state.scope)
+        self.assertEqual(resolve.call_count, 2)
+        resolve.assert_called_with(authority)
 
 
 class _BootstrapCursor:
@@ -275,6 +291,7 @@ class PostgreSQLMailboxAdapterTests(unittest.TestCase):
     def test_reader_public_surface_exposes_no_write_methods(self):
         reader = repository.PostgreSQLMailboxReaderRepository
         for forbidden in (
+            "initialize_current_state",
             "commit_provider_delta",
             "claim_outbox_batch",
             "mark_outbox_processed",
