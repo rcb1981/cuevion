@@ -2,7 +2,7 @@
 
 This module is deliberately outside `api/`: importing or deploying it exposes no
 route. `active_read` is Preview-only and constructs a reader repository only.
-Provider writes and production activation remain unavailable in this slice.
+Active writes are Preview-only; Production activation remains unavailable.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ class MailboxRuntimeMode(str, Enum):
     DISABLED = "disabled"
     SHADOW = "shadow"
     ACTIVE_READ = "active_read"
+    ACTIVE_WRITE = "active_write"
 
 
 class MailboxRuntimeConfigurationError(RuntimeError):
@@ -279,6 +280,8 @@ def parse_mailbox_runtime_configuration(
         environment.get(_WRITER_URL_VARIABLE),
         expected_role=expected_writer,
     )
+    if mode is MailboxRuntimeMode.ACTIVE_WRITE and vercel_environment != "preview":
+        _configuration_error()
     if (
         reader.hostname != writer.hostname
         or reader.database != writer.database
@@ -409,6 +412,46 @@ def build_active_read_mailbox_reader(
 
 
 @dataclass(frozen=True, slots=True)
+class ActiveWriteMailboxRepositories:
+    reader: PostgreSQLMailboxReaderRepository
+    writer: PostgreSQLMailboxRepository
+
+
+def build_active_write_mailbox_repositories(
+    environment: Mapping[str, str],
+    *,
+    connect: _ConnectCallable | None = None,
+) -> ActiveWriteMailboxRepositories:
+    """Compose Preview-only active reader/writer repositories."""
+
+    config = parse_mailbox_runtime_configuration(environment)
+    if config.mode is not MailboxRuntimeMode.ACTIVE_WRITE:
+        raise MailboxRuntimeDisabledError()
+    reader_url = config.reader_database_url
+    writer_url = config.writer_database_url
+    if (
+        type(reader_url) is not MailboxDatabaseUrl
+        or type(writer_url) is not MailboxDatabaseUrl
+    ):
+        _configuration_error()
+
+    reader_factory = MailboxConnectionFactory(
+        reader_url,
+        read_only=True,
+        connect=connect,
+    )
+    writer_factory = MailboxConnectionFactory(
+        writer_url,
+        read_only=False,
+        connect=connect,
+    )
+    return ActiveWriteMailboxRepositories(
+        PostgreSQLMailboxReaderRepository(reader_factory),
+        PostgreSQLMailboxRepository(writer_factory),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class ShadowMailboxRepositories:
     reader: PostgreSQLMailboxReaderRepository
     writer: PostgreSQLMailboxRepository
@@ -452,6 +495,7 @@ def build_shadow_mailbox_repositories(
 
 
 __all__ = (
+    "ActiveWriteMailboxRepositories",
     "MailboxConnectionFactory",
     "MailboxDatabaseUrl",
     "MailboxRuntimeConfiguration",
@@ -460,6 +504,7 @@ __all__ = (
     "MailboxRuntimeMode",
     "ShadowMailboxRepositories",
     "build_active_read_mailbox_reader",
+    "build_active_write_mailbox_repositories",
     "build_shadow_mailbox_repositories",
     "parse_mailbox_runtime_configuration",
 )
