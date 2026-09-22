@@ -3,6 +3,7 @@
 import ast
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from cuevion_mailbox import postgresql_repository as repository
 from cuevion_mailbox.repository_contract import (
@@ -93,6 +94,26 @@ class MailboxReadAuthorityTests(unittest.TestCase):
                 provider=MailboxProvider.GOOGLE,
                 provider_account_identity="x",
             )
+
+
+class PostgreSQLMailboxReaderDelegationTests(unittest.TestCase):
+    def test_current_scope_lookup_delegates_to_repository(self):
+        authority = MailboxReadAuthority(
+            workspace_id="wsp_" + ("a" * 22),
+            owner_user_id="usr_" + ("b" * 22),
+            mailbox_id="gmail-1",
+            provider=MailboxProvider.GOOGLE,
+            provider_account_identity="verified@gmail.com",
+        )
+        expected = object()
+        reader = repository.PostgreSQLMailboxReaderRepository(lambda: None)
+        with patch.object(
+            repository.PostgreSQLMailboxRepository,
+            "resolve_current_scope",
+            return_value=expected,
+        ) as resolve:
+            self.assertIs(reader.resolve_current_scope(authority), expected)
+        resolve.assert_called_once_with(authority)
 
 
 class PostgreSQLMailboxAdapterTests(unittest.TestCase):
