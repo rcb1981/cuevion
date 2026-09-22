@@ -194,9 +194,6 @@ class PreviewGmailDurableWriteTests(unittest.TestCase):
         self._run(_Repositories(first_reader, first_writer))
         first_commit = first_writer.commits[0]
         inserted = first_commit.mutations[0].record
-        current_projection = type(first_commit.mutations[0]).__module__
-        del current_projection
-
         from cuevion_mailbox.repository_contract import MessageProjection
 
         projection = MessageProjection(
@@ -319,6 +316,14 @@ class PreviewGmailDurableWriteTests(unittest.TestCase):
 
 
 class PreviewGmailDurableWriteStaticTests(unittest.TestCase):
+    def test_route_captures_history_before_snapshot_and_writes_after_snapshot(self):
+        gmail = _GMAIL_ROUTE.read_text(encoding="utf-8")
+        history_index = gmail.index("durable_history = read_gmail_account_history")
+        snapshot_index = gmail.index("snapshot_result = read_gmail_folder_snapshot")
+        write_index = gmail.index("durable_write = run_preview_gmail_durable_write")
+        self.assertLess(history_index, snapshot_index)
+        self.assertLess(snapshot_index, write_index)
+
     def test_route_hook_is_gmail_only(self):
         gmail = _GMAIL_ROUTE.read_text(encoding="utf-8")
         imap = _IMAP_ROUTE.read_text(encoding="utf-8")
