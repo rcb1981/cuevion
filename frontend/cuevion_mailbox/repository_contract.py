@@ -91,8 +91,11 @@ class MailboxReadAuthority:
             or not self.owner_user_id.startswith("usr_")
             or type(self.mailbox_id) is not str
             or not 1 <= len(self.mailbox_id.encode("utf-8")) <= 160
+            or type(self.provider) is not MailboxProvider
             or type(self.provider_account_identity) is not str
-            or not self.provider_account_identity
+            or not 3 <= len(
+                self.provider_account_identity.encode("utf-8")
+            ) <= 320
             or self.provider_account_identity
             != self.provider_account_identity.casefold()
         ):
