@@ -1,6 +1,6 @@
 # Mailbox PostgreSQL runtime activation requirements
 
-## Status: shadow wiring only
+## Status: active-read foundation, no route activation
 
 The durable mailbox schema and PostgreSQL adapter exist, but mailbox runtime
 activation is not authorized by this slice.
@@ -68,7 +68,8 @@ repository, all of the following require a separate reviewed change:
    database binding and read-only reader behavior;
 5. prove transaction rollback, CAS conflict handling, source-generation
    isolation and outbox lease/reclaim behavior through the actual adapter;
-6. add a separately reviewed `active` state;
+6. add a separately reviewed read activation state — satisfied by the
+   Preview-only `active_read` foundation, but not enabled on a route by this slice;
 7. cut over one bounded read path first, with immediate fail-closed fallback or
    rollback;
 8. only then move provider delta writes;
@@ -82,7 +83,8 @@ variables as activation. Activation must require the explicit reviewed mode.
 
 ## Current provider behavior
 
-Until those gates are completed, Gmail and Custom IMAP continue using their
-existing production paths. The durable mailbox repository may be instantiated
-only in explicit shadow validation and must not alter provider cursors, inbox UI
-authority, Priority behavior, or user-visible mailbox state.
+Until the bounded route-read gate is completed, Gmail and Custom IMAP continue
+using their existing paths. `active_read` may construct only the Preview reader;
+this foundation does not call it from any existing route and cannot alter
+provider cursors, inbox UI authority, Priority behavior, or user-visible mailbox
+state.
