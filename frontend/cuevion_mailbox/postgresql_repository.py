@@ -398,6 +398,48 @@ class PostgreSQLMailboxReaderRepository(MailboxReaderRepository):
         self,
         authority: MailboxReadAuthority,
     ) -> MailboxScope | None:
+        return self._delegate.resolve_current_scope(authority)
+
+    def read_cursor(self, scope: MailboxScope, scope_key: str) -> SyncCursor | None:
+        return self._delegate.read_cursor(scope, scope_key)
+
+    def list_messages(
+        self,
+        scope: MailboxScope,
+        *,
+        limit: int,
+        before_timestamp_millis: int | None = None,
+    ) -> Sequence[MessageProjection]:
+        return self._delegate.list_messages(
+            scope,
+            limit=limit,
+            before_timestamp_millis=before_timestamp_millis,
+        )
+
+    def read_cached_body(
+        self,
+        scope: MailboxScope,
+        message_id: str,
+    ) -> CachedBody | None:
+        return self._delegate.read_cached_body(scope, message_id)
+
+
+class PostgreSQLMailboxRepository(MailboxRepository):
+    __slots__ = ("_connection_factory",)
+
+    def __init__(self, connection_factory: PostgreSQLConnectionFactory) -> None:
+        object.__setattr__(self, "_connection_factory", connection_factory)
+
+    def _connection(self) -> object:
+        connection = self._connection_factory()
+        if getattr(connection, "autocommit", None) is not False:
+            raise RuntimeError("mailbox repository requires transactional connection")
+        return connection
+
+    def resolve_current_scope(
+        self,
+        authority: MailboxReadAuthority,
+    ) -> MailboxScope | None:
         if type(authority) is not MailboxReadAuthority:
             raise ValueError("invalid mailbox read authority")
         connection = self._connection()
@@ -439,42 +481,6 @@ class PostgreSQLMailboxReaderRepository(MailboxReaderRepository):
                 getattr(cursor, "close")()
             getattr(connection, "rollback")()
             getattr(connection, "close")()
-
-    def read_cursor(self, scope: MailboxScope, scope_key: str) -> SyncCursor | None:
-        return self._delegate.read_cursor(scope, scope_key)
-
-    def list_messages(
-        self,
-        scope: MailboxScope,
-        *,
-        limit: int,
-        before_timestamp_millis: int | None = None,
-    ) -> Sequence[MessageProjection]:
-        return self._delegate.list_messages(
-            scope,
-            limit=limit,
-            before_timestamp_millis=before_timestamp_millis,
-        )
-
-    def read_cached_body(
-        self,
-        scope: MailboxScope,
-        message_id: str,
-    ) -> CachedBody | None:
-        return self._delegate.read_cached_body(scope, message_id)
-
-
-class PostgreSQLMailboxRepository(MailboxRepository):
-    __slots__ = ("_connection_factory",)
-
-    def __init__(self, connection_factory: PostgreSQLConnectionFactory) -> None:
-        object.__setattr__(self, "_connection_factory", connection_factory)
-
-    def _connection(self) -> object:
-        connection = self._connection_factory()
-        if getattr(connection, "autocommit", None) is not False:
-            raise RuntimeError("mailbox repository requires transactional connection")
-        return connection
 
     def read_cursor(self, scope: MailboxScope, scope_key: str) -> SyncCursor | None:
         digest = derive_locator_digest(scope_key)
