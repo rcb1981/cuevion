@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from cuevion_mailbox import postgresql_repository as repository
 from cuevion_mailbox.repository_contract import (
+    CurrentStateInitializationOutcome,
     MailboxProvider,
     MailboxReadAuthority,
     OutboxStorageScope,
@@ -116,6 +117,134 @@ class PostgreSQLMailboxReaderDelegationTests(unittest.TestCase):
         resolve.assert_called_once_with(authority)
 
 
+class _BootstrapCursor:
+    def __init__(self, insert_rowcount: int, state_rows: list[tuple[object, ...]]) -> None:
+        self.insert_rowcount = insert_rowcount
+        self.state_rows = state_rows
+        self.rowcount = -1
+        self.executions: list[tuple[str, tuple[object, ...]]] = []
+        self.closed = False
+
+    def execute(self, sql: str, parameters: tuple[object, ...]) -> None:
+        self.executions.append((sql, parameters))
+        self.rowcount = (
+            self.insert_rowcount
+            if sql == repository._INSERT_INITIAL_STATE_SQL
+            else len(self.state_rows)
+        )
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        if not self.executions or self.executions[-1][0] != repository._SELECT_CURRENT_STATE_SQL:
+            raise AssertionError("unexpected fetch")
+        return list(self.state_rows)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _BootstrapConnection:
+    autocommit = False
+
+    def __init__(self, cursor: _BootstrapCursor) -> None:
+        self._cursor = cursor
+        self.commits = 0
+        self.rollbacks = 0
+        self.closed = False
+
+    def cursor(self) -> _BootstrapCursor:
+        return self._cursor
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class PostgreSQLMailboxCurrentStateBootstrapTests(unittest.TestCase):
+    def _authority(self) -> MailboxReadAuthority:
+        return MailboxReadAuthority(
+            workspace_id="wsp_" + ("a" * 22),
+            owner_user_id="usr_" + ("b" * 22),
+            mailbox_id="gmail-1",
+            provider=MailboxProvider.GOOGLE,
+            provider_account_identity="verified@gmail.com",
+        )
+
+    def _repository(
+        self,
+        *,
+        insert_rowcount: int,
+        state_rows: list[tuple[object, ...]],
+    ):
+        cursor = _BootstrapCursor(insert_rowcount, state_rows)
+        connection = _BootstrapConnection(cursor)
+        adapter = repository.PostgreSQLMailboxRepository(lambda: connection)
+        return adapter, connection, cursor
+
+    def test_initial_state_create_is_generation_one_and_commits_once(self):
+        adapter, connection, cursor = self._repository(
+            insert_rowcount=1,
+            state_rows=[(1, "not_started", 1)],
+        )
+        result = adapter.initialize_current_state(
+            self._authority(),
+            initialized_at_millis=1_790_110_000_000,
+        )
+        self.assertIs(result.outcome, CurrentStateInitializationOutcome.CREATED)
+        self.assertEqual(result.state.scope.source_generation, 1)
+        self.assertEqual(result.state.row_version, 1)
+        self.assertEqual(connection.commits, 1)
+        self.assertEqual(connection.rollbacks, 0)
+        self.assertTrue(connection.closed)
+        self.assertTrue(cursor.closed)
+        self.assertEqual(
+            [sql for sql, _ in cursor.executions],
+            [
+                repository._INSERT_INITIAL_STATE_SQL,
+                repository._SELECT_CURRENT_STATE_SQL,
+            ],
+        )
+
+    def test_exact_existing_state_is_idempotent_and_rolls_back_read_transaction(self):
+        adapter, connection, _cursor = self._repository(
+            insert_rowcount=0,
+            state_rows=[(3, "recent_ready", 7)],
+        )
+        result = adapter.initialize_current_state(
+            self._authority(),
+            initialized_at_millis=1_790_110_000_000,
+        )
+        self.assertIs(result.outcome, CurrentStateInitializationOutcome.EXISTING)
+        self.assertEqual(result.state.scope.source_generation, 3)
+        self.assertEqual(result.state.row_version, 7)
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+
+    def test_conflicting_or_unsafe_existing_state_fails_closed(self):
+        adapter, connection, _cursor = self._repository(
+            insert_rowcount=0,
+            state_rows=[],
+        )
+        result = adapter.initialize_current_state(
+            self._authority(),
+            initialized_at_millis=1_790_110_000_000,
+        )
+        self.assertIs(result.outcome, CurrentStateInitializationOutcome.CONFLICT)
+        self.assertIsNone(result.state)
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+
+    def test_initial_state_sql_is_generation_one_current_and_idempotent(self):
+        normalized = " ".join(repository._INSERT_INITIAL_STATE_SQL.casefold().split())
+        self.assertIn("source_generation", normalized)
+        self.assertIn("1, true, 'not_started'", normalized)
+        self.assertIn("on conflict do nothing", normalized)
+
+
 class PostgreSQLMailboxAdapterTests(unittest.TestCase):
     def test_module_has_no_runtime_configuration_or_network_boundary(self):
         source = _ADAPTER.read_text(encoding="utf-8")
@@ -155,7 +284,7 @@ class PostgreSQLMailboxAdapterTests(unittest.TestCase):
 
     def test_read_sql_reproves_current_mailbox_authority(self):
         for sql in (
-            repository._SELECT_CURRENT_SCOPE_SQL,
+            repository._SELECT_CURRENT_STATE_SQL,
             repository._SELECT_CURSOR_SQL,
             repository._LIST_MESSAGES_SQL,
             repository._SELECT_BODY_SQL,
@@ -166,7 +295,7 @@ class PostgreSQLMailboxAdapterTests(unittest.TestCase):
 
     def test_current_scope_lookup_is_exact_and_current_only(self):
         normalized = " ".join(
-            repository._SELECT_CURRENT_SCOPE_SQL.casefold().split()
+            repository._SELECT_CURRENT_STATE_SQL.casefold().split()
         )
         for required in (
             "workspace_id = %s",
@@ -206,7 +335,8 @@ class PostgreSQLMailboxAdapterTests(unittest.TestCase):
 
     def test_fixed_sql_placeholder_inventory(self):
         expected = {
-            "_SELECT_CURRENT_SCOPE_SQL": 5,
+            "_SELECT_CURRENT_STATE_SQL": 5,
+            "_INSERT_INITIAL_STATE_SQL": 7,
             "_SELECT_CURSOR_SQL": 7,
             "_LIST_MESSAGES_SQL": 9,
             "_SELECT_BODY_SQL": 7,
