@@ -5,7 +5,11 @@ from pathlib import Path
 import unittest
 
 from cuevion_mailbox import postgresql_repository as repository
-from cuevion_mailbox.repository_contract import OutboxStorageScope
+from cuevion_mailbox.repository_contract import (
+    MailboxProvider,
+    MailboxReadAuthority,
+    OutboxStorageScope,
+)
 from cuevion_mailbox.role_policy import build_mailbox_role_plan
 
 
@@ -68,6 +72,27 @@ class MailboxRolePolicyTests(unittest.TestCase):
             build_mailbox_role_plan("reader", "reader")
         with self.assertRaises(ValueError):
             build_mailbox_role_plan("Reader-Unsafe", "writer_safe")
+
+
+class MailboxReadAuthorityTests(unittest.TestCase):
+    def test_authority_rejects_non_enum_provider_and_out_of_bounds_identity(self):
+        common = {
+            "workspace_id": "wsp_" + ("a" * 22),
+            "owner_user_id": "usr_" + ("b" * 22),
+            "mailbox_id": "mailbox-1",
+        }
+        with self.assertRaises(ValueError):
+            MailboxReadAuthority(
+                **common,
+                provider="google",  # type: ignore[arg-type]
+                provider_account_identity="user@example.com",
+            )
+        with self.assertRaises(ValueError):
+            MailboxReadAuthority(
+                **common,
+                provider=MailboxProvider.GOOGLE,
+                provider_account_identity="x",
+            )
 
 
 class PostgreSQLMailboxAdapterTests(unittest.TestCase):
