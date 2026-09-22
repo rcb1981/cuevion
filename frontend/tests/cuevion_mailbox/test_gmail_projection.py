@@ -99,6 +99,15 @@ class GmailDurableProjectionTests(unittest.TestCase):
         self.assertIs(record.body_state, BodyState.NOT_CACHED)
         self.assertRegex(record.metadata_hash, r"^[0-9a-f]{64}$")
 
+    def test_empty_display_name_and_snippet_are_valid(self):
+        record = project_gmail_snapshot_message(
+            _scope(),
+            _preview(),
+            _source(senderDisplay="", snippet=""),
+        )
+        self.assertIsNone(record.sender_display)
+        self.assertEqual(record.snippet, "")
+
     def test_label_order_does_not_change_metadata_hash(self):
         first = project_gmail_snapshot_message(
             _scope(),
