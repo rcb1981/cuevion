@@ -17,6 +17,7 @@ from cuevion_mailbox.repository_contract import (
     BackfillState,
     BodyState,
     BootstrapState,
+    BoundedMessageProjectionInventory,
     CachedBody,
     CurrentStateInitializationOutcome,
     CurrentStateInitializationResult,
@@ -129,6 +130,39 @@ WHERE m.workspace_id = %s
   AND m.provider_deleted = false
   AND (%s::timestamptz IS NULL OR m.provider_timestamp < %s::timestamptz)
 ORDER BY m.provider_timestamp DESC, m.message_id DESC
+LIMIT %s
+""".strip()
+
+_SELECT_ACTIVE_MESSAGE_INVENTORY_SQL = """
+SELECT
+    m.message_id,
+    m.provider_message_id,
+    m.provider_folder,
+    m.imap_uid_validity,
+    m.imap_uid,
+    m.provider_thread_id,
+    m.metadata_hash,
+    m.body_state,
+    m.unread,
+    m.starred,
+    m.provider_deleted,
+    m.row_version
+FROM cuevion_mailbox.mailbox_messages AS m
+JOIN cuevion_mailbox.mailbox_sync_state AS s
+  ON s.workspace_id = m.workspace_id
+ AND s.owner_user_id = m.owner_user_id
+ AND s.mailbox_id = m.mailbox_id
+ AND s.source_generation = m.source_generation
+ AND s.provider = m.provider
+WHERE m.workspace_id = %s
+  AND m.owner_user_id = %s
+  AND m.mailbox_id = %s
+  AND m.source_generation = %s
+  AND m.provider = %s
+  AND s.provider_account_identity = %s
+  AND s.is_current = true
+  AND m.provider_deleted = false
+ORDER BY m.message_id
 LIMIT %s
 """.strip()
 
@@ -500,6 +534,17 @@ class PostgreSQLMailboxReaderRepository(MailboxReaderRepository):
             before_timestamp_millis=before_timestamp_millis,
         )
 
+    def read_active_message_inventory(
+        self,
+        scope: MailboxScope,
+        *,
+        limit: int,
+    ) -> BoundedMessageProjectionInventory:
+        return self._delegate.read_active_message_inventory(
+            scope,
+            limit=limit,
+        )
+
     def read_messages_by_provider_message_ids(
         self,
         scope: MailboxScope,
@@ -758,6 +803,66 @@ class PostgreSQLMailboxRepository(MailboxRepository):
                 projection.validate_for(scope.provider)
                 result.append(projection)
             return tuple(result)
+        finally:
+            if cursor is not None:
+                getattr(cursor, "close")()
+            getattr(connection, "rollback")()
+            getattr(connection, "close")()
+
+    def read_active_message_inventory(
+        self,
+        scope: MailboxScope,
+        *,
+        limit: int,
+    ) -> BoundedMessageProjectionInventory:
+        if (
+            type(scope) is not MailboxScope
+            or type(limit) is not int
+            or isinstance(limit, bool)
+            or not 1 <= limit <= 100
+        ):
+            raise ValueError("invalid active message inventory request")
+
+        connection = self._connection()
+        cursor = None
+        try:
+            cursor = getattr(connection, "cursor")()
+            getattr(cursor, "execute")(
+                _SELECT_ACTIVE_MESSAGE_INVENTORY_SQL,
+                _scope_params(scope)
+                + (scope.provider_account_identity, limit + 1),
+            )
+            rows = _fetchall(cursor)
+            if len(rows) > limit:
+                return BoundedMessageProjectionInventory((), True)
+
+            projections: list[MessageProjection] = []
+            for row in rows:
+                if len(row) != 12 or row[10] is not False:
+                    raise RuntimeError("mailbox repository storage corruption")
+                identity = MessageIdentity(
+                    message_id=row[0],
+                    provider_message_id=row[1],
+                    provider_folder=row[2],
+                    imap_uid_validity=row[3],
+                    imap_uid=row[4],
+                )
+                projection = MessageProjection(
+                    identity=identity,
+                    provider_thread_id=row[5],
+                    metadata_hash=row[6],
+                    body_state=BodyState(row[7]),
+                    unread=row[8],
+                    starred=row[9],
+                    provider_deleted=row[10],
+                    row_version=row[11],
+                )
+                projection.validate_for(scope.provider)
+                projections.append(projection)
+            return BoundedMessageProjectionInventory(
+                tuple(projections),
+                False,
+            )
         finally:
             if cursor is not None:
                 getattr(cursor, "close")()
