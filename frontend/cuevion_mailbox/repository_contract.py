@@ -354,6 +354,7 @@ class BoundedMessageProjectionInventory:
     def __post_init__(self) -> None:
         if (
             type(self.projections) is not tuple
+            or any(type(projection) is not MessageProjection for projection in self.projections)
             or type(self.overflow) is not bool
             or (self.overflow and self.projections)
         ):
