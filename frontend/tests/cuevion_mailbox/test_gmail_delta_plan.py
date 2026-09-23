@@ -9,9 +9,11 @@ import unittest
 from cuevion_mailbox.gmail_delta_plan import (
     build_gmail_delta_commit,
     build_gmail_history_delta_commit,
+    build_gmail_stale_recovery_commit,
     derive_gmail_event_id,
     plan_gmail_history_message_mutations,
     plan_gmail_message_mutations,
+    plan_gmail_stale_recovery_message_mutations,
 )
 from cuevion_mailbox.gmail_projection import project_gmail_snapshot_message
 from cuevion_mailbox.repository_contract import (
@@ -427,6 +429,171 @@ class GmailHistoryMutationPlanTests(unittest.TestCase):
                 expected_state_row_version=1,
                 current_cursor=None,  # type: ignore[arg-type]
                 next_cursor=_cursor(history_id="125", row_version=1),
+                committed_at_millis=1790100000000,
+                next_bootstrap_state=BootstrapState.RECENT_READY,
+            )
+
+
+class GmailStaleRecoveryPlanTests(unittest.TestCase):
+    def test_complete_recovery_reconciles_updates_resurrection_and_absence(self):
+        changed_old = _record("gmail-message-changed", subject="Old subject")
+        changed_new = _record("gmail-message-changed", subject="New subject")
+        resurrected = _record("gmail-message-resurrected")
+        absent = _record("gmail-message-absent")
+        terminal = _record("gmail-message-terminal")
+
+        changed_current = _projection(
+            changed_old,
+            row_version=4,
+            body_state=BodyState.CACHED,
+        )
+        resurrected_tombstone = _projection(
+            resurrected,
+            row_version=8,
+            provider_deleted=True,
+            body_state=BodyState.STALE,
+        )
+        mutations = plan_gmail_stale_recovery_message_mutations(
+            _scope(),
+            [
+                "gmail-message-changed",
+                "gmail-message-resurrected",
+                "gmail-message-terminal",
+            ],
+            [changed_new, resurrected],
+            ["gmail-message-terminal"],
+            [
+                changed_current,
+                _projection(absent, row_version=2),
+                _projection(terminal, row_version=6),
+            ],
+            [
+                changed_current,
+                resurrected_tombstone,
+            ],
+        )
+
+        self.assertEqual(len(mutations), 4)
+        self.assertIs(mutations[0].kind, MessageMutationKind.UPSERT)
+        self.assertIs(
+            mutations[0].outbox_event_type,
+            OutboxEventType.MESSAGE_CHANGED,
+        )
+        self.assertEqual(mutations[0].expected_row_version, 4)
+        self.assertIs(mutations[0].record.body_state, BodyState.CACHED)
+
+        self.assertIs(mutations[1].kind, MessageMutationKind.UPSERT)
+        self.assertEqual(mutations[1].expected_row_version, 8)
+        self.assertIs(
+            mutations[1].outbox_event_type,
+            OutboxEventType.MESSAGE_CHANGED,
+        )
+
+        self.assertIs(mutations[2].kind, MessageMutationKind.TOMBSTONE)
+        self.assertEqual(
+            mutations[2].identity.provider_message_id,
+            "gmail-message-absent",
+        )
+        self.assertEqual(mutations[2].expected_row_version, 2)
+
+        self.assertIs(mutations[3].kind, MessageMutationKind.TOMBSTONE)
+        self.assertEqual(
+            mutations[3].identity.provider_message_id,
+            "gmail-message-terminal",
+        )
+        self.assertEqual(mutations[3].expected_row_version, 6)
+
+    def test_provider_inventory_must_be_exactly_accounted_for(self):
+        record = _record("gmail-message-1")
+        with self.assertRaises(ValueError):
+            plan_gmail_stale_recovery_message_mutations(
+                _scope(),
+                ["gmail-message-1", "gmail-message-2"],
+                [record],
+                [],
+                [],
+                [],
+            )
+        with self.assertRaises(ValueError):
+            plan_gmail_stale_recovery_message_mutations(
+                _scope(),
+                ["gmail-message-1"],
+                [record],
+                ["gmail-message-1"],
+                [],
+                [],
+            )
+
+    def test_active_inventory_and_exact_record_rows_fail_closed_on_bad_shapes(self):
+        record = _record("gmail-message-1")
+        unrelated = _record("gmail-message-unrelated")
+
+        with self.assertRaises(ValueError):
+            plan_gmail_stale_recovery_message_mutations(
+                _scope(),
+                ["gmail-message-1"],
+                [record],
+                [],
+                [_projection(record, provider_deleted=True)],
+                [],
+            )
+
+        with self.assertRaises(ValueError):
+            plan_gmail_stale_recovery_message_mutations(
+                _scope(),
+                ["gmail-message-1"],
+                [record],
+                [],
+                [],
+                [_projection(unrelated)],
+            )
+
+    def test_recovery_bounds_fail_closed_before_planning(self):
+        too_many = [f"gmail-message-{index}" for index in range(101)]
+        with self.assertRaises(ValueError):
+            plan_gmail_stale_recovery_message_mutations(
+                _scope(),
+                too_many,
+                [],
+                too_many,
+                [],
+                [],
+            )
+
+    def test_stale_recovery_commit_resets_cursor_only_after_complete_plan(self):
+        previous_cursor = _cursor(history_id="100", row_version=3)
+        next_cursor = _cursor(history_id="500", row_version=4)
+
+        commit = build_gmail_stale_recovery_commit(
+            _scope(),
+            [],
+            [],
+            [],
+            [],
+            [],
+            expected_state_row_version=11,
+            current_cursor=previous_cursor,
+            next_cursor=next_cursor,
+            committed_at_millis=1790100000000,
+            next_bootstrap_state=BootstrapState.RECENT_READY,
+        )
+
+        self.assertEqual(commit.mutations, ())
+        self.assertEqual(commit.expected_state_row_version, 11)
+        self.assertEqual(commit.expected_cursor_row_version, 3)
+        self.assertEqual(commit.next_cursor.gmail_history_id, "500")
+
+        with self.assertRaises(ValueError):
+            build_gmail_stale_recovery_commit(
+                _scope(),
+                [],
+                [],
+                [],
+                [],
+                [],
+                expected_state_row_version=11,
+                current_cursor=previous_cursor,
+                next_cursor=_cursor(history_id="99", row_version=4),
                 committed_at_millis=1790100000000,
                 next_bootstrap_state=BootstrapState.RECENT_READY,
             )
