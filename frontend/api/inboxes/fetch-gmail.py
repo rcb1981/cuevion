@@ -366,6 +366,7 @@ class handler(BaseHTTPRequestHandler):
                     provider_message_id=provider_message_id,
                     request_with_one_refresh=_request_with_one_refresh,
                     focus_preferences=focus_preferences,
+                    require_inbound_semantics=False,
                     message_parser=message_from_bytes,
                 )
                 return PreviewGmailHistoryRecovery(
