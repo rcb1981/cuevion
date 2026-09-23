@@ -424,6 +424,9 @@ def build_gmail_history_delta_commit(
 ) -> ProviderDeltaCommit:
     """Build one CAS-protected commit for a complete exact Gmail History window."""
 
+    if type(current_cursor) is not SyncCursor:
+        raise ValueError("invalid Gmail durable history plan")
+
     base = build_gmail_delta_commit(
         scope,
         records,
