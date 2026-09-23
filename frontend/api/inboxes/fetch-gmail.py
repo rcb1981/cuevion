@@ -81,6 +81,7 @@ from cuevion_mailbox.preview_active_write import (
     preview_active_write_enabled,
     run_preview_gmail_durable_write,
     run_preview_gmail_history_sync,
+    run_preview_gmail_stale_recovery,
 )
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -353,6 +354,8 @@ class handler(BaseHTTPRequestHandler):
             )
 
         durable_history = None
+        stale_recovery_history = None
+        stale_recovery = None
         history_sync = None
         if preview_active_write_enabled(os.environ):
             member = resolution.get("memberAuthority")
@@ -414,6 +417,48 @@ class handler(BaseHTTPRequestHandler):
                         "cuevion_mailbox_active_write gmail bootstrap_history_"
                         + durable_history.status
                     )
+            elif (
+                history_sync is not None
+                and history_sync.status == "full_sync_required"
+            ):
+                stale_recovery_history = read_gmail_account_history(
+                    context,
+                    request_with_one_refresh=_request_with_one_refresh,
+                )
+                context = stale_recovery_history.context
+                if (
+                    stale_recovery_history.status != "ok"
+                    or stale_recovery_history.history_id is None
+                ):
+                    print(
+                        "cuevion_mailbox_active_write gmail stale_recovery_history_"
+                        + stale_recovery_history.status
+                    )
+                else:
+                    try:
+                        stale_recovery = run_preview_gmail_stale_recovery(
+                            environment=os.environ,
+                            workspace_id=getattr(member, "workspace_id"),
+                            owner_user_id=getattr(member, "user_id"),
+                            mailbox_id=context["mailbox_id"],
+                            mailbox_account_identity=context["mailbox_email"],
+                            context=context,
+                            fresh_history_id=stale_recovery_history.history_id,
+                            request_with_one_refresh=_request_with_one_refresh,
+                            recover_exact_message=recover_history_message,
+                            committed_at_millis=time.time_ns() // 1_000_000,
+                        )
+                    except Exception:
+                        print(
+                            "cuevion_mailbox_active_write gmail "
+                            "stale_recovery_failed"
+                        )
+                    else:
+                        context = stale_recovery.context
+                        print(
+                            "cuevion_mailbox_active_write gmail stale_recovery_"
+                            + stale_recovery.status
+                        )
 
         snapshot_result = read_gmail_folder_snapshot(
             context,
