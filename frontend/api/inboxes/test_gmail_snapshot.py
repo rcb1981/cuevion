@@ -881,6 +881,12 @@ class GmailExactMessageRecoveryTests(unittest.TestCase):
             ["/messages/exact-message-1?format=raw"],
         )
         self.assertFalse(any(path.startswith("/messages?") for path in paths))
+        assert recovered.preview is not None
+        self.assertEqual(recovered.preview["providerMessageId"], message_id)
+        self.assertEqual(
+            recovered.preview["providerThreadId"],
+            "gmail-authoritative-thread",
+        )
         assert recovered.candidate_source is not None
         self.assertEqual(
             recovered.candidate_source["providerThreadId"],
@@ -917,6 +923,7 @@ class GmailExactMessageRecoveryTests(unittest.TestCase):
                     recovered.result,
                     gmail_snapshot.GmailExactMessageRecoveryResult.RETRY,
                 )
+                self.assertIsNone(recovered.preview)
                 self.assertIsNone(recovered.candidate_source)
                 request.assert_called_once()
 
@@ -942,6 +949,7 @@ class GmailExactMessageRecoveryTests(unittest.TestCase):
                     recovered.result,
                     gmail_snapshot.GmailExactMessageRecoveryResult.TERMINAL_ABSENT,
                 )
+                self.assertIsNone(recovered.preview)
                 self.assertIsNone(recovered.candidate_source)
 
         not_found = gmail_snapshot.recover_exact_gmail_inbox_message(
