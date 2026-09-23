@@ -133,6 +133,31 @@ class PostgreSQLMailboxReaderDelegationTests(unittest.TestCase):
         resolve.assert_called_with(authority)
 
 
+    def test_exact_provider_message_lookup_delegates(self):
+        scope = MailboxScope(
+            workspace_id="wsp_" + ("a" * 22),
+            owner_user_id="usr_" + ("b" * 22),
+            mailbox_id="gmail-1",
+            source_generation=1,
+            provider=MailboxProvider.GOOGLE,
+            provider_account_identity="verified@gmail.com",
+        )
+        reader = repository.PostgreSQLMailboxReaderRepository(lambda: None)
+        with patch.object(
+            repository.PostgreSQLMailboxRepository,
+            "read_messages_by_provider_message_ids",
+            return_value=(),
+        ) as exact_read:
+            self.assertEqual(
+                reader.read_messages_by_provider_message_ids(
+                    scope,
+                    ["gmail-message-1"],
+                ),
+                (),
+            )
+        exact_read.assert_called_once_with(scope, ["gmail-message-1"])
+
+
 class _BootstrapCursor:
     def __init__(self, insert_rowcount: int, state_rows: list[tuple[object, ...]]) -> None:
         self.insert_rowcount = insert_rowcount
@@ -261,6 +286,126 @@ class PostgreSQLMailboxCurrentStateBootstrapTests(unittest.TestCase):
         self.assertIn("on conflict do nothing", normalized)
 
 
+class _ExactLookupCursor:
+    def __init__(self, rows: list[tuple[object, ...]]) -> None:
+        self.rows = rows
+        self.executions: list[tuple[str, tuple[object, ...]]] = []
+        self.closed = False
+
+    def execute(self, sql: str, parameters: tuple[object, ...]) -> None:
+        self.executions.append((sql, parameters))
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return list(self.rows)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _ExactLookupConnection:
+    autocommit = False
+
+    def __init__(self, cursor: _ExactLookupCursor) -> None:
+        self._cursor = cursor
+        self.rollbacks = 0
+        self.closed = False
+
+    def cursor(self) -> _ExactLookupCursor:
+        return self._cursor
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class PostgreSQLMailboxExactProviderLookupTests(unittest.TestCase):
+    def _scope(self, provider=MailboxProvider.GOOGLE):
+        return MailboxScope(
+            workspace_id="wsp_" + ("a" * 22),
+            owner_user_id="usr_" + ("b" * 22),
+            mailbox_id="gmail-1",
+            source_generation=1,
+            provider=provider,
+            provider_account_identity="verified@gmail.com",
+        )
+
+    def test_exact_lookup_returns_active_and_tombstoned_rows(self):
+        rows = [
+            (
+                "mbm_" + ("a" * 22),
+                "gmail-message-1",
+                "Inbox",
+                None,
+                None,
+                "thread-1",
+                "1" * 64,
+                "cached",
+                True,
+                False,
+                False,
+                4,
+            ),
+            (
+                "mbm_" + ("b" * 22),
+                "gmail-message-2",
+                "Inbox",
+                None,
+                None,
+                "thread-2",
+                "2" * 64,
+                "stale",
+                False,
+                False,
+                True,
+                7,
+            ),
+        ]
+        cursor = _ExactLookupCursor(rows)
+        connection = _ExactLookupConnection(cursor)
+        adapter = repository.PostgreSQLMailboxRepository(lambda: connection)
+
+        projections = adapter.read_messages_by_provider_message_ids(
+            self._scope(),
+            ["gmail-message-1", "gmail-message-2"],
+        )
+
+        self.assertEqual(len(projections), 2)
+        self.assertFalse(projections[0].provider_deleted)
+        self.assertTrue(projections[1].provider_deleted)
+        self.assertEqual(projections[1].row_version, 7)
+        self.assertEqual(len(cursor.executions), 1)
+        sql, parameters = cursor.executions[0]
+        self.assertEqual(sql, repository._SELECT_MESSAGES_BY_PROVIDER_IDS_SQL)
+        self.assertEqual(
+            parameters[-1],
+            ["gmail-message-1", "gmail-message-2"],
+        )
+        self.assertEqual(connection.rollbacks, 1)
+        self.assertTrue(connection.closed)
+        self.assertTrue(cursor.closed)
+
+    def test_exact_lookup_empty_is_connection_free_and_invalid_shapes_fail(self):
+        adapter = repository.PostgreSQLMailboxRepository(
+            lambda: (_ for _ in ()).throw(AssertionError("connection opened"))
+        )
+        self.assertEqual(
+            adapter.read_messages_by_provider_message_ids(self._scope(), []),
+            (),
+        )
+        with self.assertRaises(ValueError):
+            adapter.read_messages_by_provider_message_ids(
+                self._scope(),
+                ["gmail-message-1", "gmail-message-1"],
+            )
+        with self.assertRaises(ValueError):
+            adapter.read_messages_by_provider_message_ids(
+                self._scope(MailboxProvider.CUSTOM_IMAP),
+                ["gmail-message-1"],
+            )
+
+
 class PostgreSQLMailboxAdapterTests(unittest.TestCase):
     def test_module_has_no_runtime_configuration_or_network_boundary(self):
         source = _ADAPTER.read_text(encoding="utf-8")
@@ -304,6 +449,7 @@ class PostgreSQLMailboxAdapterTests(unittest.TestCase):
             repository._SELECT_CURRENT_STATE_SQL,
             repository._SELECT_CURSOR_SQL,
             repository._LIST_MESSAGES_SQL,
+            repository._SELECT_MESSAGES_BY_PROVIDER_IDS_SQL,
             repository._SELECT_BODY_SQL,
         ):
             normalized = " ".join(sql.casefold().split())
@@ -356,6 +502,7 @@ class PostgreSQLMailboxAdapterTests(unittest.TestCase):
             "_INSERT_INITIAL_STATE_SQL": 7,
             "_SELECT_CURSOR_SQL": 7,
             "_LIST_MESSAGES_SQL": 9,
+            "_SELECT_MESSAGES_BY_PROVIDER_IDS_SQL": 7,
             "_SELECT_BODY_SQL": 7,
             "_LOCK_STATE_SQL": 4,
             "_LOCK_CURSOR_SQL": 6,

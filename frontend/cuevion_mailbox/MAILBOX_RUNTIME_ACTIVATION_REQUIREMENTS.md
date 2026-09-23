@@ -1,6 +1,6 @@
 # Mailbox PostgreSQL runtime activation requirements
 
-## Status: Preview active-read proven; bounded Preview Gmail write hook; pure Gmail History delta discovery
+## Status: Preview active-read proven; bounded Gmail History discovery and mutation foundation
 
 The durable mailbox schema, PostgreSQL adapter, Gmail durable projection, and
 pure Gmail delta planner exist.
@@ -32,6 +32,22 @@ This write remains observational: any durable write/history failure emits only a
 fixed Preview diagnostic and does not replace or mutate the existing Gmail API
 response. Custom IMAP has no active writer hook. Production cannot parse
 `active_write`.
+
+A bounded Gmail History delta reader exists for the next activation stage. It
+starts from an already-persisted account-level `historyId`, follows bounded
+History pagination, deduplicates affected provider message IDs, returns a
+candidate next cursor only after the final page, and maps stale History 404 to
+`full_sync_required`. Provider failures, invalid payloads, repeated page
+tokens, and configured bounds fail closed without a next cursor.
+
+The History mutation foundation now adds an exact durable lookup by Gmail
+provider message ID, including already-tombstoned rows, so History planning
+never depends on only the newest visible cache window. A pure mutation planner
+can combine exact recovered records with provider-verified Inbox absences into
+one CAS-protected delta. Recovered records become bounded upserts; only
+explicitly provider-verified absences may become tombstones. Unknown absences
+and rows already tombstoned are no-ops. These History helpers still perform no
+route activation.
 
 ## Configuration boundary
 
@@ -120,7 +136,7 @@ provider snapshot.
 After the bounded Preview Gmail write hook is proven:
 
 1. keep Preview on `active_read` except during explicit write validation;
-2. wire the bounded Gmail History delta reader into Preview `active_write`;
+2. wire the bounded Gmail History delta reader and exact mutation foundation into Preview `active_write`;
 3. recover every affected provider message exactly before one CAS-protected
    durable commit, using explicit provider absence to plan tombstones;
 4. treat stale Gmail History 404 as a full-snapshot/bootstrap recovery path and

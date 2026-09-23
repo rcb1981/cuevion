@@ -232,6 +232,108 @@ def plan_gmail_message_mutations(
     return tuple(mutations)
 
 
+def _validated_absent_provider_message_ids(
+    values: list[str] | tuple[str, ...],
+) -> tuple[str, ...]:
+    if type(values) not in (list, tuple) or len(values) > _MAX_GMAIL_DELTA_MESSAGES:
+        raise ValueError("invalid Gmail durable history plan")
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if type(value) is not str or not value:
+            raise ValueError("invalid Gmail durable history plan")
+        try:
+            encoded = value.encode("utf-8", errors="strict")
+        except UnicodeError:
+            raise ValueError("invalid Gmail durable history plan") from None
+        if not 1 <= len(encoded) <= 1_024 or value in seen:
+            raise ValueError("invalid Gmail durable history plan")
+        seen.add(value)
+        result.append(value)
+    return tuple(result)
+
+
+def plan_gmail_history_message_mutations(
+    scope: MailboxScope,
+    records: list[MessageRecord] | tuple[MessageRecord, ...],
+    verified_absent_provider_message_ids: list[str] | tuple[str, ...],
+    current_projections: list[MessageProjection] | tuple[MessageProjection, ...],
+) -> tuple[MessageMutation, ...]:
+    """Plan exact History upserts and provider-verified Inbox tombstones.
+
+    Absence is actionable only when the caller explicitly supplies a provider
+    message id after an exact provider read established that the message is no
+    longer in the tracked Inbox. Missing rows that were never durable are a
+    no-op. Already-tombstoned rows are also a no-op.
+    """
+
+    if (
+        type(scope) is not MailboxScope
+        or scope.provider is not MailboxProvider.GOOGLE
+        or type(records) not in (list, tuple)
+        or len(records) > _MAX_GMAIL_DELTA_MESSAGES
+    ):
+        raise ValueError("invalid Gmail durable history plan")
+
+    absent = _validated_absent_provider_message_ids(
+        verified_absent_provider_message_ids
+    )
+    record_ids: list[str] = []
+    seen_record_ids: set[str] = set()
+    for record in records:
+        provider_message_id = _provider_message_id_from_record(scope, record)
+        if provider_message_id in seen_record_ids:
+            raise ValueError("invalid Gmail durable history plan")
+        seen_record_ids.add(provider_message_id)
+        record_ids.append(provider_message_id)
+
+    absent_set = set(absent)
+    affected_ids = seen_record_ids | absent_set
+    if (
+        seen_record_ids.intersection(absent_set)
+        or len(affected_ids) > _MAX_GMAIL_DELTA_MESSAGES
+    ):
+        raise ValueError("invalid Gmail durable history plan")
+
+    current_by_provider_id = _current_projection_index(
+        scope,
+        current_projections,
+    )
+    if not set(current_by_provider_id).issubset(affected_ids):
+        raise ValueError("invalid Gmail durable history plan")
+
+    mutations = list(
+        plan_gmail_message_mutations(
+            scope,
+            records,
+            current_projections,
+        )
+    )
+    for provider_message_id in absent:
+        current = current_by_provider_id.get(provider_message_id)
+        if current is None or current.provider_deleted:
+            continue
+        resulting_row_version = current.row_version + 1
+        event_type = OutboxEventType.MESSAGE_DELETED
+        mutation = MessageMutation(
+            kind=MessageMutationKind.TOMBSTONE,
+            identity=current.identity,
+            record=None,
+            expected_row_version=current.row_version,
+            event_id=derive_gmail_event_id(
+                scope,
+                current.identity.message_id,
+                resulting_row_version,
+                event_type,
+            ),
+            outbox_event_type=event_type,
+        )
+        mutation.validate_for(MailboxProvider.GOOGLE)
+        mutations.append(mutation)
+
+    return tuple(mutations)
+
+
 def _validate_cursor_transition(
     current_cursor: SyncCursor | None,
     next_cursor: SyncCursor,
@@ -306,8 +408,58 @@ def build_gmail_delta_commit(
     )
 
 
+
+
+def build_gmail_history_delta_commit(
+    scope: MailboxScope,
+    records: list[MessageRecord] | tuple[MessageRecord, ...],
+    verified_absent_provider_message_ids: list[str] | tuple[str, ...],
+    current_projections: list[MessageProjection] | tuple[MessageProjection, ...],
+    *,
+    expected_state_row_version: int,
+    current_cursor: SyncCursor,
+    next_cursor: SyncCursor,
+    committed_at_millis: int,
+    next_bootstrap_state: BootstrapState,
+) -> ProviderDeltaCommit:
+    """Build one CAS-protected commit for a complete exact Gmail History window."""
+
+    if type(current_cursor) is not SyncCursor:
+        raise ValueError("invalid Gmail durable history plan")
+
+    base = build_gmail_delta_commit(
+        scope,
+        records,
+        current_projections,
+        expected_state_row_version=expected_state_row_version,
+        current_cursor=current_cursor,
+        next_cursor=next_cursor,
+        committed_at_millis=committed_at_millis,
+        next_bootstrap_state=next_bootstrap_state,
+    )
+    mutations = plan_gmail_history_message_mutations(
+        scope,
+        records,
+        verified_absent_provider_message_ids,
+        current_projections,
+    )
+    return ProviderDeltaCommit(
+        scope=base.scope,
+        scope_key=base.scope_key,
+        expected_state_row_version=base.expected_state_row_version,
+        expected_cursor_row_version=base.expected_cursor_row_version,
+        expected_cursor_generation=base.expected_cursor_generation,
+        committed_at_millis=base.committed_at_millis,
+        mutations=mutations,
+        next_cursor=base.next_cursor,
+        next_bootstrap_state=base.next_bootstrap_state,
+    )
+
+
 __all__ = (
     "build_gmail_delta_commit",
+    "build_gmail_history_delta_commit",
     "derive_gmail_event_id",
+    "plan_gmail_history_message_mutations",
     "plan_gmail_message_mutations",
 )
