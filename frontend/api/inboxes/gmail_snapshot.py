@@ -174,6 +174,7 @@ class GmailExactMessageRecoveryResult(str, Enum):
 class GmailExactMessageRecovery:
     result: GmailExactMessageRecoveryResult
     context: dict
+    preview: dict | None = None
     candidate_source: dict | None = None
 
 
@@ -448,6 +449,7 @@ def recover_exact_gmail_inbox_message(
     provider_message_id: str,
     request_with_one_refresh: GmailRequestWithOneRefresh,
     focus_preferences: dict | None = None,
+    require_inbound_semantics: bool = True,
     message_parser=message_from_bytes,
 ) -> GmailExactMessageRecovery:
     """Fetch one exact Gmail message and produce its canonical source shape."""
@@ -457,6 +459,7 @@ def recover_exact_gmail_inbox_message(
         not isinstance(context, dict)
         or not valid_identifier(provider_message_id)
         or not callable(request_with_one_refresh)
+        or type(require_inbound_semantics) is not bool
         or not callable(message_parser)
     ):
         return GmailExactMessageRecovery(retry, context)
@@ -499,7 +502,10 @@ def recover_exact_gmail_inbox_message(
         return GmailExactMessageRecovery(retry, next_context)
     if (
         "INBOX" not in raw_labels
-        or _INBOX_EXCLUDED_LABELS.intersection(raw_labels)
+        or (
+            require_inbound_semantics
+            and _INBOX_EXCLUDED_LABELS.intersection(raw_labels)
+        )
     ):
         return GmailExactMessageRecovery(
             GmailExactMessageRecoveryResult.TERMINAL_ABSENT,
@@ -518,10 +524,11 @@ def recover_exact_gmail_inbox_message(
     )
     if parsed is None:
         return GmailExactMessageRecovery(retry, next_context)
-    _preview, candidate_source = parsed
+    preview, candidate_source = parsed
     return GmailExactMessageRecovery(
         GmailExactMessageRecoveryResult.RECOVERED,
         next_context,
+        preview,
         candidate_source,
     )
 

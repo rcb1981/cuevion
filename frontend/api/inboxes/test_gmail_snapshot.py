@@ -881,6 +881,12 @@ class GmailExactMessageRecoveryTests(unittest.TestCase):
             ["/messages/exact-message-1?format=raw"],
         )
         self.assertFalse(any(path.startswith("/messages?") for path in paths))
+        assert recovered.preview is not None
+        self.assertEqual(recovered.preview["providerMessageId"], message_id)
+        self.assertEqual(
+            recovered.preview["providerThreadId"],
+            "gmail-authoritative-thread",
+        )
         assert recovered.candidate_source is not None
         self.assertEqual(
             recovered.candidate_source["providerThreadId"],
@@ -917,6 +923,7 @@ class GmailExactMessageRecoveryTests(unittest.TestCase):
                     recovered.result,
                     gmail_snapshot.GmailExactMessageRecoveryResult.RETRY,
                 )
+                self.assertIsNone(recovered.preview)
                 self.assertIsNone(recovered.candidate_source)
                 request.assert_called_once()
 
@@ -942,6 +949,7 @@ class GmailExactMessageRecoveryTests(unittest.TestCase):
                     recovered.result,
                     gmail_snapshot.GmailExactMessageRecoveryResult.TERMINAL_ABSENT,
                 )
+                self.assertIsNone(recovered.preview)
                 self.assertIsNone(recovered.candidate_source)
 
         not_found = gmail_snapshot.recover_exact_gmail_inbox_message(
@@ -977,6 +985,29 @@ class GmailExactMessageRecoveryTests(unittest.TestCase):
                 "/messages/exact-message-1?format=raw",
             )
         self.assertEqual(error, {"code": "gmail_message_not_found"})
+
+    def test_exact_helper_can_use_plain_inbox_membership_for_durable_history(self):
+        message_id = "exact-message-1"
+        detail = {
+            **gmail_detail(message_id),
+            "labelIds": ["INBOX", "SENT"],
+        }
+        recovered = gmail_snapshot.recover_exact_gmail_inbox_message(
+            gmail_context(),
+            provider_message_id=message_id,
+            request_with_one_refresh=Mock(
+                return_value=(detail, None, gmail_context(), None)
+            ),
+            require_inbound_semantics=False,
+        )
+        self.assertIs(
+            recovered.result,
+            gmail_snapshot.GmailExactMessageRecoveryResult.RECOVERED,
+        )
+        assert recovered.preview is not None
+        self.assertIn("INBOX", recovered.preview["labelIds"])
+        assert recovered.candidate_source is not None
+        self.assertIn("INBOX", recovered.candidate_source["labels"])
 
     def test_exact_helper_keeps_provider_and_refresh_failures_retryable(self):
         message_id = "exact-message-1"

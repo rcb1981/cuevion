@@ -77,8 +77,10 @@ from cuevion_mailbox.preview_active_read import (
     run_preview_gmail_active_read,
 )
 from cuevion_mailbox.preview_active_write import (
+    PreviewGmailHistoryRecovery,
     preview_active_write_enabled,
     run_preview_gmail_durable_write,
+    run_preview_gmail_history_sync,
 )
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -351,20 +353,67 @@ class handler(BaseHTTPRequestHandler):
             )
 
         durable_history = None
+        history_sync = None
         if preview_active_write_enabled(os.environ):
-            durable_history = read_gmail_account_history(
-                context,
-                request_with_one_refresh=_request_with_one_refresh,
-            )
-            context = durable_history.context
-            if (
-                durable_history.status != "ok"
-                or durable_history.history_id is None
-            ):
+            member = resolution.get("memberAuthority")
+
+            def recover_history_message(
+                recovery_context: dict,
+                provider_message_id: str,
+            ) -> PreviewGmailHistoryRecovery:
+                recovered = recover_exact_gmail_inbox_message(
+                    recovery_context,
+                    provider_message_id=provider_message_id,
+                    request_with_one_refresh=_request_with_one_refresh,
+                    focus_preferences=focus_preferences,
+                    require_inbound_semantics=False,
+                    message_parser=message_from_bytes,
+                )
+                return PreviewGmailHistoryRecovery(
+                    recovered.result.value,
+                    recovered.context,
+                    recovered.preview,
+                    recovered.candidate_source,
+                )
+
+            try:
+                history_sync = run_preview_gmail_history_sync(
+                    environment=os.environ,
+                    workspace_id=getattr(member, "workspace_id"),
+                    owner_user_id=getattr(member, "user_id"),
+                    mailbox_id=context["mailbox_id"],
+                    mailbox_account_identity=context["mailbox_email"],
+                    context=context,
+                    request_with_one_refresh=_request_with_one_refresh,
+                    recover_exact_message=recover_history_message,
+                    committed_at_millis=time.time_ns() // 1_000_000,
+                )
+            except Exception:
+                print("cuevion_mailbox_active_write gmail history_sync_failed")
+            else:
+                context = history_sync.context
                 print(
                     "cuevion_mailbox_active_write gmail history_"
-                    + durable_history.status
+                    + history_sync.status
                 )
+
+            if (
+                history_sync is not None
+                and history_sync.status == "bootstrap_required"
+            ):
+                durable_history = read_gmail_account_history(
+                    context,
+                    request_with_one_refresh=_request_with_one_refresh,
+                )
+                context = durable_history.context
+                if (
+                    durable_history.status != "ok"
+                    or durable_history.history_id is None
+                ):
+                    print(
+                        "cuevion_mailbox_active_write gmail bootstrap_history_"
+                        + durable_history.status
+                    )
 
         snapshot_result = read_gmail_folder_snapshot(
             context,
@@ -412,6 +461,8 @@ class handler(BaseHTTPRequestHandler):
 
         if (
             preview_active_write_enabled(os.environ)
+            and history_sync is not None
+            and history_sync.status == "bootstrap_required"
             and durable_history is not None
             and durable_history.status == "ok"
             and durable_history.history_id is not None
