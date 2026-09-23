@@ -138,7 +138,13 @@ class _InventoryConnection:
         self.closed = True
 
 
-def _row(record, *, row_version):
+def _row(
+    record,
+    *,
+    row_version,
+    body_state=None,
+):
+    durable_body_state = body_state or record.body_state
     return (
         record.identity.message_id,
         record.identity.provider_message_id,
@@ -147,7 +153,7 @@ def _row(record, *, row_version):
         None,
         record.provider_thread_id,
         record.metadata_hash,
-        record.body_state.value,
+        durable_body_state.value,
         record.unread,
         record.starred,
         False,
@@ -208,7 +214,11 @@ def _proof():
 
     inventory_cursor = _InventoryCursor(
         [
-            _row(changed_old, row_version=4),
+            _row(
+                changed_old,
+                row_version=4,
+                body_state=BodyState.CACHED,
+            ),
             _row(absent, row_version=2),
             _row(terminal, row_version=6),
         ]
