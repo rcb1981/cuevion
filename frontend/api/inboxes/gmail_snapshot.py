@@ -174,6 +174,7 @@ class GmailExactMessageRecoveryResult(str, Enum):
 class GmailExactMessageRecovery:
     result: GmailExactMessageRecoveryResult
     context: dict
+    preview: dict | None = None
     candidate_source: dict | None = None
 
 
@@ -518,10 +519,11 @@ def recover_exact_gmail_inbox_message(
     )
     if parsed is None:
         return GmailExactMessageRecovery(retry, next_context)
-    _preview, candidate_source = parsed
+    preview, candidate_source = parsed
     return GmailExactMessageRecovery(
         GmailExactMessageRecoveryResult.RECOVERED,
         next_context,
+        preview,
         candidate_source,
     )
 
