@@ -1,6 +1,6 @@
 # Mailbox PostgreSQL runtime activation requirements
 
-## Status: Preview active-read proven; bounded Preview Gmail write hook
+## Status: Preview active-read proven; bounded Preview Gmail write hook; pure Gmail History delta discovery
 
 The durable mailbox schema, PostgreSQL adapter, Gmail durable projection, and
 pure Gmail delta planner exist.
@@ -119,16 +119,17 @@ provider snapshot.
 
 After the bounded Preview Gmail write hook is proven:
 
-1. exercise the helper against the fixed Preview Neon branch with synthetic
-   state and verify create, repeat/no-op, cursor advance and CAS conflict paths;
-2. keep Preview on `active_read` except during explicit write validation;
-3. introduce Gmail History delta synchronization so removals/label changes do
-   not depend on full bounded snapshots;
-4. only after provider writes are stable, activate outbox-to-Priority
+1. keep Preview on `active_read` except during explicit write validation;
+2. wire the bounded Gmail History delta reader into Preview `active_write`;
+3. recover every affected provider message exactly before one CAS-protected
+   durable commit, using explicit provider absence to plan tombstones;
+4. treat stale Gmail History 404 as a full-snapshot/bootstrap recovery path and
+   never advance a cursor from a partial or overflowed History window;
+5. only after provider writes are stable, activate outbox-to-Priority
    consumption;
-5. only after the server cache is sufficiently complete, promote cache-first
+6. only after the server cache is sufficiently complete, promote cache-first
    server reads to user-visible authority;
-6. activate Production through a separate explicit gate.
+7. activate Production through a separate explicit gate.
 
 No route may interpret the mere presence of mailbox database environment
 variables as activation. Activation always requires the explicit reviewed mode.
