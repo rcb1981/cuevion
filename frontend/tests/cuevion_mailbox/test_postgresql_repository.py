@@ -133,6 +133,29 @@ class PostgreSQLMailboxReaderDelegationTests(unittest.TestCase):
         resolve.assert_called_with(authority)
 
 
+    def test_active_message_inventory_delegates(self):
+        scope = MailboxScope(
+            workspace_id="wsp_" + ("a" * 22),
+            owner_user_id="usr_" + ("b" * 22),
+            mailbox_id="gmail-1",
+            source_generation=1,
+            provider=MailboxProvider.GOOGLE,
+            provider_account_identity="verified@gmail.com",
+        )
+        reader = repository.PostgreSQLMailboxReaderRepository(lambda: None)
+        sentinel = object()
+        with patch.object(
+            repository.PostgreSQLMailboxRepository,
+            "read_active_message_inventory",
+            return_value=sentinel,
+        ) as inventory:
+            self.assertIs(
+                reader.read_active_message_inventory(scope, limit=100),
+                sentinel,
+            )
+        inventory.assert_called_once_with(scope, limit=100)
+
+
     def test_exact_provider_message_lookup_delegates(self):
         scope = MailboxScope(
             workspace_id="wsp_" + ("a" * 22),
@@ -406,6 +429,101 @@ class PostgreSQLMailboxExactProviderLookupTests(unittest.TestCase):
             )
 
 
+class PostgreSQLMailboxActiveInventoryTests(unittest.TestCase):
+    def _scope(self):
+        return MailboxScope(
+            workspace_id="wsp_" + ("a" * 22),
+            owner_user_id="usr_" + ("b" * 22),
+            mailbox_id="gmail-1",
+            source_generation=1,
+            provider=MailboxProvider.GOOGLE,
+            provider_account_identity="verified@gmail.com",
+        )
+
+    def _row(self, suffix: str, *, deleted: bool = False, row_version: int = 1):
+        return (
+            "mbm_" + (suffix * 22),
+            "gmail-message-" + suffix,
+            "Inbox",
+            None,
+            None,
+            "thread-" + suffix,
+            suffix * 64,
+            "cached",
+            True,
+            False,
+            deleted,
+            row_version,
+        )
+
+    def test_complete_active_inventory_returns_projections(self):
+        cursor = _ExactLookupCursor(
+            [
+                self._row("a", row_version=3),
+                self._row("b", row_version=5),
+            ]
+        )
+        connection = _ExactLookupConnection(cursor)
+        adapter = repository.PostgreSQLMailboxRepository(lambda: connection)
+
+        inventory = adapter.read_active_message_inventory(
+            self._scope(),
+            limit=100,
+        )
+
+        self.assertFalse(inventory.overflow)
+        self.assertEqual(len(inventory.projections), 2)
+        self.assertEqual(
+            [p.identity.provider_message_id for p in inventory.projections],
+            ["gmail-message-a", "gmail-message-b"],
+        )
+        self.assertTrue(all(not p.provider_deleted for p in inventory.projections))
+        sql, parameters = cursor.executions[0]
+        self.assertEqual(sql, repository._SELECT_ACTIVE_MESSAGE_INVENTORY_SQL)
+        self.assertEqual(parameters[-1], 101)
+        self.assertEqual(connection.rollbacks, 1)
+        self.assertTrue(connection.closed)
+        self.assertTrue(cursor.closed)
+
+    def test_limit_plus_one_row_reports_overflow_without_partial_projection(self):
+        cursor = _ExactLookupCursor(
+            [
+                self._row("a"),
+                self._row("b"),
+            ]
+        )
+        connection = _ExactLookupConnection(cursor)
+        adapter = repository.PostgreSQLMailboxRepository(lambda: connection)
+
+        inventory = adapter.read_active_message_inventory(
+            self._scope(),
+            limit=1,
+        )
+
+        self.assertTrue(inventory.overflow)
+        self.assertEqual(inventory.projections, ())
+
+    def test_deleted_storage_row_or_invalid_limit_fails_closed(self):
+        cursor = _ExactLookupCursor([self._row("a", deleted=True)])
+        connection = _ExactLookupConnection(cursor)
+        adapter = repository.PostgreSQLMailboxRepository(lambda: connection)
+        with self.assertRaises(RuntimeError):
+            adapter.read_active_message_inventory(self._scope(), limit=100)
+
+        for invalid in (0, 101, True):
+            with self.subTest(limit=invalid):
+                adapter = repository.PostgreSQLMailboxRepository(
+                    lambda: (_ for _ in ()).throw(
+                        AssertionError("connection opened")
+                    )
+                )
+                with self.assertRaises(ValueError):
+                    adapter.read_active_message_inventory(
+                        self._scope(),
+                        limit=invalid,
+                    )
+
+
 class PostgreSQLMailboxAdapterTests(unittest.TestCase):
     def test_module_has_no_runtime_configuration_or_network_boundary(self):
         source = _ADAPTER.read_text(encoding="utf-8")
@@ -449,6 +567,7 @@ class PostgreSQLMailboxAdapterTests(unittest.TestCase):
             repository._SELECT_CURRENT_STATE_SQL,
             repository._SELECT_CURSOR_SQL,
             repository._LIST_MESSAGES_SQL,
+            repository._SELECT_ACTIVE_MESSAGE_INVENTORY_SQL,
             repository._SELECT_MESSAGES_BY_PROVIDER_IDS_SQL,
             repository._SELECT_BODY_SQL,
         ):
@@ -502,6 +621,7 @@ class PostgreSQLMailboxAdapterTests(unittest.TestCase):
             "_INSERT_INITIAL_STATE_SQL": 7,
             "_SELECT_CURSOR_SQL": 7,
             "_LIST_MESSAGES_SQL": 9,
+            "_SELECT_ACTIVE_MESSAGE_INVENTORY_SQL": 7,
             "_SELECT_MESSAGES_BY_PROVIDER_IDS_SQL": 7,
             "_SELECT_BODY_SQL": 7,
             "_LOCK_STATE_SQL": 4,
