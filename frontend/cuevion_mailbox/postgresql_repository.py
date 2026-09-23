@@ -16,6 +16,7 @@ import psycopg
 from cuevion_mailbox.repository_contract import (
     BackfillState,
     BodyState,
+    BootstrapState,
     CachedBody,
     CurrentStateInitializationOutcome,
     CurrentStateInitializationResult,

@@ -1,6 +1,6 @@
 # Mailbox PostgreSQL runtime activation requirements
 
-## Status: Preview active-read proven; Preview active-write runtime only
+## Status: Preview active-read proven; bounded Preview Gmail write hook
 
 The durable mailbox schema, PostgreSQL adapter, Gmail durable projection, and
 pure Gmail delta planner exist.
@@ -19,7 +19,19 @@ That hook proves durable scope/message reads but does not make the durable cache
 the user-visible response authority. The existing Gmail provider fetch remains
 authoritative.
 
-No existing Gmail or Custom IMAP route calls the active writer.
+When `active_write` is explicitly enabled in Preview, the Gmail Inbox fetch
+route first captures an account-level Gmail `historyId` baseline from
+`/profile` and binds it to the authenticated mailbox identity. It then reads the
+provider Inbox snapshot. Only after that snapshot succeeds does the route
+bootstrap/read current durable state, project the accepted Inbox snapshot, plan
+a CAS-protected `ProviderDeltaCommit`, and write it through the restricted
+Preview writer. Capturing the history baseline first prevents changes occurring
+during the snapshot from being skipped by a later History delta.
+
+This write remains observational: any durable write/history failure emits only a
+fixed Preview diagnostic and does not replace or mutate the existing Gmail API
+response. Custom IMAP has no active writer hook. Production cannot parse
+`active_write`.
 
 ## Configuration boundary
 
@@ -80,42 +92,43 @@ queries run.
 Database URLs are parser-controlled redacted objects and must not be logged,
 rendered, serialized, pickled, returned from APIs, or added to exception text.
 
-## Active-write validation gate
+## Bounded Gmail write boundary
 
-`active_write` only makes the already restricted Preview writer repository
-constructible. It does not authorize a provider route write by itself.
+The Preview Gmail write hook must:
 
-Before any existing Gmail route may write a provider delta:
+1. request Gmail `/profile` through the existing one-refresh auth boundary
+   before starting the provider Inbox snapshot;
+2. require profile `emailAddress` to match the authenticated mailbox identity;
+3. require a canonical numeric account-level `historyId`;
+4. write nothing unless the subsequent provider Inbox snapshot succeeds;
+5. initialize generation 1 only when no safe current durable state exists;
+6. reuse exact current state/cursor/message projections when already present;
+7. project at most 100 accepted Inbox messages;
+8. never infer tombstones from absence in the bounded snapshot;
+9. preserve existing durable body state during metadata refreshes;
+10. commit messages, cursor, state advance and outbox rows transactionally;
+11. short-circuit an exact repeat with unchanged history and metadata;
+12. never consume the outbox in this route;
+13. never change the Gmail response authority or response payload.
 
-1. deploy the exact reviewed Preview head;
-2. explicitly set Preview mode to `active_write`;
-3. prove the real restricted Preview writer connection over pooled TLS;
-4. against synthetic Preview-only mailbox state, commit one bounded
-   `ProviderDeltaCommit` transaction;
-5. read the committed cursor/message back through the restricted Preview reader;
-6. verify the expected outbox row exists without consuming it;
-7. clean up the synthetic Preview data and any temporary proof endpoint;
-8. keep Production mode unable to parse `active_write`;
-9. add Gmail route writes only in a separate reviewed change.
-
-A bounded Gmail snapshot must never infer deletions solely from absence. Durable
-body state must not be downgraded by a metadata refresh. Cursor and message
-writes remain CAS-protected and source-generation scoped.
+Durable failures are intentionally observational in this first route hook:
+Preview logs a fixed non-sensitive marker and continues returning the successful
+provider snapshot.
 
 ## Remaining activation sequence
 
-After the synthetic active-write proof succeeds:
+After the bounded Preview Gmail write hook is proven:
 
-1. add a separately reviewed Preview-only Gmail provider-write hook;
-2. keep the existing provider response authoritative while durable writes are
-   observed;
-3. prove repeated refreshes are idempotent and conflicts fail closed;
-4. introduce provider delta/history-based synchronization;
-5. only after provider writes are stable, activate outbox-to-Priority
+1. exercise the helper against the fixed Preview Neon branch with synthetic
+   state and verify create, repeat/no-op, cursor advance and CAS conflict paths;
+2. keep Preview on `active_read` except during explicit write validation;
+3. introduce Gmail History delta synchronization so removals/label changes do
+   not depend on full bounded snapshots;
+4. only after provider writes are stable, activate outbox-to-Priority
    consumption;
-6. only after the server cache is sufficiently complete, promote cache-first
+5. only after the server cache is sufficiently complete, promote cache-first
    server reads to user-visible authority;
-7. activate Production through a separate explicit gate.
+6. activate Production through a separate explicit gate.
 
 No route may interpret the mere presence of mailbox database environment
 variables as activation. Activation always requires the explicit reviewed mode.

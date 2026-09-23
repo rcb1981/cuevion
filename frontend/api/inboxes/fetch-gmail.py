@@ -28,6 +28,7 @@ _identity_sys.modules[_LEGACY_MODULE_NAME] = _current_module
 
 import json
 import os
+import time
 from email import message_from_bytes
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
@@ -70,9 +71,14 @@ from api.priority.candidate_store import build_runtime_candidate_store
 from api.priority.event_reference import resolve_priority_hmac_secret
 from api.priority.semantic_config import read_new_inbound_client_mode
 from api.priority.store import build_runtime_workflow_store
+from cuevion_mailbox.gmail_history import read_gmail_account_history
 from cuevion_mailbox.preview_active_read import (
     preview_active_read_enabled,
     run_preview_gmail_active_read,
+)
+from cuevion_mailbox.preview_active_write import (
+    preview_active_write_enabled,
+    run_preview_gmail_durable_write,
 )
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -344,6 +350,22 @@ class handler(BaseHTTPRequestHandler):
                 + active_read.status
             )
 
+        durable_history = None
+        if preview_active_write_enabled(os.environ):
+            durable_history = read_gmail_account_history(
+                context,
+                request_with_one_refresh=_request_with_one_refresh,
+            )
+            context = durable_history.context
+            if (
+                durable_history.status != "ok"
+                or durable_history.history_id is None
+            ):
+                print(
+                    "cuevion_mailbox_active_write gmail history_"
+                    + durable_history.status
+                )
+
         snapshot_result = read_gmail_folder_snapshot(
             context,
             provider_folder="Inbox",
@@ -387,6 +409,38 @@ class handler(BaseHTTPRequestHandler):
         ]
 
         candidate_sources = snapshot_result.get("_priorityCandidateSources")
+
+        if (
+            preview_active_write_enabled(os.environ)
+            and durable_history is not None
+            and durable_history.status == "ok"
+            and durable_history.history_id is not None
+        ):
+            member = resolution.get("memberAuthority")
+            try:
+                durable_write = run_preview_gmail_durable_write(
+                    environment=os.environ,
+                    workspace_id=getattr(member, "workspace_id"),
+                    owner_user_id=getattr(member, "user_id"),
+                    mailbox_id=context["mailbox_id"],
+                    mailbox_account_identity=context["mailbox_email"],
+                    previews=previews,
+                    candidate_sources=(
+                        candidate_sources
+                        if isinstance(candidate_sources, list)
+                        else []
+                    ),
+                    gmail_history_id=durable_history.history_id,
+                    committed_at_millis=time.time_ns() // 1_000_000,
+                )
+            except Exception:
+                print("cuevion_mailbox_active_write gmail failed")
+            else:
+                print(
+                    "cuevion_mailbox_active_write gmail "
+                    + durable_write.status
+                )
+
         if isinstance(candidate_sources, list) and candidate_sources:
             try:
                 populate_runtime_priority_candidates(
