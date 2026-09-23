@@ -1,6 +1,6 @@
 # Mailbox PostgreSQL runtime activation requirements
 
-## Status: Preview active-read proven; bounded Gmail History discovery and mutation foundation
+## Status: Preview active-read proven; Preview Gmail History active-write integration
 
 The durable mailbox schema, PostgreSQL adapter, Gmail durable projection, and
 pure Gmail delta planner exist.
@@ -40,14 +40,28 @@ candidate next cursor only after the final page, and maps stale History 404 to
 `full_sync_required`. Provider failures, invalid payloads, repeated page
 tokens, and configured bounds fail closed without a next cursor.
 
-The History mutation foundation now adds an exact durable lookup by Gmail
-provider message ID, including already-tombstoned rows, so History planning
-never depends on only the newest visible cache window. A pure mutation planner
-can combine exact recovered records with provider-verified Inbox absences into
-one CAS-protected delta. Recovered records become bounded upserts; only
-explicitly provider-verified absences may become tombstones. Unknown absences
-and rows already tombstoned are no-ops. These History helpers still perform no
-route activation.
+The History mutation foundation adds an exact durable lookup by Gmail provider
+message ID, including already-tombstoned rows, so History planning never depends
+on only the newest visible cache window. A pure mutation planner combines exact
+recovered records with provider-verified Inbox absences into one CAS-protected
+delta. Recovered records become bounded upserts; only explicitly
+provider-verified absences may become tombstones. Unknown absences and rows
+already tombstoned are no-ops.
+
+When Preview `active_write` is enabled, the Gmail Inbox route now tries this
+History path before reading the user-visible Inbox snapshot. If current durable
+state and a Gmail cursor exist, it reads one complete bounded History window,
+recovers every affected provider message exactly, resolves the exact durable
+rows for those provider IDs, and performs at most one CAS-protected commit.
+Retryable exact-recovery failures, stale History, invalid/overflowed History,
+or CAS conflicts do not advance the cursor. The latest provider context is then
+used for the normal Inbox snapshot, which remains the response authority.
+
+If no durable state or cursor exists, History returns `bootstrap_required`.
+Only that path retains the existing `/profile` baseline-before-snapshot
+bootstrap write. A stale existing History cursor never falls back to a bounded
+snapshot write, because a bounded snapshot cannot prove deletions outside its
+window.
 
 ## Configuration boundary
 
@@ -133,19 +147,19 @@ provider snapshot.
 
 ## Remaining activation sequence
 
-After the bounded Preview Gmail write hook is proven:
+After the Preview Gmail History route integration is proven:
 
 1. keep Preview on `active_read` except during explicit write validation;
-2. wire the bounded Gmail History delta reader and exact mutation foundation into Preview `active_write`;
-3. recover every affected provider message exactly before one CAS-protected
-   durable commit, using explicit provider absence to plan tombstones;
-4. treat stale Gmail History 404 as a full-snapshot/bootstrap recovery path and
-   never advance a cursor from a partial or overflowed History window;
-5. only after provider writes are stable, activate outbox-to-Priority
+2. validate bootstrap, cursor-only advance, recovered upsert, provider-verified
+   tombstone, retry/no-advance, stale-History/no-advance and CAS conflict paths
+   against the fixed Preview Neon branch;
+3. add an explicit stale-History recovery strategy that cannot lose deletions
+   outside a bounded snapshot before allowing cursor reset;
+4. only after provider writes are stable, activate outbox-to-Priority
    consumption;
-6. only after the server cache is sufficiently complete, promote cache-first
+5. only after the server cache is sufficiently complete, promote cache-first
    server reads to user-visible authority;
-7. activate Production through a separate explicit gate.
+6. activate Production through a separate explicit gate.
 
 No route may interpret the mere presence of mailbox database environment
 variables as activation. Activation always requires the explicit reviewed mode.
