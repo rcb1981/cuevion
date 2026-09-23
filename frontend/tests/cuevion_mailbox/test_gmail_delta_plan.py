@@ -8,7 +8,9 @@ import unittest
 
 from cuevion_mailbox.gmail_delta_plan import (
     build_gmail_delta_commit,
+    build_gmail_history_delta_commit,
     derive_gmail_event_id,
+    plan_gmail_history_message_mutations,
     plan_gmail_message_mutations,
 )
 from cuevion_mailbox.gmail_projection import project_gmail_snapshot_message
@@ -303,6 +305,131 @@ class GmailDurableDeltaPlanTests(unittest.TestCase):
                         committed_at_millis=1790100000000,
                         next_bootstrap_state=BootstrapState.RECENT_READY,
                     )
+
+
+class GmailHistoryMutationPlanTests(unittest.TestCase):
+    def test_provider_verified_absence_tombstones_exact_active_row(self):
+        record = _record("gmail-message-absent")
+        current = _projection(record, row_version=7)
+        mutations = plan_gmail_history_message_mutations(
+            _scope(),
+            [],
+            ["gmail-message-absent"],
+            [current],
+        )
+        self.assertEqual(len(mutations), 1)
+        mutation = mutations[0]
+        self.assertIs(mutation.kind, MessageMutationKind.TOMBSTONE)
+        self.assertIs(mutation.outbox_event_type, OutboxEventType.MESSAGE_DELETED)
+        self.assertEqual(mutation.identity, record.identity)
+        self.assertIsNone(mutation.record)
+        self.assertEqual(mutation.expected_row_version, 7)
+        self.assertRegex(mutation.event_id, r"^mbe_[A-Za-z0-9_-]{22}$")
+
+    def test_unknown_or_already_tombstoned_absence_is_noop(self):
+        record = _record("gmail-message-absent")
+        self.assertEqual(
+            plan_gmail_history_message_mutations(
+                _scope(),
+                [],
+                ["gmail-message-unknown"],
+                [],
+            ),
+            (),
+        )
+        self.assertEqual(
+            plan_gmail_history_message_mutations(
+                _scope(),
+                [],
+                ["gmail-message-absent"],
+                [_projection(record, row_version=9, provider_deleted=True)],
+            ),
+            (),
+        )
+
+    def test_recovered_change_and_verified_absence_share_one_plan(self):
+        changed = _record("gmail-message-changed", subject="New subject")
+        old_changed = _record("gmail-message-changed")
+        absent = _record("gmail-message-absent")
+        mutations = plan_gmail_history_message_mutations(
+            _scope(),
+            [changed],
+            ["gmail-message-absent"],
+            [
+                _projection(old_changed, row_version=4),
+                _projection(absent, row_version=2),
+            ],
+        )
+        self.assertEqual(len(mutations), 2)
+        self.assertIs(mutations[0].kind, MessageMutationKind.UPSERT)
+        self.assertIs(
+            mutations[0].outbox_event_type,
+            OutboxEventType.MESSAGE_CHANGED,
+        )
+        self.assertEqual(mutations[0].expected_row_version, 4)
+        self.assertIs(mutations[1].kind, MessageMutationKind.TOMBSTONE)
+        self.assertEqual(mutations[1].expected_row_version, 2)
+
+    def test_overlap_duplicate_or_unrelated_projection_fails_closed(self):
+        record = _record("gmail-message-1")
+        unrelated = _record("gmail-message-unrelated")
+        with self.assertRaises(ValueError):
+            plan_gmail_history_message_mutations(
+                _scope(),
+                [record],
+                ["gmail-message-1"],
+                [_projection(record)],
+            )
+        with self.assertRaises(ValueError):
+            plan_gmail_history_message_mutations(
+                _scope(),
+                [],
+                ["gmail-message-1", "gmail-message-1"],
+                [],
+            )
+        with self.assertRaises(ValueError):
+            plan_gmail_history_message_mutations(
+                _scope(),
+                [record],
+                [],
+                [_projection(unrelated)],
+            )
+
+    def test_history_commit_uses_existing_cursor_cas_and_tombstone(self):
+        record = _record("gmail-message-absent")
+        current = _projection(record, row_version=5)
+        previous_cursor = _cursor(history_id="100", row_version=3)
+        next_cursor = _cursor(history_id="125", row_version=4)
+        commit = build_gmail_history_delta_commit(
+            _scope(),
+            [],
+            ["gmail-message-absent"],
+            [current],
+            expected_state_row_version=11,
+            current_cursor=previous_cursor,
+            next_cursor=next_cursor,
+            committed_at_millis=1790100000000,
+            next_bootstrap_state=BootstrapState.RECENT_READY,
+        )
+        self.assertEqual(commit.expected_state_row_version, 11)
+        self.assertEqual(commit.expected_cursor_row_version, 3)
+        self.assertEqual(commit.next_cursor.gmail_history_id, "125")
+        self.assertEqual(len(commit.mutations), 1)
+        self.assertIs(commit.mutations[0].kind, MessageMutationKind.TOMBSTONE)
+
+    def test_history_commit_requires_preexisting_cursor(self):
+        with self.assertRaises(ValueError):
+            build_gmail_history_delta_commit(
+                _scope(),
+                [],
+                [],
+                [],
+                expected_state_row_version=1,
+                current_cursor=None,  # type: ignore[arg-type]
+                next_cursor=_cursor(history_id="125", row_version=1),
+                committed_at_millis=1790100000000,
+                next_bootstrap_state=BootstrapState.RECENT_READY,
+            )
 
 
 class GmailDurableDeltaPlanStaticTests(unittest.TestCase):
