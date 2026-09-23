@@ -49,6 +49,33 @@ _SOURCE = {
 }
 
 
+def _read_outbox_verification(repositories):
+    connection = repositories.writer._connection()
+    cursor = None
+    try:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            SELECT event_type, message_row_version, attempt_count,
+                   processed_at IS NULL
+            FROM cuevion_mailbox.mailbox_change_outbox
+            WHERE workspace_id = %s
+              AND owner_user_id = %s
+              AND mailbox_id = %s
+              AND source_generation = 1
+            ORDER BY event_id
+            """,
+            (_WORKSPACE_ID, _OWNER_USER_ID, _MAILBOX_ID),
+        )
+        rows = cursor.fetchall()
+        connection.rollback()
+        return rows
+    finally:
+        if cursor is not None:
+            cursor.close()
+        connection.close()
+
+
 def _history(history_id: str):
     context = {"mailbox_email": _ACCOUNT_IDENTITY}
     return read_gmail_account_history(
@@ -100,6 +127,7 @@ def _proof():
                 existing_state.scope,
                 limit=10,
             )
+            outbox_rows = _read_outbox_verification(repositories)
             if (
                 cursor is not None
                 and cursor.gmail_history_id == "2002"
@@ -108,6 +136,7 @@ def _proof():
                 and len(messages) == 1
                 and messages[0].identity.provider_message_id
                 == "preview-hook-message-1"
+                and outbox_rows == [("message_added", 1, 0, True)]
             ):
                 return 200, {
                     "ok": True,
@@ -117,6 +146,9 @@ def _proof():
                     "advance": "applied",
                     "projected_count": 1,
                     "cursor_history_id": "2002",
+                    "outbox_count": 1,
+                    "outbox_event_type": "message_added",
+                    "outbox_unprocessed": True,
                 }
             return 503, {"ok": False, "stage": "pre_state_dirty"}
 
@@ -149,6 +181,7 @@ def _proof():
             return 503, {"ok": False, "stage": "state_readback"}
         cursor = repositories.reader.read_cursor(state.scope, "gmail-account")
         messages = repositories.reader.list_messages(state.scope, limit=10)
+        outbox_rows = _read_outbox_verification(repositories)
         if (
             cursor is None
             or cursor.gmail_history_id != "2002"
@@ -158,6 +191,7 @@ def _proof():
             or messages[0].identity.provider_message_id
             != "preview-hook-message-1"
             or messages[0].row_version != 1
+            or outbox_rows != [("message_added", 1, 0, True)]
         ):
             return 503, {"ok": False, "stage": "verify"}
 
@@ -169,6 +203,9 @@ def _proof():
             "advance": advance.status,
             "projected_count": 1,
             "cursor_history_id": "2002",
+            "outbox_count": 1,
+            "outbox_event_type": "message_added",
+            "outbox_unprocessed": True,
         }
     except Exception:
         return 503, {"ok": False, "stage": "exception"}
