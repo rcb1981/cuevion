@@ -40,10 +40,10 @@ def _scope():
     )
 
 
-def _state(*, row_version=7):
+def _state(*, row_version=7, bootstrap_state=BootstrapState.RECENT_READY):
     return MailboxStateSnapshot(
         scope=_scope(),
-        bootstrap_state=BootstrapState.RECENT_READY,
+        bootstrap_state=bootstrap_state,
         row_version=row_version,
     )
 
@@ -209,6 +209,27 @@ class PreviewGmailHistorySyncTests(unittest.TestCase):
                 self.assertEqual(reader.exact_calls, [])
                 self.assertEqual(writer.commits, [])
 
+    def test_existing_cursor_in_nonready_state_never_calls_provider_or_writer(self):
+        reader = _Reader(
+            state=_state(bootstrap_state=BootstrapState.RECOVERING),
+            cursor=_cursor(),
+        )
+        writer = _Writer()
+        provider_calls = []
+
+        result = _run(
+            _Repositories(reader, writer),
+            lambda *_args: provider_calls.append("history"),
+            lambda *_args: (_ for _ in ()).throw(
+                AssertionError("recovery called")
+            ),
+        )
+
+        self.assertEqual(result.status, "state_not_ready")
+        self.assertEqual(provider_calls, [])
+        self.assertEqual(reader.exact_calls, [])
+        self.assertEqual(writer.commits, [])
+
     def test_empty_history_advance_commits_cursor_only(self):
         reader = _Reader(state=_state(), cursor=_cursor())
         writer = _Writer()
@@ -237,6 +258,7 @@ class PreviewGmailHistorySyncTests(unittest.TestCase):
         self.assertEqual(commit.expected_cursor_row_version, 3)
         self.assertEqual(commit.next_cursor.row_version, 4)
         self.assertEqual(commit.next_cursor.gmail_history_id, "1005")
+        self.assertIs(commit.next_bootstrap_state, BootstrapState.RECENT_READY)
         self.assertEqual(commit.mutations, ())
 
     def test_recovered_change_and_verified_absence_commit_atomically(self):
