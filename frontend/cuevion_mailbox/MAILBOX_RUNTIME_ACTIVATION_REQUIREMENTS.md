@@ -1,6 +1,6 @@
 # Mailbox PostgreSQL runtime activation requirements
 
-## Status: Preview active-read proven; Preview Gmail History active-write integration
+## Status: Preview active-read proven; stale Gmail History recovery foundation
 
 The durable mailbox schema, PostgreSQL adapter, Gmail durable projection, and
 pure Gmail delta planner exist.
@@ -62,6 +62,31 @@ Only that path retains the existing `/profile` baseline-before-snapshot
 bootstrap write. A stale existing History cursor never falls back to a bounded
 snapshot write, because a bounded snapshot cannot prove deletions outside its
 window.
+
+A stale-History recovery foundation now exists but is not route-wired. Its
+recovery bound is intentionally strict:
+
+- Gmail Inbox membership is considered complete only when one
+  `labelIds=INBOX&maxResults=100` page has no `nextPageToken`;
+- the durable active-row inventory is complete only when at most 100 current
+  non-tombstoned rows exist; the repository reads `limit + 1` to detect
+  overflow rather than returning a partial set;
+- every provider Inventory ID must be accounted for by either one exactly
+  recovered Inbox record or one exact terminal-absence result;
+- the planner reconciles those recovered records against exact durable rows,
+  including prior tombstones, and tombstones every previously active durable
+  row not present in the recovered record set;
+- provider Inventory, active durable Inventory, exact recovery and cursor
+  transition must all be complete before one CAS-protected commit may install a
+  fresh Gmail history cursor;
+- Inbox overflow, durable-row overflow, malformed inventory, incomplete exact
+  recovery or cursor/CAS failure leaves the stale cursor unchanged.
+
+The intended route ordering for a later activation slice is fresh
+identity-bound `/profile` history baseline first, then complete Inbox inventory
+and exact recovery, then one atomic reconciliation + cursor-reset commit. Taking
+the fresh history baseline before inventory means any Gmail changes occurring
+during recovery remain discoverable from the newly installed cursor.
 
 ## Configuration boundary
 
@@ -153,13 +178,17 @@ After the Preview Gmail History route integration is proven:
 2. validate bootstrap, cursor-only advance, recovered upsert, provider-verified
    tombstone, retry/no-advance, stale-History/no-advance and CAS conflict paths
    against the fixed Preview Neon branch;
-3. add an explicit stale-History recovery strategy that cannot lose deletions
-   outside a bounded snapshot before allowing cursor reset;
-4. only after provider writes are stable, activate outbox-to-Priority
+3. wire the bounded stale-History recovery foundation into Preview
+   `active_write`, capturing a fresh identity-bound history baseline before
+   complete Inventory + exact recovery and refusing cursor reset on any
+   overflow or incomplete recovery;
+4. prove stale-cursor reconciliation, resurrection, deletions, overflow and
+   no-advance failure paths against the fixed Preview Neon branch;
+5. only after provider writes are stable, activate outbox-to-Priority
    consumption;
-5. only after the server cache is sufficiently complete, promote cache-first
+6. only after the server cache is sufficiently complete, promote cache-first
    server reads to user-visible authority;
-6. activate Production through a separate explicit gate.
+7. activate Production through a separate explicit gate.
 
 No route may interpret the mere presence of mailbox database environment
 variables as activation. Activation always requires the explicit reviewed mode.

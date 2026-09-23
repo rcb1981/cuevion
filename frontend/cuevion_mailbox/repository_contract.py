@@ -347,6 +347,21 @@ class MessageProjection:
 
 
 @dataclass(frozen=True, slots=True)
+class BoundedMessageProjectionInventory:
+    projections: tuple[MessageProjection, ...]
+    overflow: bool
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.projections) is not tuple
+            or any(type(projection) is not MessageProjection for projection in self.projections)
+            or type(self.overflow) is not bool
+            or (self.overflow and self.projections)
+        ):
+            raise ValueError("invalid bounded message projection inventory")
+
+
+@dataclass(frozen=True, slots=True)
 class MessageMutation:
     kind: MessageMutationKind
     identity: MessageIdentity
@@ -500,6 +515,15 @@ class MailboxReaderRepository(Protocol):
     ) -> Sequence[MessageProjection]:
         ...
 
+    def read_active_message_inventory(
+        self,
+        scope: MailboxScope,
+        *,
+        limit: int,
+    ) -> BoundedMessageProjectionInventory:
+        """Read every active row only when the complete set fits the bound."""
+        ...
+
     def read_messages_by_provider_message_ids(
         self,
         scope: MailboxScope,
@@ -580,6 +604,7 @@ class MailboxRepository(MailboxReaderRepository, Protocol):
 __all__ = (
     "BackfillState",
     "BodyState",
+    "BoundedMessageProjectionInventory",
     "BootstrapState",
     "CachedBody",
     "CurrentStateInitializationOutcome",

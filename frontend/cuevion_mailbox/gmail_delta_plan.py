@@ -29,6 +29,9 @@ from cuevion_mailbox.repository_contract import (
 
 
 _MAX_GMAIL_DELTA_MESSAGES = 100
+_MAX_GMAIL_RECOVERY_PROVIDER_MESSAGES = 100
+_MAX_GMAIL_RECOVERY_DURABLE_MESSAGES = 100
+_MAX_GMAIL_RECOVERY_COMBINED_MESSAGES = 200
 _GMAIL_SCOPE_KEY = "gmail-account"
 
 
@@ -117,10 +120,14 @@ def _provider_message_id_from_projection(
 def _current_projection_index(
     scope: MailboxScope,
     current_projections: list[MessageProjection] | tuple[MessageProjection, ...],
+    *,
+    maximum: int = _MAX_GMAIL_DELTA_MESSAGES,
 ) -> dict[str, MessageProjection]:
     if (
-        type(current_projections) not in (list, tuple)
-        or len(current_projections) > _MAX_GMAIL_DELTA_MESSAGES
+        type(maximum) is not int
+        or maximum < 0
+        or type(current_projections) not in (list, tuple)
+        or len(current_projections) > maximum
     ):
         raise ValueError("invalid Gmail durable commit plan")
     result: dict[str, MessageProjection] = {}
@@ -334,6 +341,155 @@ def plan_gmail_history_message_mutations(
     return tuple(mutations)
 
 
+def _validated_recovery_provider_message_ids(
+    values: list[str] | tuple[str, ...],
+    *,
+    maximum: int,
+) -> tuple[str, ...]:
+    if (
+        type(maximum) is not int
+        or maximum < 0
+        or type(values) not in (list, tuple)
+        or len(values) > maximum
+    ):
+        raise ValueError("invalid Gmail stale recovery plan")
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if type(value) is not str or not value:
+            raise ValueError("invalid Gmail stale recovery plan")
+        try:
+            encoded = value.encode("utf-8", errors="strict")
+        except UnicodeError:
+            raise ValueError("invalid Gmail stale recovery plan") from None
+        if not 1 <= len(encoded) <= 1_024 or value in seen:
+            raise ValueError("invalid Gmail stale recovery plan")
+        seen.add(value)
+        result.append(value)
+    return tuple(result)
+
+
+def plan_gmail_stale_recovery_message_mutations(
+    scope: MailboxScope,
+    provider_inventory_message_ids: list[str] | tuple[str, ...],
+    records: list[MessageRecord] | tuple[MessageRecord, ...],
+    verified_terminal_absent_provider_message_ids: list[str] | tuple[str, ...],
+    active_current_projections: list[MessageProjection] | tuple[MessageProjection, ...],
+    current_projections_for_records: list[MessageProjection] | tuple[MessageProjection, ...],
+) -> tuple[MessageMutation, ...]:
+    """Reconcile one proven-complete bounded Inbox after stale Gmail History.
+
+    The caller must enumerate the complete provider Inbox within the recovery
+    bound and exactly recover every listed provider message. The record IDs plus
+    terminal-absent IDs must therefore account for the provider inventory
+    exactly. Every active durable row omitted from the recovered record set may
+    then be tombstoned without inferring deletion from a partial snapshot.
+    """
+
+    if (
+        type(scope) is not MailboxScope
+        or scope.provider is not MailboxProvider.GOOGLE
+        or type(records) not in (list, tuple)
+        or len(records) > _MAX_GMAIL_RECOVERY_PROVIDER_MESSAGES
+        or type(active_current_projections) not in (list, tuple)
+        or len(active_current_projections) > _MAX_GMAIL_RECOVERY_DURABLE_MESSAGES
+        or type(current_projections_for_records) not in (list, tuple)
+        or len(current_projections_for_records) > _MAX_GMAIL_RECOVERY_PROVIDER_MESSAGES
+    ):
+        raise ValueError("invalid Gmail stale recovery plan")
+
+    provider_inventory = _validated_recovery_provider_message_ids(
+        provider_inventory_message_ids,
+        maximum=_MAX_GMAIL_RECOVERY_PROVIDER_MESSAGES,
+    )
+    terminal_absent = _validated_recovery_provider_message_ids(
+        verified_terminal_absent_provider_message_ids,
+        maximum=_MAX_GMAIL_RECOVERY_PROVIDER_MESSAGES,
+    )
+
+    record_by_provider_id: dict[str, MessageRecord] = {}
+    for record in records:
+        provider_message_id = _provider_message_id_from_record(scope, record)
+        if provider_message_id in record_by_provider_id:
+            raise ValueError("invalid Gmail stale recovery plan")
+        record_by_provider_id[provider_message_id] = record
+
+    recovered_ids = set(record_by_provider_id)
+    terminal_absent_ids = set(terminal_absent)
+    provider_inventory_ids = set(provider_inventory)
+    if (
+        recovered_ids.intersection(terminal_absent_ids)
+        or recovered_ids.union(terminal_absent_ids) != provider_inventory_ids
+    ):
+        raise ValueError("invalid Gmail stale recovery plan")
+
+    active_by_provider_id = _current_projection_index(
+        scope,
+        active_current_projections,
+        maximum=_MAX_GMAIL_RECOVERY_DURABLE_MESSAGES,
+    )
+    if any(
+        projection.provider_deleted
+        for projection in active_by_provider_id.values()
+    ):
+        raise ValueError("invalid Gmail stale recovery plan")
+
+    exact_by_provider_id = _current_projection_index(
+        scope,
+        current_projections_for_records,
+        maximum=_MAX_GMAIL_RECOVERY_PROVIDER_MESSAGES,
+    )
+    if not set(exact_by_provider_id).issubset(recovered_ids):
+        raise ValueError("invalid Gmail stale recovery plan")
+
+    combined_current = dict(active_by_provider_id)
+    for provider_message_id, projection in exact_by_provider_id.items():
+        existing = combined_current.get(provider_message_id)
+        if existing is not None and existing != projection:
+            raise ValueError("invalid Gmail stale recovery plan")
+        combined_current[provider_message_id] = projection
+    if len(combined_current) > _MAX_GMAIL_RECOVERY_COMBINED_MESSAGES:
+        raise ValueError("invalid Gmail stale recovery plan")
+
+    recovered_current = [
+        combined_current[provider_message_id]
+        for provider_message_id in record_by_provider_id
+        if provider_message_id in combined_current
+    ]
+    mutations = list(
+        plan_gmail_message_mutations(
+            scope,
+            list(records),
+            recovered_current,
+        )
+    )
+
+    for provider_message_id, current in active_by_provider_id.items():
+        if provider_message_id in recovered_ids:
+            continue
+        resulting_row_version = current.row_version + 1
+        event_type = OutboxEventType.MESSAGE_DELETED
+        mutation = MessageMutation(
+            kind=MessageMutationKind.TOMBSTONE,
+            identity=current.identity,
+            record=None,
+            expected_row_version=current.row_version,
+            event_id=derive_gmail_event_id(
+                scope,
+                current.identity.message_id,
+                resulting_row_version,
+                event_type,
+            ),
+            outbox_event_type=event_type,
+        )
+        mutation.validate_for(MailboxProvider.GOOGLE)
+        mutations.append(mutation)
+
+    if len(mutations) > _MAX_GMAIL_RECOVERY_COMBINED_MESSAGES:
+        raise ValueError("invalid Gmail stale recovery plan")
+    return tuple(mutations)
+
+
 def _validate_cursor_transition(
     current_cursor: SyncCursor | None,
     next_cursor: SyncCursor,
@@ -456,10 +612,63 @@ def build_gmail_history_delta_commit(
     )
 
 
+def build_gmail_stale_recovery_commit(
+    scope: MailboxScope,
+    provider_inventory_message_ids: list[str] | tuple[str, ...],
+    records: list[MessageRecord] | tuple[MessageRecord, ...],
+    verified_terminal_absent_provider_message_ids: list[str] | tuple[str, ...],
+    active_current_projections: list[MessageProjection] | tuple[MessageProjection, ...],
+    current_projections_for_records: list[MessageProjection] | tuple[MessageProjection, ...],
+    *,
+    expected_state_row_version: int,
+    current_cursor: SyncCursor,
+    next_cursor: SyncCursor,
+    committed_at_millis: int,
+    next_bootstrap_state: BootstrapState,
+) -> ProviderDeltaCommit:
+    """Build one atomic reconciliation + fresh cursor commit after stale History."""
+
+    if (
+        type(current_cursor) is not SyncCursor
+        or type(expected_state_row_version) is not int
+        or expected_state_row_version < 1
+        or type(committed_at_millis) is not int
+        or committed_at_millis < 0
+        or type(next_bootstrap_state) is not BootstrapState
+    ):
+        raise ValueError("invalid Gmail stale recovery plan")
+
+    expected_cursor_row_version = _validate_cursor_transition(
+        current_cursor,
+        next_cursor,
+    )
+    mutations = plan_gmail_stale_recovery_message_mutations(
+        scope,
+        provider_inventory_message_ids,
+        records,
+        verified_terminal_absent_provider_message_ids,
+        active_current_projections,
+        current_projections_for_records,
+    )
+    return ProviderDeltaCommit(
+        scope=scope,
+        scope_key=_GMAIL_SCOPE_KEY,
+        expected_state_row_version=expected_state_row_version,
+        expected_cursor_row_version=expected_cursor_row_version,
+        expected_cursor_generation=next_cursor.cursor_generation,
+        committed_at_millis=committed_at_millis,
+        mutations=mutations,
+        next_cursor=next_cursor,
+        next_bootstrap_state=next_bootstrap_state,
+    )
+
+
 __all__ = (
     "build_gmail_delta_commit",
     "build_gmail_history_delta_commit",
+    "build_gmail_stale_recovery_commit",
     "derive_gmail_event_id",
     "plan_gmail_history_message_mutations",
     "plan_gmail_message_mutations",
+    "plan_gmail_stale_recovery_message_mutations",
 )
