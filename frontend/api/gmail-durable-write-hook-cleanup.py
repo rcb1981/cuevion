@@ -3,20 +3,39 @@
 import json
 import os
 from http.server import BaseHTTPRequestHandler
+from urllib.parse import urlsplit
 
-from cuevion_mailbox.runtime import build_active_write_mailbox_repositories
+import psycopg
+
+from cuevion_db.configuration import (
+    DatabaseTarget,
+    parse_database_configuration,
+)
 
 
 _WORKSPACE_ID = "wsp_l44kMFQRDa7J3askwYxxbQ"
 _OWNER_USER_ID = "usr_jDkwYBEn-6jawBwY_-Pzpg"
 _MAILBOX_ID = "preview-gmail-write-hook-proof"
 _ACCOUNT_IDENTITY = "preview-gmail-write-hook@example.invalid"
+_EXPECTED_PREVIEW_HOST = "ep-cool-scene-asb5gwsr.c-4.eu-central-1.aws.neon.tech"
 
 
 def _cleanup():
     try:
-        repositories = build_active_write_mailbox_repositories(os.environ)
-        connection = repositories.writer._connection()
+        config = parse_database_configuration(os.environ)
+        if (
+            config.target is not DatabaseTarget.PREVIEW
+            or os.environ.get("VERCEL_ENV") != "preview"
+            or urlsplit(config.migration_url.value).hostname
+            != _EXPECTED_PREVIEW_HOST
+        ):
+            return 503, {"ok": False, "stage": "boundary"}
+
+        connection = psycopg.connect(
+            config.migration_url.value,
+            autocommit=False,
+            connect_timeout=5,
+        )
     except Exception:
         return 503, {"ok": False, "stage": "runtime"}
 
