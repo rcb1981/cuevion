@@ -500,6 +500,18 @@ class MailboxReaderRepository(Protocol):
     ) -> Sequence[MessageProjection]:
         ...
 
+    def read_messages_by_provider_message_ids(
+        self,
+        scope: MailboxScope,
+        provider_message_ids: Sequence[str],
+    ) -> Sequence[MessageProjection]:
+        """Read exact Gmail rows, including already-tombstoned rows.
+
+        This is intentionally identity-based rather than recency-based so a
+        History delta never plans against only the newest visible cache window.
+        """
+        ...
+
     def read_cached_body(
         self,
         scope: MailboxScope,
