@@ -265,6 +265,19 @@ def run_preview_gmail_history_sync(
         or current_cursor.gmail_history_id is None
     ):
         raise ValueError("invalid Preview Gmail History cursor")
+    if state.bootstrap_state not in {
+        BootstrapState.RECENT_READY,
+        BootstrapState.BACKFILLING,
+        BootstrapState.READY,
+    }:
+        return PreviewGmailHistorySyncResult(
+            "state_not_ready",
+            context,
+            0,
+            scope.source_generation,
+            None,
+            0,
+        )
 
     delta = read_gmail_history_delta(
         context,
@@ -332,7 +345,7 @@ def run_preview_gmail_history_sync(
         current_cursor=current_cursor,
         next_cursor=next_cursor,
         committed_at_millis=committed_at_millis,
-        next_bootstrap_state=BootstrapState.RECENT_READY,
+        next_bootstrap_state=state.bootstrap_state,
     )
 
     if (
