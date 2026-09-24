@@ -16,6 +16,7 @@ from cuevion_mailbox.repository_contract import (
     MailboxStateSnapshot,
     OutboxEvent,
     OutboxEventType,
+    OutboxMailboxScope,
     OutboxStorageScope,
 )
 from cuevion_mailbox.role_policy import build_mailbox_role_plan
@@ -700,6 +701,124 @@ class PostgreSQLMailboxActiveInventoryTests(unittest.TestCase):
                     )
 
 
+class _ScopedClaimCursor:
+    def __init__(self, rows):
+        self.rows = list(rows)
+        self.executions = []
+        self.closed = False
+
+    def execute(self, sql, parameters):
+        self.executions.append((sql, parameters))
+
+    def fetchall(self):
+        return list(self.rows)
+
+    def close(self):
+        self.closed = True
+
+
+class _ScopedClaimConnection:
+    autocommit = False
+
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self.commits = 0
+        self.rollbacks = 0
+        self.closed = False
+
+    def cursor(self):
+        return self._cursor
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+    def close(self):
+        self.closed = True
+
+
+class PostgreSQLMailboxScopedOutboxClaimTests(unittest.TestCase):
+    def _scope(self):
+        return OutboxMailboxScope(
+            workspace_id="wsp_" + ("a" * 22),
+            owner_user_id="usr_" + ("b" * 22),
+            mailbox_id="gmail-1",
+        )
+
+    def test_scoped_claim_returns_only_exact_mailbox_rows(self):
+        rows = [
+            (
+                "mbe_" + ("a" * 22),
+                self._scope().workspace_id,
+                self._scope().owner_user_id,
+                self._scope().mailbox_id,
+                2,
+                "mbm_" + ("c" * 22),
+                4,
+                "message_changed",
+                1,
+                "claim-token",
+            )
+        ]
+        cursor = _ScopedClaimCursor(rows)
+        connection = _ScopedClaimConnection(cursor)
+        adapter = repository.PostgreSQLMailboxRepository(lambda: connection)
+
+        claimed = adapter.claim_outbox_batch_for_mailbox(
+            self._scope(),
+            limit=20,
+            now_millis=1_790_250_000_000,
+            lease_millis=60_000,
+        )
+
+        self.assertEqual(len(claimed), 1)
+        self.assertEqual(claimed[0].scope.source_generation, 2)
+        self.assertEqual(claimed[0].attempt_count, 1)
+        sql, parameters = cursor.executions[0]
+        self.assertEqual(sql, repository._CLAIM_OUTBOX_FOR_MAILBOX_SQL)
+        self.assertEqual(parameters[2:5], (
+            self._scope().workspace_id,
+            self._scope().owner_user_id,
+            self._scope().mailbox_id,
+        ))
+        self.assertEqual(parameters[5], 20)
+        self.assertEqual(connection.commits, 1)
+        self.assertEqual(connection.rollbacks, 0)
+        self.assertTrue(connection.closed)
+        self.assertTrue(cursor.closed)
+
+    def test_scoped_claim_rejects_cross_tenant_returned_row(self):
+        rows = [
+            (
+                "mbe_" + ("a" * 22),
+                "wsp_" + ("z" * 22),
+                self._scope().owner_user_id,
+                self._scope().mailbox_id,
+                2,
+                "mbm_" + ("c" * 22),
+                4,
+                "message_changed",
+                1,
+                "claim-token",
+            )
+        ]
+        cursor = _ScopedClaimCursor(rows)
+        connection = _ScopedClaimConnection(cursor)
+        adapter = repository.PostgreSQLMailboxRepository(lambda: connection)
+
+        with self.assertRaises(RuntimeError):
+            adapter.claim_outbox_batch_for_mailbox(
+                self._scope(),
+                limit=20,
+                now_millis=1_790_250_000_000,
+                lease_millis=60_000,
+            )
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+
+
 class PostgreSQLMailboxAdapterTests(unittest.TestCase):
     def test_module_has_no_runtime_configuration_or_network_boundary(self):
         source = _ADAPTER.read_text(encoding="utf-8")
@@ -797,10 +916,23 @@ class PostgreSQLMailboxAdapterTests(unittest.TestCase):
             self.assertIn("imap_uid = %s", normalized)
 
     def test_outbox_claims_are_skip_locked_unique_and_expiring(self):
-        claim = " ".join(repository._CLAIM_OUTBOX_SQL.casefold().split())
-        self.assertIn("for update skip locked", claim)
-        self.assertIn("gen_random_uuid()", claim)
-        self.assertIn("claim_expires_at", claim)
+        for raw in (
+            repository._CLAIM_OUTBOX_SQL,
+            repository._CLAIM_OUTBOX_FOR_MAILBOX_SQL,
+        ):
+            claim = " ".join(raw.casefold().split())
+            self.assertIn("for update skip locked", claim)
+            self.assertIn("gen_random_uuid()", claim)
+            self.assertIn("claim_expires_at", claim)
+        scoped = " ".join(
+            repository._CLAIM_OUTBOX_FOR_MAILBOX_SQL.casefold().split()
+        )
+        for required in (
+            "workspace_id = %s",
+            "owner_user_id = %s",
+            "mailbox_id = %s",
+        ):
+            self.assertIn(required, scoped)
         for sql in (
             repository._MARK_OUTBOX_PROCESSED_SQL,
             repository._MARK_OUTBOX_RETRY_SQL,
@@ -831,6 +963,7 @@ class PostgreSQLMailboxAdapterTests(unittest.TestCase):
             "_TOMBSTONE_MESSAGE_SQL": 13,
             "_INSERT_OUTBOX_SQL": 9,
             "_CLAIM_OUTBOX_SQL": 4,
+            "_CLAIM_OUTBOX_FOR_MAILBOX_SQL": 7,
             "_MARK_OUTBOX_PROCESSED_SQL": 4,
             "_MARK_OUTBOX_RETRY_SQL": 5,
         }
