@@ -81,6 +81,7 @@ def _source(message_id: str, subject: str) -> dict:
         "providerFolder": "INBOX",
         "labels": ["INBOX", "UNREAD"],
         "providerTimestampMillis": "1790250000000",
+        "rfcDate": None,
         "senderDisplay": "Proof Sender",
         "senderAddress": "proof-sender@example.invalid",
         "subject": subject,
@@ -282,6 +283,7 @@ def _proof():
 
     primary_authority = _priority_authority(_PRIMARY_MAILBOX)
     primary_source = _source(_PRIMARY_ID, "Primary initial")
+    _set_stage("primary_project_candidate")
     primary_scope, _ = project_priority_candidate(
         primary_authority,
         primary_source,
