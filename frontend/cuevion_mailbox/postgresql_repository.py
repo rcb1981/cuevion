@@ -31,6 +31,7 @@ from cuevion_mailbox.repository_contract import (
     MessageIdentity,
     MessageMutationKind,
     MessageProjection,
+    MessageRecord,
     OutboxEvent,
     OutboxEventType,
     OutboxMessageSnapshot,
