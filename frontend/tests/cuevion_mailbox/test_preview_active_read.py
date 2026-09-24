@@ -167,6 +167,8 @@ class PreviewActiveReadTests(unittest.TestCase):
         result = self._run(reader)
         self.assertEqual(result.status, "no_scope")
         self.assertEqual(result.projected_count, 0)
+        self.assertEqual(len(reader.authorities), 1)
+        self.assertEqual(reader.cursor_calls, [])
         self.assertEqual(reader.list_calls, [])
 
     def test_recent_ready_is_never_cache_authority(self):
