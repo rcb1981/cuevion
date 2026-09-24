@@ -12,10 +12,14 @@ from dataclasses import dataclass
 from typing import Protocol, Sequence
 
 from cuevion_mailbox.repository_contract import (
+    BackfillState,
+    BootstrapState,
     MailboxProvider,
     MailboxReadAuthority,
     MailboxScope,
+    MailboxStateSnapshot,
     MessageProjection,
+    SyncCursor,
 )
 from cuevion_mailbox.runtime import build_active_read_mailbox_reader
 
@@ -24,10 +28,17 @@ _MAX_ROUTE_READ_LIMIT = 100
 
 
 class _ActiveReader(Protocol):
-    def resolve_current_scope(
+    def resolve_current_state(
         self,
         authority: MailboxReadAuthority,
-    ) -> MailboxScope | None:
+    ) -> MailboxStateSnapshot | None:
+        ...
+
+    def read_cursor(
+        self,
+        scope: MailboxScope,
+        scope_key: str,
+    ) -> SyncCursor | None:
         ...
 
     def list_messages(
@@ -81,9 +92,27 @@ def run_preview_gmail_active_read(
         if reader is None
         else reader
     )
-    scope = repository.resolve_current_scope(authority)
-    if scope is None:
+    state = repository.resolve_current_state(authority)
+    if state is None:
         return PreviewActiveReadResult("no_scope", 0)
+    if type(state) is not MailboxStateSnapshot:
+        raise ValueError("invalid preview mailbox read state")
+    if state.bootstrap_state is not BootstrapState.READY:
+        return PreviewActiveReadResult("not_ready", 0)
+
+    scope = state.scope
+    cursor = repository.read_cursor(scope, "gmail-account")
+    if cursor is None:
+        return PreviewActiveReadResult("cursor_missing", 0)
+    if (
+        type(cursor) is not SyncCursor
+        or cursor.provider is not MailboxProvider.GOOGLE
+        or cursor.scope_key != "gmail-account"
+        or cursor.gmail_history_id is None
+        or cursor.backfill_state is not BackfillState.COMPLETE
+        or cursor.backfill_cursor is not None
+    ):
+        return PreviewActiveReadResult("not_ready", 0)
 
     projections = repository.list_messages(
         scope,
