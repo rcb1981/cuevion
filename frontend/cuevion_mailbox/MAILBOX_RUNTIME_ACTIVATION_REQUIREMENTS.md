@@ -1,6 +1,6 @@
 # Mailbox PostgreSQL runtime activation requirements
 
-## Status: Preview active-read proven; stale Gmail History recovery route integration
+## Status: Preview cache-authoritative Gmail read promotion
 
 The durable mailbox schema, PostgreSQL adapter, Gmail durable projection, and
 pure Gmail delta planner exist.
@@ -14,10 +14,20 @@ pure Gmail delta planner exist.
 
 Both active modes are rejected when `VERCEL_ENV=production`.
 
-The existing Gmail fetch route has a bounded Preview-only `active_read` hook.
-That hook proves durable scope/message reads but does not make the durable cache
-the user-visible response authority. The existing Gmail provider fetch remains
-authoritative.
+The Gmail fetch route now has a freshness-proven Preview-only `active_read`
+cache-authority path. Durable Inbox membership/order may become user-visible
+authority only after prior complete reconciliation has promoted durable state
+to `ready` and the Gmail cursor backfill state to `complete`. An
+identity-bound Gmail `/profile` historyId must also exactly match the
+persisted durable cursor.
+
+The route then fetches only those exact durable provider message IDs for
+render/body metadata, captures `/profile` again, and publishes the durable
+membership only if the historyId is still unchanged. Missing readiness, cursor
+mismatch, provider history change, exact-detail failure, or revalidation
+failure falls back to the existing Gmail list snapshot. Durable repository
+corruption/unavailability fails closed with the fixed
+`mailbox_read_unavailable` response.
 
 When `active_write` is explicitly enabled in Preview, the Gmail Inbox fetch
 route first captures an account-level Gmail `historyId` baseline from
@@ -161,6 +171,29 @@ queries run.
 
 Database URLs are parser-controlled redacted objects and must not be logged,
 rendered, serialized, pickled, returned from APIs, or added to exception text.
+
+## Preview cache-authoritative Gmail read boundary
+
+The Preview `active_read` route may use durable Gmail Inbox membership as
+user-visible list authority only when all of the following hold:
+
+1. authenticated Gmail `/profile` succeeds and returns a canonical numeric
+   historyId bound to the authenticated mailbox identity;
+2. exact durable current state is `ready`;
+3. the persisted `gmail-account` cursor is Google, has
+   `backfill_state=complete`, has no backfill cursor, and its historyId exactly
+   equals the first provider historyId;
+4. every durable row selected for the bounded response is active, Inbox-scoped,
+   and has a canonical Gmail provider message ID;
+5. Gmail exact-detail reads succeed for every durable provider message ID in
+   durable order with strict Inbox membership validation;
+6. a second identity-bound Gmail `/profile` request succeeds after those
+   detail reads and returns the exact same historyId.
+
+`recent_ready`, `backfilling`, incomplete cursors, and mere PostgreSQL row
+presence are never sufficient authority. The cache path never infers freshness
+from timestamps. Any provider history mismatch before or after exact detail
+rendering returns to the provider list path.
 
 ## Bounded Gmail write boundary
 

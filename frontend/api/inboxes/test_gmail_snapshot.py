@@ -1047,5 +1047,100 @@ class GmailExactMessageRecoveryTests(unittest.TestCase):
                 self.assertTrue(recovered.context["refresh_attempted"])
 
 
+class GmailSnapshotAuthoritativeIdsTests(unittest.TestCase):
+    def test_exact_authoritative_ids_skip_list_and_preserve_order(self):
+        paths: list[str] = []
+        result = gmail_snapshot.read_gmail_folder_snapshot(
+            gmail_context(),
+            provider_folder="Inbox",
+            request_with_one_refresh=snapshot_request(
+                [
+                    (gmail_detail("message-b"), None),
+                    (gmail_detail("message-a"), None),
+                ],
+                paths,
+            ),
+            limit=2,
+            strict=True,
+            authoritative_message_ids=("message-b", "message-a"),
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(
+            paths,
+            [
+                "/messages/message-b?format=raw",
+                "/messages/message-a?format=raw",
+            ],
+        )
+        self.assertEqual(
+            [
+                message["providerMessageId"]
+                for message in result["snapshot"]["messages"]
+            ],
+            ["message-b", "message-a"],
+        )
+
+    def test_empty_authoritative_ids_return_empty_snapshot_without_provider_call(self):
+        paths: list[str] = []
+        result = gmail_snapshot.read_gmail_folder_snapshot(
+            gmail_context(),
+            provider_folder="Inbox",
+            request_with_one_refresh=snapshot_request([], paths),
+            limit=50,
+            strict=True,
+            authoritative_message_ids=(),
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["snapshot"]["messages"], [])
+        self.assertEqual(paths, [])
+
+    def test_invalid_authoritative_id_shapes_fail_before_provider_call(self):
+        cases = (
+            ("Archive", ("message-1",), None),
+            ("Inbox", ("message-1", "message-1"), None),
+            ("Inbox", ("",), None),
+            ("Inbox", ("message-1",), "archive-required"),
+        )
+        for provider_folder, ids, required_id in cases:
+            with self.subTest(
+                provider_folder=provider_folder,
+                ids=ids,
+                required_id=required_id,
+            ):
+                paths: list[str] = []
+                result = gmail_snapshot.read_gmail_folder_snapshot(
+                    gmail_context(),
+                    provider_folder=provider_folder,
+                    request_with_one_refresh=snapshot_request([], paths),
+                    limit=2,
+                    required_message_id=required_id,
+                    authoritative_message_ids=ids,
+                )
+                self.assertEqual(result["status"], "error")
+                self.assertEqual(
+                    result["error"]["code"],
+                    "gmail_snapshot_invalid_request",
+                )
+                self.assertEqual(paths, [])
+
+    def test_authoritative_ids_cannot_exceed_requested_limit(self):
+        paths: list[str] = []
+        result = gmail_snapshot.read_gmail_folder_snapshot(
+            gmail_context(),
+            provider_folder="Inbox",
+            request_with_one_refresh=snapshot_request([], paths),
+            limit=1,
+            authoritative_message_ids=("message-1", "message-2"),
+        )
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(
+            result["error"]["code"],
+            "gmail_snapshot_invalid_request",
+        )
+        self.assertEqual(paths, [])
+
+
 if __name__ == "__main__":
     unittest.main()

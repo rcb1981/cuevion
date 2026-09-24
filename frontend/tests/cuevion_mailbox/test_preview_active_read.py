@@ -1,4 +1,4 @@
-"""Tests for the first bounded Preview mailbox route read."""
+"""Tests for bounded Preview Gmail durable read authority."""
 
 from __future__ import annotations
 
@@ -6,15 +6,19 @@ from pathlib import Path
 import unittest
 
 from cuevion_mailbox.preview_active_read import (
+    plan_preview_gmail_authoritative_read,
     preview_active_read_enabled,
     run_preview_gmail_active_read,
 )
 from cuevion_mailbox.repository_contract import (
     BackfillState,
+    BodyState,
     BootstrapState,
     MailboxProvider,
     MailboxScope,
     MailboxStateSnapshot,
+    MessageIdentity,
+    MessageProjection,
     SyncCursor,
 )
 
@@ -50,7 +54,7 @@ class _Reader:
         before_timestamp_millis=None,
     ):
         self.list_calls.append((scope, limit, before_timestamp_millis))
-        return self.projections
+        return self.projections[:limit]
 
 
 class PreviewActiveReadTests(unittest.TestCase):
@@ -77,18 +81,42 @@ class PreviewActiveReadTests(unittest.TestCase):
             row_version=4,
         )
 
-    def _cursor(self, backfill_state=BackfillState.COMPLETE):
+    def _cursor(
+        self,
+        history_id="9000",
+        *,
+        backfill_state=BackfillState.COMPLETE,
+        backfill_cursor=None,
+    ):
         return SyncCursor(
             scope_key="gmail-account",
             cursor_generation=1,
             provider=MailboxProvider.GOOGLE,
-            gmail_history_id="4000",
+            gmail_history_id=history_id,
             imap_uid_validity=None,
             imap_highest_uid=None,
             imap_uidnext_observed=None,
             backfill_state=backfill_state,
-            backfill_cursor=None,
+            backfill_cursor=backfill_cursor,
             row_version=3,
+        )
+
+    def _projection(self, suffix: str, *, folder="Inbox", deleted=False):
+        return MessageProjection(
+            identity=MessageIdentity(
+                message_id="mbm_" + (suffix * 22),
+                provider_message_id="gmail-message-" + suffix,
+                provider_folder=folder,
+                imap_uid_validity=None,
+                imap_uid=None,
+            ),
+            provider_thread_id="thread-" + suffix,
+            metadata_hash=suffix * 64,
+            body_state=BodyState.CACHED,
+            unread=True,
+            starred=False,
+            provider_deleted=deleted,
+            row_version=1,
         )
 
     def _run(self, reader, *, environment=None, limit=50):
@@ -98,6 +126,18 @@ class PreviewActiveReadTests(unittest.TestCase):
             owner_user_id="usr_" + ("b" * 22),
             mailbox_id="gmail-1",
             mailbox_account_identity="Verified@Gmail.com",
+            limit=limit,
+            reader=reader,
+        )
+
+    def _plan(self, reader, *, history_id="9000", limit=2, environment=None):
+        return plan_preview_gmail_authoritative_read(
+            environment=(self._environment() if environment is None else environment),
+            workspace_id="wsp_" + ("a" * 22),
+            owner_user_id="usr_" + ("b" * 22),
+            mailbox_id="gmail-1",
+            mailbox_account_identity="Verified@Gmail.com",
+            provider_history_id=history_id,
             limit=limit,
             reader=reader,
         )
@@ -119,6 +159,8 @@ class PreviewActiveReadTests(unittest.TestCase):
                 self.assertFalse(preview_active_read_enabled(environment))
                 with self.assertRaises(RuntimeError):
                     self._run(_Reader(None), environment=environment)
+                with self.assertRaises(RuntimeError):
+                    self._plan(_Reader(None), environment=environment)
 
     def test_missing_current_scope_is_safe_cache_miss(self):
         reader = _Reader(None)
@@ -126,66 +168,125 @@ class PreviewActiveReadTests(unittest.TestCase):
         self.assertEqual(result.status, "no_scope")
         self.assertEqual(result.projected_count, 0)
         self.assertEqual(len(reader.authorities), 1)
-        self.assertEqual(
-            reader.authorities[0].provider_account_identity,
-            "verified@gmail.com",
-        )
         self.assertEqual(reader.cursor_calls, [])
         self.assertEqual(reader.list_calls, [])
 
-    def test_recent_ready_is_not_user_visible_cache_authority(self):
+    def test_recent_ready_is_never_cache_authority(self):
         reader = _Reader(
             self._state(BootstrapState.RECENT_READY),
             cursor=self._cursor(),
+            projections=(self._projection("a"), self._projection("b")),
         )
-        result = self._run(reader)
-        self.assertEqual(result.status, "not_ready")
-        self.assertEqual(result.projected_count, 0)
-        self.assertEqual(reader.cursor_calls, [])
+        self.assertEqual(self._run(reader, limit=2).status, "not_ready")
+        plan = self._plan(reader, limit=2)
+        self.assertEqual(plan.status, "provider_required")
         self.assertEqual(reader.list_calls, [])
 
-    def test_ready_state_requires_complete_gmail_cursor(self):
+    def test_ready_requires_complete_gmail_cursor(self):
         for cursor in (
             None,
-            self._cursor(BackfillState.NOT_STARTED),
-            self._cursor(BackfillState.RUNNING),
+            self._cursor(backfill_state=BackfillState.NOT_STARTED),
+            self._cursor(backfill_state=BackfillState.RUNNING),
         ):
             with self.subTest(cursor=cursor):
                 reader = _Reader(self._state(), cursor=cursor)
-                result = self._run(reader)
-                self.assertIn(result.status, {"cursor_missing", "not_ready"})
-                self.assertEqual(result.projected_count, 0)
+                self.assertEqual(self._run(reader).status, "not_ready")
+                self.assertEqual(self._plan(reader).status, "provider_required")
                 self.assertEqual(reader.list_calls, [])
 
-    def test_complete_ready_scope_performs_one_bounded_projection_read(self):
-        scope = self._scope()
+    def test_complete_ready_scope_performs_bounded_projection_read(self):
+        projections = (self._projection("a"), self._projection("b"))
         reader = _Reader(
             self._state(),
             cursor=self._cursor(),
-            projections=(object(), object()),
+            projections=projections,
         )
         result = self._run(reader, limit=100)
         self.assertEqual(result.status, "resolved")
         self.assertEqual(result.projected_count, 2)
-        self.assertEqual(reader.cursor_calls, [(scope, "gmail-account")])
-        self.assertEqual(reader.list_calls, [(scope, 100, None)])
+        self.assertEqual(reader.list_calls, [(self._scope(), 100, None)])
 
-    def test_invalid_limit_fails_before_repository_read(self):
+    def test_matching_history_on_complete_ready_cache_is_authoritative(self):
+        projections = (self._projection("a"), self._projection("b"))
+        reader = _Reader(
+            self._state(),
+            cursor=self._cursor("9000"),
+            projections=projections,
+        )
+        plan = self._plan(reader, history_id="9000", limit=2)
+        self.assertEqual(plan.status, "cache_authoritative")
+        self.assertEqual(
+            plan.provider_message_ids,
+            ("gmail-message-a", "gmail-message-b"),
+        )
+        self.assertEqual(plan.history_id, "9000")
+        self.assertEqual(plan.source_generation, 3)
+
+    def test_history_mismatch_requires_provider_before_listing_messages(self):
+        reader = _Reader(
+            self._state(),
+            cursor=self._cursor("8999"),
+            projections=(self._projection("a"),),
+        )
+        plan = self._plan(reader, history_id="9000", limit=1)
+        self.assertEqual(plan.status, "provider_required")
+        self.assertEqual(plan.provider_message_ids, ())
+        self.assertEqual(reader.list_calls, [])
+
+    def test_ready_complete_cache_may_authoritatively_return_short_page(self):
+        reader = _Reader(
+            self._state(),
+            cursor=self._cursor(),
+            projections=(self._projection("a"),),
+        )
+        plan = self._plan(reader, limit=50)
+        self.assertEqual(plan.status, "cache_authoritative")
+        self.assertEqual(plan.provider_message_ids, ("gmail-message-a",))
+
+    def test_invalid_cached_projection_fails_closed(self):
+        for projection in (
+            self._projection("a", folder="Trash"),
+            self._projection("a", deleted=True),
+        ):
+            with self.subTest(projection=projection):
+                reader = _Reader(
+                    self._state(),
+                    cursor=self._cursor(),
+                    projections=(projection,),
+                )
+                with self.assertRaises(RuntimeError):
+                    self._plan(reader, limit=1)
+
+    def test_invalid_limit_and_history_fail_before_repository_read(self):
         reader = _Reader(self._state(), cursor=self._cursor())
         with self.assertRaises(ValueError):
             self._run(reader, limit=101)
+        with self.assertRaises(ValueError):
+            self._plan(reader, history_id="not-digits")
         self.assertEqual(reader.authorities, [])
-        self.assertEqual(reader.list_calls, [])
 
 
 class PreviewActiveReadStaticTests(unittest.TestCase):
-    def test_first_route_integration_is_gmail_only(self):
+    def test_route_integration_is_gmail_only_and_uses_authoritative_planner(self):
         gmail = _GMAIL_ROUTE.read_text(encoding="utf-8")
         imap = _IMAP_ROUTE.read_text(encoding="utf-8")
-        self.assertIn("run_preview_gmail_active_read", gmail)
+        self.assertIn("plan_preview_gmail_authoritative_read", gmail)
         self.assertIn("preview_active_read_enabled", gmail)
-        self.assertNotIn("run_preview_gmail_active_read", imap)
+        self.assertIn("cache_authority_confirmed", gmail)
+        self.assertNotIn("plan_preview_gmail_authoritative_read", imap)
         self.assertNotIn("preview_active_read_enabled", imap)
+
+    def test_route_requires_two_history_observations_around_cached_details(self):
+        gmail = _GMAIL_ROUTE.read_text(encoding="utf-8")
+        planner = gmail.index("plan_preview_gmail_authoritative_read")
+        exact_details = gmail.index("authoritative_message_ids=")
+        confirmed = gmail.index("cache_authority_confirmed")
+        self.assertLess(planner, exact_details)
+        self.assertLess(exact_details, confirmed)
+        self.assertGreaterEqual(
+            gmail.count("read_gmail_account_history("),
+            4,
+        )
 
     def test_helper_has_no_writer_or_outbox_surface(self):
         source = _HELPER.read_text(encoding="utf-8")
