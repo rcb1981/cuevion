@@ -1,6 +1,6 @@
 # Mailbox PostgreSQL runtime activation requirements
 
-## Status: Preview active-read proven; stale Gmail History recovery route integration
+## Status: Preview cache-authoritative Gmail read promotion
 
 The durable mailbox schema, PostgreSQL adapter, Gmail durable projection, and
 pure Gmail delta planner exist.
@@ -14,10 +14,19 @@ pure Gmail delta planner exist.
 
 Both active modes are rejected when `VERCEL_ENV=production`.
 
-The existing Gmail fetch route has a bounded Preview-only `active_read` hook.
-That hook proves durable scope/message reads but does not make the durable cache
-the user-visible response authority. The existing Gmail provider fetch remains
-authoritative.
+The existing Gmail fetch route now has a freshness-proven Preview-only
+`active_read` cache-authority path. Durable membership/order becomes
+user-visible authority only when an identity-bound Gmail `/profile` historyId
+exactly matches the persisted durable Gmail cursor and the requested cache
+window is known complete. The route then fetches only those exact durable
+provider message IDs for render/body metadata, captures `/profile` again, and
+publishes the cached membership only if the historyId is still unchanged.
+
+A missing/unready durable state, cursor mismatch, short incomplete recent
+window, provider history change, exact-detail failure, or provider revalidation
+failure falls back to the existing Gmail list snapshot. Durable repository
+corruption/unavailability still fails closed with the existing fixed
+`mailbox_read_unavailable` response rather than silently trusting cache data.
 
 When `active_write` is explicitly enabled in Preview, the Gmail Inbox fetch
 route first captures an account-level Gmail `historyId` baseline from
@@ -162,6 +171,32 @@ queries run.
 Database URLs are parser-controlled redacted objects and must not be logged,
 rendered, serialized, pickled, returned from APIs, or added to exception text.
 
+## Preview cache-authoritative Gmail read boundary
+
+The Preview `active_read` route may use durable Gmail Inbox membership as the
+user-visible list authority only when all of the following hold:
+
+1. the authenticated Gmail `/profile` request succeeds and returns a canonical
+   numeric historyId bound to the authenticated mailbox identity;
+2. exact authenticated durable current state exists in
+   `recent_ready`, `backfilling`, or `ready`;
+3. the persisted `gmail-account` cursor exists and its historyId exactly
+   equals the first provider historyId;
+4. every returned durable row is active, Google, Inbox-scoped, and has a
+   canonical provider message ID;
+5. a `recent_ready` or `backfilling` cache returns the full requested page;
+   a shorter page is authoritative only when bootstrap state is `ready`;
+6. Gmail exact-detail reads succeed for every durable provider message ID in
+   the durable order, with strict Inbox membership validation;
+7. a second identity-bound Gmail `/profile` request succeeds after those
+   detail reads and returns the exact same historyId.
+
+The cache path never infers freshness from timestamps and never uses the mere
+presence of PostgreSQL rows as authority. A provider history mismatch before or
+after exact detail rendering returns to the provider list path. This closes the
+race where Gmail could change between freshness observation and response
+assembly.
+
 ## Bounded Gmail write boundary
 
 The Preview Gmail write hook must:
@@ -217,17 +252,16 @@ user-visible authority and consumer failure is observational to the response.
 
 ## Remaining activation sequence
 
-1. keep Preview on `active_read` except during explicit write validation;
-2. prove the Preview consumer against the fixed Preview Neon branch plus the
-   existing Priority Redis runtime: current upsert, delete transport removal,
-   superseded/stale no-op, retry and claim-loss behavior;
-3. verify processed/retry outbox state and Priority candidate state without
-   consuming unrelated tenant mailboxes;
-4. restore Preview to `active_read`, clean synthetic proof data, and remove
-   every temporary proof surface before merge;
-5. only after outbox consumption is stable, promote cache-first server reads to
-   user-visible authority;
-6. activate Production through a separate explicit gate.
+1. keep Preview on `active_read`;
+2. prove cache-authoritative membership against the fixed Preview Neon branch
+   with matching provider history before/after exact detail reads;
+3. prove history mismatch and incomplete-window paths use the existing provider
+   list snapshot without publishing stale durable membership;
+4. remove every temporary proof surface and keep Preview on `active_read`
+   before merge;
+5. keep Production provider-authoritative until a separate explicit Production
+   read-authority gate is reviewed and proven;
+6. activate any Production mailbox runtime through a separate explicit gate.
 
 No route may interpret the mere presence of mailbox database environment
 variables as activation. Activation always requires the explicit reviewed mode.
