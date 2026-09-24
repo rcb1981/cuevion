@@ -45,6 +45,11 @@ class _Cursor:
             raise AssertionError("closed cursor")
         self.connection.sql.append(sql)
 
+    def fetchone(self):
+        if self.closed:
+            raise AssertionError("closed cursor")
+        return self.connection.fetchone_result
+
     def close(self) -> None:
         if self.closed:
             raise AssertionError("cursor closed twice")
@@ -59,15 +64,21 @@ class _Connection:
         dbname: str = "neondb",
         ssl_in_use: bool = True,
         autocommit: bool = False,
+        fetchone_result=None,
     ) -> None:
         self.autocommit = autocommit
         self.pgconn = _PgConn(ssl_in_use)
         self.info = _Info(user, dbname)
         self.closed = False
+        self.rolled_back = False
         self.sql: list[str] = []
+        self.fetchone_result = fetchone_result
 
     def cursor(self) -> _Cursor:
         return _Cursor(self)
+
+    def rollback(self) -> None:
+        self.rolled_back = True
 
     def close(self) -> None:
         self.closed = True
@@ -186,6 +197,32 @@ class MailboxRuntimeConfigurationTests(unittest.TestCase):
                 self.assertFalse(
                     runtime.production_read_authority_enabled(environment)
                 )
+
+    def test_production_probe_mode_is_reader_only_and_never_authority(self):
+        environment = {
+            "CUEVION_MAILBOX_POSTGRES_MODE": "production_probe",
+            "VERCEL_ENV": "production",
+            "CUEVION_MAILBOX_READER_DATABASE_URL": _url(
+                _READER_ROLE,
+                "reader-secret",
+            ),
+        }
+        config = runtime.parse_mailbox_runtime_configuration(environment)
+        self.assertIs(config.mode, runtime.MailboxRuntimeMode.PRODUCTION_PROBE)
+        self.assertEqual(config.reader_database_url.role, _READER_ROLE)
+        self.assertIsNone(config.writer_database_url)
+        self.assertTrue(runtime.production_reader_probe_enabled(environment))
+        self.assertFalse(runtime.production_read_authority_enabled(environment))
+
+        preview = dict(environment)
+        preview["VERCEL_ENV"] = "preview"
+        preview["CUEVION_MAILBOX_READER_DATABASE_URL"] = _url(
+            "cuevion_preview_mailbox_reader_v1",
+            "reader-secret",
+        )
+        with self.assertRaises(runtime.MailboxRuntimeConfigurationError):
+            runtime.parse_mailbox_runtime_configuration(preview)
+        self.assertFalse(runtime.production_reader_probe_enabled(preview))
 
     def test_active_write_is_preview_only_and_requires_both_roles(self):
         environment = {
@@ -392,6 +429,51 @@ class MailboxConnectionFactoryTests(unittest.TestCase):
 
         with self.assertRaises(runtime.MailboxRuntimeDisabledError):
             runtime.build_active_read_mailbox_reader({})
+
+    def test_production_reader_connectivity_probe_is_exact_and_read_only(self):
+        environment = {
+            "CUEVION_MAILBOX_POSTGRES_MODE": "production_probe",
+            "VERCEL_ENV": "production",
+            "CUEVION_MAILBOX_READER_DATABASE_URL": _url(
+                _READER_ROLE,
+                "reader-secret",
+            ),
+        }
+        connection = _Connection(
+            user=_READER_ROLE,
+            fetchone_result=(_READER_ROLE, "neondb", "on"),
+        )
+        result = runtime.run_production_reader_connectivity_probe(
+            environment,
+            connect=_Connector(connection),
+        )
+        self.assertEqual(result.status, "connected")
+        self.assertEqual(
+            connection.sql,
+            [
+                "SET TRANSACTION READ ONLY",
+                "SELECT current_user, current_database(), "
+                "current_setting('transaction_read_only')",
+            ],
+        )
+        self.assertTrue(connection.rolled_back)
+        self.assertTrue(connection.closed)
+
+        wrong_mode = dict(environment)
+        wrong_mode["CUEVION_MAILBOX_POSTGRES_MODE"] = "production_read"
+        with self.assertRaises(runtime.MailboxRuntimeDisabledError):
+            runtime.run_production_reader_connectivity_probe(wrong_mode)
+
+        wrong_read_only = _Connection(
+            user=_READER_ROLE,
+            fetchone_result=(_READER_ROLE, "neondb", "off"),
+        )
+        with self.assertRaises(runtime.MailboxRuntimeConfigurationError):
+            runtime.run_production_reader_connectivity_probe(
+                environment,
+                connect=_Connector(wrong_read_only),
+            )
+        self.assertTrue(wrong_read_only.closed)
 
     def test_production_read_builder_requires_double_gate_and_is_reader_only(self):
         environment = {
