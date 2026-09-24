@@ -52,6 +52,12 @@ _RETRY_HISTORY = "6300"
 _UNRELATED_HISTORY = "6400"
 
 _NOW = 1_790_250_000_000
+_PROOF_STAGE = "not_started"
+
+
+def _set_stage(value: str) -> None:
+    global _PROOF_STAGE
+    _PROOF_STAGE = value
 
 
 def _preview(message_id: str, subject: str) -> dict:
@@ -225,11 +231,14 @@ def _proof():
     if not preview_active_write_enabled(os.environ):
         return 503, {"ok": False, "stage": "active_write_disabled"}
 
+    _set_stage("build_repositories")
     repositories = build_active_write_mailbox_repositories(os.environ)
+    _set_stage("resolve_priority_runtime")
     secret = resolve_priority_hmac_secret()
     candidate_store = build_runtime_candidate_store(hmac_secret=secret)
     workflow_store = build_runtime_workflow_store(hmac_secret=secret)
 
+    _set_stage("primary_bootstrap")
     primary_bootstrap = _bootstrap(
         repositories,
         _PRIMARY_MAILBOX,
@@ -237,6 +246,7 @@ def _proof():
         _PRIMARY_HISTORY,
         "Primary initial",
     )
+    _set_stage("superseded_bootstrap")
     superseded_bootstrap = _bootstrap(
         repositories,
         _SUPERSEDED_MAILBOX,
@@ -244,6 +254,7 @@ def _proof():
         _SUPERSEDED_HISTORY,
         "Superseded initial",
     )
+    _set_stage("retry_bootstrap")
     retry_bootstrap = _bootstrap(
         repositories,
         _RETRY_MAILBOX,
@@ -251,6 +262,7 @@ def _proof():
         _RETRY_HISTORY,
         "Retry initial",
     )
+    _set_stage("unrelated_bootstrap")
     unrelated_bootstrap = _bootstrap(
         repositories,
         _UNRELATED_MAILBOX,
@@ -259,6 +271,7 @@ def _proof():
         "Unrelated initial",
     )
 
+    _set_stage("unrelated_read_before")
     unrelated_before = _outbox_rows(repositories, _UNRELATED_MAILBOX)
     if (
         len(unrelated_before) != 1
@@ -274,6 +287,7 @@ def _proof():
         primary_source,
     )
 
+    _set_stage("primary_consume_add")
     primary_first = run_preview_priority_mailbox_outbox_consumer(
         environment=os.environ,
         workspace_id=_WORKSPACE_ID,
@@ -285,6 +299,7 @@ def _proof():
         candidate_store=candidate_store,
         workflow_store=workflow_store,
     )
+    _set_stage("primary_read_candidate_after_add")
     primary_candidate_after_add = candidate_store.read_candidate(primary_scope)
     if (
         primary_first.claimed != 1
@@ -301,6 +316,7 @@ def _proof():
             "candidate_present": primary_candidate_after_add is not None,
         }
 
+    _set_stage("primary_delete_history")
     primary_delete_status = _history_mutation(
         repositories,
         mailbox_id=_PRIMARY_MAILBOX,
@@ -312,6 +328,7 @@ def _proof():
         committed_at_millis=_NOW + 2_000,
     )
 
+    _set_stage("primary_consume_delete")
     primary_second = run_preview_priority_mailbox_outbox_consumer(
         environment=os.environ,
         workspace_id=_WORKSPACE_ID,
@@ -323,6 +340,7 @@ def _proof():
         candidate_store=candidate_store,
         workflow_store=workflow_store,
     )
+    _set_stage("primary_read_candidate_after_delete")
     primary_candidate_after_delete = candidate_store.read_candidate(primary_scope)
     if (
         primary_second.claimed != 1
@@ -339,6 +357,7 @@ def _proof():
             "candidate_present": primary_candidate_after_delete is not None,
         }
 
+    _set_stage("superseded_change_history")
     superseded_change_status = _history_mutation(
         repositories,
         mailbox_id=_SUPERSEDED_MAILBOX,
@@ -350,6 +369,7 @@ def _proof():
         committed_at_millis=_NOW + 4_000,
     )
     superseded_authority = _priority_authority(_SUPERSEDED_MAILBOX)
+    _set_stage("superseded_consume")
     superseded_report = consume_priority_mailbox_outbox(
         superseded_authority,
         reader=repositories.reader,
@@ -375,6 +395,7 @@ def _proof():
         }
 
     retry_authority = _priority_authority(_RETRY_MAILBOX)
+    _set_stage("retry_first_consume")
     retry_first = consume_priority_mailbox_outbox(
         retry_authority,
         reader=repositories.reader,
@@ -382,6 +403,7 @@ def _proof():
         apply_action=lambda _action: False,
         now_millis=_NOW + 6_000,
     )
+    _set_stage("retry_read_after_failure")
     retry_rows_after_failure = _outbox_rows(repositories, _RETRY_MAILBOX)
     if (
         retry_first.claimed != 1
@@ -401,6 +423,7 @@ def _proof():
             "rows": retry_rows_after_failure,
         }
 
+    _set_stage("retry_second_consume")
     retry_second = consume_priority_mailbox_outbox(
         retry_authority,
         reader=repositories.reader,
@@ -408,6 +431,7 @@ def _proof():
         apply_action=lambda _action: True,
         now_millis=_NOW + 20_000,
     )
+    _set_stage("retry_read_after_success")
     retry_rows_after_success = _outbox_rows(repositories, _RETRY_MAILBOX)
     if (
         retry_second.claimed != 1
@@ -426,6 +450,7 @@ def _proof():
             "rows": retry_rows_after_success,
         }
 
+    _set_stage("unrelated_read_after")
     unrelated_after = _outbox_rows(repositories, _UNRELATED_MAILBOX)
     if unrelated_after != unrelated_before:
         return 503, {
@@ -435,6 +460,7 @@ def _proof():
             "after": unrelated_after,
         }
 
+    _set_stage("final_outbox_read")
     primary_rows = _outbox_rows(repositories, _PRIMARY_MAILBOX)
     superseded_rows = _outbox_rows(repositories, _SUPERSEDED_MAILBOX)
     if (
@@ -445,6 +471,7 @@ def _proof():
     ):
         return 503, {"ok": False, "stage": "final_outbox_verification"}
 
+    _set_stage("complete")
     return 200, {
         "ok": True,
         "primary_bootstrap": primary_bootstrap,
@@ -484,8 +511,12 @@ class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             status, payload = _proof()
-        except Exception:
-            status, payload = 503, {"ok": False, "stage": "exception"}
+        except Exception as error:
+            status, payload = 503, {
+                "ok": False,
+                "stage": _PROOF_STAGE,
+                "exception_type": type(error).__name__,
+            }
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
