@@ -579,12 +579,13 @@ class MailboxReaderRepository(Protocol):
         self,
         event: OutboxEvent,
     ) -> OutboxMessageSnapshot | None:
-        """Resolve the current generation row referenced by a claimed outbox event.
+        """Resolve the row referenced by a claimed outbox event.
 
-        A stale source generation or missing message returns None. The returned
-        row is always the latest durable message row for that exact current
-        generation; callers must compare row_version with the event version
-        before applying any downstream side effect.
+        A stale source generation returns None. A missing message inside an
+        otherwise-current source generation is storage corruption and must fail
+        closed. Any returned row is the latest durable message row for that
+        exact current generation; callers must compare row_version with the
+        event version before applying downstream side effects.
         """
         ...
 
