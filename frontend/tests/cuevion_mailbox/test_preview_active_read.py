@@ -6,6 +6,8 @@ from pathlib import Path
 import unittest
 
 from cuevion_mailbox.preview_active_read import (
+    gmail_cache_authority_enabled,
+    plan_gmail_authoritative_read,
     plan_preview_gmail_authoritative_read,
     preview_active_read_enabled,
     run_preview_gmail_active_read,
@@ -62,6 +64,13 @@ class PreviewActiveReadTests(unittest.TestCase):
         return {
             "VERCEL_ENV": "preview",
             "CUEVION_MAILBOX_POSTGRES_MODE": "active_read",
+        }
+
+    def _production_environment(self):
+        return {
+            "VERCEL_ENV": "production",
+            "CUEVION_MAILBOX_POSTGRES_MODE": "production_read",
+            "CUEVION_MAILBOX_PRODUCTION_READ_AUTHORITY": "enabled",
         }
 
     def _scope(self):
@@ -142,6 +151,29 @@ class PreviewActiveReadTests(unittest.TestCase):
             reader=reader,
         )
 
+    def _generic_plan(
+        self,
+        reader,
+        *,
+        history_id="9000",
+        limit=2,
+        environment=None,
+    ):
+        return plan_gmail_authoritative_read(
+            environment=(
+                self._production_environment()
+                if environment is None
+                else environment
+            ),
+            workspace_id="wsp_" + ("a" * 22),
+            owner_user_id="usr_" + ("b" * 22),
+            mailbox_id="gmail-1",
+            mailbox_account_identity="Verified@Gmail.com",
+            provider_history_id=history_id,
+            limit=limit,
+            reader=reader,
+        )
+
     def test_activation_requires_exact_preview_active_read(self):
         self.assertTrue(preview_active_read_enabled(self._environment()))
         for environment in (
@@ -161,6 +193,41 @@ class PreviewActiveReadTests(unittest.TestCase):
                     self._run(_Reader(None), environment=environment)
                 with self.assertRaises(RuntimeError):
                     self._plan(_Reader(None), environment=environment)
+
+    def test_production_cache_authority_requires_exact_double_gate(self):
+        enabled = self._production_environment()
+        self.assertTrue(gmail_cache_authority_enabled(enabled))
+
+        reader = _Reader(
+            self._state(),
+            cursor=self._cursor(),
+            projections=(self._projection("a"),),
+        )
+        plan = self._generic_plan(reader, limit=1)
+        self.assertEqual(plan.status, "cache_authoritative")
+        self.assertEqual(plan.provider_message_ids, ("gmail-message-a",))
+
+        for environment in (
+            {
+                **enabled,
+                "CUEVION_MAILBOX_PRODUCTION_READ_AUTHORITY": "true",
+            },
+            {
+                **enabled,
+                "CUEVION_MAILBOX_POSTGRES_MODE": "active_read",
+            },
+            {
+                **enabled,
+                "VERCEL_ENV": "preview",
+            },
+        ):
+            with self.subTest(environment=environment):
+                self.assertFalse(gmail_cache_authority_enabled(environment))
+                with self.assertRaises(RuntimeError):
+                    self._generic_plan(
+                        _Reader(None),
+                        environment=environment,
+                    )
 
     def test_missing_current_scope_is_safe_cache_miss(self):
         reader = _Reader(None)
@@ -270,15 +337,15 @@ class PreviewActiveReadStaticTests(unittest.TestCase):
     def test_route_integration_is_gmail_only_and_uses_authoritative_planner(self):
         gmail = _GMAIL_ROUTE.read_text(encoding="utf-8")
         imap = _IMAP_ROUTE.read_text(encoding="utf-8")
-        self.assertIn("plan_preview_gmail_authoritative_read", gmail)
-        self.assertIn("preview_active_read_enabled", gmail)
+        self.assertIn("plan_gmail_authoritative_read", gmail)
+        self.assertIn("gmail_cache_authority_enabled", gmail)
         self.assertIn("cache_authority_confirmed", gmail)
-        self.assertNotIn("plan_preview_gmail_authoritative_read", imap)
-        self.assertNotIn("preview_active_read_enabled", imap)
+        self.assertNotIn("plan_gmail_authoritative_read", imap)
+        self.assertNotIn("gmail_cache_authority_enabled", imap)
 
     def test_route_requires_two_history_observations_around_cached_details(self):
         gmail = _GMAIL_ROUTE.read_text(encoding="utf-8")
-        planner = gmail.index("plan_preview_gmail_authoritative_read")
+        planner = gmail.index("plan_gmail_authoritative_read")
         exact_details = gmail.index("authoritative_message_ids=")
         confirmed = gmail.index("cache_authority_confirmed")
         self.assertLess(planner, exact_details)
