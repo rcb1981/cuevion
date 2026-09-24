@@ -33,6 +33,7 @@ from cuevion_mailbox.repository_contract import (
     MessageProjection,
     OutboxEvent,
     OutboxEventType,
+    OutboxMessageSnapshot,
     OutboxStorageScope,
     ProviderDeltaCommit,
     SyncCursor,
@@ -196,6 +197,48 @@ WHERE m.workspace_id = %s
   AND s.is_current = true
   AND m.provider_message_id = ANY(%s::text[])
 ORDER BY m.provider_message_id
+""".strip()
+
+_SELECT_OUTBOX_MESSAGE_SQL = """
+SELECT
+    s.provider,
+    s.provider_account_identity,
+    m.message_id,
+    m.provider_message_id,
+    m.provider_folder,
+    m.imap_uid_validity,
+    m.imap_uid,
+    m.provider_thread_id,
+    m.provider_labels,
+    m.rfc_message_id,
+    m.in_reply_to,
+    m.references_json,
+    m.sender_address,
+    m.sender_display,
+    m.to_json,
+    m.cc_json,
+    m.subject,
+    m.snippet,
+    m.provider_timestamp,
+    m.unread,
+    m.starred,
+    m.body_state,
+    m.metadata_hash,
+    m.provider_deleted,
+    m.row_version
+FROM cuevion_mailbox.mailbox_messages AS m
+JOIN cuevion_mailbox.mailbox_sync_state AS s
+  ON s.workspace_id = m.workspace_id
+ AND s.owner_user_id = m.owner_user_id
+ AND s.mailbox_id = m.mailbox_id
+ AND s.source_generation = m.source_generation
+ AND s.provider = m.provider
+WHERE m.workspace_id = %s
+  AND m.owner_user_id = %s
+  AND m.mailbox_id = %s
+  AND m.source_generation = %s
+  AND m.message_id = %s
+  AND s.is_current = true
 """.strip()
 
 _SELECT_BODY_SQL = """
@@ -554,6 +597,12 @@ class PostgreSQLMailboxReaderRepository(MailboxReaderRepository):
             scope,
             provider_message_ids,
         )
+
+    def resolve_outbox_message(
+        self,
+        event: OutboxEvent,
+    ) -> OutboxMessageSnapshot | None:
+        return self._delegate.resolve_outbox_message(event)
 
     def read_cached_body(
         self,
@@ -923,6 +972,113 @@ class PostgreSQLMailboxRepository(MailboxRepository):
                 projection.validate_for(scope.provider)
                 result.append(projection)
             return tuple(result)
+        finally:
+            if cursor is not None:
+                getattr(cursor, "close")()
+            getattr(connection, "rollback")()
+            getattr(connection, "close")()
+
+    def resolve_outbox_message(
+        self,
+        event: OutboxEvent,
+    ) -> OutboxMessageSnapshot | None:
+        if (
+            type(event) is not OutboxEvent
+            or type(event.scope) is not OutboxStorageScope
+            or type(event.event_id) is not str
+            or not event.event_id
+            or type(event.message_id) is not str
+            or not event.message_id
+            or type(event.message_row_version) is not int
+            or event.message_row_version < 1
+            or type(event.event_type) is not OutboxEventType
+            or type(event.attempt_count) is not int
+            or event.attempt_count < 1
+            or type(event.claim_token) is not str
+            or not event.claim_token
+        ):
+            raise ValueError("invalid outbox message resolution")
+
+        storage_scope = event.scope
+        connection = self._connection()
+        cursor = None
+        try:
+            cursor = getattr(connection, "cursor")()
+            getattr(cursor, "execute")(
+                _SELECT_OUTBOX_MESSAGE_SQL,
+                (
+                    storage_scope.workspace_id,
+                    storage_scope.owner_user_id,
+                    storage_scope.mailbox_id,
+                    storage_scope.source_generation,
+                    event.message_id,
+                ),
+            )
+            rows = _fetchall(cursor)
+            if len(rows) > 1:
+                raise RuntimeError("mailbox repository storage corruption")
+            if not rows:
+                return None
+            row = rows[0]
+            if len(row) != 25:
+                raise RuntimeError("mailbox repository storage corruption")
+
+            provider = MailboxProvider(row[0])
+            account_identity = row[1]
+            provider_timestamp = row[18]
+            if (
+                type(account_identity) is not str
+                or not account_identity
+                or not isinstance(provider_timestamp, datetime)
+                or provider_timestamp.tzinfo is None
+            ):
+                raise RuntimeError("mailbox repository storage corruption")
+
+            identity = MessageIdentity(
+                message_id=row[2],
+                provider_message_id=row[3],
+                provider_folder=row[4],
+                imap_uid_validity=row[5],
+                imap_uid=row[6],
+            )
+            record = MessageRecord(
+                identity=identity,
+                provider_thread_id=row[7],
+                provider_labels=tuple(row[8]),
+                rfc_message_id=row[9],
+                in_reply_to=row[10],
+                references=tuple(row[11]),
+                sender_address=row[12],
+                sender_display=row[13],
+                to_recipients=tuple(row[14]),
+                cc_recipients=tuple(row[15]),
+                subject=row[16],
+                snippet=row[17],
+                provider_timestamp_millis=int(
+                    provider_timestamp.timestamp() * 1_000
+                ),
+                unread=row[19],
+                starred=row[20],
+                body_state=BodyState(row[21]),
+                metadata_hash=row[22],
+            )
+            scope = MailboxScope(
+                workspace_id=storage_scope.workspace_id,
+                owner_user_id=storage_scope.owner_user_id,
+                mailbox_id=storage_scope.mailbox_id,
+                source_generation=storage_scope.source_generation,
+                provider=provider,
+                provider_account_identity=account_identity,
+            )
+            snapshot = OutboxMessageSnapshot(
+                scope=scope,
+                record=record,
+                provider_deleted=row[23],
+                row_version=row[24],
+            )
+            if snapshot.record.identity.message_id != event.message_id:
+                raise RuntimeError("mailbox repository storage corruption")
+            return snapshot
         finally:
             if cursor is not None:
                 getattr(cursor, "close")()
