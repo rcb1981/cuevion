@@ -57,17 +57,17 @@ def production_reader_connectivity_response(handler) -> auth_http.PublicResponse
             set_cookies=resolution.set_cookies,
         )
 
-    if not production_reader_diagnostic_enabled(os.environ):
-        return _json(
-            404,
-            {"ok": False, "error": {"code": "not_found"}},
-            set_cookies=resolution.set_cookies,
-        )
-
     if production_read_authority_enabled(os.environ):
         return _json(
             503,
             {"ok": False, "error": {"code": "diagnostic_gate_conflict"}},
+            set_cookies=resolution.set_cookies,
+        )
+
+    if not production_reader_diagnostic_enabled(os.environ):
+        return _json(
+            404,
+            {"ok": False, "error": {"code": "not_found"}},
             set_cookies=resolution.set_cookies,
         )
 
