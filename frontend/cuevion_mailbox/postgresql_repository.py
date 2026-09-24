@@ -200,6 +200,16 @@ WHERE m.workspace_id = %s
 ORDER BY m.provider_message_id
 """.strip()
 
+_SELECT_OUTBOX_SCOPE_CURRENT_SQL = """
+SELECT provider, provider_account_identity
+FROM cuevion_mailbox.mailbox_sync_state
+WHERE workspace_id = %s
+  AND owner_user_id = %s
+  AND mailbox_id = %s
+  AND source_generation = %s
+  AND is_current = true
+""".strip()
+
 _SELECT_OUTBOX_MESSAGE_SQL = """
 SELECT
     s.provider,
@@ -649,7 +659,21 @@ class PostgreSQLMailboxRepository(MailboxRepository):
             if len(rows) > 1:
                 raise RuntimeError("mailbox repository storage corruption")
             if not rows:
-                return None
+                getattr(cursor, "execute")(
+                    _SELECT_OUTBOX_SCOPE_CURRENT_SQL,
+                    (
+                        storage_scope.workspace_id,
+                        storage_scope.owner_user_id,
+                        storage_scope.mailbox_id,
+                        storage_scope.source_generation,
+                    ),
+                )
+                state_rows = _fetchall(cursor)
+                if len(state_rows) > 1:
+                    raise RuntimeError("mailbox repository storage corruption")
+                if not state_rows:
+                    return None
+                raise RuntimeError("mailbox repository storage corruption")
             row = rows[0]
             if (
                 len(row) != 3
