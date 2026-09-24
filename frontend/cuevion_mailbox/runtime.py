@@ -39,6 +39,7 @@ class MailboxRuntimeMode(str, Enum):
     ACTIVE_READ = "active_read"
     ACTIVE_WRITE = "active_write"
     PRODUCTION_READ = "production_read"
+    PRODUCTION_PROBE = "production_probe"
 
 
 class MailboxRuntimeConfigurationError(RuntimeError):
@@ -273,6 +274,7 @@ def parse_mailbox_runtime_configuration(
     if mode in {
         MailboxRuntimeMode.ACTIVE_READ,
         MailboxRuntimeMode.PRODUCTION_READ,
+        MailboxRuntimeMode.PRODUCTION_PROBE,
     }:
         if (
             mode is MailboxRuntimeMode.ACTIVE_READ
@@ -280,7 +282,10 @@ def parse_mailbox_runtime_configuration(
         ):
             _configuration_error()
         if (
-            mode is MailboxRuntimeMode.PRODUCTION_READ
+            mode in {
+                MailboxRuntimeMode.PRODUCTION_READ,
+                MailboxRuntimeMode.PRODUCTION_PROBE,
+            }
             and vercel_environment != "production"
         ):
             _configuration_error()
@@ -404,6 +409,28 @@ class MailboxConnectionFactory:
         return connection
 
 
+@dataclass(frozen=True, slots=True)
+class ProductionReaderProbeResult:
+    status: str
+
+    def __post_init__(self) -> None:
+        if self.status != "connected":
+            raise ValueError("invalid Production reader probe result")
+
+
+def production_reader_probe_enabled(
+    environment: Mapping[str, str],
+) -> bool:
+    """Require an exact Production-only diagnostic mode."""
+
+    return (
+        isinstance(environment, Mapping)
+        and environment.get("VERCEL_ENV") == "production"
+        and environment.get(_MODE_VARIABLE)
+        == MailboxRuntimeMode.PRODUCTION_PROBE.value
+    )
+
+
 def production_read_authority_enabled(
     environment: Mapping[str, str],
 ) -> bool:
@@ -417,6 +444,63 @@ def production_read_authority_enabled(
         and environment.get(_PRODUCTION_READ_AUTHORITY_VARIABLE)
         == _PRODUCTION_READ_AUTHORITY_ENABLED
     )
+
+
+def run_production_reader_connectivity_probe(
+    environment: Mapping[str, str],
+    *,
+    connect: _ConnectCallable | None = None,
+) -> ProductionReaderProbeResult:
+    """Prove the dedicated Production reader can connect and stay read-only."""
+
+    if not production_reader_probe_enabled(environment):
+        raise MailboxRuntimeDisabledError()
+    config = parse_mailbox_runtime_configuration(environment)
+    if config.mode is not MailboxRuntimeMode.PRODUCTION_PROBE:
+        raise MailboxRuntimeDisabledError()
+    reader_url = config.reader_database_url
+    if type(reader_url) is not MailboxDatabaseUrl:
+        _configuration_error()
+
+    connection = MailboxConnectionFactory(
+        reader_url,
+        read_only=True,
+        connect=connect,
+    )()
+    cursor = None
+    try:
+        cursor = getattr(connection, "cursor")()
+        getattr(cursor, "execute")(
+            "SELECT current_user, current_database(), "
+            "current_setting('transaction_read_only')"
+        )
+        row = getattr(cursor, "fetchone")()
+        if (
+            type(row) not in (tuple, list)
+            or len(row) != 3
+            or row[0] != reader_url.role
+            or row[1] != reader_url.database
+            or row[2] != "on"
+        ):
+            _configuration_error()
+        getattr(cursor, "close")()
+        cursor = None
+        rollback = getattr(connection, "rollback", None)
+        if callable(rollback):
+            rollback()
+    except BaseException:
+        if cursor is not None:
+            try:
+                getattr(cursor, "close")()
+            except BaseException:
+                pass
+        try:
+            getattr(connection, "close")()
+        except BaseException:
+            pass
+        raise
+    getattr(connection, "close")()
+    return ProductionReaderProbeResult("connected")
 
 
 def build_production_read_mailbox_reader(
@@ -556,6 +640,7 @@ __all__ = (
     "MailboxRuntimeConfigurationError",
     "MailboxRuntimeDisabledError",
     "MailboxRuntimeMode",
+    "ProductionReaderProbeResult",
     "ShadowMailboxRepositories",
     "build_active_read_mailbox_reader",
     "build_active_write_mailbox_repositories",
@@ -563,4 +648,6 @@ __all__ = (
     "build_shadow_mailbox_repositories",
     "parse_mailbox_runtime_configuration",
     "production_read_authority_enabled",
+    "production_reader_probe_enabled",
+    "run_production_reader_connectivity_probe",
 )
