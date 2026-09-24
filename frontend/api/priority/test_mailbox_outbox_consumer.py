@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from api.priority.candidate_projection import PriorityCandidatePopulationAuthority
@@ -413,6 +414,28 @@ class PriorityMailboxOutboxConsumerTests(unittest.TestCase):
                         environment=environment,
                         **common,
                     )
+
+
+class PriorityMailboxOutboxRouteWiringTests(unittest.TestCase):
+    def test_gmail_route_runs_consumer_only_inside_preview_active_write_and_before_recovery(self):
+        route = (
+            Path(__file__).resolve().parents[1]
+            / "inboxes"
+            / "fetch-gmail.py"
+        ).read_text(encoding="utf-8")
+        gate = "        if preview_active_write_enabled(os.environ):\n"
+        consumer = "run_preview_priority_mailbox_outbox_consumer("
+        recovery = "_run_gmail_priority_candidate_recovery("
+        consumer_index = route.rfind(consumer)
+        self.assertGreaterEqual(consumer_index, 0)
+        gate_index = route.rfind(gate, 0, consumer_index)
+        self.assertGreaterEqual(gate_index, 0)
+        recovery_index = route.rfind(recovery)
+        self.assertGreater(recovery_index, consumer_index)
+        self.assertIn(
+            'print("cuevion_mailbox_active_write priority_outbox_failed")',
+            route,
+        )
 
 
 class PriorityMailboxOutboxActionApplicationTests(unittest.TestCase):
