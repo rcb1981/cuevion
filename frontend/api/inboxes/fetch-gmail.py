@@ -69,6 +69,9 @@ from api.priority.candidate_projection import (
 )
 from api.priority.candidate_store import build_runtime_candidate_store
 from api.priority.event_reference import resolve_priority_hmac_secret
+from api.priority.mailbox_outbox_consumer import (
+    run_preview_priority_mailbox_outbox_consumer,
+)
 from api.priority.semantic_config import read_new_inbound_client_mode
 from api.priority.store import build_runtime_workflow_store
 from cuevion_mailbox.gmail_history import read_gmail_account_history
@@ -548,6 +551,27 @@ class handler(BaseHTTPRequestHandler):
                 )
             except Exception:
                 pass
+
+        if preview_active_write_enabled(os.environ):
+            member = resolution.get("memberAuthority")
+            try:
+                outbox_report = run_preview_priority_mailbox_outbox_consumer(
+                    environment=os.environ,
+                    workspace_id=getattr(member, "workspace_id"),
+                    owner_user_id=getattr(member, "user_id"),
+                    mailbox_id=context["mailbox_id"],
+                    mailbox_account_identity=context["mailbox_email"],
+                    now_millis=time.time_ns() // 1_000_000,
+                )
+            except Exception:
+                print("cuevion_mailbox_active_write priority_outbox_failed")
+            else:
+                print(
+                    "cuevion_mailbox_active_write priority_outbox "
+                    f"claimed={outbox_report.claimed} "
+                    f"processed={outbox_report.processed} "
+                    f"retried={outbox_report.retried}"
+                )
 
         try:
             _run_gmail_priority_candidate_recovery(
