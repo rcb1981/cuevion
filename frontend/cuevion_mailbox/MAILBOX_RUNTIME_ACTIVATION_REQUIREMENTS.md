@@ -215,18 +215,38 @@ The Gmail Inbox route invokes one bounded consumer drain only inside its
 existing Preview `active_write` gate. Provider Inbox snapshot data remains the
 user-visible authority and consumer failure is observational to the response.
 
+## Cache authority readiness
+
+A recent durable window is not sufficient authority for user-visible cache
+reads. Gmail cache authority is eligible only after a complete bounded Inbox
+reconciliation has proven the entire provider Inbox fits the recovery bound and
+every current provider message has been reconciled.
+
+A successful complete stale-recovery reconciliation now:
+
+- advances the Gmail cursor to the fresh provider History id;
+- marks the cursor backfill state `complete` with no remaining backfill cursor;
+- promotes mailbox bootstrap state from `recent_ready`/backfilling to `ready`;
+- performs that readiness transition transactionally with the same message,
+  cursor and state CAS commit;
+- still refuses promotion on provider overflow, durable overflow, incomplete
+  exact recovery, cursor/state uncertainty or writer conflict.
+
+Preview `active_read` now treats only `ready` + Gmail cursor
+`backfill_state=complete` as cache-authoritative. `recent_ready` remains a
+cache miss for future user-visible authority. The current Gmail route still
+returns the provider snapshot in this slice; this is a readiness gate only.
+
 ## Remaining activation sequence
 
 1. keep Preview on `active_read` except during explicit write validation;
-2. prove the Preview consumer against the fixed Preview Neon branch plus the
-   existing Priority Redis runtime: current upsert, delete transport removal,
-   superseded/stale no-op, retry and claim-loss behavior;
-3. verify processed/retry outbox state and Priority candidate state without
-   consuming unrelated tenant mailboxes;
-4. restore Preview to `active_read`, clean synthetic proof data, and remove
-   every temporary proof surface before merge;
-5. only after outbox consumption is stable, promote cache-first server reads to
-   user-visible authority;
+2. prove complete bounded Gmail reconciliation promotes state/cursor readiness,
+   while partial/recent-only state remains non-authoritative;
+3. add a bounded full-metadata cache projection for the existing Inbox response
+   shape without changing body/detail authority;
+4. wire Preview-only cache-first Inbox response selection behind the readiness
+   gate, with provider fallback or fail-closed behavior explicitly tested;
+5. prove live Preview equivalence and cleanup before merge;
 6. activate Production through a separate explicit gate.
 
 No route may interpret the mere presence of mailbox database environment
