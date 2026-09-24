@@ -34,6 +34,7 @@ from cuevion_mailbox.repository_contract import (
     MessageRecord,
     OutboxEvent,
     OutboxEventType,
+    OutboxMailboxScope,
     OutboxMessageSnapshot,
     OutboxStorageScope,
     ProviderDeltaCommit,
@@ -446,6 +447,32 @@ WITH due AS (
     WHERE processed_at IS NULL
       AND (next_attempt_at IS NULL OR next_attempt_at <= %s)
       AND (claim_expires_at IS NULL OR claim_expires_at <= %s)
+    ORDER BY created_at, event_id
+    FOR UPDATE SKIP LOCKED
+    LIMIT %s
+)
+UPDATE cuevion_mailbox.mailbox_change_outbox AS o
+SET claim_token = replace(gen_random_uuid()::text, '-', ''),
+    claim_expires_at = %s,
+    attempt_count = o.attempt_count + 1
+FROM due
+WHERE o.event_id = due.event_id
+RETURNING
+    o.event_id, o.workspace_id, o.owner_user_id, o.mailbox_id,
+    o.source_generation, o.message_id, o.message_row_version, o.event_type,
+    o.attempt_count, o.claim_token
+""".strip()
+
+_CLAIM_OUTBOX_FOR_MAILBOX_SQL = """
+WITH due AS (
+    SELECT event_id
+    FROM cuevion_mailbox.mailbox_change_outbox
+    WHERE processed_at IS NULL
+      AND (next_attempt_at IS NULL OR next_attempt_at <= %s)
+      AND (claim_expires_at IS NULL OR claim_expires_at <= %s)
+      AND workspace_id = %s
+      AND owner_user_id = %s
+      AND mailbox_id = %s
     ORDER BY created_at, event_id
     FOR UPDATE SKIP LOCKED
     LIMIT %s
@@ -1452,6 +1479,78 @@ class PostgreSQLMailboxRepository(MailboxRepository):
                         claim_token=row[9],
                     )
                 )
+            getattr(connection, "commit")()
+            return tuple(events)
+        except Exception:
+            getattr(connection, "rollback")()
+            raise
+        finally:
+            if cursor is not None:
+                getattr(cursor, "close")()
+            getattr(connection, "close")()
+
+    def claim_outbox_batch_for_mailbox(
+        self,
+        mailbox_scope: OutboxMailboxScope,
+        *,
+        limit: int,
+        now_millis: int,
+        lease_millis: int,
+    ) -> Sequence[OutboxEvent]:
+        if (
+            type(mailbox_scope) is not OutboxMailboxScope
+            or type(limit) is not int
+            or not 1 <= limit <= 100
+            or type(now_millis) is not int
+            or now_millis < 0
+            or type(lease_millis) is not int
+            or not 1_000 <= lease_millis <= 300_000
+        ):
+            raise ValueError("invalid mailbox outbox claim request")
+        now = _dt(now_millis)
+        expires = _dt(now_millis + lease_millis)
+        connection = self._connection()
+        cursor = None
+        try:
+            cursor = getattr(connection, "cursor")()
+            getattr(cursor, "execute")(
+                _CLAIM_OUTBOX_FOR_MAILBOX_SQL,
+                (
+                    now,
+                    now,
+                    mailbox_scope.workspace_id,
+                    mailbox_scope.owner_user_id,
+                    mailbox_scope.mailbox_id,
+                    limit,
+                    expires,
+                ),
+            )
+            rows = _fetchall(cursor)
+            events = []
+            for row in rows:
+                if len(row) != 10:
+                    raise RuntimeError("mailbox repository storage corruption")
+                event = OutboxEvent(
+                    event_id=row[0],
+                    scope=OutboxStorageScope(
+                        workspace_id=row[1],
+                        owner_user_id=row[2],
+                        mailbox_id=row[3],
+                        source_generation=row[4],
+                    ),
+                    message_id=row[5],
+                    message_row_version=row[6],
+                    event_type=OutboxEventType(row[7]),
+                    attempt_count=row[8],
+                    claim_token=row[9],
+                )
+                if (
+                    event.scope.workspace_id != mailbox_scope.workspace_id
+                    or event.scope.owner_user_id != mailbox_scope.owner_user_id
+                    or event.scope.mailbox_id != mailbox_scope.mailbox_id
+                ):
+                    raise RuntimeError("mailbox repository storage corruption")
+                events.append(event)
             getattr(connection, "commit")()
             return tuple(events)
         except Exception:
