@@ -296,6 +296,9 @@ class PreviewGmailStaleRecoveryTests(unittest.TestCase):
         self.assertEqual(commit.expected_cursor_row_version, 3)
         self.assertEqual(commit.next_cursor.gmail_history_id, "500")
         self.assertEqual(commit.next_cursor.row_version, 4)
+        self.assertIs(commit.next_cursor.backfill_state, BackfillState.COMPLETE)
+        self.assertIsNone(commit.next_cursor.backfill_cursor)
+        self.assertIs(commit.next_bootstrap_state, BootstrapState.READY)
         self.assertEqual(
             [mutation.kind.value for mutation in commit.mutations],
             ["upsert", "upsert", "tombstone", "tombstone"],
@@ -415,6 +418,72 @@ class PreviewGmailStaleRecoveryTests(unittest.TestCase):
 
         self.assertEqual(result.status, "cursor_missing")
         self.assertEqual(provider_calls, [])
+        self.assertEqual(writer.commits, [])
+
+    def test_complete_unchanged_inventory_promotes_recent_ready_to_ready(self):
+        reader = _Reader(
+            state=_state(bootstrap_state=BootstrapState.RECENT_READY),
+            cursor=_cursor(history_id="500"),
+            active_inventory=BoundedMessageProjectionInventory((), False),
+            exact_projections=(),
+        )
+        writer = _Writer()
+
+        result = _run(
+            _Repositories(reader, writer),
+            lambda context, path: (
+                {"messages": []},
+                None,
+                context,
+                None,
+            ),
+            lambda *_args: (_ for _ in ()).throw(
+                AssertionError("empty inventory must not recover messages")
+            ),
+            fresh_history_id="500",
+        )
+
+        self.assertEqual(result.status, "applied")
+        self.assertEqual(result.mutation_count, 0)
+        self.assertEqual(len(writer.commits), 1)
+        commit = writer.commits[0]
+        self.assertIs(commit.next_bootstrap_state, BootstrapState.READY)
+        self.assertIs(commit.next_cursor.backfill_state, BackfillState.COMPLETE)
+        self.assertIsNone(commit.next_cursor.backfill_cursor)
+        self.assertEqual(commit.next_cursor.row_version, 4)
+
+    def test_already_ready_complete_unchanged_inventory_is_observational(self):
+        ready_cursor = SyncCursor(
+            scope_key="gmail-account",
+            cursor_generation=1,
+            provider=MailboxProvider.GOOGLE,
+            gmail_history_id="500",
+            imap_uid_validity=None,
+            imap_highest_uid=None,
+            imap_uidnext_observed=None,
+            backfill_state=BackfillState.COMPLETE,
+            backfill_cursor=None,
+            row_version=3,
+        )
+        reader = _Reader(
+            state=_state(bootstrap_state=BootstrapState.READY),
+            cursor=ready_cursor,
+            active_inventory=BoundedMessageProjectionInventory((), False),
+            exact_projections=(),
+        )
+        writer = _Writer()
+
+        result = _run(
+            _Repositories(reader, writer),
+            lambda context, _path: ({"messages": []}, None, context, None),
+            lambda *_args: (_ for _ in ()).throw(
+                AssertionError("empty inventory must not recover messages")
+            ),
+            fresh_history_id="500",
+        )
+
+        self.assertEqual(result.status, "unchanged")
+        self.assertEqual(result.mutation_count, 0)
         self.assertEqual(writer.commits, [])
 
     def test_writer_conflict_is_observational(self):
