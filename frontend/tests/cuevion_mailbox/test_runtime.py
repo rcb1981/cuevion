@@ -127,6 +127,66 @@ class MailboxRuntimeConfigurationTests(unittest.TestCase):
                 }
             )
 
+    def test_production_read_mode_is_reader_only_and_preview_rejected(self):
+        environment = {
+            "CUEVION_MAILBOX_POSTGRES_MODE": "production_read",
+            "VERCEL_ENV": "production",
+            "CUEVION_MAILBOX_READER_DATABASE_URL": _url(
+                _READER_ROLE,
+                "reader-secret",
+            ),
+        }
+        config = runtime.parse_mailbox_runtime_configuration(environment)
+        self.assertIs(config.mode, runtime.MailboxRuntimeMode.PRODUCTION_READ)
+        self.assertEqual(config.reader_database_url.role, _READER_ROLE)
+        self.assertIsNone(config.writer_database_url)
+
+        preview = dict(environment)
+        preview["VERCEL_ENV"] = "preview"
+        preview["CUEVION_MAILBOX_READER_DATABASE_URL"] = _url(
+            "cuevion_preview_mailbox_reader_v1",
+            "reader-secret",
+        )
+        with self.assertRaises(runtime.MailboxRuntimeConfigurationError):
+            runtime.parse_mailbox_runtime_configuration(preview)
+
+    def test_production_read_authority_requires_both_exact_switches(self):
+        base = {
+            "CUEVION_MAILBOX_POSTGRES_MODE": "production_read",
+            "VERCEL_ENV": "production",
+            "CUEVION_MAILBOX_READER_DATABASE_URL": _url(
+                _READER_ROLE,
+                "reader-secret",
+            ),
+        }
+        self.assertFalse(runtime.production_read_authority_enabled(base))
+
+        enabled = {
+            **base,
+            "CUEVION_MAILBOX_PRODUCTION_READ_AUTHORITY": "enabled",
+        }
+        self.assertTrue(runtime.production_read_authority_enabled(enabled))
+
+        for environment in (
+            {**enabled, "VERCEL_ENV": "preview"},
+            {
+                **enabled,
+                "CUEVION_MAILBOX_POSTGRES_MODE": "active_read",
+            },
+            {
+                **enabled,
+                "CUEVION_MAILBOX_PRODUCTION_READ_AUTHORITY": "true",
+            },
+            {
+                **enabled,
+                "CUEVION_MAILBOX_PRODUCTION_READ_AUTHORITY": "ENABLED",
+            },
+        ):
+            with self.subTest(environment=environment):
+                self.assertFalse(
+                    runtime.production_read_authority_enabled(environment)
+                )
+
     def test_active_write_is_preview_only_and_requires_both_roles(self):
         environment = {
             "CUEVION_MAILBOX_POSTGRES_MODE": "active_write",
@@ -332,6 +392,40 @@ class MailboxConnectionFactoryTests(unittest.TestCase):
 
         with self.assertRaises(runtime.MailboxRuntimeDisabledError):
             runtime.build_active_read_mailbox_reader({})
+
+    def test_production_read_builder_requires_double_gate_and_is_reader_only(self):
+        environment = {
+            "CUEVION_MAILBOX_POSTGRES_MODE": "production_read",
+            "CUEVION_MAILBOX_PRODUCTION_READ_AUTHORITY": "enabled",
+            "VERCEL_ENV": "production",
+            "CUEVION_MAILBOX_READER_DATABASE_URL": _url(
+                _READER_ROLE,
+                "reader-secret",
+            ),
+        }
+        connection = _Connection(user=_READER_ROLE)
+        reader = runtime.build_production_read_mailbox_reader(
+            environment,
+            connect=_Connector(connection),
+        )
+        self.assertIsInstance(
+            reader,
+            runtime.PostgreSQLMailboxReaderRepository,
+        )
+        delegate_factory = reader._delegate._connection_factory
+        created_connection = delegate_factory()
+        self.assertIs(created_connection, connection)
+        self.assertEqual(connection.sql, ["SET TRANSACTION READ ONLY"])
+
+        missing_gate = dict(environment)
+        missing_gate.pop("CUEVION_MAILBOX_PRODUCTION_READ_AUTHORITY")
+        with self.assertRaises(runtime.MailboxRuntimeDisabledError):
+            runtime.build_production_read_mailbox_reader(missing_gate)
+
+        wrong_mode = dict(environment)
+        wrong_mode["CUEVION_MAILBOX_POSTGRES_MODE"] = "shadow"
+        with self.assertRaises(runtime.MailboxRuntimeDisabledError):
+            runtime.build_production_read_mailbox_reader(wrong_mode)
 
     def test_active_write_builder_requires_explicit_preview_mode(self):
         environment = {

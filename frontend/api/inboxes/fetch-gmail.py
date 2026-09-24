@@ -76,8 +76,8 @@ from api.priority.semantic_config import read_new_inbound_client_mode
 from api.priority.store import build_runtime_workflow_store
 from cuevion_mailbox.gmail_history import read_gmail_account_history
 from cuevion_mailbox.preview_active_read import (
-    plan_preview_gmail_authoritative_read,
-    preview_active_read_enabled,
+    gmail_cache_authority_enabled,
+    plan_gmail_authoritative_read,
 )
 from cuevion_mailbox.preview_active_write import (
     PreviewGmailHistoryRecovery,
@@ -331,7 +331,7 @@ class handler(BaseHTTPRequestHandler):
 
         cache_read_plan = None
         cache_history_before = None
-        if preview_active_read_enabled(os.environ):
+        if gmail_cache_authority_enabled(os.environ):
             member = resolution.get("memberAuthority")
             cache_history_before = read_gmail_account_history(
                 context,
@@ -343,7 +343,7 @@ class handler(BaseHTTPRequestHandler):
                 and cache_history_before.history_id is not None
             ):
                 try:
-                    cache_read_plan = plan_preview_gmail_authoritative_read(
+                    cache_read_plan = plan_gmail_authoritative_read(
                         environment=os.environ,
                         workspace_id=getattr(member, "workspace_id"),
                         owner_user_id=getattr(member, "user_id"),
@@ -353,7 +353,7 @@ class handler(BaseHTTPRequestHandler):
                         limit=limit,
                     )
                 except Exception:
-                    print("cuevion_mailbox_active_read gmail failed")
+                    print("cuevion_mailbox_cache_authority gmail failed")
                     send_json(
                         self,
                         503,
@@ -364,12 +364,12 @@ class handler(BaseHTTPRequestHandler):
                     )
                     return
                 print(
-                    "cuevion_mailbox_active_read gmail "
+                    "cuevion_mailbox_cache_authority gmail "
                     + cache_read_plan.status
                 )
             else:
                 print(
-                    "cuevion_mailbox_active_read gmail provider_history_"
+                    "cuevion_mailbox_cache_authority gmail provider_history_"
                     + cache_history_before.status
                 )
 
@@ -523,17 +523,17 @@ class handler(BaseHTTPRequestHandler):
                 ):
                     snapshot_result = cache_snapshot_result
                     print(
-                        "cuevion_mailbox_active_read gmail "
+                        "cuevion_mailbox_cache_authority gmail "
                         "cache_authority_confirmed"
                     )
                 else:
                     print(
-                        "cuevion_mailbox_active_read gmail "
+                        "cuevion_mailbox_cache_authority gmail "
                         "cache_authority_revalidation_failed"
                     )
             else:
                 print(
-                    "cuevion_mailbox_active_read gmail "
+                    "cuevion_mailbox_cache_authority gmail "
                     "cache_authority_detail_failed"
                 )
 
