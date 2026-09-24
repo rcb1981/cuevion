@@ -194,6 +194,19 @@ class PreviewActiveReadTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     self._plan(_Reader(None), environment=environment)
 
+    def test_production_reader_diagnostic_never_enables_cache_authority(self):
+        environment = {
+            "VERCEL_ENV": "production",
+            "CUEVION_MAILBOX_POSTGRES_MODE": "production_read",
+            "CUEVION_MAILBOX_PRODUCTION_READER_DIAGNOSTIC": "enabled",
+        }
+        self.assertFalse(gmail_cache_authority_enabled(environment))
+        with self.assertRaises(RuntimeError):
+            self._generic_plan(
+                _Reader(None),
+                environment=environment,
+            )
+
     def test_production_cache_authority_requires_exact_double_gate(self):
         enabled = self._production_environment()
         self.assertTrue(gmail_cache_authority_enabled(enabled))
