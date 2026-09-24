@@ -1,4 +1,4 @@
-"""Tests for bounded Preview mailbox read authority."""
+"""Tests for bounded Preview Gmail durable read authority."""
 
 from __future__ import annotations
 
@@ -30,29 +30,16 @@ _HELPER = _FRONTEND / "cuevion_mailbox" / "preview_active_read.py"
 
 
 class _Reader:
-    def __init__(
-        self,
-        scope,
-        projections=(),
-        *,
-        state=None,
-        cursor=None,
-    ) -> None:
-        self.scope = scope
-        self.projections = tuple(projections)
+    def __init__(self, state, *, cursor=None, projections=()) -> None:
         self.state = state
         self.cursor = cursor
+        self.projections = tuple(projections)
         self.authorities = []
-        self.state_authorities = []
         self.cursor_calls = []
         self.list_calls = []
 
-    def resolve_current_scope(self, authority):
-        self.authorities.append(authority)
-        return self.scope
-
     def resolve_current_state(self, authority):
-        self.state_authorities.append(authority)
+        self.authorities.append(authority)
         return self.state
 
     def read_cursor(self, scope, scope_key):
@@ -87,14 +74,20 @@ class PreviewActiveReadTests(unittest.TestCase):
             provider_account_identity="verified@gmail.com",
         )
 
-    def _state(self, bootstrap_state=BootstrapState.RECENT_READY):
+    def _state(self, bootstrap_state=BootstrapState.READY):
         return MailboxStateSnapshot(
             scope=self._scope(),
             bootstrap_state=bootstrap_state,
             row_version=4,
         )
 
-    def _cursor(self, history_id="9000"):
+    def _cursor(
+        self,
+        history_id="9000",
+        *,
+        backfill_state=BackfillState.COMPLETE,
+        backfill_cursor=None,
+    ):
         return SyncCursor(
             scope_key="gmail-account",
             cursor_generation=1,
@@ -103,8 +96,8 @@ class PreviewActiveReadTests(unittest.TestCase):
             imap_uid_validity=None,
             imap_highest_uid=None,
             imap_uidnext_observed=None,
-            backfill_state=BackfillState.NOT_STARTED,
-            backfill_cursor=None,
+            backfill_state=backfill_state,
+            backfill_cursor=backfill_cursor,
             row_version=3,
         )
 
@@ -174,38 +167,51 @@ class PreviewActiveReadTests(unittest.TestCase):
         result = self._run(reader)
         self.assertEqual(result.status, "no_scope")
         self.assertEqual(result.projected_count, 0)
-        self.assertEqual(len(reader.authorities), 1)
-        self.assertEqual(
-            reader.authorities[0].provider_account_identity,
-            "verified@gmail.com",
-        )
         self.assertEqual(reader.list_calls, [])
 
-    def test_current_scope_performs_one_bounded_projection_read(self):
-        scope = self._scope()
-        reader = _Reader(scope, projections=(object(), object()))
+    def test_recent_ready_is_never_cache_authority(self):
+        reader = _Reader(
+            self._state(BootstrapState.RECENT_READY),
+            cursor=self._cursor(),
+            projections=(self._projection("a"), self._projection("b")),
+        )
+        self.assertEqual(self._run(reader, limit=2).status, "not_ready")
+        plan = self._plan(reader, limit=2)
+        self.assertEqual(plan.status, "provider_required")
+        self.assertEqual(reader.list_calls, [])
+
+    def test_ready_requires_complete_gmail_cursor(self):
+        for cursor in (
+            None,
+            self._cursor(backfill_state=BackfillState.NOT_STARTED),
+            self._cursor(backfill_state=BackfillState.RUNNING),
+        ):
+            with self.subTest(cursor=cursor):
+                reader = _Reader(self._state(), cursor=cursor)
+                self.assertEqual(self._run(reader).status, "not_ready")
+                self.assertEqual(self._plan(reader).status, "provider_required")
+                self.assertEqual(reader.list_calls, [])
+
+    def test_complete_ready_scope_performs_bounded_projection_read(self):
+        projections = (self._projection("a"), self._projection("b"))
+        reader = _Reader(
+            self._state(),
+            cursor=self._cursor(),
+            projections=projections,
+        )
         result = self._run(reader, limit=100)
         self.assertEqual(result.status, "resolved")
         self.assertEqual(result.projected_count, 2)
-        self.assertEqual(reader.list_calls, [(scope, 100, None)])
+        self.assertEqual(reader.list_calls, [(self._scope(), 100, None)])
 
-    def test_invalid_limit_fails_before_repository_read(self):
-        reader = _Reader(self._scope())
-        with self.assertRaises(ValueError):
-            self._run(reader, limit=101)
-        self.assertEqual(reader.authorities, [])
-        self.assertEqual(reader.list_calls, [])
-
-    def test_matching_history_and_full_recent_window_becomes_authoritative(self):
+    def test_matching_history_on_complete_ready_cache_is_authoritative(self):
         projections = (self._projection("a"), self._projection("b"))
         reader = _Reader(
-            self._scope(),
-            projections,
-            state=self._state(),
-            cursor=self._cursor(),
+            self._state(),
+            cursor=self._cursor("9000"),
+            projections=projections,
         )
-        plan = self._plan(reader, limit=2)
-
+        plan = self._plan(reader, history_id="9000", limit=2)
         self.assertEqual(plan.status, "cache_authoritative")
         self.assertEqual(
             plan.provider_message_ids,
@@ -213,64 +219,27 @@ class PreviewActiveReadTests(unittest.TestCase):
         )
         self.assertEqual(plan.history_id, "9000")
         self.assertEqual(plan.source_generation, 3)
-        self.assertEqual(reader.cursor_calls, [(self._scope(), "gmail-account")])
-        self.assertEqual(reader.list_calls, [(self._scope(), 2, None)])
 
     def test_history_mismatch_requires_provider_before_listing_messages(self):
         reader = _Reader(
-            self._scope(),
-            (self._projection("a"),),
-            state=self._state(),
+            self._state(),
             cursor=self._cursor("8999"),
+            projections=(self._projection("a"),),
         )
         plan = self._plan(reader, history_id="9000", limit=1)
-
         self.assertEqual(plan.status, "provider_required")
         self.assertEqual(plan.provider_message_ids, ())
         self.assertEqual(reader.list_calls, [])
 
-    def test_missing_or_unready_state_requires_provider(self):
-        for state in (
-            None,
-            self._state(BootstrapState.NOT_STARTED),
-            self._state(BootstrapState.RECENT_SYNC),
-            self._state(BootstrapState.RECOVERING),
-            self._state(BootstrapState.BLOCKED),
-        ):
-            with self.subTest(state=state):
-                reader = _Reader(
-                    self._scope(),
-                    state=state,
-                    cursor=self._cursor(),
-                )
-                plan = self._plan(reader, limit=1)
-                self.assertEqual(plan.status, "provider_required")
-                self.assertEqual(reader.list_calls, [])
-
-    def test_short_recent_window_requires_provider_but_ready_allows_it(self):
-        projection = self._projection("a")
-
-        recent_reader = _Reader(
-            self._scope(),
-            (projection,),
-            state=self._state(BootstrapState.RECENT_READY),
+    def test_ready_complete_cache_may_authoritatively_return_short_page(self):
+        reader = _Reader(
+            self._state(),
             cursor=self._cursor(),
+            projections=(self._projection("a"),),
         )
-        recent_plan = self._plan(recent_reader, limit=2)
-        self.assertEqual(recent_plan.status, "provider_required")
-
-        ready_reader = _Reader(
-            self._scope(),
-            (projection,),
-            state=self._state(BootstrapState.READY),
-            cursor=self._cursor(),
-        )
-        ready_plan = self._plan(ready_reader, limit=2)
-        self.assertEqual(ready_plan.status, "cache_authoritative")
-        self.assertEqual(
-            ready_plan.provider_message_ids,
-            ("gmail-message-a",),
-        )
+        plan = self._plan(reader, limit=50)
+        self.assertEqual(plan.status, "cache_authoritative")
+        self.assertEqual(plan.provider_message_ids, ("gmail-message-a",))
 
     def test_invalid_cached_projection_fails_closed(self):
         for projection in (
@@ -279,23 +248,20 @@ class PreviewActiveReadTests(unittest.TestCase):
         ):
             with self.subTest(projection=projection):
                 reader = _Reader(
-                    self._scope(),
-                    (projection,),
-                    state=self._state(BootstrapState.READY),
+                    self._state(),
                     cursor=self._cursor(),
+                    projections=(projection,),
                 )
                 with self.assertRaises(RuntimeError):
                     self._plan(reader, limit=1)
 
-    def test_invalid_provider_history_id_fails_before_repository_read(self):
-        reader = _Reader(
-            self._scope(),
-            state=self._state(),
-            cursor=self._cursor(),
-        )
+    def test_invalid_limit_and_history_fail_before_repository_read(self):
+        reader = _Reader(self._state(), cursor=self._cursor())
+        with self.assertRaises(ValueError):
+            self._run(reader, limit=101)
         with self.assertRaises(ValueError):
             self._plan(reader, history_id="not-digits")
-        self.assertEqual(reader.state_authorities, [])
+        self.assertEqual(reader.authorities, [])
 
 
 class PreviewActiveReadStaticTests(unittest.TestCase):

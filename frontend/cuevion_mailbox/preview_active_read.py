@@ -1,9 +1,8 @@
-"""Preview-only durable mailbox read authority for existing routes.
+"""Preview-only durable Gmail cache authority for existing routes.
 
-Durable cache rows may become user-visible Gmail Inbox authority only when the
-provider account history cursor proves the cache is current and the requested
-window is known complete. Any uncertainty returns provider_required; callers
-must retain the existing provider snapshot path.
+This module never changes provider state. User-visible durable Gmail Inbox
+membership is permitted only after complete durable readiness has already been
+proven and the provider account history cursor matches exactly.
 """
 
 from __future__ import annotations
@@ -13,6 +12,7 @@ from dataclasses import dataclass
 from typing import Protocol, Sequence
 
 from cuevion_mailbox.repository_contract import (
+    BackfillState,
     BootstrapState,
     MailboxProvider,
     MailboxReadAuthority,
@@ -26,13 +26,6 @@ from cuevion_mailbox.runtime import build_active_read_mailbox_reader
 
 _MAX_ROUTE_READ_LIMIT = 100
 _GMAIL_SCOPE_KEY = "gmail-account"
-_READY_STATES = frozenset(
-    {
-        BootstrapState.RECENT_READY,
-        BootstrapState.BACKFILLING,
-        BootstrapState.READY,
-    }
-)
 
 
 class _ActiveReader(Protocol):
@@ -40,12 +33,6 @@ class _ActiveReader(Protocol):
         self,
         authority: MailboxReadAuthority,
     ) -> MailboxStateSnapshot | None:
-        ...
-
-    def resolve_current_scope(
-        self,
-        authority: MailboxReadAuthority,
-    ) -> MailboxScope | None:
         ...
 
     def read_cursor(
@@ -131,6 +118,34 @@ def _reader(environment: Mapping[str, str], reader: _ActiveReader | None):
     return build_active_read_mailbox_reader(environment) if reader is None else reader
 
 
+def _resolve_complete_ready(
+    repository: _ActiveReader,
+    authority: MailboxReadAuthority,
+) -> tuple[MailboxStateSnapshot, SyncCursor] | None:
+    state = repository.resolve_current_state(authority)
+    if state is None:
+        return None
+    if type(state) is not MailboxStateSnapshot:
+        raise ValueError("invalid preview mailbox read state")
+    if state.bootstrap_state is not BootstrapState.READY:
+        return None
+
+    cursor = repository.read_cursor(state.scope, _GMAIL_SCOPE_KEY)
+    if cursor is None:
+        return None
+    if type(cursor) is not SyncCursor:
+        raise ValueError("invalid preview mailbox read cursor")
+    if (
+        cursor.provider is not MailboxProvider.GOOGLE
+        or cursor.scope_key != _GMAIL_SCOPE_KEY
+        or cursor.gmail_history_id is None
+        or cursor.backfill_state is not BackfillState.COMPLETE
+        or cursor.backfill_cursor is not None
+    ):
+        return None
+    return state, cursor
+
+
 def run_preview_gmail_active_read(
     *,
     environment: Mapping[str, str],
@@ -141,8 +156,6 @@ def run_preview_gmail_active_read(
     limit: int,
     reader: _ActiveReader | None = None,
 ) -> PreviewActiveReadResult:
-    """Retain the original bounded observational read contract."""
-
     if not preview_active_read_enabled(environment):
         raise RuntimeError("preview active mailbox read is disabled")
     if type(limit) is not int or isinstance(limit, bool) or not 1 <= limit <= 100:
@@ -155,12 +168,17 @@ def run_preview_gmail_active_read(
         mailbox_account_identity=mailbox_account_identity,
     )
     repository = _reader(environment, reader)
-    scope = repository.resolve_current_scope(authority)
-    if scope is None:
-        return PreviewActiveReadResult("no_scope", 0)
+    resolved = _resolve_complete_ready(repository, authority)
+    if resolved is None:
+        state = repository.resolve_current_state(authority)
+        return PreviewActiveReadResult(
+            "no_scope" if state is None else "not_ready",
+            0,
+        )
 
+    state, _cursor = resolved
     projections = repository.list_messages(
-        scope,
+        state.scope,
         limit=min(limit, _MAX_ROUTE_READ_LIMIT),
     )
     return PreviewActiveReadResult("resolved", len(projections))
@@ -177,7 +195,7 @@ def plan_preview_gmail_authoritative_read(
     limit: int,
     reader: _ActiveReader | None = None,
 ) -> PreviewGmailAuthoritativeReadPlan:
-    """Return exact cached Gmail IDs only when freshness/completeness is proven."""
+    """Return durable Gmail membership only after complete readiness + freshness."""
 
     if not preview_active_read_enabled(environment):
         raise RuntimeError("preview active mailbox read is disabled")
@@ -199,8 +217,8 @@ def plan_preview_gmail_authoritative_read(
         mailbox_account_identity=mailbox_account_identity,
     )
     repository = _reader(environment, reader)
-    state = repository.resolve_current_state(authority)
-    if state is None or state.bootstrap_state not in _READY_STATES:
+    resolved = _resolve_complete_ready(repository, authority)
+    if resolved is None:
         return PreviewGmailAuthoritativeReadPlan(
             "provider_required",
             (),
@@ -208,13 +226,8 @@ def plan_preview_gmail_authoritative_read(
             None,
         )
 
-    cursor = repository.read_cursor(state.scope, _GMAIL_SCOPE_KEY)
-    if (
-        cursor is None
-        or cursor.provider is not MailboxProvider.GOOGLE
-        or cursor.scope_key != _GMAIL_SCOPE_KEY
-        or cursor.gmail_history_id != provider_history_id
-    ):
+    state, cursor = resolved
+    if cursor.gmail_history_id != provider_history_id:
         return PreviewGmailAuthoritativeReadPlan(
             "provider_required",
             (),
@@ -248,17 +261,6 @@ def plan_preview_gmail_authoritative_read(
 
     if len(set(provider_ids)) != len(provider_ids):
         raise RuntimeError("invalid Preview Gmail authoritative read result")
-
-    # RECENT_READY/BACKFILLING proves only the stored recent window. A full
-    # requested page is safe; a shorter page is authoritative only after a
-    # complete backfill has moved state to READY.
-    if len(provider_ids) < limit and state.bootstrap_state is not BootstrapState.READY:
-        return PreviewGmailAuthoritativeReadPlan(
-            "provider_required",
-            (),
-            None,
-            None,
-        )
 
     return PreviewGmailAuthoritativeReadPlan(
         "cache_authoritative",

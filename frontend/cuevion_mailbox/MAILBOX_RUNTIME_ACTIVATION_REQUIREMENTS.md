@@ -14,19 +14,20 @@ pure Gmail delta planner exist.
 
 Both active modes are rejected when `VERCEL_ENV=production`.
 
-The existing Gmail fetch route now has a freshness-proven Preview-only
-`active_read` cache-authority path. Durable membership/order becomes
-user-visible authority only when an identity-bound Gmail `/profile` historyId
-exactly matches the persisted durable Gmail cursor and the requested cache
-window is known complete. The route then fetches only those exact durable
-provider message IDs for render/body metadata, captures `/profile` again, and
-publishes the cached membership only if the historyId is still unchanged.
+The Gmail fetch route now has a freshness-proven Preview-only `active_read`
+cache-authority path. Durable Inbox membership/order may become user-visible
+authority only after prior complete reconciliation has promoted durable state
+to `ready` and the Gmail cursor backfill state to `complete`. An
+identity-bound Gmail `/profile` historyId must also exactly match the
+persisted durable cursor.
 
-A missing/unready durable state, cursor mismatch, short incomplete recent
-window, provider history change, exact-detail failure, or provider revalidation
+The route then fetches only those exact durable provider message IDs for
+render/body metadata, captures `/profile` again, and publishes the durable
+membership only if the historyId is still unchanged. Missing readiness, cursor
+mismatch, provider history change, exact-detail failure, or revalidation
 failure falls back to the existing Gmail list snapshot. Durable repository
-corruption/unavailability still fails closed with the existing fixed
-`mailbox_read_unavailable` response rather than silently trusting cache data.
+corruption/unavailability fails closed with the fixed
+`mailbox_read_unavailable` response.
 
 When `active_write` is explicitly enabled in Preview, the Gmail Inbox fetch
 route first captures an account-level Gmail `historyId` baseline from
@@ -173,29 +174,26 @@ rendered, serialized, pickled, returned from APIs, or added to exception text.
 
 ## Preview cache-authoritative Gmail read boundary
 
-The Preview `active_read` route may use durable Gmail Inbox membership as the
+The Preview `active_read` route may use durable Gmail Inbox membership as
 user-visible list authority only when all of the following hold:
 
-1. the authenticated Gmail `/profile` request succeeds and returns a canonical
-   numeric historyId bound to the authenticated mailbox identity;
-2. exact authenticated durable current state exists in
-   `recent_ready`, `backfilling`, or `ready`;
-3. the persisted `gmail-account` cursor exists and its historyId exactly
+1. authenticated Gmail `/profile` succeeds and returns a canonical numeric
+   historyId bound to the authenticated mailbox identity;
+2. exact durable current state is `ready`;
+3. the persisted `gmail-account` cursor is Google, has
+   `backfill_state=complete`, has no backfill cursor, and its historyId exactly
    equals the first provider historyId;
-4. every returned durable row is active, Google, Inbox-scoped, and has a
-   canonical provider message ID;
-5. a `recent_ready` or `backfilling` cache returns the full requested page;
-   a shorter page is authoritative only when bootstrap state is `ready`;
-6. Gmail exact-detail reads succeed for every durable provider message ID in
-   the durable order, with strict Inbox membership validation;
-7. a second identity-bound Gmail `/profile` request succeeds after those
+4. every durable row selected for the bounded response is active, Inbox-scoped,
+   and has a canonical Gmail provider message ID;
+5. Gmail exact-detail reads succeed for every durable provider message ID in
+   durable order with strict Inbox membership validation;
+6. a second identity-bound Gmail `/profile` request succeeds after those
    detail reads and returns the exact same historyId.
 
-The cache path never infers freshness from timestamps and never uses the mere
-presence of PostgreSQL rows as authority. A provider history mismatch before or
-after exact detail rendering returns to the provider list path. This closes the
-race where Gmail could change between freshness observation and response
-assembly.
+`recent_ready`, `backfilling`, incomplete cursors, and mere PostgreSQL row
+presence are never sufficient authority. The cache path never infers freshness
+from timestamps. Any provider history mismatch before or after exact detail
+rendering returns to the provider list path.
 
 ## Bounded Gmail write boundary
 
@@ -250,18 +248,39 @@ The Gmail Inbox route invokes one bounded consumer drain only inside its
 existing Preview `active_write` gate. Provider Inbox snapshot data remains the
 user-visible authority and consumer failure is observational to the response.
 
+## Cache authority readiness
+
+A recent durable window is not sufficient authority for user-visible cache
+reads. Gmail cache authority is eligible only after a complete bounded Inbox
+reconciliation has proven the entire provider Inbox fits the recovery bound and
+every current provider message has been reconciled.
+
+A successful complete stale-recovery reconciliation now:
+
+- advances the Gmail cursor to the fresh provider History id;
+- marks the cursor backfill state `complete` with no remaining backfill cursor;
+- promotes mailbox bootstrap state from `recent_ready`/backfilling to `ready`;
+- performs that readiness transition transactionally with the same message,
+  cursor and state CAS commit;
+- still refuses promotion on provider overflow, durable overflow, incomplete
+  exact recovery, cursor/state uncertainty or writer conflict.
+
+Preview `active_read` now treats only `ready` + Gmail cursor
+`backfill_state=complete` as cache-authoritative. `recent_ready` remains a
+cache miss for future user-visible authority. The current Gmail route still
+returns the provider snapshot in this slice; this is a readiness gate only.
+
 ## Remaining activation sequence
 
-1. keep Preview on `active_read`;
-2. prove cache-authoritative membership against the fixed Preview Neon branch
-   with matching provider history before/after exact detail reads;
-3. prove history mismatch and incomplete-window paths use the existing provider
-   list snapshot without publishing stale durable membership;
-4. remove every temporary proof surface and keep Preview on `active_read`
-   before merge;
-5. keep Production provider-authoritative until a separate explicit Production
-   read-authority gate is reviewed and proven;
-6. activate any Production mailbox runtime through a separate explicit gate.
+1. keep Preview on `active_read` except during explicit write validation;
+2. prove complete bounded Gmail reconciliation promotes state/cursor readiness,
+   while partial/recent-only state remains non-authoritative;
+3. add a bounded full-metadata cache projection for the existing Inbox response
+   shape without changing body/detail authority;
+4. wire Preview-only cache-first Inbox response selection behind the readiness
+   gate, with provider fallback or fail-closed behavior explicitly tested;
+5. prove live Preview equivalence and cleanup before merge;
+6. activate Production through a separate explicit gate.
 
 No route may interpret the mere presence of mailbox database environment
 variables as activation. Activation always requires the explicit reviewed mode.
