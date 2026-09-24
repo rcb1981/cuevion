@@ -334,13 +334,31 @@ class PreviewGmailDurableWriteStaticTests(unittest.TestCase):
         self.assertLess(profile_index, snapshot_index)
         self.assertLess(snapshot_index, write_index)
 
+    def test_stale_history_captures_fresh_profile_before_recovery_and_snapshot(self):
+        gmail = _GMAIL_ROUTE.read_text(encoding="utf-8")
+        stale_gate_index = gmail.index(
+            'history_sync.status == "full_sync_required"'
+        )
+        stale_profile_index = gmail.index(
+            "stale_recovery_history = read_gmail_account_history"
+        )
+        stale_recovery_index = gmail.index(
+            "stale_recovery = run_preview_gmail_stale_recovery"
+        )
+        snapshot_index = gmail.index("snapshot_result = read_gmail_folder_snapshot")
+        self.assertLess(stale_gate_index, stale_profile_index)
+        self.assertLess(stale_profile_index, stale_recovery_index)
+        self.assertLess(stale_recovery_index, snapshot_index)
+
     def test_route_hook_is_gmail_only(self):
         gmail = _GMAIL_ROUTE.read_text(encoding="utf-8")
         imap = _IMAP_ROUTE.read_text(encoding="utf-8")
         self.assertIn("preview_active_write_enabled", gmail)
         self.assertIn("run_preview_gmail_history_sync", gmail)
+        self.assertIn("run_preview_gmail_stale_recovery", gmail)
         self.assertIn("run_preview_gmail_durable_write", gmail)
         self.assertNotIn("run_preview_gmail_history_sync", imap)
+        self.assertNotIn("run_preview_gmail_stale_recovery", imap)
         self.assertNotIn("run_preview_gmail_durable_write", imap)
         self.assertNotIn("preview_active_write_enabled", imap)
 

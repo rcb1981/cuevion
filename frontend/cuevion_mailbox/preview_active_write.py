@@ -14,12 +14,16 @@ from typing import Callable, Protocol
 from cuevion_mailbox.gmail_delta_plan import (
     build_gmail_delta_commit,
     build_gmail_history_delta_commit,
+    build_gmail_stale_recovery_commit,
 )
 from cuevion_mailbox.gmail_history_delta import (
     GmailRequestWithOneRefresh,
     read_gmail_history_delta,
 )
 from cuevion_mailbox.gmail_projection import project_gmail_snapshot
+from cuevion_mailbox.gmail_recovery_inventory import (
+    read_complete_gmail_inbox_recovery_inventory,
+)
 from cuevion_mailbox.repository_contract import (
     BackfillState,
     BootstrapState,
@@ -50,6 +54,14 @@ class _Reader(Protocol):
         ...
 
     def read_cursor(self, scope, scope_key: str) -> SyncCursor | None:
+        ...
+
+    def read_active_message_inventory(
+        self,
+        scope,
+        *,
+        limit: int,
+    ):
         ...
 
     def read_messages_by_provider_message_ids(
@@ -128,6 +140,16 @@ class PreviewGmailHistorySyncResult:
     source_generation: int | None
     next_history_id: str | None
     affected_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class PreviewGmailStaleRecoveryResult:
+    status: str
+    context: dict
+    mutation_count: int
+    source_generation: int | None
+    next_history_id: str | None
+    provider_count: int
 
 
 def preview_active_write_enabled(environment: Mapping[str, str]) -> bool:
@@ -369,6 +391,209 @@ def run_preview_gmail_history_sync(
         scope.source_generation,
         delta.next_history_id,
         len(delta.affected_message_ids),
+    )
+
+
+def run_preview_gmail_stale_recovery(
+    *,
+    environment: Mapping[str, str],
+    workspace_id: str,
+    owner_user_id: str,
+    mailbox_id: str,
+    mailbox_account_identity: str,
+    context: dict,
+    fresh_history_id: str,
+    request_with_one_refresh: GmailRequestWithOneRefresh,
+    recover_exact_message: PreviewGmailHistoryRecoveryCallable,
+    committed_at_millis: int,
+    repositories: _Repositories | None = None,
+) -> PreviewGmailStaleRecoveryResult:
+    """Reconcile a complete bounded Inbox before replacing a stale Gmail cursor."""
+
+    if not preview_active_write_enabled(environment):
+        raise RuntimeError("preview active mailbox write is disabled")
+    if (
+        type(context) is not dict
+        or type(fresh_history_id) is not str
+        or not 1 <= len(fresh_history_id) <= 128
+        or not fresh_history_id.isascii()
+        or not fresh_history_id.isdigit()
+        or not callable(request_with_one_refresh)
+        or not callable(recover_exact_message)
+        or type(committed_at_millis) is not int
+        or isinstance(committed_at_millis, bool)
+        or committed_at_millis < 0
+    ):
+        raise ValueError("invalid Preview Gmail stale recovery")
+
+    authority = MailboxReadAuthority(
+        workspace_id=workspace_id,
+        owner_user_id=owner_user_id,
+        mailbox_id=mailbox_id,
+        provider=MailboxProvider.GOOGLE,
+        provider_account_identity=mailbox_account_identity.casefold(),
+    )
+    runtime_repositories = (
+        build_active_write_mailbox_repositories(environment)
+        if repositories is None
+        else repositories
+    )
+
+    state = runtime_repositories.reader.resolve_current_state(authority)
+    if state is None:
+        return PreviewGmailStaleRecoveryResult(
+            "state_missing",
+            context,
+            0,
+            None,
+            None,
+            0,
+        )
+    if type(state) is not MailboxStateSnapshot:
+        raise ValueError("invalid Preview Gmail stale recovery state")
+    if state.bootstrap_state not in {
+        BootstrapState.RECENT_READY,
+        BootstrapState.BACKFILLING,
+        BootstrapState.READY,
+    }:
+        return PreviewGmailStaleRecoveryResult(
+            "state_not_ready",
+            context,
+            0,
+            state.scope.source_generation,
+            None,
+            0,
+        )
+
+    scope = state.scope
+    current_cursor = runtime_repositories.reader.read_cursor(
+        scope,
+        _GMAIL_SCOPE_KEY,
+    )
+    if current_cursor is None:
+        return PreviewGmailStaleRecoveryResult(
+            "cursor_missing",
+            context,
+            0,
+            scope.source_generation,
+            None,
+            0,
+        )
+    if (
+        type(current_cursor) is not SyncCursor
+        or current_cursor.provider is not MailboxProvider.GOOGLE
+        or current_cursor.scope_key != _GMAIL_SCOPE_KEY
+        or current_cursor.gmail_history_id is None
+    ):
+        raise ValueError("invalid Preview Gmail stale recovery cursor")
+
+    inventory = read_complete_gmail_inbox_recovery_inventory(
+        context,
+        request_with_one_refresh=request_with_one_refresh,
+    )
+    current_context = inventory.context
+    if inventory.status != "ok":
+        return PreviewGmailStaleRecoveryResult(
+            "provider_" + inventory.status,
+            current_context,
+            0,
+            scope.source_generation,
+            None,
+            0,
+        )
+
+    active_inventory = runtime_repositories.reader.read_active_message_inventory(
+        scope,
+        limit=_MAX_ROUTE_WRITE_LIMIT,
+    )
+    if active_inventory.overflow:
+        return PreviewGmailStaleRecoveryResult(
+            "durable_overflow",
+            current_context,
+            0,
+            scope.source_generation,
+            None,
+            len(inventory.provider_message_ids),
+        )
+
+    recovered_previews: list[object] = []
+    recovered_sources: list[object] = []
+    recovered_provider_ids: list[str] = []
+    terminal_absent: list[str] = []
+    for provider_message_id in inventory.provider_message_ids:
+        recovered = recover_exact_message(
+            current_context,
+            provider_message_id,
+        )
+        if type(recovered) is not PreviewGmailHistoryRecovery:
+            raise ValueError("invalid Preview Gmail stale recovery")
+        current_context = recovered.context
+        if recovered.status == "retry":
+            return PreviewGmailStaleRecoveryResult(
+                "recovery_unavailable",
+                current_context,
+                0,
+                scope.source_generation,
+                None,
+                len(inventory.provider_message_ids),
+            )
+        if recovered.status == "terminal_absent":
+            terminal_absent.append(provider_message_id)
+            continue
+        recovered_provider_ids.append(provider_message_id)
+        recovered_previews.append(recovered.preview)
+        recovered_sources.append(recovered.candidate_source)
+
+    exact_current = tuple(
+        runtime_repositories.reader.read_messages_by_provider_message_ids(
+            scope,
+            recovered_provider_ids,
+        )
+    )
+    records = project_gmail_snapshot(
+        scope,
+        recovered_previews,
+        recovered_sources,
+    )
+    next_cursor = _next_cursor(
+        current_cursor,
+        gmail_history_id=fresh_history_id,
+    )
+    commit = build_gmail_stale_recovery_commit(
+        scope,
+        list(inventory.provider_message_ids),
+        records,
+        terminal_absent,
+        list(active_inventory.projections),
+        list(exact_current),
+        expected_state_row_version=state.row_version,
+        current_cursor=current_cursor,
+        next_cursor=next_cursor,
+        committed_at_millis=committed_at_millis,
+        next_bootstrap_state=state.bootstrap_state,
+    )
+
+    if (
+        current_cursor.gmail_history_id == fresh_history_id
+        and not commit.mutations
+    ):
+        return PreviewGmailStaleRecoveryResult(
+            "unchanged",
+            current_context,
+            0,
+            scope.source_generation,
+            fresh_history_id,
+            len(inventory.provider_message_ids),
+        )
+
+    outcome = runtime_repositories.writer.commit_provider_delta(commit)
+    return PreviewGmailStaleRecoveryResult(
+        outcome.value,
+        current_context,
+        len(commit.mutations),
+        scope.source_generation,
+        fresh_history_id,
+        len(inventory.provider_message_ids),
     )
 
 
