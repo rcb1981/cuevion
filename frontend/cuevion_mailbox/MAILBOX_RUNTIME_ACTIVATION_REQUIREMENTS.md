@@ -1,6 +1,6 @@
 # Mailbox PostgreSQL runtime activation requirements
 
-## Status: dormant Production Gmail cache-authority gate foundation
+## Status: Production reader-only connectivity proof
 
 The durable mailbox schema, PostgreSQL adapter, Gmail durable projection, and
 pure Gmail delta planner exist.
@@ -12,10 +12,13 @@ pure Gmail delta planner exist.
 - `active_read` — Preview-only reader construction;
 - `active_write` — Preview-only reader/writer construction;
 - `production_read` — Production-only reader construction, additionally gated
-  by an exact Production authority flag.
+  by an exact Production authority flag;
+- `production_probe` — Production-only reader diagnostic mode used only to
+  prove connectivity, role identity and transaction read-only state.
 
 `active_read` and `active_write` remain rejected when
-`VERCEL_ENV=production`. `production_read` is rejected outside Production.
+`VERCEL_ENV=production`. `production_read` and `production_probe` are rejected
+outside Production. `production_probe` is never Gmail cache authority.
 
 The Gmail fetch route now has a freshness-proven Preview-only `active_read`
 cache-authority path. Durable Inbox membership/order may become user-visible
@@ -138,6 +141,16 @@ Preview active-write requires:
 - `CUEVION_MAILBOX_READER_DATABASE_URL`
 - `CUEVION_MAILBOX_WRITER_DATABASE_URL`
 
+Production reader connectivity proof requires:
+
+- `CUEVION_MAILBOX_POSTGRES_MODE=production_probe`
+- `VERCEL_ENV=production`
+- `CUEVION_MAILBOX_READER_DATABASE_URL`
+
+The probe mode does not consult or enable
+`CUEVION_MAILBOX_PRODUCTION_READ_AUTHORITY`. It is intentionally excluded
+from the Gmail cache-authority gate and does not construct a writer.
+
 Production read-authority requires all of the following:
 
 - `CUEVION_MAILBOX_POSTGRES_MODE=production_read`
@@ -187,6 +200,30 @@ queries run.
 
 Database URLs are parser-controlled redacted objects and must not be logged,
 rendered, serialized, pickled, returned from APIs, or added to exception text.
+
+## Production reader connectivity proof boundary
+
+The temporary authenticated proof route may run only when the runtime is
+exactly `VERCEL_ENV=production` plus
+`CUEVION_MAILBOX_POSTGRES_MODE=production_probe`. Before the probe executes,
+it additionally verifies that the ordinary Gmail cache-authority capability is
+disabled.
+
+The probe:
+
+1. parses only the dedicated Production reader credential;
+2. opens a fresh PostgreSQL connection with `autocommit=False`;
+3. verifies TLS, server-reported role and database identity through the normal
+   runtime connection factory;
+4. issues `SET TRANSACTION READ ONLY`;
+5. reads only `current_user`, `current_database()` and
+   `transaction_read_only`;
+6. requires the transaction setting to be exactly `on`;
+7. rolls back and closes the connection;
+8. returns only fixed non-secret status fields.
+
+It reads no mailbox rows, creates no repository writer, performs no schema
+mutation, and cannot make durable Gmail membership user-visible.
 
 ## Production cache-authority activation boundary
 
@@ -312,16 +349,18 @@ returns the provider snapshot in this slice; this is a readiness gate only.
 
 ## Remaining activation sequence
 
-1. merge this dormant Production gate with no Production environment changes;
-2. prove the Production reader role can connect read-only without enabling
-   user-visible cache authority;
-3. prove the exact Production double gate remains false for every partial or
-   malformed configuration;
-4. perform a Production provider-vs-cache equivalence diagnostic without
-   changing the route response authority;
-5. only after equivalence is proven, explicitly enable
+1. merge the isolated `production_probe` diagnostic with no Production
+   environment changes;
+2. record the current Production mailbox mode before changing anything;
+3. temporarily set only
+   `CUEVION_MAILBOX_POSTGRES_MODE=production_probe`, redeploy, and prove the
+   dedicated Production reader connects with transaction read-only = on;
+4. restore the exact prior Production mailbox mode immediately after the proof;
+5. perform a Production provider-vs-cache equivalence diagnostic without
+   changing the Gmail response authority;
+6. only after equivalence is proven, explicitly enable
    `production_read + enabled` in a separately reviewed rollout;
-6. keep Production writer activation out of scope.
+7. keep Production writer activation out of scope.
 
 No route may interpret the mere presence of mailbox database environment
 variables as activation. Activation always requires the explicit reviewed mode.
