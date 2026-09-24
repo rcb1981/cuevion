@@ -2,7 +2,8 @@
 
 This module is deliberately outside `api/`: importing or deploying it exposes no
 route. `active_read` is Preview-only and constructs a reader repository only.
-Active writes are Preview-only; Production activation remains unavailable.
+`production_read` is reader-only and additionally requires an exact separate
+Production authority flag before composition. Active writes remain Preview-only.
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ from cuevion_mailbox.postgresql_repository import (
 
 
 _MODE_VARIABLE = "CUEVION_MAILBOX_POSTGRES_MODE"
+_PRODUCTION_READ_AUTHORITY_VARIABLE = "CUEVION_MAILBOX_PRODUCTION_READ_AUTHORITY"
+_PRODUCTION_READ_AUTHORITY_ENABLED = "enabled"
 _READER_URL_VARIABLE = "CUEVION_MAILBOX_READER_DATABASE_URL"
 _WRITER_URL_VARIABLE = "CUEVION_MAILBOX_WRITER_DATABASE_URL"
 _MAX_DATABASE_URL_CHARACTERS = 8_192
@@ -35,6 +38,7 @@ class MailboxRuntimeMode(str, Enum):
     SHADOW = "shadow"
     ACTIVE_READ = "active_read"
     ACTIVE_WRITE = "active_write"
+    PRODUCTION_READ = "production_read"
 
 
 class MailboxRuntimeConfigurationError(RuntimeError):
@@ -266,8 +270,19 @@ def parse_mailbox_runtime_configuration(
         expected_role=expected_reader,
     )
 
-    if mode is MailboxRuntimeMode.ACTIVE_READ:
-        if vercel_environment != "preview":
+    if mode in {
+        MailboxRuntimeMode.ACTIVE_READ,
+        MailboxRuntimeMode.PRODUCTION_READ,
+    }:
+        if (
+            mode is MailboxRuntimeMode.ACTIVE_READ
+            and vercel_environment != "preview"
+        ):
+            _configuration_error()
+        if (
+            mode is MailboxRuntimeMode.PRODUCTION_READ
+            and vercel_environment != "production"
+        ):
             _configuration_error()
         return MailboxRuntimeConfiguration(
             mode,
@@ -389,6 +404,45 @@ class MailboxConnectionFactory:
         return connection
 
 
+def production_read_authority_enabled(
+    environment: Mapping[str, str],
+) -> bool:
+    """Require two exact Production-only switches before reader composition."""
+
+    return (
+        isinstance(environment, Mapping)
+        and environment.get("VERCEL_ENV") == "production"
+        and environment.get(_MODE_VARIABLE)
+        == MailboxRuntimeMode.PRODUCTION_READ.value
+        and environment.get(_PRODUCTION_READ_AUTHORITY_VARIABLE)
+        == _PRODUCTION_READ_AUTHORITY_ENABLED
+    )
+
+
+def build_production_read_mailbox_reader(
+    environment: Mapping[str, str],
+    *,
+    connect: _ConnectCallable | None = None,
+) -> PostgreSQLMailboxReaderRepository:
+    """Compose Production reader-only authority after the explicit double gate."""
+
+    if not production_read_authority_enabled(environment):
+        raise MailboxRuntimeDisabledError()
+    config = parse_mailbox_runtime_configuration(environment)
+    if config.mode is not MailboxRuntimeMode.PRODUCTION_READ:
+        raise MailboxRuntimeDisabledError()
+    reader_url = config.reader_database_url
+    if type(reader_url) is not MailboxDatabaseUrl:
+        _configuration_error()
+    return PostgreSQLMailboxReaderRepository(
+        MailboxConnectionFactory(
+            reader_url,
+            read_only=True,
+            connect=connect,
+        )
+    )
+
+
 def build_active_read_mailbox_reader(
     environment: Mapping[str, str],
     *,
@@ -505,6 +559,8 @@ __all__ = (
     "ShadowMailboxRepositories",
     "build_active_read_mailbox_reader",
     "build_active_write_mailbox_repositories",
+    "build_production_read_mailbox_reader",
     "build_shadow_mailbox_repositories",
     "parse_mailbox_runtime_configuration",
+    "production_read_authority_enabled",
 )
