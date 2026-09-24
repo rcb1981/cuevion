@@ -76,8 +76,8 @@ from api.priority.semantic_config import read_new_inbound_client_mode
 from api.priority.store import build_runtime_workflow_store
 from cuevion_mailbox.gmail_history import read_gmail_account_history
 from cuevion_mailbox.preview_active_read import (
+    plan_preview_gmail_authoritative_read,
     preview_active_read_enabled,
-    run_preview_gmail_active_read,
 )
 from cuevion_mailbox.preview_active_write import (
     PreviewGmailHistoryRecovery,
@@ -329,32 +329,49 @@ class handler(BaseHTTPRequestHandler):
             return
         context = resolution["context"]
 
+        cache_read_plan = None
+        cache_history_before = None
         if preview_active_read_enabled(os.environ):
             member = resolution.get("memberAuthority")
-            try:
-                active_read = run_preview_gmail_active_read(
-                    environment=os.environ,
-                    workspace_id=getattr(member, "workspace_id"),
-                    owner_user_id=getattr(member, "user_id"),
-                    mailbox_id=context["mailbox_id"],
-                    mailbox_account_identity=context["mailbox_email"],
-                    limit=limit,
-                )
-            except Exception:
-                print("cuevion_mailbox_active_read gmail failed")
-                send_json(
-                    self,
-                    503,
-                    error_payload(
-                        "mailbox_read_unavailable",
-                        "Mailbox read validation is temporarily unavailable.",
-                    ),
-                )
-                return
-            print(
-                "cuevion_mailbox_active_read gmail "
-                + active_read.status
+            cache_history_before = read_gmail_account_history(
+                context,
+                request_with_one_refresh=_request_with_one_refresh,
             )
+            context = cache_history_before.context
+            if (
+                cache_history_before.status == "ok"
+                and cache_history_before.history_id is not None
+            ):
+                try:
+                    cache_read_plan = plan_preview_gmail_authoritative_read(
+                        environment=os.environ,
+                        workspace_id=getattr(member, "workspace_id"),
+                        owner_user_id=getattr(member, "user_id"),
+                        mailbox_id=context["mailbox_id"],
+                        mailbox_account_identity=context["mailbox_email"],
+                        provider_history_id=cache_history_before.history_id,
+                        limit=limit,
+                    )
+                except Exception:
+                    print("cuevion_mailbox_active_read gmail failed")
+                    send_json(
+                        self,
+                        503,
+                        error_payload(
+                            "mailbox_read_unavailable",
+                            "Mailbox read validation is temporarily unavailable.",
+                        ),
+                    )
+                    return
+                print(
+                    "cuevion_mailbox_active_read gmail "
+                    + cache_read_plan.status
+                )
+            else:
+                print(
+                    "cuevion_mailbox_active_read gmail provider_history_"
+                    + cache_history_before.status
+                )
 
         durable_history = None
         stale_recovery_history = None
@@ -463,17 +480,75 @@ class handler(BaseHTTPRequestHandler):
                             + stale_recovery.status
                         )
 
-        snapshot_result = read_gmail_folder_snapshot(
-            context,
-            provider_folder="Inbox",
-            request_with_one_refresh=_request_with_one_refresh,
-            gmail_request=_gmail_request,
-            refresh_context=refresh_gmail_context,
-            limit=limit,
-            focus_preferences=focus_preferences,
-            strict=False,
-            message_parser=message_from_bytes,
-        )
+        snapshot_result = None
+        if (
+            cache_read_plan is not None
+            and cache_read_plan.status == "cache_authoritative"
+            and cache_history_before is not None
+            and cache_history_before.history_id is not None
+        ):
+            cache_snapshot_result = read_gmail_folder_snapshot(
+                context,
+                provider_folder="Inbox",
+                request_with_one_refresh=_request_with_one_refresh,
+                gmail_request=_gmail_request,
+                refresh_context=refresh_gmail_context,
+                limit=limit,
+                focus_preferences=focus_preferences,
+                strict=True,
+                authoritative_message_ids=cache_read_plan.provider_message_ids,
+                message_parser=message_from_bytes,
+            )
+            cache_snapshot_context = cache_snapshot_result.get("context")
+            if isinstance(cache_snapshot_context, dict):
+                context = cache_snapshot_context
+            cache_snapshot = cache_snapshot_result.get("snapshot")
+            if (
+                cache_snapshot_result.get("refresh_failure") is None
+                and cache_snapshot_result.get("error") is None
+                and isinstance(cache_snapshot, dict)
+                and isinstance(cache_snapshot.get("messages"), list)
+                and len(cache_snapshot["messages"])
+                == len(cache_read_plan.provider_message_ids)
+            ):
+                cache_history_after = read_gmail_account_history(
+                    context,
+                    request_with_one_refresh=_request_with_one_refresh,
+                )
+                context = cache_history_after.context
+                if (
+                    cache_history_after.status == "ok"
+                    and cache_history_after.history_id
+                    == cache_history_before.history_id
+                ):
+                    snapshot_result = cache_snapshot_result
+                    print(
+                        "cuevion_mailbox_active_read gmail "
+                        "cache_authority_confirmed"
+                    )
+                else:
+                    print(
+                        "cuevion_mailbox_active_read gmail "
+                        "cache_authority_revalidation_failed"
+                    )
+            else:
+                print(
+                    "cuevion_mailbox_active_read gmail "
+                    "cache_authority_detail_failed"
+                )
+
+        if snapshot_result is None:
+            snapshot_result = read_gmail_folder_snapshot(
+                context,
+                provider_folder="Inbox",
+                request_with_one_refresh=_request_with_one_refresh,
+                gmail_request=_gmail_request,
+                refresh_context=refresh_gmail_context,
+                limit=limit,
+                focus_preferences=focus_preferences,
+                strict=False,
+                message_parser=message_from_bytes,
+            )
         refresh_failure = snapshot_result.get("refresh_failure")
         if refresh_failure:
             send_json(self, refresh_failure["status_code"], refresh_failure["error"])
