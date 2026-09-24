@@ -482,6 +482,25 @@ class OutboxEvent:
     claim_token: str
 
 
+@dataclass(frozen=True, slots=True)
+class OutboxMessageSnapshot:
+    scope: MailboxScope
+    record: MessageRecord
+    provider_deleted: bool
+    row_version: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.scope) is not MailboxScope
+            or type(self.record) is not MessageRecord
+            or type(self.provider_deleted) is not bool
+            or type(self.row_version) is not int
+            or self.row_version < 1
+        ):
+            raise ValueError("invalid outbox message snapshot")
+        self.record.validate_for(self.scope.provider)
+
+
 class MailboxReaderRepository(Protocol):
     """Read-only durable mailbox boundary for cache/UI consumers."""
 
@@ -533,6 +552,19 @@ class MailboxReaderRepository(Protocol):
 
         This is intentionally identity-based rather than recency-based so a
         History delta never plans against only the newest visible cache window.
+        """
+        ...
+
+    def resolve_outbox_message(
+        self,
+        event: OutboxEvent,
+    ) -> OutboxMessageSnapshot | None:
+        """Resolve the current generation row referenced by a claimed outbox event.
+
+        A stale source generation or missing message returns None. The returned
+        row is always the latest durable message row for that exact current
+        generation; callers must compare row_version with the event version
+        before applying any downstream side effect.
         """
         ...
 
@@ -623,6 +655,7 @@ __all__ = (
     "MessageMutationKind",
     "MessageProjection",
     "OutboxEvent",
+    "OutboxMessageSnapshot",
     "OutboxStorageScope",
     "OutboxEventType",
     "ProviderDeltaCommit",

@@ -185,21 +185,46 @@ Durable failures are intentionally observational in this first route hook:
 Preview logs a fixed non-sensitive marker and continues returning the successful
 provider snapshot.
 
+## Outbox to Priority foundation
+
+The mailbox outbox remains unconsumed at runtime in this slice.
+
+A foundation now exists for deterministic outbox-to-Priority planning:
+
+- a claimed outbox event can be resolved back to the exact latest durable
+  message row for its current source generation;
+- stale source generations return no current row and are terminal no-ops;
+- a missing message inside an otherwise-current generation is treated as
+  storage corruption rather than silently acknowledged;
+- delayed events are compared against the latest durable message row version;
+  any event older than the current row is `superseded` and may not mutate
+  Priority state;
+- exact active `message_added` / `message_changed` events project through
+  the existing canonical Gmail Priority candidate projection;
+- exact `message_deleted` events plan removal of only the Priority candidate
+  transport record; separate workflow authority remains independent;
+- messages that are current but not eligible for the Priority candidate
+  transport are classified `ineligible` rather than retried forever.
+
+No claimant, Redis mutation, retry/ack worker, route, cron, or Production
+activation is added by this foundation.
+
 ## Remaining activation sequence
 
 After the Preview Gmail History route integration is proven:
 
 1. keep Preview on `active_read` except during explicit write validation;
-2. prove the stale-cursor recovery route against the fixed Preview Neon branch,
-   including reconciliation, resurrection, deletions, provider overflow,
-   durable overflow, retry/no-advance and CAS conflict;
-3. restore Preview to `active_read` and remove every temporary proof surface
-   before merge;
-4. only after provider writes are stable, activate outbox-to-Priority
-   consumption;
-5. only after the server cache is sufficiently complete, promote cache-first
-   server reads to user-visible authority;
-6. activate Production through a separate explicit gate.
+2. keep the merged Gmail bootstrap, History and stale-recovery write paths
+   provider-authoritative and Preview-gated;
+3. wire a bounded Preview-only outbox claimant around the deterministic
+   outbox-to-Priority foundation, with lease-safe processed/retry outcomes;
+4. prove added/changed candidate upsert, deleted candidate transport removal,
+   superseded-event no-op, stale-generation no-op, retry and claim-loss paths;
+5. restore Preview to `active_read` and remove every temporary proof surface
+   before merging any outbox consumer activation;
+6. only after outbox consumption is stable, promote cache-first server reads to
+   user-visible authority;
+7. activate Production through a separate explicit gate.
 
 No route may interpret the mere presence of mailbox database environment
 variables as activation. Activation always requires the explicit reviewed mode.

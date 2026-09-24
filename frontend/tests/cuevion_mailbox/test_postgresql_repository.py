@@ -1,6 +1,7 @@
 """Security and structure tests for the inert PostgreSQL mailbox adapter."""
 
 import ast
+from datetime import datetime, timezone
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -13,6 +14,8 @@ from cuevion_mailbox.repository_contract import (
     MailboxReadAuthority,
     MailboxScope,
     MailboxStateSnapshot,
+    OutboxEvent,
+    OutboxEventType,
     OutboxStorageScope,
 )
 from cuevion_mailbox.role_policy import build_mailbox_role_plan
@@ -249,6 +252,23 @@ class PostgreSQLMailboxCurrentStateBootstrapTests(unittest.TestCase):
         adapter = repository.PostgreSQLMailboxRepository(lambda: connection)
         return adapter, connection, cursor
 
+    def test_resolve_current_state_missing_returns_none_without_outbox_scope_logic(self):
+        adapter, connection, cursor = self._repository(
+            insert_rowcount=0,
+            state_rows=[],
+        )
+
+        self.assertIsNone(adapter.resolve_current_state(self._authority()))
+
+        self.assertEqual(
+            [sql for sql, _parameters in cursor.executions],
+            [repository._SELECT_CURRENT_STATE_SQL],
+        )
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+        self.assertTrue(connection.closed)
+        self.assertTrue(cursor.closed)
+
     def test_initial_state_create_is_generation_one_and_commits_once(self):
         adapter, connection, cursor = self._repository(
             insert_rowcount=1,
@@ -429,6 +449,162 @@ class PostgreSQLMailboxExactProviderLookupTests(unittest.TestCase):
             )
 
 
+class _OutboxResolutionCursor:
+    def __init__(self, *, message_rows, state_rows=()) -> None:
+        self.message_rows = list(message_rows)
+        self.state_rows = list(state_rows)
+        self.executions: list[tuple[str, tuple[object, ...]]] = []
+        self.closed = False
+
+    def execute(self, sql: str, parameters: tuple[object, ...]) -> None:
+        self.executions.append((sql, parameters))
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        if not self.executions:
+            raise AssertionError("fetch without execute")
+        sql = self.executions[-1][0]
+        if sql == repository._SELECT_OUTBOX_MESSAGE_SQL:
+            return list(self.message_rows)
+        if sql == repository._SELECT_OUTBOX_SCOPE_CURRENT_SQL:
+            return list(self.state_rows)
+        raise AssertionError("unexpected SQL")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class PostgreSQLMailboxOutboxResolutionTests(unittest.TestCase):
+    def _event(self, *, row_version=4):
+        return OutboxEvent(
+            event_id="mbe_" + ("a" * 22),
+            scope=OutboxStorageScope(
+                workspace_id="wsp_" + ("a" * 22),
+                owner_user_id="usr_" + ("b" * 22),
+                mailbox_id="gmail-1",
+                source_generation=3,
+            ),
+            message_id="mbm_" + ("c" * 22),
+            message_row_version=row_version,
+            event_type=OutboxEventType.MESSAGE_CHANGED,
+            attempt_count=1,
+            claim_token="claim-token",
+        )
+
+    def _message_row(self, *, deleted=False, row_version=4):
+        return (
+            "google",
+            "verified@gmail.com",
+            "mbm_" + ("c" * 22),
+            "gmail-message-1",
+            "Inbox",
+            None,
+            None,
+            "thread-1",
+            ["INBOX", "UNREAD"],
+            "rfc-1@example.test",
+            None,
+            ["root@example.test"],
+            "sender@example.test",
+            "Sender",
+            ["owner@example.test"],
+            [],
+            "Subject",
+            "Snippet",
+            datetime(2026, 9, 24, 8, 0, tzinfo=timezone.utc),
+            True,
+            False,
+            "stale" if deleted else "cached",
+            "1" * 64,
+            deleted,
+            row_version,
+        )
+
+    def _repository(self, *, message_rows, state_rows=()):
+        cursor = _OutboxResolutionCursor(
+            message_rows=message_rows,
+            state_rows=state_rows,
+        )
+        connection = _ExactLookupConnection(cursor)
+        return (
+            repository.PostgreSQLMailboxRepository(lambda: connection),
+            connection,
+            cursor,
+        )
+
+    def test_current_event_resolves_full_exact_message_snapshot(self):
+        adapter, connection, cursor = self._repository(
+            message_rows=[self._message_row()],
+        )
+
+        snapshot = adapter.resolve_outbox_message(self._event())
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot.scope.source_generation, 3)
+        self.assertEqual(snapshot.scope.provider_account_identity, "verified@gmail.com")
+        self.assertEqual(
+            snapshot.record.identity.provider_message_id,
+            "gmail-message-1",
+        )
+        self.assertEqual(snapshot.record.provider_thread_id, "thread-1")
+        self.assertEqual(snapshot.record.provider_labels, ("INBOX", "UNREAD"))
+        self.assertEqual(snapshot.record.sender_address, "sender@example.test")
+        self.assertEqual(snapshot.record.subject, "Subject")
+        self.assertEqual(snapshot.record.provider_timestamp_millis, 1790236800000)
+        self.assertIs(snapshot.record.body_state, repository.BodyState.CACHED)
+        self.assertFalse(snapshot.provider_deleted)
+        self.assertEqual(snapshot.row_version, 4)
+        self.assertEqual(
+            [sql for sql, _params in cursor.executions],
+            [repository._SELECT_OUTBOX_MESSAGE_SQL],
+        )
+        self.assertEqual(connection.rollbacks, 1)
+        self.assertTrue(connection.closed)
+        self.assertTrue(cursor.closed)
+
+    def test_stale_generation_returns_none_only_after_current_scope_check(self):
+        adapter, _connection, cursor = self._repository(
+            message_rows=[],
+            state_rows=[],
+        )
+
+        self.assertIsNone(adapter.resolve_outbox_message(self._event()))
+
+        self.assertEqual(
+            [sql for sql, _params in cursor.executions],
+            [
+                repository._SELECT_OUTBOX_MESSAGE_SQL,
+                repository._SELECT_OUTBOX_SCOPE_CURRENT_SQL,
+            ],
+        )
+
+    def test_missing_message_in_current_generation_is_storage_corruption(self):
+        adapter, _connection, _cursor = self._repository(
+            message_rows=[],
+            state_rows=[("google", "verified@gmail.com")],
+        )
+
+        with self.assertRaises(RuntimeError):
+            adapter.resolve_outbox_message(self._event())
+
+    def test_tombstoned_current_row_is_returned_not_hidden(self):
+        adapter, _connection, _cursor = self._repository(
+            message_rows=[
+                self._message_row(deleted=True, row_version=5),
+            ],
+        )
+
+        snapshot = adapter.resolve_outbox_message(
+            self._event(row_version=5)
+        )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertTrue(snapshot.provider_deleted)
+        self.assertEqual(snapshot.row_version, 5)
+        self.assertIs(snapshot.record.body_state, repository.BodyState.STALE)
+
+
 class PostgreSQLMailboxActiveInventoryTests(unittest.TestCase):
     def _scope(self):
         return MailboxScope(
@@ -575,6 +751,25 @@ class PostgreSQLMailboxAdapterTests(unittest.TestCase):
             self.assertIn("provider_account_identity = %s", normalized)
             self.assertIn("is_current = true", normalized)
 
+    def test_outbox_resolution_sql_is_generation_exact_and_current_only(self):
+        message_sql = " ".join(
+            repository._SELECT_OUTBOX_MESSAGE_SQL.casefold().split()
+        )
+        scope_sql = " ".join(
+            repository._SELECT_OUTBOX_SCOPE_CURRENT_SQL.casefold().split()
+        )
+        for required in (
+            "workspace_id = %s",
+            "owner_user_id = %s",
+            "mailbox_id = %s",
+            "source_generation = %s",
+            "is_current = true",
+        ):
+            self.assertIn(required, message_sql)
+            self.assertIn(required, scope_sql)
+        self.assertIn("message_id = %s", message_sql)
+        self.assertIn("provider_account_identity", message_sql)
+
     def test_current_scope_lookup_is_exact_and_current_only(self):
         normalized = " ".join(
             repository._SELECT_CURRENT_STATE_SQL.casefold().split()
@@ -623,6 +818,8 @@ class PostgreSQLMailboxAdapterTests(unittest.TestCase):
             "_LIST_MESSAGES_SQL": 9,
             "_SELECT_ACTIVE_MESSAGE_INVENTORY_SQL": 7,
             "_SELECT_MESSAGES_BY_PROVIDER_IDS_SQL": 7,
+            "_SELECT_OUTBOX_SCOPE_CURRENT_SQL": 4,
+            "_SELECT_OUTBOX_MESSAGE_SQL": 5,
             "_SELECT_BODY_SQL": 7,
             "_LOCK_STATE_SQL": 4,
             "_LOCK_CURSOR_SQL": 6,
