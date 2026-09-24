@@ -3,7 +3,9 @@
 This module is deliberately outside `api/`: importing or deploying it exposes no
 route. `active_read` is Preview-only and constructs a reader repository only.
 `production_read` is reader-only and additionally requires an exact separate
-Production authority flag before composition. Active writes remain Preview-only.
+Production authority flag before composition. `production_probe` is a separate
+Production-only diagnostic reader mode and is never cache authority. Active
+writes remain Preview-only.
 """
 
 from __future__ import annotations
