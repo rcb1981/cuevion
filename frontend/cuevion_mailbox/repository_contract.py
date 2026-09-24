@@ -464,6 +464,26 @@ class CachedBody:
 
 
 @dataclass(frozen=True, slots=True)
+class OutboxMailboxScope:
+    workspace_id: str
+    owner_user_id: str
+    mailbox_id: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.workspace_id) is not str
+            or len(self.workspace_id) != 26
+            or not self.workspace_id.startswith("wsp_")
+            or type(self.owner_user_id) is not str
+            or len(self.owner_user_id) != 26
+            or not self.owner_user_id.startswith("usr_")
+            or type(self.mailbox_id) is not str
+            or not 1 <= len(self.mailbox_id.encode("utf-8")) <= 160
+        ):
+            raise ValueError("invalid outbox mailbox scope")
+
+
+@dataclass(frozen=True, slots=True)
 class OutboxStorageScope:
     workspace_id: str
     owner_user_id: str
@@ -610,6 +630,17 @@ class MailboxRepository(MailboxReaderRepository, Protocol):
         """Atomically claim due events and return their persisted claim tokens."""
         ...
 
+    def claim_outbox_batch_for_mailbox(
+        self,
+        mailbox_scope: OutboxMailboxScope,
+        *,
+        limit: int,
+        now_millis: int,
+        lease_millis: int,
+    ) -> Sequence[OutboxEvent]:
+        """Claim only due events for one exact tenant mailbox across generations."""
+        ...
+
     def mark_outbox_processed(
         self,
         event_id: str,
@@ -655,6 +686,7 @@ __all__ = (
     "MessageMutationKind",
     "MessageProjection",
     "OutboxEvent",
+    "OutboxMailboxScope",
     "OutboxMessageSnapshot",
     "OutboxStorageScope",
     "OutboxEventType",
