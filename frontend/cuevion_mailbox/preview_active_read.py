@@ -21,7 +21,11 @@ from cuevion_mailbox.repository_contract import (
     MessageProjection,
     SyncCursor,
 )
-from cuevion_mailbox.runtime import build_active_read_mailbox_reader
+from cuevion_mailbox.runtime import (
+    build_active_read_mailbox_reader,
+    build_production_read_mailbox_reader,
+    production_read_authority_enabled,
+)
 
 
 _MAX_ROUTE_READ_LIMIT = 100
@@ -114,8 +118,21 @@ def _authority(
     )
 
 
+def gmail_cache_authority_enabled(environment: Mapping[str, str]) -> bool:
+    return (
+        preview_active_read_enabled(environment)
+        or production_read_authority_enabled(environment)
+    )
+
+
 def _reader(environment: Mapping[str, str], reader: _ActiveReader | None):
-    return build_active_read_mailbox_reader(environment) if reader is None else reader
+    if reader is not None:
+        return reader
+    if preview_active_read_enabled(environment):
+        return build_active_read_mailbox_reader(environment)
+    if production_read_authority_enabled(environment):
+        return build_production_read_mailbox_reader(environment)
+    raise RuntimeError("Gmail cache authority is disabled")
 
 
 def _resolve_complete_ready(
@@ -188,7 +205,7 @@ def run_preview_gmail_active_read(
     return PreviewActiveReadResult("resolved", len(projections))
 
 
-def plan_preview_gmail_authoritative_read(
+def plan_gmail_authoritative_read(
     *,
     environment: Mapping[str, str],
     workspace_id: str,
@@ -201,8 +218,8 @@ def plan_preview_gmail_authoritative_read(
 ) -> PreviewGmailAuthoritativeReadPlan:
     """Return durable Gmail membership only after complete readiness + freshness."""
 
-    if not preview_active_read_enabled(environment):
-        raise RuntimeError("preview active mailbox read is disabled")
+    if not gmail_cache_authority_enabled(environment):
+        raise RuntimeError("Gmail cache authority is disabled")
     if (
         type(limit) is not int
         or isinstance(limit, bool)
@@ -277,9 +294,20 @@ def plan_preview_gmail_authoritative_read(
     )
 
 
+def plan_preview_gmail_authoritative_read(
+    **kwargs,
+) -> PreviewGmailAuthoritativeReadPlan:
+    environment = kwargs.get("environment")
+    if not preview_active_read_enabled(environment):
+        raise RuntimeError("preview active mailbox read is disabled")
+    return plan_gmail_authoritative_read(**kwargs)
+
+
 __all__ = (
     "PreviewActiveReadResult",
     "PreviewGmailAuthoritativeReadPlan",
+    "gmail_cache_authority_enabled",
+    "plan_gmail_authoritative_read",
     "plan_preview_gmail_authoritative_read",
     "preview_active_read_enabled",
     "run_preview_gmail_active_read",
