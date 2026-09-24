@@ -208,6 +208,29 @@ def _next_cursor(
     )
 
 
+def _next_complete_cursor(
+    current: SyncCursor,
+    *,
+    gmail_history_id: str,
+) -> SyncCursor:
+    next_cursor = _next_cursor(
+        current,
+        gmail_history_id=gmail_history_id,
+    )
+    return SyncCursor(
+        scope_key=next_cursor.scope_key,
+        cursor_generation=next_cursor.cursor_generation,
+        provider=next_cursor.provider,
+        gmail_history_id=next_cursor.gmail_history_id,
+        imap_uid_validity=next_cursor.imap_uid_validity,
+        imap_highest_uid=next_cursor.imap_highest_uid,
+        imap_uidnext_observed=next_cursor.imap_uidnext_observed,
+        backfill_state=BackfillState.COMPLETE,
+        backfill_cursor=None,
+        row_version=next_cursor.row_version,
+    )
+
+
 def run_preview_gmail_history_sync(
     *,
     environment: Mapping[str, str],
@@ -555,7 +578,7 @@ def run_preview_gmail_stale_recovery(
         recovered_previews,
         recovered_sources,
     )
-    next_cursor = _next_cursor(
+    next_cursor = _next_complete_cursor(
         current_cursor,
         gmail_history_id=fresh_history_id,
     )
@@ -570,11 +593,14 @@ def run_preview_gmail_stale_recovery(
         current_cursor=current_cursor,
         next_cursor=next_cursor,
         committed_at_millis=committed_at_millis,
-        next_bootstrap_state=state.bootstrap_state,
+        next_bootstrap_state=BootstrapState.READY,
     )
 
     if (
         current_cursor.gmail_history_id == fresh_history_id
+        and current_cursor.backfill_state is BackfillState.COMPLETE
+        and current_cursor.backfill_cursor is None
+        and state.bootstrap_state is BootstrapState.READY
         and not commit.mutations
     ):
         return PreviewGmailStaleRecoveryResult(
