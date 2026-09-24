@@ -121,18 +121,22 @@ def _reader(environment: Mapping[str, str], reader: _ActiveReader | None):
 def _resolve_complete_ready(
     repository: _ActiveReader,
     authority: MailboxReadAuthority,
-) -> tuple[MailboxStateSnapshot, SyncCursor] | None:
+) -> tuple[
+    str,
+    MailboxStateSnapshot | None,
+    SyncCursor | None,
+]:
     state = repository.resolve_current_state(authority)
     if state is None:
-        return None
+        return "no_scope", None, None
     if type(state) is not MailboxStateSnapshot:
         raise ValueError("invalid preview mailbox read state")
     if state.bootstrap_state is not BootstrapState.READY:
-        return None
+        return "not_ready", state, None
 
     cursor = repository.read_cursor(state.scope, _GMAIL_SCOPE_KEY)
     if cursor is None:
-        return None
+        return "not_ready", state, None
     if type(cursor) is not SyncCursor:
         raise ValueError("invalid preview mailbox read cursor")
     if (
@@ -142,8 +146,8 @@ def _resolve_complete_ready(
         or cursor.backfill_state is not BackfillState.COMPLETE
         or cursor.backfill_cursor is not None
     ):
-        return None
-    return state, cursor
+        return "not_ready", state, cursor
+    return "ready", state, cursor
 
 
 def run_preview_gmail_active_read(
@@ -168,15 +172,15 @@ def run_preview_gmail_active_read(
         mailbox_account_identity=mailbox_account_identity,
     )
     repository = _reader(environment, reader)
-    resolved = _resolve_complete_ready(repository, authority)
-    if resolved is None:
-        state = repository.resolve_current_state(authority)
-        return PreviewActiveReadResult(
-            "no_scope" if state is None else "not_ready",
-            0,
-        )
+    readiness, state, _cursor = _resolve_complete_ready(
+        repository,
+        authority,
+    )
+    if readiness != "ready":
+        return PreviewActiveReadResult(readiness, 0)
+    if state is None:
+        raise RuntimeError("invalid preview mailbox read readiness")
 
-    state, _cursor = resolved
     projections = repository.list_messages(
         state.scope,
         limit=min(limit, _MAX_ROUTE_READ_LIMIT),
@@ -217,16 +221,19 @@ def plan_preview_gmail_authoritative_read(
         mailbox_account_identity=mailbox_account_identity,
     )
     repository = _reader(environment, reader)
-    resolved = _resolve_complete_ready(repository, authority)
-    if resolved is None:
+    readiness, state, cursor = _resolve_complete_ready(
+        repository,
+        authority,
+    )
+    if readiness != "ready":
         return PreviewGmailAuthoritativeReadPlan(
             "provider_required",
             (),
             None,
             None,
         )
-
-    state, cursor = resolved
+    if state is None or cursor is None:
+        raise RuntimeError("invalid Preview Gmail authoritative readiness")
     if cursor.gmail_history_id != provider_history_id:
         return PreviewGmailAuthoritativeReadPlan(
             "provider_required",
