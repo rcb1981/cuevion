@@ -542,16 +542,20 @@ def read_gmail_folder_snapshot(
     focus_preferences: dict | None = None,
     strict: bool = False,
     required_message_id: str | None = None,
+    authoritative_message_ids: tuple[str, ...] | None = None,
     message_parser=message_from_bytes,
     gmail_request: GmailRawRequest | None = None,
     refresh_context: GmailContextRefresh | None = None,
 ) -> dict:
     """Read and normalize one bounded Gmail folder snapshot.
 
-    The initial list retains the injected authenticated callback. Routes can
-    additionally provide raw transport and refresh capabilities for bounded
-    detail overlap; opaque legacy callbacks stay sequential. Every return
-    includes the latest ordered context and any provider or refresh failure.
+    The initial list retains the injected authenticated callback. Preview
+    cache-authoritative callers may instead supply an exact ordered tuple of
+    Inbox provider message IDs; that skips Gmail list membership and fetches
+    only those message details. Routes can additionally provide raw transport
+    and refresh capabilities for bounded detail overlap; opaque legacy
+    callbacks stay sequential. Every return includes the latest ordered context
+    and any provider or refresh failure.
     """
 
     if (
@@ -572,6 +576,21 @@ def read_gmail_folder_snapshot(
                 or not valid_identifier(required_message_id)
             )
         )
+        or (
+            authoritative_message_ids is not None
+            and (
+                provider_folder != "Inbox"
+                or required_message_id is not None
+                or type(authoritative_message_ids) is not tuple
+                or len(authoritative_message_ids) > limit
+                or len(set(authoritative_message_ids))
+                != len(authoritative_message_ids)
+                or any(
+                    not valid_identifier(message_id)
+                    for message_id in authoritative_message_ids
+                )
+            )
+        )
     ):
         return _result(
             context,
@@ -582,35 +601,38 @@ def read_gmail_folder_snapshot(
         context, request_with_one_refresh, gmail_request, refresh_context,
     )
 
-    list_payload, list_error, context, refresh_failure = (
-        requests.sequential_request(_list_path(provider_folder, limit))
-    )
-    if refresh_failure is not None:
-        return _result(
-            context,
-            error=list_error,
-            refresh_failure=refresh_failure,
+    if authoritative_message_ids is None:
+        list_payload, list_error, context, refresh_failure = (
+            requests.sequential_request(_list_path(provider_folder, limit))
         )
-    if list_error is not None:
-        return _result(context, error=list_error)
-    if not isinstance(list_payload, dict):
-        return _invalid_response(context)
+        if refresh_failure is not None:
+            return _result(
+                context,
+                error=list_error,
+                refresh_failure=refresh_failure,
+            )
+        if list_error is not None:
+            return _result(context, error=list_error)
+        if not isinstance(list_payload, dict):
+            return _invalid_response(context)
 
-    message_ids, list_is_valid = _message_ids_from_list(
-        list_payload,
-        strict=strict,
-        limit=limit,
-    )
-    if not list_is_valid or message_ids is None:
-        return _invalid_response(context)
+        message_ids, list_is_valid = _message_ids_from_list(
+            list_payload,
+            strict=strict,
+            limit=limit,
+        )
+        if not list_is_valid or message_ids is None:
+            return _invalid_response(context)
 
-    if (
-        required_message_id is not None
-        and required_message_id not in message_ids
-    ):
-        if len(message_ids) >= limit:
-            message_ids = message_ids[: limit - 1]
-        message_ids.append(required_message_id)
+        if (
+            required_message_id is not None
+            and required_message_id not in message_ids
+        ):
+            if len(message_ids) >= limit:
+                message_ids = message_ids[: limit - 1]
+            message_ids.append(required_message_id)
+    else:
+        message_ids = list(authoritative_message_ids)
 
     messages: list[dict] = []
     priority_candidate_sources: list[dict] = []
