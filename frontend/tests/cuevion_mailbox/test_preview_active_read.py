@@ -10,8 +10,12 @@ from cuevion_mailbox.preview_active_read import (
     run_preview_gmail_active_read,
 )
 from cuevion_mailbox.repository_contract import (
+    BackfillState,
+    BootstrapState,
     MailboxProvider,
     MailboxScope,
+    MailboxStateSnapshot,
+    SyncCursor,
 )
 
 
@@ -22,15 +26,21 @@ _HELPER = _FRONTEND / "cuevion_mailbox" / "preview_active_read.py"
 
 
 class _Reader:
-    def __init__(self, scope, projections=()) -> None:
-        self.scope = scope
+    def __init__(self, state, *, cursor=None, projections=()) -> None:
+        self.state = state
+        self.cursor = cursor
         self.projections = tuple(projections)
         self.authorities = []
+        self.cursor_calls = []
         self.list_calls = []
 
-    def resolve_current_scope(self, authority):
+    def resolve_current_state(self, authority):
         self.authorities.append(authority)
-        return self.scope
+        return self.state
+
+    def read_cursor(self, scope, scope_key):
+        self.cursor_calls.append((scope, scope_key))
+        return self.cursor
 
     def list_messages(
         self,
@@ -58,6 +68,27 @@ class PreviewActiveReadTests(unittest.TestCase):
             source_generation=3,
             provider=MailboxProvider.GOOGLE,
             provider_account_identity="verified@gmail.com",
+        )
+
+    def _state(self, bootstrap_state=BootstrapState.READY):
+        return MailboxStateSnapshot(
+            scope=self._scope(),
+            bootstrap_state=bootstrap_state,
+            row_version=4,
+        )
+
+    def _cursor(self, backfill_state=BackfillState.COMPLETE):
+        return SyncCursor(
+            scope_key="gmail-account",
+            cursor_generation=1,
+            provider=MailboxProvider.GOOGLE,
+            gmail_history_id="4000",
+            imap_uid_validity=None,
+            imap_highest_uid=None,
+            imap_uidnext_observed=None,
+            backfill_state=backfill_state,
+            backfill_cursor=None,
+            row_version=3,
         )
 
     def _run(self, reader, *, environment=None, limit=50):
@@ -99,18 +130,48 @@ class PreviewActiveReadTests(unittest.TestCase):
             reader.authorities[0].provider_account_identity,
             "verified@gmail.com",
         )
+        self.assertEqual(reader.cursor_calls, [])
         self.assertEqual(reader.list_calls, [])
 
-    def test_current_scope_performs_one_bounded_projection_read(self):
+    def test_recent_ready_is_not_user_visible_cache_authority(self):
+        reader = _Reader(
+            self._state(BootstrapState.RECENT_READY),
+            cursor=self._cursor(),
+        )
+        result = self._run(reader)
+        self.assertEqual(result.status, "not_ready")
+        self.assertEqual(result.projected_count, 0)
+        self.assertEqual(reader.cursor_calls, [])
+        self.assertEqual(reader.list_calls, [])
+
+    def test_ready_state_requires_complete_gmail_cursor(self):
+        for cursor in (
+            None,
+            self._cursor(BackfillState.NOT_STARTED),
+            self._cursor(BackfillState.RUNNING),
+        ):
+            with self.subTest(cursor=cursor):
+                reader = _Reader(self._state(), cursor=cursor)
+                result = self._run(reader)
+                self.assertIn(result.status, {"cursor_missing", "not_ready"})
+                self.assertEqual(result.projected_count, 0)
+                self.assertEqual(reader.list_calls, [])
+
+    def test_complete_ready_scope_performs_one_bounded_projection_read(self):
         scope = self._scope()
-        reader = _Reader(scope, projections=(object(), object()))
+        reader = _Reader(
+            self._state(),
+            cursor=self._cursor(),
+            projections=(object(), object()),
+        )
         result = self._run(reader, limit=100)
         self.assertEqual(result.status, "resolved")
         self.assertEqual(result.projected_count, 2)
+        self.assertEqual(reader.cursor_calls, [(scope, "gmail-account")])
         self.assertEqual(reader.list_calls, [(scope, 100, None)])
 
     def test_invalid_limit_fails_before_repository_read(self):
-        reader = _Reader(self._scope())
+        reader = _Reader(self._state(), cursor=self._cursor())
         with self.assertRaises(ValueError):
             self._run(reader, limit=101)
         self.assertEqual(reader.authorities, [])
