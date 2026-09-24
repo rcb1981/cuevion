@@ -204,44 +204,102 @@ def _proof():
         stale_snapshot,
     )
 
+    checks = {
+        "current_snapshot_present": current_snapshot is not None,
+        "current_row_version": (
+            None if current_snapshot is None else current_snapshot.row_version
+        ),
+        "current_deleted": (
+            None if current_snapshot is None else current_snapshot.provider_deleted
+        ),
+        "current_provider_message_match": bool(
+            current_snapshot is not None
+            and current_snapshot.record.identity.provider_message_id
+            == _PROVIDER_MESSAGE_ID
+        ),
+        "current_thread_match": bool(
+            current_snapshot is not None
+            and current_snapshot.record.provider_thread_id == "thread-1"
+        ),
+        "current_subject_match": bool(
+            current_snapshot is not None
+            and current_snapshot.record.subject == "Proof subject"
+        ),
+        "current_action": current_action.kind.value,
+        "current_scope_present": current_action.candidate_scope is not None,
+        "current_action_provider_match": bool(
+            current_action.candidate_scope is not None
+            and current_action.candidate_scope.identity.provider_message_id
+            == _PROVIDER_MESSAGE_ID
+        ),
+        "current_source_present": current_action.source is not None,
+        "current_folder": (
+            None if current_action.source is None
+            else current_action.source.get("providerFolder")
+        ),
+        "current_timestamp": (
+            None if current_action.source is None
+            else current_action.source.get("providerTimestampMillis")
+        ),
+        "newer_snapshot_present": newer_snapshot is not None,
+        "newer_row_version": (
+            None if newer_snapshot is None else newer_snapshot.row_version
+        ),
+        "newer_deleted": (
+            None if newer_snapshot is None else newer_snapshot.provider_deleted
+        ),
+        "superseded_action": superseded_action.kind.value,
+        "stale_snapshot_none": stale_snapshot is None,
+        "stale_action": stale_action.kind.value,
+        "factory_calls": factory.calls,
+        "current_rollbacks": current_connection.rollbacks,
+        "newer_rollbacks": superseded_connection.rollbacks,
+        "stale_rollbacks": stale_connection.rollbacks,
+        "all_cursors_closed": bool(
+            current_cursor.closed
+            and superseded_cursor.closed
+            and stale_cursor.closed
+        ),
+        "all_connections_closed": bool(
+            current_connection.closed
+            and superseded_connection.closed
+            and stale_connection.closed
+        ),
+        "stale_query_count": len(stale_cursor.executions),
+    }
     expected = (
-        current_snapshot is not None
-        and current_snapshot.row_version == 4
-        and current_snapshot.provider_deleted is False
-        and current_snapshot.record.identity.provider_message_id
-        == _PROVIDER_MESSAGE_ID
-        and current_snapshot.record.provider_thread_id == "thread-1"
-        and current_snapshot.record.subject == "Proof subject"
-        and current_action.kind is PriorityMailboxOutboxActionKind.UPSERT
-        and current_action.candidate_scope is not None
-        and current_action.candidate_scope.identity.provider_message_id
-        == _PROVIDER_MESSAGE_ID
-        and current_action.source is not None
-        and current_action.source["providerFolder"] == "INBOX"
-        and current_action.source["providerTimestampMillis"]
-        == "1790236800000"
-        and newer_snapshot is not None
-        and newer_snapshot.row_version == 5
-        and newer_snapshot.provider_deleted is True
-        and superseded_action.kind
-        is PriorityMailboxOutboxActionKind.SUPERSEDED
-        and stale_snapshot is None
-        and stale_action.kind
-        is PriorityMailboxOutboxActionKind.STALE_GENERATION
-        and factory.calls == 3
-        and current_connection.rollbacks == 1
-        and superseded_connection.rollbacks == 1
-        and stale_connection.rollbacks == 1
-        and current_cursor.closed
-        and superseded_cursor.closed
-        and stale_cursor.closed
-        and current_connection.closed
-        and superseded_connection.closed
-        and stale_connection.closed
-        and len(stale_cursor.executions) == 2
+        checks["current_snapshot_present"]
+        and checks["current_row_version"] == 4
+        and checks["current_deleted"] is False
+        and checks["current_provider_message_match"]
+        and checks["current_thread_match"]
+        and checks["current_subject_match"]
+        and checks["current_action"] == "upsert"
+        and checks["current_scope_present"]
+        and checks["current_action_provider_match"]
+        and checks["current_source_present"]
+        and checks["current_folder"] == "INBOX"
+        and checks["current_timestamp"] == "1790236800000"
+        and checks["newer_snapshot_present"]
+        and checks["newer_row_version"] == 5
+        and checks["newer_deleted"] is True
+        and checks["superseded_action"] == "superseded"
+        and checks["stale_snapshot_none"]
+        and checks["stale_action"] == "stale_generation"
+        and checks["factory_calls"] == 3
+        and checks["current_rollbacks"] == 1
+        and checks["newer_rollbacks"] == 1
+        and checks["stale_rollbacks"] == 1
+        and checks["all_cursors_closed"]
+        and checks["all_connections_closed"]
+        and checks["stale_query_count"] == 2
     )
     if not expected:
-        return 503, {"ok": False, "stage": "assertion"}
+        return 503, {
+            "ok": False,
+            "stage": "assertion",
+            "checks": checks,
+        }
 
     return 200, {
         "ok": True,
