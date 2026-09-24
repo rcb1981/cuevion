@@ -252,6 +252,23 @@ class PostgreSQLMailboxCurrentStateBootstrapTests(unittest.TestCase):
         adapter = repository.PostgreSQLMailboxRepository(lambda: connection)
         return adapter, connection, cursor
 
+    def test_resolve_current_state_missing_returns_none_without_outbox_scope_logic(self):
+        adapter, connection, cursor = self._repository(
+            insert_rowcount=0,
+            state_rows=[],
+        )
+
+        self.assertIsNone(adapter.resolve_current_state(self._authority()))
+
+        self.assertEqual(
+            [sql for sql, _parameters in cursor.executions],
+            [repository._SELECT_CURRENT_STATE_SQL],
+        )
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+        self.assertTrue(connection.closed)
+        self.assertTrue(cursor.closed)
+
     def test_initial_state_create_is_generation_one_and_commits_once(self):
         adapter, connection, cursor = self._repository(
             insert_rowcount=1,
