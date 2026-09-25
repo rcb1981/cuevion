@@ -21,6 +21,24 @@ _MAX_PROVIDER_MESSAGE_ID_BYTES = 1_024
 
 
 @dataclass(frozen=True, slots=True)
+class GmailInboxRecoveryPage:
+    status: str
+    context: dict
+    provider_message_ids: tuple[str, ...]
+    next_page_token: str | None
+
+    def __post_init__(self) -> None:
+        if (
+            self.status not in {"ok", "unavailable", "invalid"}
+            or type(self.context) is not dict
+            or type(self.provider_message_ids) is not tuple
+            or (self.status != "ok" and (self.provider_message_ids or self.next_page_token is not None))
+            or (self.next_page_token is not None and not _valid_page_token(self.next_page_token))
+        ):
+            raise ValueError("invalid Gmail recovery page")
+
+
+@dataclass(frozen=True, slots=True)
 class GmailInboxRecoveryInventory:
     status: str
     context: dict
@@ -62,13 +80,48 @@ def _valid_page_token(value: object) -> bool:
     return 1 <= len(encoded) <= _MAX_PAGE_TOKEN_BYTES
 
 
-def _inventory_path() -> str:
-    return "/messages?" + urlencode(
-        {
-            "labelIds": "INBOX",
-            "maxResults": _RECOVERY_INBOX_LIMIT,
-        }
+def _inventory_path(page_token: str | None = None) -> str:
+    query = {"labelIds": "INBOX", "maxResults": _RECOVERY_INBOX_LIMIT}
+    if page_token is not None:
+        if not _valid_page_token(page_token):
+            raise ValueError("invalid Gmail recovery page token")
+        query["pageToken"] = page_token
+    return "/messages?" + urlencode(query)
+
+
+def read_gmail_inbox_recovery_page(
+    context: dict,
+    *,
+    page_token: str | None,
+    request_with_one_refresh: GmailRequestWithOneRefresh,
+) -> GmailInboxRecoveryPage:
+    if type(context) is not dict or not callable(request_with_one_refresh):
+        raise ValueError("invalid Gmail recovery page request")
+    payload, error, next_context, refresh_failure = request_with_one_refresh(
+        context, _inventory_path(page_token)
     )
+    current_context = next_context if type(next_context) is dict else context
+    if refresh_failure is not None or error is not None:
+        return GmailInboxRecoveryPage("unavailable", current_context, (), None)
+    if type(payload) is not dict:
+        return GmailInboxRecoveryPage("invalid", current_context, (), None)
+    raw_messages = payload.get("messages", [])
+    if type(raw_messages) is not list or len(raw_messages) > _RECOVERY_INBOX_LIMIT:
+        return GmailInboxRecoveryPage("invalid", current_context, (), None)
+    ids: list[str] = []
+    seen: set[str] = set()
+    for raw_message in raw_messages:
+        if type(raw_message) is not dict:
+            return GmailInboxRecoveryPage("invalid", current_context, (), None)
+        provider_message_id = raw_message.get("id")
+        if not _valid_provider_message_id(provider_message_id) or provider_message_id in seen:
+            return GmailInboxRecoveryPage("invalid", current_context, (), None)
+        seen.add(provider_message_id)
+        ids.append(provider_message_id)
+    next_token = payload.get("nextPageToken")
+    if next_token is not None and not _valid_page_token(next_token):
+        return GmailInboxRecoveryPage("invalid", current_context, (), None)
+    return GmailInboxRecoveryPage("ok", current_context, tuple(ids), next_token)
 
 
 def _result(
@@ -137,5 +190,7 @@ def read_complete_gmail_inbox_recovery_inventory(
 
 __all__ = (
     "GmailInboxRecoveryInventory",
+    "GmailInboxRecoveryPage",
     "read_complete_gmail_inbox_recovery_inventory",
+    "read_gmail_inbox_recovery_page",
 )
