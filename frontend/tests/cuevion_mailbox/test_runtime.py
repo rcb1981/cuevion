@@ -187,6 +187,18 @@ class MailboxRuntimeConfigurationTests(unittest.TestCase):
                     runtime.production_read_authority_enabled(environment)
                 )
 
+    def test_production_bootstrap_configuration_stage_is_fixed_and_non_secret(self):
+        base = {
+            "CUEVION_MAILBOX_POSTGRES_MODE": "production_bootstrap",
+            "CUEVION_MAILBOX_PRODUCTION_BOOTSTRAP_AUTHORITY": "enabled",
+            "VERCEL_ENV": "production",
+        }
+        self.assertEqual(runtime.production_bootstrap_configuration_stage(base), "reader_url")
+        with_reader = {**base, "CUEVION_MAILBOX_READER_DATABASE_URL": _url(_READER_ROLE, "reader-secret")}
+        self.assertEqual(runtime.production_bootstrap_configuration_stage(with_reader), "writer_url")
+        complete = {**with_reader, "CUEVION_MAILBOX_WRITER_DATABASE_URL": _url(_WRITER_ROLE, "writer-secret")}
+        self.assertEqual(runtime.production_bootstrap_configuration_stage(complete), "connection")
+
     def test_production_bootstrap_requires_exact_gate_and_excludes_read_authority(self):
         base = {
             "CUEVION_MAILBOX_POSTGRES_MODE": "production_bootstrap",
