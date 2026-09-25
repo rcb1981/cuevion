@@ -10,9 +10,9 @@ import os
 from api.auth import http as auth_http
 from api.auth import runtime as auth_runtime
 from cuevion_mailbox.runtime import (
+    diagnose_production_reader_connectivity,
     production_read_authority_enabled,
     production_reader_diagnostic_enabled,
-    run_production_reader_connectivity_check,
 )
 
 
@@ -72,13 +72,29 @@ def production_reader_connectivity_response(handler) -> auth_http.PublicResponse
         )
 
     try:
-        result = run_production_reader_connectivity_check(os.environ)
+        diagnostic = diagnose_production_reader_connectivity(os.environ)
     except Exception:
         return _json(
             503,
             {
                 "ok": False,
-                "error": {"code": "mailbox_reader_diagnostic_unavailable"},
+                "error": {
+                    "code": "mailbox_reader_diagnostic_unavailable",
+                    "stage": "internal_unavailable",
+                },
+            },
+            set_cookies=resolution.set_cookies,
+        )
+
+    if diagnostic.stage != "connected":
+        return _json(
+            503,
+            {
+                "ok": False,
+                "error": {
+                    "code": "mailbox_reader_diagnostic_unavailable",
+                    "stage": diagnostic.stage,
+                },
             },
             set_cookies=resolution.set_cookies,
         )
@@ -91,10 +107,10 @@ def production_reader_connectivity_response(handler) -> auth_http.PublicResponse
             "mode": "production_read",
             "diagnostic_enabled": True,
             "authority_enabled": False,
-            "role": result.role,
-            "tls": result.tls,
-            "read_only": result.transaction_read_only,
-            "connected": result.status == "connected",
+            "role": "cuevion_production_mailbox_reader_v1",
+            "tls": True,
+            "read_only": True,
+            "connected": True,
         },
         set_cookies=resolution.set_cookies,
     )
