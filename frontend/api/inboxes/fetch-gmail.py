@@ -82,6 +82,7 @@ from cuevion_mailbox.preview_active_read import (
 from cuevion_mailbox.preview_active_write import (
     PreviewGmailHistoryRecovery,
     gmail_durable_write_enabled,
+    preview_active_write_enabled,
     run_preview_gmail_durable_write,
     run_preview_gmail_history_sync,
     run_preview_gmail_stale_recovery,
@@ -627,7 +628,7 @@ class handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-        if gmail_durable_write_enabled(os.environ):
+        if preview_active_write_enabled(os.environ):
             member = resolution.get("memberAuthority")
             try:
                 outbox_report = run_preview_priority_mailbox_outbox_consumer(
