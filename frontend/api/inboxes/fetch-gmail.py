@@ -79,12 +79,12 @@ from cuevion_mailbox.preview_active_read import (
     gmail_cache_authority_enabled,
     plan_gmail_authoritative_read,
 )
-from cuevion_mailbox.runtime import production_bootstrap_configuration_stage
+from cuevion_mailbox.runtime import (\n    production_bootstrap_authority_enabled,\n    production_bootstrap_configuration_stage,\n)
 from cuevion_mailbox.preview_active_write import (
     PreviewGmailHistoryRecovery,
     gmail_durable_write_enabled,
     preview_active_write_enabled,
-    run_preview_gmail_durable_write,
+    run_production_gmail_bootstrap_backfill,\n    run_preview_gmail_durable_write,
     run_preview_gmail_history_sync,
     run_preview_gmail_stale_recovery,
 )
@@ -461,7 +461,12 @@ class handler(BaseHTTPRequestHandler):
                     )
                 else:
                     try:
-                        stale_recovery = run_preview_gmail_stale_recovery(
+                        recovery_runner = (
+                            run_production_gmail_bootstrap_backfill
+                            if production_bootstrap_authority_enabled(os.environ)
+                            else run_preview_gmail_stale_recovery
+                        )
+                        stale_recovery = recovery_runner(
                             environment=os.environ,
                             workspace_id=getattr(member, "workspace_id"),
                             owner_user_id=getattr(member, "user_id"),
