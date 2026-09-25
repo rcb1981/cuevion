@@ -447,6 +447,115 @@ class MailboxConnectionFactoryTests(unittest.TestCase):
         with self.assertRaises(runtime.MailboxRuntimeDisabledError):
             runtime.build_active_read_mailbox_reader({})
 
+    def test_production_reader_stage_diagnostic_is_fixed_and_non_secret(self):
+        environment = {
+            "CUEVION_MAILBOX_POSTGRES_MODE": "production_read",
+            "CUEVION_MAILBOX_PRODUCTION_READER_DIAGNOSTIC": "enabled",
+            "VERCEL_ENV": "production",
+            "CUEVION_MAILBOX_READER_DATABASE_URL": _url(
+                _READER_ROLE,
+                "reader-secret",
+            ),
+        }
+
+        connected = runtime.diagnose_production_reader_connectivity(
+            environment,
+            connect=_Connector(
+                _Connection(
+                    user=_READER_ROLE,
+                    fetchone_result=("on",),
+                )
+            ),
+        )
+        self.assertEqual(connected.stage, "connected")
+
+        invalid_configuration = {
+            **environment,
+            "CUEVION_MAILBOX_READER_DATABASE_URL": _url(
+                "cuevion_preview_mailbox_reader_v1",
+                "reader-secret",
+            ),
+        }
+        self.assertEqual(
+            runtime.diagnose_production_reader_connectivity(
+                invalid_configuration
+            ).stage,
+            "configuration_invalid",
+        )
+
+        def failing_connect(
+            _conninfo: str,
+            *,
+            autocommit: bool,
+            connect_timeout: int,
+        ):
+            del autocommit, connect_timeout
+            raise OSError("unavailable")
+
+        self.assertEqual(
+            runtime.diagnose_production_reader_connectivity(
+                environment,
+                connect=failing_connect,
+            ).stage,
+            "connect_failed",
+        )
+        self.assertEqual(
+            runtime.diagnose_production_reader_connectivity(
+                environment,
+                connect=_Connector(
+                    _Connection(
+                        user=_READER_ROLE,
+                        ssl_in_use=False,
+                    )
+                ),
+            ).stage,
+            "tls_invalid",
+        )
+        self.assertEqual(
+            runtime.diagnose_production_reader_connectivity(
+                environment,
+                connect=_Connector(
+                    _Connection(
+                        user="unexpected_role",
+                    )
+                ),
+            ).stage,
+            "role_invalid",
+        )
+        self.assertEqual(
+            runtime.diagnose_production_reader_connectivity(
+                environment,
+                connect=_Connector(
+                    _Connection(
+                        user=_READER_ROLE,
+                        dbname="unexpected_database",
+                    )
+                ),
+            ).stage,
+            "database_invalid",
+        )
+        self.assertEqual(
+            runtime.diagnose_production_reader_connectivity(
+                environment,
+                connect=_Connector(
+                    _Connection(
+                        user=_READER_ROLE,
+                        fetchone_result=("off",),
+                    )
+                ),
+            ).stage,
+            "read_only_verify_failed",
+        )
+
+        authority_enabled = {
+            **environment,
+            "CUEVION_MAILBOX_PRODUCTION_READ_AUTHORITY": "enabled",
+        }
+        with self.assertRaises(runtime.MailboxRuntimeDisabledError):
+            runtime.diagnose_production_reader_connectivity(
+                authority_enabled
+            )
+
     def test_production_reader_connectivity_check_is_exact_and_read_only(self):
         environment = {
             "CUEVION_MAILBOX_POSTGRES_MODE": "production_read",
