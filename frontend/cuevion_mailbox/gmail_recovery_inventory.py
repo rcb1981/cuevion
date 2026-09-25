@@ -62,13 +62,13 @@ def _valid_page_token(value: object) -> bool:
     return 1 <= len(encoded) <= _MAX_PAGE_TOKEN_BYTES
 
 
-def _inventory_path() -> str:
-    return "/messages?" + urlencode(
-        {
-            "labelIds": "INBOX",
-            "maxResults": _RECOVERY_INBOX_LIMIT,
-        }
-    )
+def _inventory_path(page_token: str | None = None) -> str:
+    query = {"labelIds": "INBOX", "maxResults": _RECOVERY_INBOX_LIMIT}
+    if page_token is not None:
+        if not _valid_page_token(page_token):
+            raise ValueError("invalid Gmail recovery page token")
+        query["pageToken"] = page_token
+    return "/messages?" + urlencode(query)
 
 
 def _result(
