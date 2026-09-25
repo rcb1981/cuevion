@@ -23,6 +23,7 @@ from cuevion_mailbox.gmail_history_delta import (
 from cuevion_mailbox.gmail_projection import project_gmail_snapshot
 from cuevion_mailbox.gmail_recovery_inventory import (
     read_complete_gmail_inbox_recovery_inventory,
+    read_gmail_inbox_recovery_page,
 )
 from cuevion_mailbox.repository_contract import (
     BackfillState,
