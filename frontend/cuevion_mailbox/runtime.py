@@ -441,6 +441,35 @@ def production_bootstrap_authority_enabled(
     )
 
 
+def production_bootstrap_configuration_stage(
+    environment: Mapping[str, str],
+) -> str:
+    """Return a fixed non-secret stage for Production bootstrap diagnostics."""
+
+    if not production_bootstrap_authority_enabled(environment):
+        return "gate"
+    try:
+        vercel_environment = _clean_text(environment.get("VERCEL_ENV"), maximum=32)
+        expected_reader, expected_writer = _expected_roles(vercel_environment)
+    except MailboxRuntimeConfigurationError:
+        return "environment"
+    try:
+        reader = _parse_database_url(
+            environment.get(_READER_URL_VARIABLE), expected_role=expected_reader
+        )
+    except MailboxRuntimeConfigurationError:
+        return "reader_url"
+    try:
+        writer = _parse_database_url(
+            environment.get(_WRITER_URL_VARIABLE), expected_role=expected_writer
+        )
+    except MailboxRuntimeConfigurationError:
+        return "writer_url"
+    if reader.hostname != writer.hostname or reader.database != writer.database:
+        return "database_match"
+    return "connection"
+
+
 def build_production_bootstrap_mailbox_repositories(
     environment: Mapping[str, str],
     *,
@@ -608,5 +637,6 @@ __all__ = (
     "build_shadow_mailbox_repositories",
     "parse_mailbox_runtime_configuration",
     "production_bootstrap_authority_enabled",
+    "production_bootstrap_configuration_stage",
     "production_read_authority_enabled",
 )

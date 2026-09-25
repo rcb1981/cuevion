@@ -79,6 +79,7 @@ from cuevion_mailbox.preview_active_read import (
     gmail_cache_authority_enabled,
     plan_gmail_authoritative_read,
 )
+from cuevion_mailbox.runtime import production_bootstrap_configuration_stage
 from cuevion_mailbox.preview_active_write import (
     PreviewGmailHistoryRecovery,
     gmail_durable_write_enabled,
@@ -413,10 +414,10 @@ class handler(BaseHTTPRequestHandler):
                     committed_at_millis=time.time_ns() // 1_000_000,
                 )
             except Exception as exc:
-                print(
-                    "cuevion_mailbox_active_write gmail history_sync_failed "
-                    "error_type=" + type(exc).__name__
-                )
+                diagnostic = "error_type=" + type(exc).__name__
+                if type(exc).__name__ == "MailboxRuntimeConfigurationError":
+                    diagnostic += " config_stage=" + production_bootstrap_configuration_stage(os.environ)
+                print("cuevion_mailbox_active_write gmail history_sync_failed " + diagnostic)
             else:
                 context = history_sync.context
                 print(
