@@ -15,10 +15,11 @@ class ProductionReaderConnectivityDiagnosticTests(unittest.TestCase):
 
         self.assertIn("production_reader_diagnostic_enabled", source)
         self.assertIn("production_read_authority_enabled", source)
-        self.assertIn("run_production_reader_connectivity_check", source)
+        self.assertIn("diagnose_production_reader_connectivity", source)
         self.assertIn('"mode": "production_read"', source)
         self.assertIn('"authority_enabled": False', source)
-        self.assertIn('"connected": result.status == "connected"', source)
+        self.assertIn('"connected": True', source)
+        self.assertIn('"stage": diagnostic.stage', source)
 
         for forbidden in (
             "CUEVION_MAILBOX_WRITER_DATABASE_URL",
