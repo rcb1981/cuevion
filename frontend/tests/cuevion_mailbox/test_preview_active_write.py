@@ -195,6 +195,12 @@ class PreviewGmailDurableWriteTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self._run(_Repositories(_Reader(), _Writer(initialization=_initialization())), environment=environment)
 
+    def test_history_sync_failure_diagnostic_logs_type_only(self):
+        gmail = _GMAIL_ROUTE.read_text(encoding="utf-8")
+        self.assertIn('"error_type=" + type(exc).__name__', gmail)
+        self.assertNotIn('str(exc)', gmail)
+        self.assertNotIn('repr(exc)', gmail)
+
     def test_route_keeps_priority_outbox_preview_only_during_production_bootstrap(self):
         gmail = _GMAIL_ROUTE.read_text(encoding="utf-8")
         outbox_call = gmail.index("outbox_report = run_preview_priority_mailbox_outbox_consumer")
