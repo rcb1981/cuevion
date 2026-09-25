@@ -324,6 +324,19 @@ def run_preview_gmail_history_sync(
         or current_cursor.gmail_history_id is None
     ):
         raise ValueError("invalid Preview Gmail History cursor")
+    if production_bootstrap_authority_enabled(environment) and (
+        state.bootstrap_state is not BootstrapState.READY
+        or current_cursor.backfill_state is not BackfillState.COMPLETE
+        or current_cursor.backfill_cursor is not None
+    ):
+        return PreviewGmailHistorySyncResult(
+            "full_sync_required",
+            context,
+            0,
+            scope.source_generation,
+            None,
+            0,
+        )
     if state.bootstrap_state not in {
         BootstrapState.RECENT_READY,
         BootstrapState.BACKFILLING,
