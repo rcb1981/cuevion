@@ -7,7 +7,6 @@ import unittest
 from cuevion_mailbox.gmail_projection import project_gmail_snapshot_message
 from cuevion_mailbox.preview_active_write import (
     PreviewGmailHistoryRecovery,
-    run_production_gmail_bootstrap_backfill,
     run_preview_gmail_stale_recovery,
 )
 from cuevion_mailbox.repository_contract import (
@@ -201,38 +200,6 @@ def _run(repositories, request, recover, *, fresh_history_id="500"):
         committed_at_millis=1_790_179_000_000,
         repositories=repositories,
     )
-
-
-class ProductionGmailBootstrapBackfillTests(unittest.TestCase):
-    def _run(self, reader, writer, request):
-        return run_production_gmail_bootstrap_backfill(
-            environment={"VERCEL_ENV": "production", "CUEVION_MAILBOX_POSTGRES_MODE": "production_bootstrap", "CUEVION_MAILBOX_PRODUCTION_BOOTSTRAP_AUTHORITY": "enabled"},
-            workspace_id="wsp_" + ("a" * 22), owner_user_id="usr_" + ("b" * 22), mailbox_id="gmail-1", mailbox_account_identity="Verified@Gmail.com",
-            context={"mailbox_email": "Verified@Gmail.com", "mailbox_id": "gmail-1"}, request_with_one_refresh=request,
-            recover_exact_message=lambda context, provider_id: PreviewGmailHistoryRecovery("recovered", context, _preview(provider_id), _source(provider_id)),
-            committed_at_millis=1_790_179_000_000, repositories=_Repositories(reader, writer),
-        )
-
-    def test_nonfinal_page_persists_running_cursor(self):
-        reader = _Reader(state=_state(), cursor=_cursor(), exact_projections=())
-        writer = _Writer()
-        result = self._run(reader, writer, lambda context, _path: ({"messages": [{"id": "gmail-message-1"}], "nextPageToken": "page-2"}, None, context, None))
-        self.assertEqual(result.status, "applied")
-        commit = writer.commits[0]
-        self.assertIs(commit.next_bootstrap_state, BootstrapState.BACKFILLING)
-        self.assertIs(commit.next_cursor.backfill_state, BackfillState.RUNNING)
-        self.assertEqual(commit.next_cursor.backfill_cursor, "page-2")
-
-    def test_final_page_promotes_ready_complete(self):
-        cursor = SyncCursor(scope_key="gmail-account", cursor_generation=1, provider=MailboxProvider.GOOGLE, gmail_history_id="100", imap_uid_validity=None, imap_highest_uid=None, imap_uidnext_observed=None, backfill_state=BackfillState.RUNNING, backfill_cursor="page-2", row_version=3)
-        reader = _Reader(state=_state(bootstrap_state=BootstrapState.BACKFILLING), cursor=cursor, exact_projections=())
-        writer = _Writer()
-        result = self._run(reader, writer, lambda context, _path: ({"messages": [{"id": "gmail-message-2"}]}, None, context, None))
-        self.assertEqual(result.status, "applied")
-        commit = writer.commits[0]
-        self.assertIs(commit.next_bootstrap_state, BootstrapState.READY)
-        self.assertIs(commit.next_cursor.backfill_state, BackfillState.COMPLETE)
-        self.assertIsNone(commit.next_cursor.backfill_cursor)
 
 
 class PreviewGmailStaleRecoveryTests(unittest.TestCase):

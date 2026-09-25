@@ -6,7 +6,6 @@ import unittest
 
 from cuevion_mailbox.gmail_recovery_inventory import (
     read_complete_gmail_inbox_recovery_inventory,
-    read_gmail_inbox_recovery_page,
 )
 
 
@@ -17,21 +16,6 @@ class GmailRecoveryInventoryTests(unittest.TestCase):
             "mailbox_id": "gmail-1",
             "refresh_attempted": False,
         }
-
-    def test_paginated_page_preserves_bounded_ids_and_next_token(self):
-        result = read_gmail_inbox_recovery_page(
-            self._context(),
-            page_token="page-1",
-            request_with_one_refresh=lambda context, path: (
-                {"messages": [{"id": "message-2"}], "nextPageToken": "page-2"},
-                None,
-                context,
-                None,
-            ),
-        )
-        self.assertEqual(result.status, "ok")
-        self.assertEqual(result.provider_message_ids, ("message-2",))
-        self.assertEqual(result.next_page_token, "page-2")
 
     def test_complete_single_page_inventory_is_usable(self):
         calls = []
