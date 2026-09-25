@@ -3,7 +3,7 @@
 This module is deliberately outside `api/`: importing or deploying it exposes no
 route. `active_read` is Preview-only and constructs a reader repository only.
 `production_read` is reader-only and additionally requires an exact separate
-Production authority flag before composition. Active writes remain Preview-only.
+Production authority flag before composition. Active writes are Preview-only except for an explicitly gated Production bootstrap lane.
 """
 
 from __future__ import annotations
@@ -25,6 +25,8 @@ from cuevion_mailbox.postgresql_repository import (
 _MODE_VARIABLE = "CUEVION_MAILBOX_POSTGRES_MODE"
 _PRODUCTION_READ_AUTHORITY_VARIABLE = "CUEVION_MAILBOX_PRODUCTION_READ_AUTHORITY"
 _PRODUCTION_READ_AUTHORITY_ENABLED = "enabled"
+_PRODUCTION_BOOTSTRAP_AUTHORITY_VARIABLE = "CUEVION_MAILBOX_PRODUCTION_BOOTSTRAP_AUTHORITY"
+_PRODUCTION_BOOTSTRAP_AUTHORITY_ENABLED = "enabled"
 _READER_URL_VARIABLE = "CUEVION_MAILBOX_READER_DATABASE_URL"
 _WRITER_URL_VARIABLE = "CUEVION_MAILBOX_WRITER_DATABASE_URL"
 _MAX_DATABASE_URL_CHARACTERS = 8_192
@@ -39,6 +41,7 @@ class MailboxRuntimeMode(str, Enum):
     ACTIVE_READ = "active_read"
     ACTIVE_WRITE = "active_write"
     PRODUCTION_READ = "production_read"
+    PRODUCTION_BOOTSTRAP = "production_bootstrap"
 
 
 class MailboxRuntimeConfigurationError(RuntimeError):
@@ -297,6 +300,8 @@ def parse_mailbox_runtime_configuration(
     )
     if mode is MailboxRuntimeMode.ACTIVE_WRITE and vercel_environment != "preview":
         _configuration_error()
+    if mode is MailboxRuntimeMode.PRODUCTION_BOOTSTRAP and vercel_environment != "production":
+        _configuration_error()
     if (
         reader.hostname != writer.hostname
         or reader.database != writer.database
@@ -416,6 +421,45 @@ def production_read_authority_enabled(
         == MailboxRuntimeMode.PRODUCTION_READ.value
         and environment.get(_PRODUCTION_READ_AUTHORITY_VARIABLE)
         == _PRODUCTION_READ_AUTHORITY_ENABLED
+    )
+
+
+def production_bootstrap_authority_enabled(
+    environment: Mapping[str, str],
+) -> bool:
+    """Require an exact Production bootstrap mode plus separate authority switch."""
+
+    return (
+        isinstance(environment, Mapping)
+        and environment.get("VERCEL_ENV") == "production"
+        and environment.get(_MODE_VARIABLE)
+        == MailboxRuntimeMode.PRODUCTION_BOOTSTRAP.value
+        and environment.get(_PRODUCTION_BOOTSTRAP_AUTHORITY_VARIABLE)
+        == _PRODUCTION_BOOTSTRAP_AUTHORITY_ENABLED
+        and environment.get(_PRODUCTION_READ_AUTHORITY_VARIABLE)
+        != _PRODUCTION_READ_AUTHORITY_ENABLED
+    )
+
+
+def build_production_bootstrap_mailbox_repositories(
+    environment: Mapping[str, str],
+    *,
+    connect: _ConnectCallable | None = None,
+) -> "ActiveWriteMailboxRepositories":
+    """Compose Production bootstrap repositories behind an isolated exact gate."""
+
+    if not production_bootstrap_authority_enabled(environment):
+        raise MailboxRuntimeDisabledError()
+    config = parse_mailbox_runtime_configuration(environment)
+    if config.mode is not MailboxRuntimeMode.PRODUCTION_BOOTSTRAP:
+        raise MailboxRuntimeDisabledError()
+    reader_url = config.reader_database_url
+    writer_url = config.writer_database_url
+    if type(reader_url) is not MailboxDatabaseUrl or type(writer_url) is not MailboxDatabaseUrl:
+        _configuration_error()
+    return ActiveWriteMailboxRepositories(
+        PostgreSQLMailboxReaderRepository(MailboxConnectionFactory(reader_url, read_only=True, connect=connect)),
+        PostgreSQLMailboxRepository(MailboxConnectionFactory(writer_url, read_only=False, connect=connect)),
     )
 
 
@@ -559,8 +603,10 @@ __all__ = (
     "ShadowMailboxRepositories",
     "build_active_read_mailbox_reader",
     "build_active_write_mailbox_repositories",
+    "build_production_bootstrap_mailbox_repositories",
     "build_production_read_mailbox_reader",
     "build_shadow_mailbox_repositories",
     "parse_mailbox_runtime_configuration",
+    "production_bootstrap_authority_enabled",
     "production_read_authority_enabled",
 )
