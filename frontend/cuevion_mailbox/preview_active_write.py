@@ -445,6 +445,46 @@ def run_preview_gmail_history_sync(
     )
 
 
+def run_production_gmail_bootstrap_backfill(*, environment, workspace_id, owner_user_id, mailbox_id, mailbox_account_identity, context, recover_exact_message, request_with_one_refresh, committed_at_millis, repositories=None):
+    """Advance one bounded Production bootstrap page; never infers deletions."""
+    if not production_bootstrap_authority_enabled(environment):
+        raise RuntimeError("Production Gmail bootstrap backfill is disabled")
+    authority = MailboxReadAuthority(workspace_id=workspace_id, owner_user_id=owner_user_id, mailbox_id=mailbox_id, provider=MailboxProvider.GOOGLE, provider_account_identity=mailbox_account_identity.casefold())
+    runtime_repositories = _runtime_repositories(environment) if repositories is None else repositories
+    state = runtime_repositories.reader.resolve_current_state(authority)
+    if type(state) is not MailboxStateSnapshot or state.bootstrap_state not in {BootstrapState.RECENT_READY, BootstrapState.BACKFILLING}:
+        return PreviewGmailStaleRecoveryResult("state_not_ready", context, 0, None if state is None else state.scope.source_generation, None, 0)
+    scope = state.scope
+    current_cursor = runtime_repositories.reader.read_cursor(scope, _GMAIL_SCOPE_KEY)
+    if type(current_cursor) is not SyncCursor or current_cursor.gmail_history_id is None or current_cursor.backfill_state not in {BackfillState.NOT_STARTED, BackfillState.RUNNING}:
+        return PreviewGmailStaleRecoveryResult("cursor_not_backfillable", context, 0, scope.source_generation, None, 0)
+    page = read_gmail_inbox_recovery_page(context, page_token=current_cursor.backfill_cursor, request_with_one_refresh=request_with_one_refresh)
+    if page.status != "ok":
+        return PreviewGmailStaleRecoveryResult("provider_" + page.status, page.context, 0, scope.source_generation, None, 0)
+    recovered_previews, recovered_sources, recovered_ids = [], [], []
+    current_context = page.context
+    for provider_message_id in page.provider_message_ids:
+        recovered = recover_exact_message(current_context, provider_message_id)
+        if type(recovered) is not PreviewGmailHistoryRecovery:
+            raise ValueError("invalid Production Gmail bootstrap recovery")
+        current_context = recovered.context
+        if recovered.status == "retry":
+            return PreviewGmailStaleRecoveryResult("recovery_unavailable", current_context, 0, scope.source_generation, None, len(page.provider_message_ids))
+        if recovered.status == "terminal_absent":
+            continue
+        recovered_ids.append(provider_message_id)
+        recovered_previews.append(recovered.preview)
+        recovered_sources.append(recovered.candidate_source)
+    current = tuple(runtime_repositories.reader.read_messages_by_provider_message_ids(scope, recovered_ids))
+    records = project_gmail_snapshot(scope, recovered_previews, recovered_sources)
+    base_cursor = _next_cursor(current_cursor, gmail_history_id=current_cursor.gmail_history_id)
+    complete = page.next_page_token is None
+    next_cursor = SyncCursor(scope_key=base_cursor.scope_key, cursor_generation=base_cursor.cursor_generation, provider=base_cursor.provider, gmail_history_id=base_cursor.gmail_history_id, imap_uid_validity=None, imap_highest_uid=None, imap_uidnext_observed=None, backfill_state=BackfillState.COMPLETE if complete else BackfillState.RUNNING, backfill_cursor=None if complete else page.next_page_token, row_version=base_cursor.row_version)
+    commit = build_gmail_delta_commit(scope, records, list(current), expected_state_row_version=state.row_version, current_cursor=current_cursor, next_cursor=next_cursor, committed_at_millis=committed_at_millis, next_bootstrap_state=BootstrapState.READY if complete else BootstrapState.BACKFILLING)
+    outcome = runtime_repositories.writer.commit_provider_delta(commit)
+    return PreviewGmailStaleRecoveryResult(outcome.value, current_context, len(commit.mutations), scope.source_generation, current_cursor.gmail_history_id if complete else None, len(page.provider_message_ids))
+
+
 def run_preview_gmail_stale_recovery(
     *,
     environment: Mapping[str, str],
@@ -758,6 +798,7 @@ __all__ = (
     "PreviewGmailHistorySyncResult",
     "gmail_durable_write_enabled",
     "preview_active_write_enabled",
+    "run_production_gmail_bootstrap_backfill",
     "run_preview_gmail_durable_write",
     "run_preview_gmail_history_sync",
 )
