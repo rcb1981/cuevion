@@ -2,9 +2,8 @@
 
 This module is deliberately outside `api/`: importing or deploying it exposes no
 route. `active_read` is Preview-only and constructs a reader repository only.
-`production_read` is reader-only. User-visible Production authority and isolated
-Production connectivity diagnostics are separate exact gates. Active writes
-remain Preview-only.
+`production_read` is reader-only and additionally requires an exact separate
+Production authority flag before composition. Active writes remain Preview-only.
 """
 
 from __future__ import annotations
@@ -26,8 +25,6 @@ from cuevion_mailbox.postgresql_repository import (
 _MODE_VARIABLE = "CUEVION_MAILBOX_POSTGRES_MODE"
 _PRODUCTION_READ_AUTHORITY_VARIABLE = "CUEVION_MAILBOX_PRODUCTION_READ_AUTHORITY"
 _PRODUCTION_READ_AUTHORITY_ENABLED = "enabled"
-_PRODUCTION_READER_DIAGNOSTIC_VARIABLE = "CUEVION_MAILBOX_PRODUCTION_READER_DIAGNOSTIC"
-_PRODUCTION_READER_DIAGNOSTIC_ENABLED = "enabled"
 _READER_URL_VARIABLE = "CUEVION_MAILBOX_READER_DATABASE_URL"
 _WRITER_URL_VARIABLE = "CUEVION_MAILBOX_WRITER_DATABASE_URL"
 _MAX_DATABASE_URL_CHARACTERS = 8_192
@@ -407,59 +404,6 @@ class MailboxConnectionFactory:
         return connection
 
 
-@dataclass(frozen=True, slots=True)
-class ProductionReaderDiagnosticStageResult:
-    stage: str
-
-    def __post_init__(self) -> None:
-        if self.stage not in {
-            "connected",
-            "configuration_invalid",
-            "connect_failed",
-            "autocommit_invalid",
-            "tls_invalid",
-            "role_invalid",
-            "database_invalid",
-            "read_only_begin_failed",
-            "read_only_verify_failed",
-        }:
-            raise ValueError("invalid Production reader diagnostic stage")
-
-
-@dataclass(frozen=True, slots=True)
-class ProductionReaderConnectivityResult:
-    status: str
-    role: str
-    tls: bool
-    transaction_read_only: bool
-
-    def __post_init__(self) -> None:
-        if (
-            self.status != "connected"
-            or self.role != "cuevion_production_mailbox_reader_v1"
-            or self.tls is not True
-            or self.transaction_read_only is not True
-        ):
-            raise ValueError("invalid Production reader connectivity result")
-
-
-def production_reader_diagnostic_enabled(
-    environment: Mapping[str, str],
-) -> bool:
-    """Require an exact isolated Production reader diagnostic gate."""
-
-    return (
-        isinstance(environment, Mapping)
-        and environment.get("VERCEL_ENV") == "production"
-        and environment.get(_MODE_VARIABLE)
-        == MailboxRuntimeMode.PRODUCTION_READ.value
-        and environment.get(_PRODUCTION_READER_DIAGNOSTIC_VARIABLE)
-        == _PRODUCTION_READER_DIAGNOSTIC_ENABLED
-        and environment.get(_PRODUCTION_READ_AUTHORITY_VARIABLE)
-        != _PRODUCTION_READ_AUTHORITY_ENABLED
-    )
-
-
 def production_read_authority_enabled(
     environment: Mapping[str, str],
 ) -> bool:
@@ -472,169 +416,6 @@ def production_read_authority_enabled(
         == MailboxRuntimeMode.PRODUCTION_READ.value
         and environment.get(_PRODUCTION_READ_AUTHORITY_VARIABLE)
         == _PRODUCTION_READ_AUTHORITY_ENABLED
-    )
-
-
-def _production_connectivity_connection_factory(
-    environment: Mapping[str, str],
-    *,
-    connect: _ConnectCallable | None = None,
-) -> MailboxConnectionFactory:
-    if not production_reader_diagnostic_enabled(environment):
-        raise MailboxRuntimeDisabledError()
-    config = parse_mailbox_runtime_configuration(environment)
-    if config.mode is not MailboxRuntimeMode.PRODUCTION_READ:
-        raise MailboxRuntimeDisabledError()
-    reader_url = config.reader_database_url
-    if type(reader_url) is not MailboxDatabaseUrl:
-        _configuration_error()
-    return MailboxConnectionFactory(
-        reader_url,
-        read_only=True,
-        connect=connect,
-    )
-
-
-def build_production_connectivity_mailbox_reader(
-    environment: Mapping[str, str],
-    *,
-    connect: _ConnectCallable | None = None,
-) -> PostgreSQLMailboxReaderRepository:
-    """Compose the isolated Production reader diagnostic surface only."""
-
-    return PostgreSQLMailboxReaderRepository(
-        _production_connectivity_connection_factory(
-            environment,
-            connect=connect,
-        )
-    )
-
-
-def diagnose_production_reader_connectivity(
-    environment: Mapping[str, str],
-    *,
-    connect: _ConnectCallable | None = None,
-) -> ProductionReaderDiagnosticStageResult:
-    """Return one fixed non-secret stage for the isolated Production reader proof."""
-
-    if not production_reader_diagnostic_enabled(environment):
-        raise MailboxRuntimeDisabledError()
-
-    try:
-        config = parse_mailbox_runtime_configuration(environment)
-    except MailboxRuntimeConfigurationError:
-        return ProductionReaderDiagnosticStageResult("configuration_invalid")
-
-    reader_url = config.reader_database_url
-    if (
-        config.mode is not MailboxRuntimeMode.PRODUCTION_READ
-        or type(reader_url) is not MailboxDatabaseUrl
-    ):
-        return ProductionReaderDiagnosticStageResult("configuration_invalid")
-
-    connector = _default_connect if connect is None else connect
-    try:
-        connection = connector(
-            reader_url.value,
-            autocommit=False,
-            connect_timeout=_CONNECT_TIMEOUT_SECONDS,
-        )
-    except Exception:
-        return ProductionReaderDiagnosticStageResult("connect_failed")
-
-    cursor = None
-
-    def close_connection() -> None:
-        nonlocal cursor
-        if cursor is not None:
-            try:
-                getattr(cursor, "close")()
-            except BaseException:
-                pass
-            cursor = None
-        try:
-            rollback = getattr(connection, "rollback", None)
-            if callable(rollback):
-                rollback()
-        except BaseException:
-            pass
-        try:
-            getattr(connection, "close")()
-        except BaseException:
-            pass
-
-    try:
-        if getattr(connection, "autocommit") is not False:
-            close_connection()
-            return ProductionReaderDiagnosticStageResult("autocommit_invalid")
-
-        pgconn = getattr(connection, "pgconn")
-        if getattr(pgconn, "ssl_in_use") is not True:
-            close_connection()
-            return ProductionReaderDiagnosticStageResult("tls_invalid")
-
-        info = getattr(connection, "info")
-        if getattr(info, "user") != reader_url.role:
-            close_connection()
-            return ProductionReaderDiagnosticStageResult("role_invalid")
-        if getattr(info, "dbname") != reader_url.database:
-            close_connection()
-            return ProductionReaderDiagnosticStageResult("database_invalid")
-    except Exception:
-        close_connection()
-        return ProductionReaderDiagnosticStageResult("connect_failed")
-
-    try:
-        cursor = getattr(connection, "cursor")()
-        getattr(cursor, "execute")("SET TRANSACTION READ ONLY")
-    except Exception:
-        close_connection()
-        return ProductionReaderDiagnosticStageResult("read_only_begin_failed")
-
-    try:
-        getattr(cursor, "execute")(
-            "SELECT current_setting('transaction_read_only')"
-        )
-        row = getattr(cursor, "fetchone")()
-        if (
-            type(row) not in (tuple, list)
-            or len(row) != 1
-            or row[0] != "on"
-        ):
-            close_connection()
-            return ProductionReaderDiagnosticStageResult("read_only_verify_failed")
-    except Exception:
-        close_connection()
-        return ProductionReaderDiagnosticStageResult("read_only_verify_failed")
-
-    close_connection()
-    return ProductionReaderDiagnosticStageResult("connected")
-
-
-def run_production_reader_connectivity_check(
-    environment: Mapping[str, str],
-    *,
-    connect: _ConnectCallable | None = None,
-) -> ProductionReaderConnectivityResult:
-    """Prove Production reader identity/TLS/read-only state without mailbox reads."""
-
-    diagnostic = diagnose_production_reader_connectivity(
-        environment,
-        connect=connect,
-    )
-    if diagnostic.stage != "connected":
-        _configuration_error()
-
-    config = parse_mailbox_runtime_configuration(environment)
-    reader_url = config.reader_database_url
-    if type(reader_url) is not MailboxDatabaseUrl:
-        _configuration_error()
-
-    return ProductionReaderConnectivityResult(
-        status="connected",
-        role=reader_url.role,
-        tls=True,
-        transaction_read_only=True,
     )
 
 
@@ -775,17 +556,11 @@ __all__ = (
     "MailboxRuntimeConfigurationError",
     "MailboxRuntimeDisabledError",
     "MailboxRuntimeMode",
-    "ProductionReaderConnectivityResult",
-    "ProductionReaderDiagnosticStageResult",
     "ShadowMailboxRepositories",
     "build_active_read_mailbox_reader",
     "build_active_write_mailbox_repositories",
-    "build_production_connectivity_mailbox_reader",
     "build_production_read_mailbox_reader",
     "build_shadow_mailbox_repositories",
-    "diagnose_production_reader_connectivity",
     "parse_mailbox_runtime_configuration",
     "production_read_authority_enabled",
-    "production_reader_diagnostic_enabled",
-    "run_production_reader_connectivity_check",
 )
