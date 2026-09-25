@@ -7,6 +7,7 @@ import unittest
 from cuevion_mailbox.gmail_projection import project_gmail_snapshot_message
 from cuevion_mailbox.preview_active_write import (
     PreviewGmailHistoryRecovery,
+    run_production_gmail_bootstrap_backfill,
     run_preview_gmail_stale_recovery,
 )
 from cuevion_mailbox.repository_contract import (
