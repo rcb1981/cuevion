@@ -23,6 +23,7 @@ from cuevion_mailbox.gmail_history_delta import (
 from cuevion_mailbox.gmail_projection import project_gmail_snapshot
 from cuevion_mailbox.gmail_recovery_inventory import (
     read_complete_gmail_inbox_recovery_inventory,
+    read_gmail_inbox_bootstrap_page,
 )
 from cuevion_mailbox.repository_contract import (
     BackfillState,
@@ -444,6 +445,41 @@ def run_preview_gmail_history_sync(
     )
 
 
+def run_production_gmail_bootstrap_page(*, environment, workspace_id, owner_user_id, mailbox_id, mailbox_account_identity, context, request_with_one_refresh, recover_exact_message, committed_at_millis, repositories=None):
+    if not production_bootstrap_authority_enabled(environment):
+        raise RuntimeError("Production Gmail bootstrap page is disabled")
+    authority = MailboxReadAuthority(workspace_id=workspace_id, owner_user_id=owner_user_id, mailbox_id=mailbox_id, provider=MailboxProvider.GOOGLE, provider_account_identity=mailbox_account_identity.casefold())
+    repos = _runtime_repositories(environment) if repositories is None else repositories
+    state = repos.reader.resolve_current_state(authority)
+    if type(state) is not MailboxStateSnapshot or state.bootstrap_state not in {BootstrapState.RECENT_READY, BootstrapState.BACKFILLING}:
+        return PreviewGmailStaleRecoveryResult("state_not_ready", context, 0, None if state is None else state.scope.source_generation, None, 0)
+    cursor = repos.reader.read_cursor(state.scope, _GMAIL_SCOPE_KEY)
+    if type(cursor) is not SyncCursor or cursor.backfill_state not in {BackfillState.NOT_STARTED, BackfillState.RUNNING}:
+        return PreviewGmailStaleRecoveryResult("cursor_not_backfillable", context, 0, state.scope.source_generation, None, 0)
+    page = read_gmail_inbox_bootstrap_page(context, page_token=cursor.backfill_cursor, request_with_one_refresh=request_with_one_refresh)
+    if page.status != "ok":
+        return PreviewGmailStaleRecoveryResult("provider_" + page.status, page.context, 0, state.scope.source_generation, None, 0)
+    current_context = page.context
+    previews, sources, ids = [], [], []
+    for provider_id in page.provider_message_ids:
+        recovered = recover_exact_message(current_context, provider_id)
+        if type(recovered) is not PreviewGmailHistoryRecovery:
+            raise ValueError("invalid Production Gmail bootstrap recovery")
+        current_context = recovered.context
+        if recovered.status == "retry":
+            return PreviewGmailStaleRecoveryResult("recovery_unavailable", current_context, 0, state.scope.source_generation, None, len(page.provider_message_ids))
+        if recovered.status == "recovered":
+            ids.append(provider_id); previews.append(recovered.preview); sources.append(recovered.candidate_source)
+    current = tuple(repos.reader.read_messages_by_provider_message_ids(state.scope, ids))
+    records = project_gmail_snapshot(state.scope, previews, sources)
+    base = _next_cursor(cursor, gmail_history_id=cursor.gmail_history_id)
+    complete = page.next_page_token is None
+    next_cursor = SyncCursor(scope_key=base.scope_key, cursor_generation=base.cursor_generation, provider=base.provider, gmail_history_id=base.gmail_history_id, imap_uid_validity=None, imap_highest_uid=None, imap_uidnext_observed=None, backfill_state=BackfillState.COMPLETE if complete else BackfillState.RUNNING, backfill_cursor=None if complete else page.next_page_token, row_version=base.row_version)
+    commit = build_gmail_delta_commit(state.scope, records, list(current), expected_state_row_version=state.row_version, current_cursor=cursor, next_cursor=next_cursor, committed_at_millis=committed_at_millis, next_bootstrap_state=BootstrapState.READY if complete else BootstrapState.BACKFILLING)
+    outcome = repos.writer.commit_provider_delta(commit)
+    return PreviewGmailStaleRecoveryResult(outcome.value, current_context, len(commit.mutations), state.scope.source_generation, cursor.gmail_history_id if complete else None, len(page.provider_message_ids))
+
+
 def run_preview_gmail_stale_recovery(
     *,
     environment: Mapping[str, str],
@@ -757,6 +793,7 @@ __all__ = (
     "PreviewGmailHistorySyncResult",
     "gmail_durable_write_enabled",
     "preview_active_write_enabled",
+    "run_production_gmail_bootstrap_page",
     "run_preview_gmail_durable_write",
     "run_preview_gmail_history_sync",
 )
