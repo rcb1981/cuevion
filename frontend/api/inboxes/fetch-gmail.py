@@ -461,23 +461,31 @@ class handler(BaseHTTPRequestHandler):
                     )
                 else:
                     try:
-                        recovery_runner = (
-                            run_production_gmail_bootstrap_backfill
-                            if production_bootstrap_authority_enabled(os.environ)
-                            else run_preview_gmail_stale_recovery
-                        )
-                        stale_recovery = recovery_runner(
-                            environment=os.environ,
-                            workspace_id=getattr(member, "workspace_id"),
-                            owner_user_id=getattr(member, "user_id"),
-                            mailbox_id=context["mailbox_id"],
-                            mailbox_account_identity=context["mailbox_email"],
-                            context=context,
-                            fresh_history_id=stale_recovery_history.history_id,
-                            request_with_one_refresh=_request_with_one_refresh,
-                            recover_exact_message=recover_history_message,
-                            committed_at_millis=time.time_ns() // 1_000_000,
-                        )
+                        if production_bootstrap_authority_enabled(os.environ):
+                            stale_recovery = run_production_gmail_bootstrap_backfill(
+                                environment=os.environ,
+                                workspace_id=getattr(member, "workspace_id"),
+                                owner_user_id=getattr(member, "user_id"),
+                                mailbox_id=context["mailbox_id"],
+                                mailbox_account_identity=context["mailbox_email"],
+                                context=context,
+                                request_with_one_refresh=_request_with_one_refresh,
+                                recover_exact_message=recover_history_message,
+                                committed_at_millis=time.time_ns() // 1_000_000,
+                            )
+                        else:
+                            stale_recovery = run_preview_gmail_stale_recovery(
+                                environment=os.environ,
+                                workspace_id=getattr(member, "workspace_id"),
+                                owner_user_id=getattr(member, "user_id"),
+                                mailbox_id=context["mailbox_id"],
+                                mailbox_account_identity=context["mailbox_email"],
+                                context=context,
+                                request_with_one_refresh=_request_with_one_refresh,
+                                recover_exact_message=recover_history_message,
+                                committed_at_millis=time.time_ns() // 1_000_000,
+                                fresh_history_id=stale_recovery_history.history_id,
+                            )
                     except Exception:
                         print(
                             "cuevion_mailbox_active_write gmail "
