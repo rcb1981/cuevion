@@ -16,6 +16,7 @@ from cuevion_mailbox.gmail_history_delta import GmailRequestWithOneRefresh
 
 
 _RECOVERY_INBOX_LIMIT = 100
+_BOOTSTRAP_PAGE_LIMIT = 10
 _MAX_PAGE_TOKEN_BYTES = 4_096
 _MAX_PROVIDER_MESSAGE_ID_BYTES = 1_024
 
@@ -69,6 +70,39 @@ def _inventory_path(page_token: str | None = None) -> str:
             raise ValueError("invalid Gmail recovery page token")
         query["pageToken"] = page_token
     return "/messages?" + urlencode(query)
+
+
+@dataclass(frozen=True, slots=True)
+class GmailInboxBootstrapPage:
+    status: str
+    context: dict
+    provider_message_ids: tuple[str, ...]
+    next_page_token: str | None
+
+
+def read_gmail_inbox_bootstrap_page(context: dict, *, page_token: str | None, request_with_one_refresh: GmailRequestWithOneRefresh) -> GmailInboxBootstrapPage:
+    query = {"labelIds": "INBOX", "maxResults": _BOOTSTRAP_PAGE_LIMIT}
+    if page_token is not None:
+        if not _valid_page_token(page_token):
+            raise ValueError("invalid Gmail bootstrap page token")
+        query["pageToken"] = page_token
+    payload, error, next_context, refresh_failure = request_with_one_refresh(context, "/messages?" + urlencode(query))
+    current_context = next_context if type(next_context) is dict else context
+    if refresh_failure is not None or error is not None or type(payload) is not dict:
+        return GmailInboxBootstrapPage("unavailable", current_context, (), None)
+    raw_messages = payload.get("messages", [])
+    next_token = payload.get("nextPageToken")
+    if type(raw_messages) is not list or len(raw_messages) > _BOOTSTRAP_PAGE_LIMIT or (next_token is not None and not _valid_page_token(next_token)):
+        return GmailInboxBootstrapPage("invalid", current_context, (), None)
+    ids = []
+    seen = set()
+    for item in raw_messages:
+        provider_id = item.get("id") if type(item) is dict else None
+        if not _valid_provider_message_id(provider_id) or provider_id in seen:
+            return GmailInboxBootstrapPage("invalid", current_context, (), None)
+        seen.add(provider_id)
+        ids.append(provider_id)
+    return GmailInboxBootstrapPage("ok", current_context, tuple(ids), next_token)
 
 
 def _result(
@@ -136,6 +170,8 @@ def read_complete_gmail_inbox_recovery_inventory(
 
 
 __all__ = (
+    "GmailInboxBootstrapPage",
     "GmailInboxRecoveryInventory",
     "read_complete_gmail_inbox_recovery_inventory",
+    "read_gmail_inbox_bootstrap_page",
 )
