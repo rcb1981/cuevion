@@ -221,6 +221,25 @@ class ProductionGmailBootstrapPageTests(unittest.TestCase):
         self.assertEqual(commit.next_cursor.backfill_cursor, "page-2")
 
 
+class ProductionGmailBootstrapFinalPageTests(unittest.TestCase):
+    def test_final_page_promotes_ready_complete(self):
+        cursor = SyncCursor(scope_key="gmail-account", cursor_generation=1, provider=MailboxProvider.GOOGLE, gmail_history_id="100", imap_uid_validity=None, imap_highest_uid=None, imap_uidnext_observed=None, backfill_state=BackfillState.RUNNING, backfill_cursor="page-2", row_version=3)
+        reader = _Reader(state=_state(bootstrap_state=BootstrapState.BACKFILLING), cursor=cursor, exact_projections=())
+        writer = _Writer()
+        result = run_production_gmail_bootstrap_page(
+            environment={"VERCEL_ENV": "production", "CUEVION_MAILBOX_POSTGRES_MODE": "production_bootstrap", "CUEVION_MAILBOX_PRODUCTION_BOOTSTRAP_AUTHORITY": "enabled"},
+            workspace_id="wsp_" + ("a" * 22), owner_user_id="usr_" + ("b" * 22), mailbox_id="gmail-1", mailbox_account_identity="verified@gmail.com", context={},
+            request_with_one_refresh=lambda context, path: ({"messages": [{"id": "gmail-message-2"}]}, None, context, None),
+            recover_exact_message=lambda context, provider_id: PreviewGmailHistoryRecovery("recovered", context, _preview(provider_id), _source(provider_id)),
+            committed_at_millis=1_790_179_000_000, repositories=_Repositories(reader, writer),
+        )
+        self.assertEqual(result.status, "applied")
+        commit = writer.commits[0]
+        self.assertIs(commit.next_bootstrap_state, BootstrapState.READY)
+        self.assertIs(commit.next_cursor.backfill_state, BackfillState.COMPLETE)
+        self.assertIsNone(commit.next_cursor.backfill_cursor)
+
+
 class PreviewGmailStaleRecoveryTests(unittest.TestCase):
     def test_complete_recovery_commits_update_resurrection_and_deletions(self):
         changed_id = "gmail-message-changed"
