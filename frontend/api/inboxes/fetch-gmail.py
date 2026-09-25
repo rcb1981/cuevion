@@ -412,8 +412,11 @@ class handler(BaseHTTPRequestHandler):
                     recover_exact_message=recover_history_message,
                     committed_at_millis=time.time_ns() // 1_000_000,
                 )
-            except Exception:
-                print("cuevion_mailbox_active_write gmail history_sync_failed")
+            except Exception as exc:
+                print(
+                    "cuevion_mailbox_active_write gmail history_sync_failed "
+                    "error_type=" + type(exc).__name__
+                )
             else:
                 context = history_sync.context
                 print(
