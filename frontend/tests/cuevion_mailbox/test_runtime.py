@@ -187,6 +187,32 @@ class MailboxRuntimeConfigurationTests(unittest.TestCase):
                     runtime.production_read_authority_enabled(environment)
                 )
 
+    def test_production_bootstrap_requires_exact_gate_and_excludes_read_authority(self):
+        base = {
+            "CUEVION_MAILBOX_POSTGRES_MODE": "production_bootstrap",
+            "VERCEL_ENV": "production",
+            "CUEVION_MAILBOX_READER_DATABASE_URL": _url(_READER_ROLE, "reader-secret"),
+            "CUEVION_MAILBOX_WRITER_DATABASE_URL": _url(_WRITER_ROLE, "writer-secret"),
+        }
+        self.assertFalse(runtime.production_bootstrap_authority_enabled(base))
+        enabled = {**base, "CUEVION_MAILBOX_PRODUCTION_BOOTSTRAP_AUTHORITY": "enabled"}
+        self.assertTrue(runtime.production_bootstrap_authority_enabled(enabled))
+        repositories = runtime.build_production_bootstrap_mailbox_repositories(enabled)
+        self.assertIsInstance(repositories.reader, runtime.PostgreSQLMailboxReaderRepository)
+        self.assertIsInstance(repositories.writer, runtime.PostgreSQLMailboxRepository)
+        self.assertFalse(runtime.production_read_authority_enabled(enabled))
+
+        for environment in (
+            {**enabled, "VERCEL_ENV": "preview"},
+            {**enabled, "CUEVION_MAILBOX_POSTGRES_MODE": "active_write"},
+            {**enabled, "CUEVION_MAILBOX_PRODUCTION_BOOTSTRAP_AUTHORITY": "true"},
+            {**enabled, "CUEVION_MAILBOX_PRODUCTION_READ_AUTHORITY": "enabled"},
+        ):
+            with self.subTest(environment=environment):
+                self.assertFalse(runtime.production_bootstrap_authority_enabled(environment))
+                with self.assertRaises(runtime.MailboxRuntimeDisabledError):
+                    runtime.build_production_bootstrap_mailbox_repositories(environment)
+
     def test_active_write_is_preview_only_and_requires_both_roles(self):
         environment = {
             "CUEVION_MAILBOX_POSTGRES_MODE": "active_write",

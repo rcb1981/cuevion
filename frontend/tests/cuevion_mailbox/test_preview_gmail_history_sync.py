@@ -168,9 +168,11 @@ def _run(
     repositories,
     request,
     recover,
+    *,
+    environment=None,
 ):
     return run_preview_gmail_history_sync(
-        environment=_environment(),
+        environment=_environment() if environment is None else environment,
         workspace_id="wsp_" + ("a" * 22),
         owner_user_id="usr_" + ("b" * 22),
         mailbox_id="gmail-1",
@@ -226,6 +228,26 @@ class PreviewGmailHistorySyncTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "state_not_ready")
+        self.assertEqual(provider_calls, [])
+        self.assertEqual(reader.exact_calls, [])
+        self.assertEqual(writer.commits, [])
+
+    def test_production_bootstrap_forces_complete_reconciliation_before_history_delta(self):
+        reader = _Reader(state=_state(), cursor=_cursor())
+        writer = _Writer()
+        provider_calls = []
+        environment = {
+            "VERCEL_ENV": "production",
+            "CUEVION_MAILBOX_POSTGRES_MODE": "production_bootstrap",
+            "CUEVION_MAILBOX_PRODUCTION_BOOTSTRAP_AUTHORITY": "enabled",
+        }
+        result = _run(
+            _Repositories(reader, writer),
+            lambda *_args: provider_calls.append("history"),
+            lambda *_args: (_ for _ in ()).throw(AssertionError("recovery called")),
+            environment=environment,
+        )
+        self.assertEqual(result.status, "full_sync_required")
         self.assertEqual(provider_calls, [])
         self.assertEqual(reader.exact_calls, [])
         self.assertEqual(writer.commits, [])

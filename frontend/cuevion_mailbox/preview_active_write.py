@@ -39,6 +39,8 @@ from cuevion_mailbox.repository_contract import (
 from cuevion_mailbox.runtime import (
     ActiveWriteMailboxRepositories,
     build_active_write_mailbox_repositories,
+    build_production_bootstrap_mailbox_repositories,
+    production_bootstrap_authority_enabled,
 )
 
 
@@ -160,6 +162,18 @@ def preview_active_write_enabled(environment: Mapping[str, str]) -> bool:
     )
 
 
+def gmail_durable_write_enabled(environment: Mapping[str, str]) -> bool:
+    return preview_active_write_enabled(environment) or production_bootstrap_authority_enabled(environment)
+
+
+def _runtime_repositories(environment: Mapping[str, str]):
+    if preview_active_write_enabled(environment):
+        return build_active_write_mailbox_repositories(environment)
+    if production_bootstrap_authority_enabled(environment):
+        return build_production_bootstrap_mailbox_repositories(environment)
+    raise RuntimeError("Gmail durable mailbox write is disabled")
+
+
 def _next_cursor(
     current: SyncCursor | None,
     *,
@@ -251,8 +265,8 @@ def run_preview_gmail_history_sync(
     Any incomplete History/provider recovery returns without advancing cursor.
     """
 
-    if not preview_active_write_enabled(environment):
-        raise RuntimeError("preview active mailbox write is disabled")
+    if not gmail_durable_write_enabled(environment):
+        raise RuntimeError("Gmail durable mailbox write is disabled")
     if (
         type(context) is not dict
         or not callable(request_with_one_refresh)
@@ -271,7 +285,7 @@ def run_preview_gmail_history_sync(
         provider_account_identity=mailbox_account_identity.casefold(),
     )
     runtime_repositories = (
-        build_active_write_mailbox_repositories(environment)
+        _runtime_repositories(environment)
         if repositories is None
         else repositories
     )
@@ -310,6 +324,19 @@ def run_preview_gmail_history_sync(
         or current_cursor.gmail_history_id is None
     ):
         raise ValueError("invalid Preview Gmail History cursor")
+    if production_bootstrap_authority_enabled(environment) and (
+        state.bootstrap_state is not BootstrapState.READY
+        or current_cursor.backfill_state is not BackfillState.COMPLETE
+        or current_cursor.backfill_cursor is not None
+    ):
+        return PreviewGmailHistorySyncResult(
+            "full_sync_required",
+            context,
+            0,
+            scope.source_generation,
+            None,
+            0,
+        )
     if state.bootstrap_state not in {
         BootstrapState.RECENT_READY,
         BootstrapState.BACKFILLING,
@@ -433,8 +460,8 @@ def run_preview_gmail_stale_recovery(
 ) -> PreviewGmailStaleRecoveryResult:
     """Reconcile a complete bounded Inbox before replacing a stale Gmail cursor."""
 
-    if not preview_active_write_enabled(environment):
-        raise RuntimeError("preview active mailbox write is disabled")
+    if not gmail_durable_write_enabled(environment):
+        raise RuntimeError("Gmail durable mailbox write is disabled")
     if (
         type(context) is not dict
         or type(fresh_history_id) is not str
@@ -457,7 +484,7 @@ def run_preview_gmail_stale_recovery(
         provider_account_identity=mailbox_account_identity.casefold(),
     )
     runtime_repositories = (
-        build_active_write_mailbox_repositories(environment)
+        _runtime_repositories(environment)
         if repositories is None
         else repositories
     )
@@ -636,8 +663,8 @@ def run_preview_gmail_durable_write(
     committed_at_millis: int,
     repositories: _Repositories | None = None,
 ) -> PreviewDurableWriteResult:
-    if not preview_active_write_enabled(environment):
-        raise RuntimeError("preview active mailbox write is disabled")
+    if not gmail_durable_write_enabled(environment):
+        raise RuntimeError("Gmail durable mailbox write is disabled")
     if (
         type(committed_at_millis) is not int
         or isinstance(committed_at_millis, bool)
@@ -657,7 +684,7 @@ def run_preview_gmail_durable_write(
         provider_account_identity=mailbox_account_identity.casefold(),
     )
     runtime_repositories = (
-        build_active_write_mailbox_repositories(environment)
+        _runtime_repositories(environment)
         if repositories is None
         else repositories
     )
@@ -728,6 +755,7 @@ __all__ = (
     "PreviewDurableWriteResult",
     "PreviewGmailHistoryRecovery",
     "PreviewGmailHistorySyncResult",
+    "gmail_durable_write_enabled",
     "preview_active_write_enabled",
     "run_preview_gmail_durable_write",
     "run_preview_gmail_history_sync",

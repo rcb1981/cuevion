@@ -81,6 +81,7 @@ from cuevion_mailbox.preview_active_read import (
 )
 from cuevion_mailbox.preview_active_write import (
     PreviewGmailHistoryRecovery,
+    gmail_durable_write_enabled,
     preview_active_write_enabled,
     run_preview_gmail_durable_write,
     run_preview_gmail_history_sync,
@@ -377,7 +378,7 @@ class handler(BaseHTTPRequestHandler):
         stale_recovery_history = None
         stale_recovery = None
         history_sync = None
-        if preview_active_write_enabled(os.environ):
+        if gmail_durable_write_enabled(os.environ):
             member = resolution.get("memberAuthority")
 
             def recover_history_message(
@@ -583,7 +584,7 @@ class handler(BaseHTTPRequestHandler):
         candidate_sources = snapshot_result.get("_priorityCandidateSources")
 
         if (
-            preview_active_write_enabled(os.environ)
+            gmail_durable_write_enabled(os.environ)
             and history_sync is not None
             and history_sync.status == "bootstrap_required"
             and durable_history is not None
