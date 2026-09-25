@@ -6,6 +6,7 @@ from pathlib import Path
 import unittest
 
 from cuevion_mailbox.preview_active_write import (
+    gmail_durable_write_enabled,
     preview_active_write_enabled,
     run_preview_gmail_durable_write,
 )
@@ -167,6 +168,32 @@ class PreviewGmailDurableWriteTests(unittest.TestCase):
                         _Repositories(_Reader(), _Writer(initialization=_initialization())),
                         environment=environment,
                     )
+
+    def test_production_bootstrap_gate_reuses_provider_authoritative_write_logic(self):
+        environment = {
+            "VERCEL_ENV": "production",
+            "CUEVION_MAILBOX_POSTGRES_MODE": "production_bootstrap",
+            "CUEVION_MAILBOX_PRODUCTION_BOOTSTRAP_AUTHORITY": "enabled",
+        }
+        self.assertTrue(gmail_durable_write_enabled(environment))
+        self.assertFalse(preview_active_write_enabled(environment))
+        reader = _Reader()
+        writer = _Writer(initialization=_initialization())
+        result = self._run(_Repositories(reader, writer), environment=environment)
+        self.assertEqual(result.status, "applied")
+        self.assertEqual(result.mutation_count, 1)
+        self.assertEqual(len(writer.commits), 1)
+
+    def test_production_bootstrap_refuses_read_authority_coactivation(self):
+        environment = {
+            "VERCEL_ENV": "production",
+            "CUEVION_MAILBOX_POSTGRES_MODE": "production_bootstrap",
+            "CUEVION_MAILBOX_PRODUCTION_BOOTSTRAP_AUTHORITY": "enabled",
+            "CUEVION_MAILBOX_PRODUCTION_READ_AUTHORITY": "enabled",
+        }
+        self.assertFalse(gmail_durable_write_enabled(environment))
+        with self.assertRaises(RuntimeError):
+            self._run(_Repositories(_Reader(), _Writer(initialization=_initialization())), environment=environment)
 
     def test_first_write_bootstraps_state_and_commits_one_added_message(self):
         reader = _Reader()
@@ -353,14 +380,14 @@ class PreviewGmailDurableWriteStaticTests(unittest.TestCase):
     def test_route_hook_is_gmail_only(self):
         gmail = _GMAIL_ROUTE.read_text(encoding="utf-8")
         imap = _IMAP_ROUTE.read_text(encoding="utf-8")
-        self.assertIn("preview_active_write_enabled", gmail)
+        self.assertIn("gmail_durable_write_enabled", gmail)
         self.assertIn("run_preview_gmail_history_sync", gmail)
         self.assertIn("run_preview_gmail_stale_recovery", gmail)
         self.assertIn("run_preview_gmail_durable_write", gmail)
         self.assertNotIn("run_preview_gmail_history_sync", imap)
         self.assertNotIn("run_preview_gmail_stale_recovery", imap)
         self.assertNotIn("run_preview_gmail_durable_write", imap)
-        self.assertNotIn("preview_active_write_enabled", imap)
+        self.assertNotIn("gmail_durable_write_enabled", imap)
 
 
 if __name__ == "__main__":
