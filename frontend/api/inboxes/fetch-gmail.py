@@ -79,12 +79,12 @@ from cuevion_mailbox.preview_active_read import (
     gmail_cache_authority_enabled,
     plan_gmail_authoritative_read,
 )
-from cuevion_mailbox.runtime import (\n    production_bootstrap_authority_enabled,\n    production_bootstrap_configuration_stage,\n)
+from cuevion_mailbox.runtime import production_bootstrap_configuration_stage
 from cuevion_mailbox.preview_active_write import (
     PreviewGmailHistoryRecovery,
     gmail_durable_write_enabled,
     preview_active_write_enabled,
-    run_production_gmail_bootstrap_backfill,\n    run_preview_gmail_durable_write,
+    run_preview_gmail_durable_write,
     run_preview_gmail_history_sync,
     run_preview_gmail_stale_recovery,
 )
@@ -461,31 +461,18 @@ class handler(BaseHTTPRequestHandler):
                     )
                 else:
                     try:
-                        if production_bootstrap_authority_enabled(os.environ):
-                            stale_recovery = run_production_gmail_bootstrap_backfill(
-                                environment=os.environ,
-                                workspace_id=getattr(member, "workspace_id"),
-                                owner_user_id=getattr(member, "user_id"),
-                                mailbox_id=context["mailbox_id"],
-                                mailbox_account_identity=context["mailbox_email"],
-                                context=context,
-                                request_with_one_refresh=_request_with_one_refresh,
-                                recover_exact_message=recover_history_message,
-                                committed_at_millis=time.time_ns() // 1_000_000,
-                            )
-                        else:
-                            stale_recovery = run_preview_gmail_stale_recovery(
-                                environment=os.environ,
-                                workspace_id=getattr(member, "workspace_id"),
-                                owner_user_id=getattr(member, "user_id"),
-                                mailbox_id=context["mailbox_id"],
-                                mailbox_account_identity=context["mailbox_email"],
-                                context=context,
-                                request_with_one_refresh=_request_with_one_refresh,
-                                recover_exact_message=recover_history_message,
-                                committed_at_millis=time.time_ns() // 1_000_000,
-                                fresh_history_id=stale_recovery_history.history_id,
-                            )
+                        stale_recovery = run_preview_gmail_stale_recovery(
+                            environment=os.environ,
+                            workspace_id=getattr(member, "workspace_id"),
+                            owner_user_id=getattr(member, "user_id"),
+                            mailbox_id=context["mailbox_id"],
+                            mailbox_account_identity=context["mailbox_email"],
+                            context=context,
+                            fresh_history_id=stale_recovery_history.history_id,
+                            request_with_one_refresh=_request_with_one_refresh,
+                            recover_exact_message=recover_history_message,
+                            committed_at_millis=time.time_ns() // 1_000_000,
+                        )
                     except Exception:
                         print(
                             "cuevion_mailbox_active_write gmail "
