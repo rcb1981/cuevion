@@ -198,6 +198,7 @@ class PreviewGmailDurableWriteTests(unittest.TestCase):
     def test_history_sync_failure_diagnostic_logs_type_only(self):
         gmail = _GMAIL_ROUTE.read_text(encoding="utf-8")
         self.assertIn('"error_type=" + type(exc).__name__', gmail)
+        self.assertIn("production_bootstrap_configuration_stage(os.environ)", gmail)
         self.assertNotIn('str(exc)', gmail)
         self.assertNotIn('repr(exc)', gmail)
 
