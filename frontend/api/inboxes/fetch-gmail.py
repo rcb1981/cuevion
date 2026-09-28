@@ -510,11 +510,12 @@ class handler(BaseHTTPRequestHandler):
                             "stale_recovery_failed"
                         )
                     else:
-                        context = stale_recovery.context
-                        print(
-                            "cuevion_mailbox_active_write gmail stale_recovery_"
-                            + stale_recovery.status
-                        )
+                        if stale_recovery is not None:
+                            context = stale_recovery.context
+                            print(
+                                "cuevion_mailbox_active_write gmail stale_recovery_"
+                                + stale_recovery.status
+                            )
 
         snapshot_result = None
         if (
