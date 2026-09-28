@@ -75,6 +75,16 @@ def _source():
     }
 
 
+class GmailOversizedMetadataFallbackContractTests(unittest.TestCase):
+    def test_route_source_contains_bounded_metadata_fallback(self):
+        route_path = Path(__file__).resolve().parents[2] / "api" / "inboxes" / "gmail_snapshot.py"
+        source = route_path.read_text(encoding="utf-8")
+        self.assertIn('error.get("code") == "gmail_response_too_large"', source)
+        self.assertIn("?format=metadata", source)
+        self.assertIn("&metadataHeaders=Message-ID", source)
+        self.assertIn('retry_reason="metadata_invalid"', source)
+
+
 class GmailExactRecoveryDiagnosticContractTests(unittest.TestCase):
     def test_retry_reason_is_not_part_of_preview_recovery_contract(self):
         fields = PreviewGmailHistoryRecovery.__dataclass_fields__
