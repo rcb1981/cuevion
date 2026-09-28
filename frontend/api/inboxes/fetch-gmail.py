@@ -398,6 +398,12 @@ class handler(BaseHTTPRequestHandler):
                     require_inbound_semantics=False,
                     message_parser=message_from_bytes,
                 )
+                if recovered.result.value == "retry":
+                    print(
+                        "cuevion_mailbox_active_write gmail "
+                        "exact_recovery_retry reason="
+                        + (recovered.retry_reason or "unknown")
+                    )
                 return PreviewGmailHistoryRecovery(
                     recovered.result.value,
                     recovered.context,
