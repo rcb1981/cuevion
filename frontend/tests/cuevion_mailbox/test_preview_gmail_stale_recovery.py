@@ -221,6 +221,76 @@ class ProductionGmailBootstrapPageTests(unittest.TestCase):
         self.assertEqual(commit.next_cursor.backfill_cursor, "page-2")
 
 
+class ProductionGmailBootstrapContinuationTests(unittest.TestCase):
+    def test_bounded_continuation_stops_after_five_pages(self):
+        state = _state(bootstrap_state=BootstrapState.BACKFILLING)
+        cursor = SyncCursor(scope_key="gmail-account", cursor_generation=1, provider=MailboxProvider.GOOGLE, gmail_history_id="100", imap_uid_validity=None, imap_highest_uid=None, imap_uidnext_observed=None, backfill_state=BackfillState.RUNNING, backfill_cursor="page-0", row_version=3)
+        reader = _Reader(state=state, cursor=cursor, exact_projections=())
+        writer = _Writer()
+        page_calls = []
+
+        def request(context, path):
+            page_calls.append(path)
+            index = len(page_calls)
+            return ({"messages": [{"id": "gmail-message-" + str(index)}], "nextPageToken": "page-" + str(index)}, None, context, None)
+
+        def commit(commit):
+            writer.commits.append(commit)
+            reader.state = _state(row_version=reader.state.row_version + 1, bootstrap_state=commit.next_bootstrap_state)
+            reader.cursor = commit.next_cursor
+            return DeltaCommitOutcome.APPLIED
+
+        writer.commit_provider_delta = commit
+        result = run_production_gmail_bootstrap_page(
+            environment={"VERCEL_ENV": "production", "CUEVION_MAILBOX_POSTGRES_MODE": "production_bootstrap", "CUEVION_MAILBOX_PRODUCTION_BOOTSTRAP_AUTHORITY": "enabled"},
+            workspace_id="wsp_" + ("a" * 22), owner_user_id="usr_" + ("b" * 22), mailbox_id="gmail-1", mailbox_account_identity="verified@gmail.com", context={},
+            request_with_one_refresh=request,
+            recover_exact_message=lambda context, provider_id: PreviewGmailHistoryRecovery("recovered", context, _preview(provider_id), _source(provider_id)),
+            committed_at_millis=1_790_179_000_000, repositories=_Repositories(reader, writer), max_pages=5,
+        )
+        self.assertEqual(result.status, "applied")
+        self.assertEqual(len(page_calls), 5)
+        self.assertEqual(len(writer.commits), 5)
+        self.assertIs(writer.commits[-1].next_bootstrap_state, BootstrapState.BACKFILLING)
+        self.assertIs(writer.commits[-1].next_cursor.backfill_state, BackfillState.RUNNING)
+
+    def test_bounded_continuation_stops_immediately_on_final_page(self):
+        state = _state(bootstrap_state=BootstrapState.BACKFILLING)
+        cursor = SyncCursor(scope_key="gmail-account", cursor_generation=1, provider=MailboxProvider.GOOGLE, gmail_history_id="100", imap_uid_validity=None, imap_highest_uid=None, imap_uidnext_observed=None, backfill_state=BackfillState.RUNNING, backfill_cursor="page-0", row_version=3)
+        reader = _Reader(state=state, cursor=cursor, exact_projections=())
+        writer = _Writer()
+        page_calls = []
+
+        def request(context, path):
+            page_calls.append(path)
+            index = len(page_calls)
+            payload = {"messages": [{"id": "gmail-message-" + str(index)}]}
+            if index < 3:
+                payload["nextPageToken"] = "page-" + str(index)
+            return (payload, None, context, None)
+
+        def commit(commit):
+            writer.commits.append(commit)
+            reader.state = _state(row_version=reader.state.row_version + 1, bootstrap_state=commit.next_bootstrap_state)
+            reader.cursor = commit.next_cursor
+            return DeltaCommitOutcome.APPLIED
+
+        writer.commit_provider_delta = commit
+        result = run_production_gmail_bootstrap_page(
+            environment={"VERCEL_ENV": "production", "CUEVION_MAILBOX_POSTGRES_MODE": "production_bootstrap", "CUEVION_MAILBOX_PRODUCTION_BOOTSTRAP_AUTHORITY": "enabled"},
+            workspace_id="wsp_" + ("a" * 22), owner_user_id="usr_" + ("b" * 22), mailbox_id="gmail-1", mailbox_account_identity="verified@gmail.com", context={},
+            request_with_one_refresh=request,
+            recover_exact_message=lambda context, provider_id: PreviewGmailHistoryRecovery("recovered", context, _preview(provider_id), _source(provider_id)),
+            committed_at_millis=1_790_179_000_000, repositories=_Repositories(reader, writer), max_pages=5,
+        )
+        self.assertEqual(result.status, "applied")
+        self.assertEqual(len(page_calls), 3)
+        self.assertEqual(len(writer.commits), 3)
+        self.assertIs(writer.commits[-1].next_bootstrap_state, BootstrapState.READY)
+        self.assertIs(writer.commits[-1].next_cursor.backfill_state, BackfillState.COMPLETE)
+        self.assertIsNone(writer.commits[-1].next_cursor.backfill_cursor)
+
+
 class ProductionGmailBootstrapFinalPageTests(unittest.TestCase):
     def test_final_page_promotes_ready_complete(self):
         cursor = SyncCursor(scope_key="gmail-account", cursor_generation=1, provider=MailboxProvider.GOOGLE, gmail_history_id="100", imap_uid_validity=None, imap_highest_uid=None, imap_uidnext_observed=None, backfill_state=BackfillState.RUNNING, backfill_cursor="page-2", row_version=3)
