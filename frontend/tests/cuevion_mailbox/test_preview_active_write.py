@@ -81,6 +81,7 @@ class GmailBootstrapRouteSeparationContractTests(unittest.TestCase):
         source = route_path.read_text(encoding="utf-8")
         self.assertIn("bootstrap_continuation_deferred", source)
         self.assertNotIn("max_pages=5", source)
+        self.assertIn("if stale_recovery is not None:", source)
 
     def test_continuation_route_is_bounded_and_authenticated(self):
         route_path = Path(__file__).resolve().parents[2] / "api" / "inboxes" / "continue-gmail-bootstrap.py"
