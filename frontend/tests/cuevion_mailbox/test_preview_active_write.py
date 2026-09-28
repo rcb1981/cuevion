@@ -75,6 +75,13 @@ def _source():
     }
 
 
+class GmailRouteSyntaxTests(unittest.TestCase):
+    def test_fetch_gmail_route_compiles(self):
+        route_path = Path(__file__).resolve().parents[2] / "api" / "inboxes" / "fetch-gmail.py"
+        source = route_path.read_text(encoding="utf-8")
+        compile(source, str(route_path), "exec")
+
+
 class _Reader:
     def __init__(self, *, cursor=None, projections=()):
         self.cursor = cursor
