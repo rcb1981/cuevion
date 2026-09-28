@@ -75,6 +75,12 @@ def _source():
     }
 
 
+class GmailExactRecoveryDiagnosticContractTests(unittest.TestCase):
+    def test_retry_reason_is_not_part_of_preview_recovery_contract(self):
+        fields = PreviewGmailHistoryRecovery.__dataclass_fields__
+        self.assertNotIn("retry_reason", fields)
+
+
 class GmailRouteSyntaxTests(unittest.TestCase):
     def test_fetch_gmail_route_compiles(self):
         route_path = Path(__file__).resolve().parents[2] / "api" / "inboxes" / "fetch-gmail.py"
