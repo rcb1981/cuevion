@@ -177,6 +177,7 @@ class GmailExactMessageRecovery:
     preview: dict | None = None
     candidate_source: dict | None = None
     retry_reason: str | None = None
+    provider_error_code: str | None = None
 
 
 def _result(
@@ -481,7 +482,7 @@ def recover_exact_gmail_inbox_message(
                 GmailExactMessageRecoveryResult.TERMINAL_ABSENT,
                 next_context,
             )
-        return GmailExactMessageRecovery(retry, next_context, retry_reason="provider_error")
+        return GmailExactMessageRecovery(retry, next_context, retry_reason="provider_error", provider_error_code=error.get("code") if type(error.get("code")) is str else "unknown")
     if not isinstance(detail_payload, dict):
         return GmailExactMessageRecovery(retry, next_context, retry_reason="invalid_payload")
 

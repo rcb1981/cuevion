@@ -403,6 +403,21 @@ class handler(BaseHTTPRequestHandler):
                         "cuevion_mailbox_active_write gmail "
                         "exact_recovery_retry reason="
                         + (recovered.retry_reason or "unknown")
+                        + (
+                            " provider_code=" + recovered.provider_error_code
+                            if recovered.retry_reason == "provider_error"
+                            and recovered.provider_error_code
+                            in {
+                                "gmail_token_invalid",
+                                "gmail_permission_denied",
+                                "gmail_rate_limited",
+                                "gmail_unavailable",
+                                "gmail_response_invalid",
+                                "gmail_response_too_large",
+                                "gmail_fetch_failed",
+                            }
+                            else ""
+                        )
                     )
                 return PreviewGmailHistoryRecovery(
                     recovered.result.value,
