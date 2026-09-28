@@ -487,17 +487,9 @@ class handler(BaseHTTPRequestHandler):
                 else:
                     try:
                         if production_bootstrap_authority_enabled(os.environ):
-                            stale_recovery = run_production_gmail_bootstrap_page(
-                                environment=os.environ,
-                                workspace_id=getattr(member, "workspace_id"),
-                                owner_user_id=getattr(member, "user_id"),
-                                mailbox_id=context["mailbox_id"],
-                                mailbox_account_identity=context["mailbox_email"],
-                                context=context,
-                                request_with_one_refresh=_request_with_one_refresh,
-                                recover_exact_message=recover_history_message,
-                                committed_at_millis=time.time_ns() // 1_000_000,
-                                max_pages=5,
+                            print(
+                                "cuevion_mailbox_active_write gmail "
+                                "bootstrap_continuation_deferred"
                             )
                         else:
                             stale_recovery = run_preview_gmail_stale_recovery(
