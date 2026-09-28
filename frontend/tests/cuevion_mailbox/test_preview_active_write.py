@@ -75,6 +75,21 @@ def _source():
     }
 
 
+class GmailBootstrapRouteSeparationContractTests(unittest.TestCase):
+    def test_interactive_refresh_defers_production_bootstrap(self):
+        route_path = Path(__file__).resolve().parents[2] / "api" / "inboxes" / "fetch-gmail.py"
+        source = route_path.read_text(encoding="utf-8")
+        self.assertIn("bootstrap_continuation_deferred", source)
+        self.assertNotIn("max_pages=5", source)
+
+    def test_continuation_route_is_bounded_and_authenticated(self):
+        route_path = Path(__file__).resolve().parents[2] / "api" / "inboxes" / "continue-gmail-bootstrap.py"
+        source = route_path.read_text(encoding="utf-8")
+        self.assertIn("resolve_authenticated_gmail(", source)
+        self.assertIn("production_bootstrap_authority_enabled", source)
+        self.assertIn("max_pages=5", source)
+
+
 class GmailOversizedMetadataFallbackContractTests(unittest.TestCase):
     def test_route_source_contains_bounded_metadata_fallback(self):
         route_path = Path(__file__).resolve().parents[2] / "api" / "inboxes" / "gmail_snapshot.py"
