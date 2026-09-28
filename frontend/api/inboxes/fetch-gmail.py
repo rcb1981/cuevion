@@ -476,6 +476,7 @@ class handler(BaseHTTPRequestHandler):
                                 request_with_one_refresh=_request_with_one_refresh,
                                 recover_exact_message=recover_history_message,
                                 committed_at_millis=time.time_ns() // 1_000_000,
+                                max_pages=5,
                             )
                         else:
                             stale_recovery = run_preview_gmail_stale_recovery(
