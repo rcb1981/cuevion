@@ -445,6 +445,93 @@ def parse_gmail_message_detail(
     return parsed[0] if parsed is not None else None
 
 
+def _parse_gmail_metadata_detail_with_candidate_source(
+    detail_payload: object,
+    *,
+    context: dict,
+    requested_message_id: str,
+) -> tuple[dict, dict] | None:
+    if not isinstance(detail_payload, dict) or not valid_identifier(requested_message_id):
+        return None
+    provider_message_id = detail_payload.get("id")
+    provider_thread_id = detail_payload.get("threadId")
+    raw_labels = detail_payload.get("labelIds")
+    internal_date = detail_payload.get("internalDate")
+    payload = detail_payload.get("payload")
+    headers = payload.get("headers") if isinstance(payload, dict) else None
+    if (
+        provider_message_id != requested_message_id
+        or not valid_identifier(provider_message_id)
+        or not valid_identifier(provider_thread_id)
+        or not isinstance(raw_labels, list)
+        or any(not valid_identifier(label) for label in raw_labels)
+        or len(set(raw_labels)) != len(raw_labels)
+        or "INBOX" not in raw_labels
+        or not isinstance(internal_date, str)
+        or not internal_date.isascii()
+        or not internal_date.isdigit()
+        or not isinstance(headers, list)
+    ):
+        return None
+
+    header_values: dict[str, str] = {}
+    for header in headers:
+        if not isinstance(header, dict):
+            return None
+        name, value = header.get("name"), header.get("value")
+        if not isinstance(name, str) or not isinstance(value, str):
+            return None
+        key = name.casefold()
+        if key in {"from", "to", "cc", "subject", "message-id"} and key not in header_values:
+            header_values[key] = value
+
+    from email.message import EmailMessage
+    parsed_message = EmailMessage()
+    for name in ("From", "To", "Cc", "Subject", "Message-ID"):
+        value = header_values.get(name.casefold())
+        if value:
+            parsed_message[name] = value
+
+    import imap_connect_preview
+
+    unread = "UNREAD" in raw_labels
+    flagged = "STARRED" in raw_labels
+    preview = imap_connect_preview.to_message_preview(
+        parsed_message,
+        0,
+        context["mailbox_email"],
+        unread,
+        None,
+        flagged,
+        internal_role=None,
+        focus_preferences=None,
+    )
+    preview.pop("imapUid", None)
+    preview["providerMessageId"] = provider_message_id
+    preview["providerThreadId"] = provider_thread_id
+    preview["labelIds"] = list(raw_labels)
+    preview["providerFolder"] = "Inbox"
+    preview["serverMailboxId"] = context["mailbox_id"]
+    rfc_message_id = header_values.get("message-id")
+    if isinstance(rfc_message_id, str):
+        normalized = rfc_message_id.strip().strip("<>").strip()
+        if valid_identifier(normalized):
+            preview["rfcMessageId"] = normalized
+    candidate_source = {
+        "provider": "google",
+        "providerMessageId": provider_message_id,
+        "providerThreadId": provider_thread_id,
+        "providerFolder": "INBOX",
+        "labels": list(raw_labels),
+        "providerTimestampMillis": internal_date,
+        **imap_connect_preview.build_priority_candidate_render_source(
+            parsed_message,
+            preview,
+        ),
+    }
+    return preview, candidate_source
+
+
 def recover_exact_gmail_inbox_message(
     context: dict,
     *,
@@ -481,6 +568,40 @@ def recover_exact_gmail_inbox_message(
             return GmailExactMessageRecovery(
                 GmailExactMessageRecoveryResult.TERMINAL_ABSENT,
                 next_context,
+            )
+        if error.get("code") == "gmail_response_too_large":
+            metadata_path = (
+                f"/messages/{quote(provider_message_id, safe='')}?format=metadata"
+                "&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc"
+                "&metadataHeaders=Subject&metadataHeaders=Message-ID"
+            )
+            metadata_payload, metadata_error, metadata_context, metadata_refresh_failure = (
+                request_with_one_refresh(next_context, metadata_path)
+            )
+            if isinstance(metadata_context, dict):
+                next_context = metadata_context
+            if metadata_refresh_failure is not None:
+                return GmailExactMessageRecovery(retry, next_context, retry_reason="metadata_refresh_failure")
+            if isinstance(metadata_error, dict):
+                if metadata_error.get("code") == "gmail_message_not_found":
+                    return GmailExactMessageRecovery(
+                        GmailExactMessageRecoveryResult.TERMINAL_ABSENT,
+                        next_context,
+                    )
+                return GmailExactMessageRecovery(retry, next_context, retry_reason="metadata_provider_error")
+            parsed_metadata = _parse_gmail_metadata_detail_with_candidate_source(
+                metadata_payload,
+                context=next_context,
+                requested_message_id=provider_message_id,
+            )
+            if parsed_metadata is None:
+                return GmailExactMessageRecovery(retry, next_context, retry_reason="metadata_invalid")
+            preview, candidate_source = parsed_metadata
+            return GmailExactMessageRecovery(
+                GmailExactMessageRecoveryResult.RECOVERED,
+                next_context,
+                preview,
+                candidate_source,
             )
         return GmailExactMessageRecovery(retry, next_context, retry_reason="provider_error", provider_error_code=error.get("code") if type(error.get("code")) is str else "unknown")
     if not isinstance(detail_payload, dict):
