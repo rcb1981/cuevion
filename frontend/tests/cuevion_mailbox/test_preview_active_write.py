@@ -79,6 +79,7 @@ class GmailExactRecoveryDiagnosticContractTests(unittest.TestCase):
     def test_retry_reason_is_not_part_of_preview_recovery_contract(self):
         fields = PreviewGmailHistoryRecovery.__dataclass_fields__
         self.assertNotIn("retry_reason", fields)
+        self.assertNotIn("provider_error_code", fields)
 
 
 class GmailRouteSyntaxTests(unittest.TestCase):
