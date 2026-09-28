@@ -176,6 +176,7 @@ class GmailExactMessageRecovery:
     context: dict
     preview: dict | None = None
     candidate_source: dict | None = None
+    retry_reason: str | None = None
 
 
 def _result(
@@ -462,7 +463,7 @@ def recover_exact_gmail_inbox_message(
         or type(require_inbound_semantics) is not bool
         or not callable(message_parser)
     ):
-        return GmailExactMessageRecovery(retry, context)
+        return GmailExactMessageRecovery(retry, context, retry_reason="invalid_arguments")
 
     detail_payload, error, next_context, refresh_failure = (
         request_with_one_refresh(
@@ -473,25 +474,25 @@ def recover_exact_gmail_inbox_message(
     if not isinstance(next_context, dict):
         next_context = context
     if refresh_failure is not None:
-        return GmailExactMessageRecovery(retry, next_context)
+        return GmailExactMessageRecovery(retry, next_context, retry_reason="refresh_failure")
     if isinstance(error, dict):
         if error.get("code") == "gmail_message_not_found":
             return GmailExactMessageRecovery(
                 GmailExactMessageRecoveryResult.TERMINAL_ABSENT,
                 next_context,
             )
-        return GmailExactMessageRecovery(retry, next_context)
+        return GmailExactMessageRecovery(retry, next_context, retry_reason="provider_error")
     if not isinstance(detail_payload, dict):
-        return GmailExactMessageRecovery(retry, next_context)
+        return GmailExactMessageRecovery(retry, next_context, retry_reason="invalid_payload")
 
     returned_message_id = detail_payload.get("id")
     if (
         not valid_identifier(returned_message_id)
         or returned_message_id != provider_message_id
     ):
-        return GmailExactMessageRecovery(retry, next_context)
+        return GmailExactMessageRecovery(retry, next_context, retry_reason="message_id_mismatch")
     if not valid_identifier(detail_payload.get("threadId")):
-        return GmailExactMessageRecovery(retry, next_context)
+        return GmailExactMessageRecovery(retry, next_context, retry_reason="invalid_thread_id")
 
     raw_labels = detail_payload.get("labelIds")
     if (
@@ -499,7 +500,7 @@ def recover_exact_gmail_inbox_message(
         or any(not valid_identifier(label) for label in raw_labels)
         or len(set(raw_labels)) != len(raw_labels)
     ):
-        return GmailExactMessageRecovery(retry, next_context)
+        return GmailExactMessageRecovery(retry, next_context, retry_reason="invalid_labels")
     if (
         "INBOX" not in raw_labels
         or (
@@ -523,7 +524,7 @@ def recover_exact_gmail_inbox_message(
         message_parser=message_parser,
     )
     if parsed is None:
-        return GmailExactMessageRecovery(retry, next_context)
+        return GmailExactMessageRecovery(retry, next_context, retry_reason="strict_parse_failed")
     preview, candidate_source = parsed
     return GmailExactMessageRecovery(
         GmailExactMessageRecoveryResult.RECOVERED,
