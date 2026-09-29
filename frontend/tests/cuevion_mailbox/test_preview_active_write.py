@@ -97,6 +97,8 @@ class GmailBootstrapRouteSeparationContractTests(unittest.TestCase):
         self.assertIn("bootstrap_continuation_exception", source)
         self.assertIn("stage=bootstrap_run", source)
         self.assertIn('"error_type=" + type(exc).__name__', source)
+        self.assertIn('sqlstate = getattr(exc, "sqlstate", None)', source)
+        self.assertIn('"sqlstate=" + sqlstate', source)
         self.assertNotIn("str(exc)", source)
         self.assertNotIn("repr(exc)", source)
 
