@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable, Protocol
 
 from cuevion_mailbox.gmail_delta_plan import (
@@ -35,6 +36,7 @@ from cuevion_mailbox.repository_contract import (
     MailboxReadAuthority,
     MailboxStateSnapshot,
     MessageProjection,
+    MessageRecord,
     SyncCursor,
 )
 from cuevion_mailbox.runtime import (
@@ -100,6 +102,49 @@ class _Writer(Protocol):
 class _Repositories(Protocol):
     reader: _Reader
     writer: _Writer
+
+
+class PreviewGmailStoragePreflightError(ValueError):
+    __slots__ = ("storage_preflight",)
+
+    def __init__(self, category: str) -> None:
+        if category not in {"nul_text", "datetime"}:
+            raise ValueError("invalid Gmail storage preflight category")
+        super().__init__("Gmail storage preflight failed")
+        self.storage_preflight = category
+
+
+def _gmail_storage_preflight(records: Sequence[MessageRecord]) -> None:
+    for record in records:
+        if type(record) is not MessageRecord:
+            raise ValueError("invalid Gmail storage preflight record")
+
+        text_values = (
+            record.identity.provider_message_id,
+            record.identity.provider_folder,
+            record.provider_thread_id,
+            record.rfc_message_id,
+            record.in_reply_to,
+            record.sender_address,
+            record.sender_display,
+            record.subject,
+            record.snippet,
+            *record.provider_labels,
+            *record.references,
+            *record.to_recipients,
+            *record.cc_recipients,
+        )
+        for value in text_values:
+            if value is not None and "\x00" in value:
+                raise PreviewGmailStoragePreflightError("nul_text")
+
+        try:
+            datetime.fromtimestamp(
+                record.provider_timestamp_millis / 1_000,
+                tz=timezone.utc,
+            )
+        except (OverflowError, OSError, ValueError):
+            raise PreviewGmailStoragePreflightError("datetime") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -481,6 +526,7 @@ def run_production_gmail_bootstrap_page(*, environment, workspace_id, owner_user
                 ids.append(provider_id); previews.append(recovered.preview); sources.append(recovered.candidate_source)
         current = tuple(repos.reader.read_messages_by_provider_message_ids(state.scope, ids))
         records = project_gmail_snapshot(state.scope, previews, sources)
+        _gmail_storage_preflight(records)
         base = _next_cursor(cursor, gmail_history_id=cursor.gmail_history_id)
         complete = page.next_page_token is None
         next_cursor = SyncCursor(scope_key=base.scope_key, cursor_generation=base.cursor_generation, provider=base.provider, gmail_history_id=base.gmail_history_id, imap_uid_validity=None, imap_highest_uid=None, imap_uidnext_observed=None, backfill_state=BackfillState.COMPLETE if complete else BackfillState.RUNNING, backfill_cursor=None if complete else page.next_page_token, row_version=base.row_version)

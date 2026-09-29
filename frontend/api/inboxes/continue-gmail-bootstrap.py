@@ -114,12 +114,16 @@ class handler(BaseHTTPRequestHandler):
                 or not sqlstate.isalnum()
             ):
                 sqlstate = "unknown"
+            storage_preflight = getattr(exc, "storage_preflight", None)
+            if storage_preflight not in {"nul_text", "datetime"}:
+                storage_preflight = "other"
             print(
                 "cuevion_mailbox_active_write gmail "
                 "bootstrap_continuation_exception "
                 "stage=bootstrap_run "
                 "error_type=" + type(exc).__name__ + " "
-                "sqlstate=" + sqlstate
+                "sqlstate=" + sqlstate + " "
+                "storage_preflight=" + storage_preflight
             )
             send_json(
                 self,
