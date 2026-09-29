@@ -106,11 +106,20 @@ class handler(BaseHTTPRequestHandler):
                 max_pages=5,
             )
         except Exception as exc:
+            sqlstate = getattr(exc, "sqlstate", None)
+            if (
+                type(sqlstate) is not str
+                or len(sqlstate) != 5
+                or not sqlstate.isascii()
+                or not sqlstate.isalnum()
+            ):
+                sqlstate = "unknown"
             print(
                 "cuevion_mailbox_active_write gmail "
                 "bootstrap_continuation_exception "
                 "stage=bootstrap_run "
-                "error_type=" + type(exc).__name__
+                "error_type=" + type(exc).__name__ + " "
+                "sqlstate=" + sqlstate
             )
             send_json(
                 self,
