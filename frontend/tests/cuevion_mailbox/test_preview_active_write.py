@@ -89,6 +89,16 @@ class GmailBootstrapRouteSeparationContractTests(unittest.TestCase):
         self.assertIn("resolve_authenticated_gmail(", source)
         self.assertIn("production_bootstrap_authority_enabled", source)
         self.assertIn("max_pages=5", source)
+        self.assertIn('"complete": result.next_history_id is not None', source)
+
+    def test_gmail_client_automatically_continues_bootstrap(self):
+        client_path = Path(__file__).resolve().parents[2] / "src" / "lib" / "inboxConnectionApi.ts"
+        source = client_path.read_text(encoding="utf-8")
+        self.assertIn("continueGmailBootstrapUntilComplete", source)
+        self.assertIn('fetch("/api/inboxes/continue-gmail-bootstrap"', source)
+        self.assertIn("if (normalizedPayload.ok)", source)
+        self.assertIn("payload.complete === true", source)
+        self.assertIn("gmailBootstrapContinuations.has(mailboxId)", source)
 
 
 class GmailOversizedMetadataFallbackContractTests(unittest.TestCase):

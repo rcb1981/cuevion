@@ -3961,6 +3961,57 @@ export async function getMailboxCredentialStatuses(
 }
 
 
+type GmailBootstrapContinuationResponse = {
+  ok: boolean;
+  status?: string;
+  providerCount?: number;
+  mutationCount?: number;
+  complete?: boolean;
+};
+
+const gmailBootstrapContinuations = new Map<string, Promise<void>>();
+
+async function continueGmailBootstrapUntilComplete(
+  request: FetchGmailInboxRequest,
+): Promise<void> {
+  const mailboxId = request.mailboxId.trim();
+  if (!mailboxId || gmailBootstrapContinuations.has(mailboxId)) return;
+
+  const continuation = (async () => {
+    for (;;) {
+      const response = await fetch("/api/inboxes/continue-gmail-bootstrap", {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          mailboxId,
+          focusPreferences: request.focusPreferences,
+        }),
+      });
+      if (!response.ok) return;
+
+      const payload =
+        (await response.json()) as GmailBootstrapContinuationResponse;
+      if (!payload.ok || payload.complete === true) return;
+      if (
+        payload.status !== "applied" ||
+        typeof payload.providerCount !== "number" ||
+        payload.providerCount <= 0
+      ) {
+        return;
+      }
+    }
+  })()
+    .catch(() => undefined)
+    .finally(() => {
+      gmailBootstrapContinuations.delete(mailboxId);
+    });
+
+  gmailBootstrapContinuations.set(mailboxId, continuation);
+}
+
 export async function fetchGmailInbox(
   request: FetchGmailInboxRequest,
 ): Promise<ConnectInboxResponse> {
@@ -3989,7 +4040,7 @@ export async function fetchGmailInbox(
       };
     }
 
-    return {
+    const normalizedPayload = {
       ...payload,
       ...(Array.isArray(payload.messages)
         ? {
@@ -4003,6 +4054,11 @@ export async function fetchGmailInbox(
           payload.prioritySemanticNewInboundMode,
         ),
     };
+
+    if (normalizedPayload.ok) {
+      void continueGmailBootstrapUntilComplete(request);
+    }
+    return normalizedPayload;
   } catch (error) {
     return {
       ok: false,
