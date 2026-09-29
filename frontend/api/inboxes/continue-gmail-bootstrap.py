@@ -24,6 +24,29 @@ from cuevion_mailbox.runtime import production_bootstrap_authority_enabled
 _fetch_gmail = importlib.import_module("api.inboxes.fetch-gmail")
 
 
+_BOOTSTRAP_RECOVERY_RETRY_REASONS = frozenset({
+    "invalid_arguments",
+    "refresh_failure",
+    "metadata_refresh_failure",
+    "metadata_provider_error",
+    "metadata_invalid",
+    "provider_error",
+    "invalid_payload",
+    "message_id_mismatch",
+    "invalid_thread_id",
+    "invalid_labels",
+    "strict_parse_failed",
+})
+_BOOTSTRAP_PROVIDER_ERROR_CODES = frozenset({
+    "gmail_fetch_failed",
+    "gmail_permission_denied",
+    "gmail_rate_limited",
+    "gmail_response_invalid",
+    "gmail_response_too_large",
+    "gmail_unavailable",
+})
+
+
 class handler(BaseHTTPRequestHandler):
     def send_error(self, code, message=None, explain=None):
         if code == HTTPStatus.NOT_IMPLEMENTED:
@@ -75,6 +98,10 @@ class handler(BaseHTTPRequestHandler):
             return
         context = resolution["context"]
         member = resolution.get("memberAuthority")
+        recovery_diagnostic = {
+            "retry_reason": "none",
+            "provider_error_code": "none",
+        }
 
         def recover(recovery_context, provider_message_id):
             recovered = recover_exact_gmail_inbox_message(
@@ -85,6 +112,21 @@ class handler(BaseHTTPRequestHandler):
                 require_inbound_semantics=False,
                 message_parser=message_from_bytes,
             )
+            if recovered.result.value == "retry":
+                retry_reason = recovered.retry_reason
+                recovery_diagnostic["retry_reason"] = (
+                    retry_reason
+                    if retry_reason in _BOOTSTRAP_RECOVERY_RETRY_REASONS
+                    else "unknown"
+                )
+                provider_error_code = recovered.provider_error_code
+                recovery_diagnostic["provider_error_code"] = (
+                    provider_error_code
+                    if provider_error_code in _BOOTSTRAP_PROVIDER_ERROR_CODES
+                    else "other"
+                    if provider_error_code is not None
+                    else "none"
+                )
             return PreviewGmailHistoryRecovery(
                 recovered.result.value,
                 recovered.context,
@@ -135,10 +177,18 @@ class handler(BaseHTTPRequestHandler):
             )
             return
 
-        print(
-            "cuevion_mailbox_active_write gmail bootstrap_continuation_"
-            + result.status
-        )
+        if result.status == "recovery_unavailable":
+            print(
+                "cuevion_mailbox_active_write gmail "
+                "bootstrap_continuation_recovery_unavailable "
+                "retry_reason=" + recovery_diagnostic["retry_reason"] + " "
+                "provider_error_code=" + recovery_diagnostic["provider_error_code"]
+            )
+        else:
+            print(
+                "cuevion_mailbox_active_write gmail bootstrap_continuation_"
+                + result.status
+            )
         send_json(
             self,
             200,
