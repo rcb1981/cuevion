@@ -112,6 +112,19 @@ class GmailBootstrapRouteSeparationContractTests(unittest.TestCase):
         self.assertIn('PreviewGmailStoragePreflightError("datetime")', source)
         self.assertIn("_gmail_storage_preflight(records)", source)
 
+    def test_continuation_route_logs_allowlisted_recovery_reason_only(self):
+        route_path = Path(__file__).resolve().parents[2] / "api" / "inboxes" / "continue-gmail-bootstrap.py"
+        source = route_path.read_text(encoding="utf-8")
+        self.assertIn("_BOOTSTRAP_RECOVERY_RETRY_REASONS", source)
+        self.assertIn("_BOOTSTRAP_PROVIDER_ERROR_CODES", source)
+        self.assertIn('recovered.retry_reason', source)
+        self.assertIn('recovered.provider_error_code', source)
+        self.assertIn('"retry_reason=" + recovery_diagnostic["retry_reason"]', source)
+        self.assertIn('"provider_error_code=" + recovery_diagnostic["provider_error_code"]', source)
+        self.assertNotIn("provider_message_id=", source)
+        self.assertNotIn("str(recovered", source)
+        self.assertNotIn("repr(recovered", source)
+
     def test_gmail_client_automatically_continues_bootstrap(self):
         client_path = Path(__file__).resolve().parents[2] / "src" / "lib" / "inboxConnectionApi.ts"
         source = client_path.read_text(encoding="utf-8")
