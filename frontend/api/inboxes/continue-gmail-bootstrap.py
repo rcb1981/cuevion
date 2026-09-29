@@ -128,6 +128,7 @@ class handler(BaseHTTPRequestHandler):
                 "status": result.status,
                 "providerCount": result.provider_count,
                 "mutationCount": result.mutation_count,
+                "complete": result.next_history_id is not None,
             },
         )
 
