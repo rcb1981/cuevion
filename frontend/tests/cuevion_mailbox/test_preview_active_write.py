@@ -99,8 +99,18 @@ class GmailBootstrapRouteSeparationContractTests(unittest.TestCase):
         self.assertIn('"error_type=" + type(exc).__name__', source)
         self.assertIn('sqlstate = getattr(exc, "sqlstate", None)', source)
         self.assertIn('"sqlstate=" + sqlstate', source)
+        self.assertIn('storage_preflight = getattr(exc, "storage_preflight", None)', source)
+        self.assertIn('"storage_preflight=" + storage_preflight', source)
         self.assertNotIn("str(exc)", source)
         self.assertNotIn("repr(exc)", source)
+
+    def test_bootstrap_storage_preflight_detects_nul_text_without_logging_content(self):
+        active_write_path = Path(__file__).resolve().parents[2] / "cuevion_mailbox" / "preview_active_write.py"
+        source = active_write_path.read_text(encoding="utf-8")
+        self.assertIn('if value is not None and "\\x00" in value:', source)
+        self.assertIn('PreviewGmailStoragePreflightError("nul_text")', source)
+        self.assertIn('PreviewGmailStoragePreflightError("datetime")', source)
+        self.assertIn("_gmail_storage_preflight(records)", source)
 
     def test_gmail_client_automatically_continues_bootstrap(self):
         client_path = Path(__file__).resolve().parents[2] / "src" / "lib" / "inboxConnectionApi.ts"
