@@ -99,6 +99,55 @@ class GmailDurableProjectionTests(unittest.TestCase):
         self.assertIs(record.body_state, BodyState.NOT_CACHED)
         self.assertRegex(record.metadata_hash, r"^[0-9a-f]{64}$")
 
+    def test_nul_bytes_are_removed_before_record_and_metadata_hash(self):
+        dirty = project_gmail_snapshot_message(
+            _scope(),
+            _preview(
+                rfcMessageId="rfc-1\x00@example.test",
+                to="Owner\x00 <owner@example.test>",
+                cc="Copy\x00 <copy@example.test>",
+            ),
+            _source(
+                senderDisplay="Sen\x00der",
+                senderAddress="sender\x00@example.test",
+                subject="Sub\x00ject",
+                snippet="Snip\x00pet",
+            ),
+        )
+        clean = project_gmail_snapshot_message(
+            _scope(),
+            _preview(
+                rfcMessageId="rfc-1@example.test",
+                to="Owner <owner@example.test>",
+                cc="Copy <copy@example.test>",
+            ),
+            _source(
+                senderDisplay="Sender",
+                senderAddress="sender@example.test",
+                subject="Subject",
+                snippet="Snippet",
+            ),
+        )
+
+        self.assertEqual(dirty.rfc_message_id, "rfc-1@example.test")
+        self.assertEqual(dirty.sender_display, "Sender")
+        self.assertEqual(dirty.sender_address, "sender@example.test")
+        self.assertEqual(dirty.subject, "Subject")
+        self.assertEqual(dirty.snippet, "Snippet")
+        self.assertEqual(dirty.to_recipients, ("Owner <owner@example.test>",))
+        self.assertEqual(dirty.cc_recipients, ("Copy <copy@example.test>",))
+        self.assertEqual(dirty.metadata_hash, clean.metadata_hash)
+
+    def test_nul_only_optional_metadata_normalizes_to_absent(self):
+        record = project_gmail_snapshot_message(
+            _scope(),
+            _preview(rfcMessageId="\x00", cc="\x00"),
+            _source(senderDisplay="\x00"),
+        )
+        self.assertIsNone(record.rfc_message_id)
+        self.assertIsNone(record.sender_display)
+        self.assertEqual(record.cc_recipients, ())
+
     def test_empty_display_name_and_snippet_are_valid(self):
         record = project_gmail_snapshot_message(
             _scope(),
