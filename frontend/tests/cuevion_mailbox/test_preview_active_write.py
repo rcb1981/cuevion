@@ -91,6 +91,15 @@ class GmailBootstrapRouteSeparationContractTests(unittest.TestCase):
         self.assertIn("max_pages=5", source)
         self.assertIn('"complete": result.next_history_id is not None', source)
 
+    def test_continuation_route_logs_sanitized_exception_type_only(self):
+        route_path = Path(__file__).resolve().parents[2] / "api" / "inboxes" / "continue-gmail-bootstrap.py"
+        source = route_path.read_text(encoding="utf-8")
+        self.assertIn("bootstrap_continuation_exception", source)
+        self.assertIn("stage=bootstrap_run", source)
+        self.assertIn('"error_type=" + type(exc).__name__', source)
+        self.assertNotIn("str(exc)", source)
+        self.assertNotIn("repr(exc)", source)
+
     def test_gmail_client_automatically_continues_bootstrap(self):
         client_path = Path(__file__).resolve().parents[2] / "src" / "lib" / "inboxConnectionApi.ts"
         source = client_path.read_text(encoding="utf-8")

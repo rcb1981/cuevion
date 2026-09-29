@@ -105,7 +105,13 @@ class handler(BaseHTTPRequestHandler):
                 committed_at_millis=time.time_ns() // 1_000_000,
                 max_pages=5,
             )
-        except Exception:
+        except Exception as exc:
+            print(
+                "cuevion_mailbox_active_write gmail "
+                "bootstrap_continuation_exception "
+                "stage=bootstrap_run "
+                "error_type=" + type(exc).__name__
+            )
             send_json(
                 self,
                 503,
