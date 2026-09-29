@@ -36,31 +36,47 @@ def _utf8_size(value: str) -> int:
         raise ValueError("invalid Gmail durable projection") from None
 
 
+def _storage_safe_text(value: str) -> str:
+    return value.replace("\x00", "")
+
+
 def _required_text(value: object, *, maximum_bytes: int | None = None) -> str:
-    if type(value) is not str or not value:
+    if type(value) is not str:
         raise ValueError("invalid Gmail durable projection")
-    if maximum_bytes is not None and not 1 <= _utf8_size(value) <= maximum_bytes:
+    normalized = _storage_safe_text(value)
+    if not normalized:
         raise ValueError("invalid Gmail durable projection")
-    return value
+    if maximum_bytes is not None and not 1 <= _utf8_size(normalized) <= maximum_bytes:
+        raise ValueError("invalid Gmail durable projection")
+    return normalized
 
 
 def _optional_text(value: object, *, maximum_bytes: int | None = None) -> str | None:
-    if value is None or value == "":
+    if value is None:
         return None
-    return _required_text(value, maximum_bytes=maximum_bytes)
+    if type(value) is not str:
+        raise ValueError("invalid Gmail durable projection")
+    normalized = _storage_safe_text(value)
+    if not normalized:
+        return None
+    return _required_text(normalized, maximum_bytes=maximum_bytes)
 
 
 def _string(value: object) -> str:
     if type(value) is not str:
         raise ValueError("invalid Gmail durable projection")
-    _utf8_size(value)
-    return value
+    normalized = _storage_safe_text(value)
+    _utf8_size(normalized)
+    return normalized
 
 
 def _header_tuple(value: object) -> tuple[str, ...]:
-    if value is None or value == "":
+    if value is None:
         return ()
-    return (_required_text(value),)
+    normalized = _string(value)
+    if not normalized:
+        return ()
+    return (_required_text(normalized),)
 
 
 def _provider_timestamp_millis(value: object) -> int:
@@ -185,26 +201,33 @@ def project_gmail_snapshot_message(
         source.get("providerMessageId"),
         maximum_bytes=_MAX_PROVIDER_MESSAGE_ID_BYTES,
     )
-    if preview.get("providerMessageId") != provider_message_id:
+    preview_provider_message_id = _required_text(
+        preview.get("providerMessageId"),
+        maximum_bytes=_MAX_PROVIDER_MESSAGE_ID_BYTES,
+    )
+    if preview_provider_message_id != provider_message_id:
         raise ValueError("invalid Gmail durable projection")
 
     provider_thread_id = _optional_text(
         source.get("providerThreadId"),
         maximum_bytes=_MAX_PROVIDER_THREAD_ID_BYTES,
     )
-    preview_thread_id = preview.get("providerThreadId")
-    if preview_thread_id is not None and preview_thread_id != provider_thread_id:
+    preview_thread_id = _optional_text(
+        preview.get("providerThreadId"),
+        maximum_bytes=_MAX_PROVIDER_THREAD_ID_BYTES,
+    )
+    if preview_thread_id != provider_thread_id:
         raise ValueError("invalid Gmail durable projection")
 
     provider_folder = _required_text(
         source.get("providerFolder"),
         maximum_bytes=_MAX_PROVIDER_FOLDER_BYTES,
     )
-    preview_folder = preview.get("providerFolder")
-    if (
-        type(preview_folder) is not str
-        or preview_folder.casefold() != provider_folder.casefold()
-    ):
+    preview_folder = _required_text(
+        preview.get("providerFolder"),
+        maximum_bytes=_MAX_PROVIDER_FOLDER_BYTES,
+    )
+    if preview_folder.casefold() != provider_folder.casefold():
         raise ValueError("invalid Gmail durable projection")
 
     provider_labels = _labels(source.get("labels"))
