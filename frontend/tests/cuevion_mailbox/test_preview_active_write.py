@@ -145,6 +145,33 @@ class GmailBootstrapRouteSeparationContractTests(unittest.TestCase):
         self.assertIn("payload.retryable === true", source)
         self.assertIn("transientRetryIndex = 0", source)
 
+    def test_gmail_client_defers_priority_maintenance_after_ready_refresh(self):
+        client_path = Path(__file__).resolve().parents[2] / "src" / "lib" / "inboxConnectionApi.ts"
+        source = client_path.read_text(encoding="utf-8")
+        self.assertIn("continueGmailPriorityMaintenance", source)
+        self.assertIn('fetch("/api/inboxes/continue-gmail-priority"', source)
+        self.assertIn("gmailPriorityMaintenancePending", source)
+        self.assertIn(
+            "normalizedPayload.gmailPriorityMaintenancePending === true",
+            source,
+        )
+        self.assertIn("gmailPriorityMaintenanceContinuations.has(mailboxId)", source)
+        self.assertIn("for (let attempt = 0; attempt < 5; attempt += 1)", source)
+        self.assertIn("payload.complete === true", source)
+
+        fetch_route = (
+            Path(__file__).resolve().parents[2]
+            / "api"
+            / "inboxes"
+            / "fetch-gmail.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"gmailPriorityMaintenancePending": True', fetch_route)
+        self.assertIn('history_sync.status in {"applied", "unchanged"}', fetch_route)
+        response_section = fetch_route[fetch_route.rfind("priority_maintenance_pending = bool("):]
+        self.assertNotIn("populate_runtime_priority_candidates(", response_section)
+        self.assertNotIn("run_preview_priority_mailbox_outbox_consumer(", response_section)
+        self.assertNotIn("_run_gmail_priority_candidate_recovery(", response_section)
+
 
 class GmailOversizedMetadataFallbackContractTests(unittest.TestCase):
     def test_route_source_contains_bounded_metadata_fallback(self):

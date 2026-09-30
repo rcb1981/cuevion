@@ -14,6 +14,7 @@ from api.priority.mailbox_outbox_consumer import (
     apply_priority_mailbox_outbox_action,
     consume_priority_mailbox_outbox,
     run_preview_priority_mailbox_outbox_consumer,
+    run_production_priority_mailbox_outbox_consumer,
 )
 from api.priority.store import PriorityWorkflowStore
 from cuevion_mailbox.repository_contract import (
@@ -415,27 +416,54 @@ class PriorityMailboxOutboxConsumerTests(unittest.TestCase):
                         **common,
                     )
 
+    def test_production_runtime_boundary_requires_exact_bootstrap_authority(self):
+        common = dict(
+            workspace_id=authority().workspace_id,
+            owner_user_id=authority().user_id,
+            mailbox_id=authority().mailbox_id,
+            mailbox_account_identity=authority().mailbox_account_identity,
+            now_millis=NOW,
+        )
+        for environment in (
+            {"VERCEL_ENV": "preview", "CUEVION_MAILBOX_POSTGRES_MODE": "active_write"},
+            {"VERCEL_ENV": "production", "CUEVION_MAILBOX_POSTGRES_MODE": "production_bootstrap"},
+            {
+                "VERCEL_ENV": "production",
+                "CUEVION_MAILBOX_POSTGRES_MODE": "production_bootstrap",
+                "CUEVION_MAILBOX_PRODUCTION_BOOTSTRAP_AUTHORITY": "enabled",
+                "CUEVION_MAILBOX_PRODUCTION_READ_AUTHORITY": "enabled",
+            },
+        ):
+            with self.subTest(environment=environment):
+                with self.assertRaises(RuntimeError):
+                    run_production_priority_mailbox_outbox_consumer(
+                        environment=environment,
+                        **common,
+                    )
+
 
 class PriorityMailboxOutboxRouteWiringTests(unittest.TestCase):
-    def test_gmail_route_runs_consumer_only_inside_preview_active_write_and_before_recovery(self):
-        route = (
+    def test_gmail_priority_maintenance_is_deferred_to_authenticated_continuation(self):
+        fetch_route = (
             Path(__file__).resolve().parents[1]
             / "inboxes"
             / "fetch-gmail.py"
         ).read_text(encoding="utf-8")
-        gate = "        if preview_active_write_enabled(os.environ):\n"
-        consumer = "run_preview_priority_mailbox_outbox_consumer("
-        recovery = "_run_gmail_priority_candidate_recovery("
-        consumer_index = route.rfind(consumer)
-        self.assertGreaterEqual(consumer_index, 0)
-        gate_index = route.rfind(gate, 0, consumer_index)
-        self.assertGreaterEqual(gate_index, 0)
-        recovery_index = route.rfind(recovery)
-        self.assertGreater(recovery_index, consumer_index)
-        self.assertIn(
-            'print("cuevion_mailbox_active_write priority_outbox_failed")',
-            route,
-        )
+        response_section = fetch_route[fetch_route.rfind("priority_maintenance_pending = bool("):]
+        self.assertNotIn("run_preview_priority_mailbox_outbox_consumer(", response_section)
+        self.assertNotIn("_run_gmail_priority_candidate_recovery(", response_section)
+
+        continuation = (
+            Path(__file__).resolve().parents[1]
+            / "inboxes"
+            / "continue-gmail-priority.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("resolve_authenticated_gmail(", continuation)
+        self.assertIn("run_production_priority_mailbox_outbox_consumer", continuation)
+        self.assertIn("run_preview_priority_mailbox_outbox_consumer", continuation)
+        self.assertIn("_run_gmail_priority_candidate_recovery(", continuation)
+        self.assertIn("_PRIORITY_MAINTENANCE_MAX_BATCHES = 5", continuation)
+        self.assertIn('"processed": total_processed', continuation)
 
 
 class PriorityMailboxOutboxActionApplicationTests(unittest.TestCase):

@@ -619,7 +619,11 @@ def _write_projected_candidate(
         except CandidateNamespaceInvalidated:
             return False, "namespace_invalidated", False
         except CandidateStoreUnavailable as error:
-            return False, error.stage, True
+            return (
+                False,
+                error.stage,
+                error.stage != "store_repair_reference_proof_invalid",
+            )
         except Exception:
             return False, "candidate_snapshot_invalid", False
 

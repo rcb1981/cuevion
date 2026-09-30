@@ -1,4 +1,4 @@
-"""Preview-only mailbox outbox consumer for Priority candidate transport.
+"""Mailbox outbox consumer for Priority candidate transport.
 
 The core consumer is bounded and lease-safe. It claims only one authenticated
 tenant mailbox across source generations, resolves each event against the
@@ -42,6 +42,8 @@ from cuevion_mailbox.repository_contract import (
 from cuevion_mailbox.runtime import (
     ActiveWriteMailboxRepositories,
     build_active_write_mailbox_repositories,
+    build_production_bootstrap_mailbox_repositories,
+    production_bootstrap_authority_enabled,
 )
 
 
@@ -403,6 +405,75 @@ def run_preview_priority_mailbox_outbox_consumer(
     return report
 
 
+def run_production_priority_mailbox_outbox_consumer(
+    *,
+    environment: Mapping[str, str],
+    workspace_id: str,
+    owner_user_id: str,
+    mailbox_id: str,
+    mailbox_account_identity: str,
+    now_millis: int,
+    limit: int = OUTBOX_PRIORITY_MAX_BATCH,
+    repositories: ActiveWriteMailboxRepositories | None = None,
+    candidate_store: PriorityCandidateStore | None = None,
+    workflow_store: PriorityWorkflowStore | None = None,
+    hmac_secret: str | None = None,
+) -> PriorityMailboxOutboxConsumerReport:
+    """Production runtime boundary behind the existing exact bootstrap authority."""
+
+    if not production_bootstrap_authority_enabled(environment):
+        raise RuntimeError("production Priority mailbox outbox is disabled")
+
+    authority = PriorityCandidatePopulationAuthority(
+        workspace_id=workspace_id,
+        user_id=owner_user_id,
+        mailbox_id=mailbox_id,
+        mailbox_account_identity=mailbox_account_identity.casefold(),
+        provider="google",
+    )
+    runtime_repositories = (
+        build_production_bootstrap_mailbox_repositories(environment)
+        if repositories is None
+        else repositories
+    )
+
+    secret = hmac_secret
+    if candidate_store is None or workflow_store is None:
+        secret = secret or resolve_priority_hmac_secret()
+    runtime_candidate_store = (
+        build_runtime_candidate_store(hmac_secret=secret)
+        if candidate_store is None
+        else candidate_store
+    )
+    runtime_workflow_store = (
+        build_runtime_workflow_store(hmac_secret=secret)
+        if workflow_store is None
+        else workflow_store
+    )
+
+    report = consume_priority_mailbox_outbox(
+        authority,
+        reader=runtime_repositories.reader,
+        writer=runtime_repositories.writer,
+        apply_action=lambda action: apply_priority_mailbox_outbox_action(
+            authority,
+            action,
+            candidate_store=runtime_candidate_store,
+            workflow_store=runtime_workflow_store,
+        ),
+        now_millis=now_millis,
+        limit=limit,
+    )
+    logger.info(
+        "Priority production mailbox outbox consumer claimed=%s processed=%s retried=%s outcomes=%s",
+        report.claimed,
+        report.processed,
+        report.retried,
+        ",".join(f"{code}:{count}" for code, count in report.result_counts),
+    )
+    return report
+
+
 __all__ = (
     "OUTBOX_PRIORITY_LEASE_MILLIS",
     "OUTBOX_PRIORITY_MAX_BATCH",
@@ -411,4 +482,5 @@ __all__ = (
     "apply_priority_mailbox_outbox_action",
     "consume_priority_mailbox_outbox",
     "run_preview_priority_mailbox_outbox_consumer",
+    "run_production_priority_mailbox_outbox_consumer",
 )
