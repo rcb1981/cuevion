@@ -222,6 +222,7 @@ export type ConnectInboxResponse = {
   uidValidity?: string | null;
   prioritySemanticNewInboundMode?: PrioritySemanticNewInboundMode;
   gmailBootstrapContinuationPending?: boolean;
+  gmailPriorityMaintenancePending?: boolean;
   warning?: {
     code?: string;
     stage?: string;
@@ -4033,6 +4034,58 @@ async function continueGmailBootstrapUntilComplete(
   gmailBootstrapContinuations.set(mailboxId, continuation);
 }
 
+type GmailPriorityMaintenanceResponse = {
+  ok: boolean;
+  complete?: boolean;
+  batches?: number;
+  claimed?: number;
+  processed?: number;
+  retried?: number;
+};
+
+const gmailPriorityMaintenanceContinuations = new Map<string, Promise<void>>();
+
+async function continueGmailPriorityMaintenance(
+  request: FetchGmailInboxRequest,
+): Promise<void> {
+  const mailboxId = request.mailboxId.trim();
+  if (!mailboxId || gmailPriorityMaintenanceContinuations.has(mailboxId)) return;
+
+  const continuation = (async () => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const response = await fetch("/api/inboxes/continue-gmail-priority", {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          mailboxId,
+          focusPreferences: request.focusPreferences,
+        }),
+      });
+      if (!response.ok) return;
+
+      const payload =
+        (await response.json()) as GmailPriorityMaintenanceResponse;
+      if (!payload.ok || payload.complete === true) return;
+      if (
+        typeof payload.claimed !== "number" ||
+        payload.claimed <= 0
+      ) {
+        return;
+      }
+    }
+  })()
+    .catch(() => undefined)
+    .finally(() => {
+      gmailPriorityMaintenanceContinuations.delete(mailboxId);
+    });
+
+  gmailPriorityMaintenanceContinuations.set(mailboxId, continuation);
+}
+
+
 export async function fetchGmailInbox(
   request: FetchGmailInboxRequest,
 ): Promise<ConnectInboxResponse> {
@@ -4081,6 +4134,12 @@ export async function fetchGmailInbox(
       normalizedPayload.gmailBootstrapContinuationPending === true
     ) {
       void continueGmailBootstrapUntilComplete(request);
+    }
+    if (
+      normalizedPayload.ok &&
+      normalizedPayload.gmailPriorityMaintenancePending === true
+    ) {
+      void continueGmailPriorityMaintenance(request);
     }
     return normalizedPayload;
   } catch (error) {

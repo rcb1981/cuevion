@@ -1910,6 +1910,60 @@ class CandidatePopulationContinuationTests(unittest.TestCase):
         )
         self.assertEqual(self.redis.values[keys["record"]], encoded)
 
+    def test_reference_proof_failure_isolated_to_one_candidate_row(self):
+        blocked = gmail_source(
+            providerMessageId="gmail-message-reference-blocked",
+            providerThreadId="gmail-thread-reference-blocked",
+        )
+        healthy = gmail_source(
+            providerMessageId="gmail-message-reference-healthy",
+            providerThreadId="gmail-thread-reference-healthy",
+        )
+        populate_priority_candidates(
+            self.authority,
+            [blocked, healthy],
+            store=self.store,
+        )
+        blocked_scope, _ = project_priority_candidate(self.authority, blocked)
+        blocked_keys = self.store._scope_keys(blocked_scope)
+        malformed = json.loads(self.redis.values[blocked_keys["record"]])
+        malformed["routingState"] = "ready"
+        malformed["routing"] = {
+            "signal": None,
+            "uiSignal": "REPLY",
+            "internalClassification": "reply",
+            "category": "reply",
+            "finalVisibility": None,
+            "action": None,
+            "v7FinalPriority": None,
+            "noiseDisposition": "none",
+            "noiseConfidence": "low",
+            "noiseReasons": {},
+            "classifierVersion": "test-classifier-v1",
+            "routingVersion": "test-routing-v1",
+        }
+        malformed["positiveReferences"]["manual_priority"] = malformed[
+            "absoluteExpiresAt"
+        ]
+        blocked_wire = self.redis._encode(malformed)
+        self.redis.values[blocked_keys["record"]] = blocked_wire
+
+        report = populate_priority_candidates(
+            self.authority,
+            [blocked, healthy],
+            store=self.store,
+        )
+
+        self.assertEqual(report.attempted, 2)
+        self.assertEqual(report.processed, 2)
+        self.assertEqual(report.written, 1)
+        self.assertEqual(report.skipped, 1)
+        self.assertEqual(
+            report.reason_counts,
+            (("store_repair_reference_proof_invalid", 1),),
+        )
+        self.assertEqual(self.redis.values[blocked_keys["record"]], blocked_wire)
+
     def test_fatal_store_failure_counts_unprocessed_rows_without_more_work(self):
         commands: list[list[object]] = []
 
