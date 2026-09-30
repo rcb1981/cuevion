@@ -983,5 +983,20 @@ class PostgreSQLMailboxAdapterTests(unittest.TestCase):
         )
 
 
+class GmailMetadataReadContractTests(unittest.TestCase):
+    def test_repository_exposes_bounded_rich_gmail_metadata_read(self):
+        repository_path = (
+            Path(__file__).resolve().parents[2]
+            / "cuevion_mailbox"
+            / "postgresql_repository.py"
+        )
+        source = repository_path.read_text(encoding="utf-8")
+        self.assertIn("_LIST_GMAIL_MESSAGE_METADATA_SQL", source)
+        self.assertIn("def list_gmail_message_metadata(", source)
+        self.assertIn("lower(m.provider_folder) = 'inbox'", source)
+        self.assertIn("ORDER BY m.provider_timestamp DESC, m.message_id DESC", source)
+        self.assertIn("GmailMessageMetadataProjection(", source)
+
+
 if __name__ == "__main__":
     unittest.main()

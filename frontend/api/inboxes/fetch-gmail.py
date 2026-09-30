@@ -82,6 +82,7 @@ from cuevion_mailbox.runtime import (
 from cuevion_mailbox.preview_active_write import (
     PreviewGmailHistoryRecovery,
     gmail_durable_write_enabled,
+    read_ready_gmail_message_metadata,
     run_production_gmail_bootstrap_page,
     run_preview_gmail_durable_write,
     run_preview_gmail_history_sync,
@@ -298,7 +299,15 @@ class handler(BaseHTTPRequestHandler):
         if request_error:
             send_json(self, 400 if request_error["error"]["code"] != "request_too_large" else 413, request_error)
             return
-        field_error = reject_unknown_fields(payload, {"mailboxId", "focusPreferences", "limit"})
+        field_error = reject_unknown_fields(
+            payload,
+            {
+                "mailboxId",
+                "focusPreferences",
+                "limit",
+                "knownBodyProviderMessageIds",
+            },
+        )
         if field_error:
             send_json(self, 400, field_error)
             return
@@ -310,6 +319,22 @@ class handler(BaseHTTPRequestHandler):
             send_json(self, 400, error_payload("invalid_request", "Fetch limit must be an integer."))
             return
         limit = max(1, min(limit_value, MAX_FETCH_LIMIT))
+
+        durable_metadata_supported = "knownBodyProviderMessageIds" in payload
+        known_body_ids_value = payload.get("knownBodyProviderMessageIds", [])
+        if (
+            type(known_body_ids_value) is not list
+            or len(known_body_ids_value) > MAX_FETCH_LIMIT
+            or any(not valid_identifier(value) for value in known_body_ids_value)
+            or len(set(known_body_ids_value)) != len(known_body_ids_value)
+        ):
+            send_json(
+                self,
+                400,
+                error_payload("invalid_request", "Known Gmail body identities are invalid."),
+            )
+            return
+        known_body_provider_message_ids = frozenset(known_body_ids_value)
 
         focus_preferences = None
         if "focusPreferences" in payload:
@@ -511,6 +536,62 @@ class handler(BaseHTTPRequestHandler):
                                 "cuevion_mailbox_active_write gmail stale_recovery_"
                                 + stale_recovery.status
                             )
+
+        if (
+            durable_metadata_supported
+            and history_sync is not None
+            and history_sync.status == "unchanged"
+            and history_sync.next_history_id is not None
+        ):
+            try:
+                durable_metadata = read_ready_gmail_message_metadata(
+                    environment=os.environ,
+                    workspace_id=getattr(member, "workspace_id"),
+                    owner_user_id=getattr(member, "user_id"),
+                    mailbox_id=context["mailbox_id"],
+                    mailbox_account_identity=context["mailbox_email"],
+                    expected_history_id=history_sync.next_history_id,
+                    limit=limit,
+                )
+            except Exception:
+                durable_metadata = None
+                print("cuevion_mailbox_active_write gmail durable_metadata_read_failed")
+            if durable_metadata is not None:
+                provider_ids = tuple(row.provider_message_id for row in durable_metadata)
+                if all(
+                    provider_id in known_body_provider_message_ids
+                    for provider_id in provider_ids
+                ):
+                    print("cuevion_mailbox_active_write gmail durable_metadata_confirmed")
+                    send_json(
+                        self,
+                        200,
+                        {
+                            "ok": True,
+                            "messages": [],
+                            "inboxUidSet": list(provider_ids),
+                            "uidValidity": "gmail-api",
+                            "prioritySemanticNewInboundMode": read_new_inbound_client_mode(),
+                            "gmailPriorityMaintenancePending": True,
+                            "gmailDurableMetadataOnly": True,
+                            "gmailDurableMetadata": [
+                                {
+                                    "providerMessageId": row.provider_message_id,
+                                    "providerThreadId": row.provider_thread_id,
+                                    "rfcMessageId": row.rfc_message_id,
+                                    "labelIds": list(row.provider_labels),
+                                    "unread": row.unread,
+                                    "flagged": row.starred,
+                                }
+                                for row in durable_metadata
+                            ],
+                        },
+                    )
+                    return
+                print(
+                    "cuevion_mailbox_active_write gmail "
+                    "durable_metadata_body_proof_incomplete"
+                )
 
         snapshot_result = None
         if (
