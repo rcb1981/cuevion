@@ -221,6 +221,7 @@ export type ConnectInboxResponse = {
   inboxUidSet?: string[] | null;
   uidValidity?: string | null;
   prioritySemanticNewInboundMode?: PrioritySemanticNewInboundMode;
+  gmailBootstrapContinuationPending?: boolean;
   warning?: {
     code?: string;
     stage?: string;
@@ -4075,7 +4076,10 @@ export async function fetchGmailInbox(
         ),
     };
 
-    if (normalizedPayload.ok) {
+    if (
+      normalizedPayload.ok &&
+      normalizedPayload.gmailBootstrapContinuationPending === true
+    ) {
       void continueGmailBootstrapUntilComplete(request);
     }
     return normalizedPayload;
