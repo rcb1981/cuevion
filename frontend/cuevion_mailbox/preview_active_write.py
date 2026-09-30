@@ -32,6 +32,7 @@ from cuevion_mailbox.repository_contract import (
     CurrentStateInitializationOutcome,
     CurrentStateInitializationResult,
     DeltaCommitOutcome,
+    GmailMessageMetadataProjection,
     MailboxProvider,
     MailboxReadAuthority,
     MailboxStateSnapshot,
@@ -59,6 +60,14 @@ class _Reader(Protocol):
         ...
 
     def read_cursor(self, scope, scope_key: str) -> SyncCursor | None:
+        ...
+
+    def list_gmail_message_metadata(
+        self,
+        scope,
+        *,
+        limit: int,
+    ) -> Sequence[GmailMessageMetadataProjection]:
         ...
 
     def read_active_message_inventory(
@@ -218,6 +227,66 @@ def _runtime_repositories(environment: Mapping[str, str]):
     if production_bootstrap_authority_enabled(environment):
         return build_production_bootstrap_mailbox_repositories(environment)
     raise RuntimeError("Gmail durable mailbox write is disabled")
+
+
+def read_ready_gmail_message_metadata(
+    *,
+    environment: Mapping[str, str],
+    workspace_id: str,
+    owner_user_id: str,
+    mailbox_id: str,
+    mailbox_account_identity: str,
+    expected_history_id: str,
+    limit: int,
+    repositories: _Repositories | None = None,
+) -> tuple[GmailMessageMetadataProjection, ...] | None:
+    """Read READY durable Gmail Inbox metadata matching the current cursor."""
+
+    if not gmail_durable_write_enabled(environment):
+        raise RuntimeError("Gmail durable mailbox write is disabled")
+    if (
+        type(expected_history_id) is not str
+        or not expected_history_id
+        or not expected_history_id.isascii()
+        or not expected_history_id.isdigit()
+        or type(limit) is not int
+        or isinstance(limit, bool)
+        or not 1 <= limit <= _MAX_ROUTE_WRITE_LIMIT
+    ):
+        raise ValueError("invalid Gmail durable metadata read")
+
+    authority = MailboxReadAuthority(
+        workspace_id=workspace_id,
+        owner_user_id=owner_user_id,
+        mailbox_id=mailbox_id,
+        provider=MailboxProvider.GOOGLE,
+        provider_account_identity=mailbox_account_identity.casefold(),
+    )
+    repos = _runtime_repositories(environment) if repositories is None else repositories
+    state = repos.reader.resolve_current_state(authority)
+    if (
+        type(state) is not MailboxStateSnapshot
+        or state.bootstrap_state is not BootstrapState.READY
+    ):
+        return None
+    cursor = repos.reader.read_cursor(state.scope, _GMAIL_SCOPE_KEY)
+    if (
+        type(cursor) is not SyncCursor
+        or cursor.provider is not MailboxProvider.GOOGLE
+        or cursor.scope_key != _GMAIL_SCOPE_KEY
+        or cursor.gmail_history_id != expected_history_id
+        or cursor.backfill_state is not BackfillState.COMPLETE
+        or cursor.backfill_cursor is not None
+    ):
+        return None
+
+    rows = tuple(repos.reader.list_gmail_message_metadata(state.scope, limit=limit))
+    if (
+        len(rows) > limit
+        or any(type(row) is not GmailMessageMetadataProjection for row in rows)
+    ):
+        raise RuntimeError("invalid Gmail durable metadata read result")
+    return rows
 
 
 def _next_cursor(
@@ -855,5 +924,6 @@ __all__ = (
     "preview_active_write_enabled",
     "run_production_gmail_bootstrap_page",
     "run_preview_gmail_durable_write",
+    "read_ready_gmail_message_metadata",
     "run_preview_gmail_history_sync",
 )

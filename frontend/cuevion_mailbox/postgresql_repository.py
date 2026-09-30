@@ -22,6 +22,7 @@ from cuevion_mailbox.repository_contract import (
     CurrentStateInitializationOutcome,
     CurrentStateInitializationResult,
     DeltaCommitOutcome,
+    GmailMessageMetadataProjection,
     MailboxProvider,
     MailboxReadAuthority,
     MailboxReaderRepository,
@@ -132,6 +133,35 @@ WHERE m.workspace_id = %s
   AND s.is_current = true
   AND m.provider_deleted = false
   AND (%s::timestamptz IS NULL OR m.provider_timestamp < %s::timestamptz)
+ORDER BY m.provider_timestamp DESC, m.message_id DESC
+LIMIT %s
+""".strip()
+
+_LIST_GMAIL_MESSAGE_METADATA_SQL = """
+SELECT
+    m.provider_message_id,
+    m.provider_thread_id,
+    m.provider_folder,
+    m.provider_labels,
+    m.rfc_message_id,
+    m.unread,
+    m.starred
+FROM cuevion_mailbox.mailbox_messages AS m
+JOIN cuevion_mailbox.mailbox_sync_state AS s
+  ON s.workspace_id = m.workspace_id
+ AND s.owner_user_id = m.owner_user_id
+ AND s.mailbox_id = m.mailbox_id
+ AND s.source_generation = m.source_generation
+ AND s.provider = m.provider
+WHERE m.workspace_id = %s
+  AND m.owner_user_id = %s
+  AND m.mailbox_id = %s
+  AND m.source_generation = %s
+  AND m.provider = 'google'
+  AND s.provider_account_identity = %s
+  AND s.is_current = true
+  AND m.provider_deleted = false
+  AND lower(m.provider_folder) = 'inbox'
 ORDER BY m.provider_timestamp DESC, m.message_id DESC
 LIMIT %s
 """.strip()
@@ -615,6 +645,14 @@ class PostgreSQLMailboxReaderRepository(MailboxReaderRepository):
             before_timestamp_millis=before_timestamp_millis,
         )
 
+    def list_gmail_message_metadata(
+        self,
+        scope: MailboxScope,
+        *,
+        limit: int,
+    ) -> Sequence[GmailMessageMetadataProjection]:
+        return self._delegate.list_gmail_message_metadata(scope, limit=limit)
+
     def read_active_message_inventory(
         self,
         scope: MailboxScope,
@@ -889,6 +927,64 @@ class PostgreSQLMailboxRepository(MailboxRepository):
                 )
                 projection.validate_for(scope.provider)
                 result.append(projection)
+            return tuple(result)
+        finally:
+            if cursor is not None:
+                getattr(cursor, "close")()
+            getattr(connection, "rollback")()
+            getattr(connection, "close")()
+
+    def list_gmail_message_metadata(
+        self,
+        scope: MailboxScope,
+        *,
+        limit: int,
+    ) -> Sequence[GmailMessageMetadataProjection]:
+        if (
+            type(scope) is not MailboxScope
+            or scope.provider is not MailboxProvider.GOOGLE
+            or type(limit) is not int
+            or isinstance(limit, bool)
+            or not 1 <= limit <= 100
+        ):
+            raise ValueError("invalid Gmail message metadata request")
+
+        connection = self._connection()
+        cursor = None
+        try:
+            cursor = getattr(connection, "cursor")()
+            getattr(cursor, "execute")(
+                _LIST_GMAIL_MESSAGE_METADATA_SQL,
+                (
+                    scope.workspace_id,
+                    scope.owner_user_id,
+                    scope.mailbox_id,
+                    scope.source_generation,
+                    scope.provider_account_identity,
+                    limit,
+                ),
+            )
+            rows = _fetchall(cursor)
+            if len(rows) > limit:
+                raise RuntimeError("mailbox repository storage corruption")
+
+            result: list[GmailMessageMetadataProjection] = []
+            seen: set[str] = set()
+            for row in rows:
+                if len(row) != 7 or type(row[0]) is not str or row[0] in seen:
+                    raise RuntimeError("mailbox repository storage corruption")
+                seen.add(row[0])
+                result.append(
+                    GmailMessageMetadataProjection(
+                        provider_message_id=row[0],
+                        provider_thread_id=row[1],
+                        provider_folder=row[2],
+                        provider_labels=tuple(row[3]),
+                        rfc_message_id=row[4],
+                        unread=row[5],
+                        starred=row[6],
+                    )
+                )
             return tuple(result)
         finally:
             if cursor is not None:

@@ -347,6 +347,46 @@ class MessageProjection:
 
 
 @dataclass(frozen=True, slots=True)
+class GmailMessageMetadataProjection:
+    provider_message_id: str
+    provider_thread_id: str | None
+    provider_folder: str
+    provider_labels: tuple[str, ...]
+    rfc_message_id: str | None
+    unread: bool
+    starred: bool
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.provider_message_id) is not str
+            or not self.provider_message_id
+            or (
+                self.provider_thread_id is not None
+                and (
+                    type(self.provider_thread_id) is not str
+                    or not self.provider_thread_id
+                )
+            )
+            or type(self.provider_folder) is not str
+            or self.provider_folder.casefold() != "inbox"
+            or type(self.provider_labels) is not tuple
+            or "INBOX" not in self.provider_labels
+            or len(set(self.provider_labels)) != len(self.provider_labels)
+            or any(type(label) is not str or not label for label in self.provider_labels)
+            or (
+                self.rfc_message_id is not None
+                and (
+                    type(self.rfc_message_id) is not str
+                    or not self.rfc_message_id
+                )
+            )
+            or type(self.unread) is not bool
+            or type(self.starred) is not bool
+        ):
+            raise ValueError("invalid Gmail message metadata projection")
+
+
+@dataclass(frozen=True, slots=True)
 class BoundedMessageProjectionInventory:
     projections: tuple[MessageProjection, ...]
     overflow: bool
@@ -554,6 +594,15 @@ class MailboxReaderRepository(Protocol):
     ) -> Sequence[MessageProjection]:
         ...
 
+    def list_gmail_message_metadata(
+        self,
+        scope: MailboxScope,
+        *,
+        limit: int,
+    ) -> Sequence[GmailMessageMetadataProjection]:
+        """Read current durable Gmail Inbox metadata in provider-time order."""
+        ...
+
     def read_active_message_inventory(
         self,
         scope: MailboxScope,
@@ -675,6 +724,7 @@ __all__ = (
     "CurrentStateInitializationResult",
     "DeltaCommitOutcome",
     "derive_locator_digest",
+    "GmailMessageMetadataProjection",
     "MailboxProvider",
     "MailboxReadAuthority",
     "MailboxReaderRepository",

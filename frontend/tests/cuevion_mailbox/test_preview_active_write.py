@@ -173,6 +173,39 @@ class GmailBootstrapRouteSeparationContractTests(unittest.TestCase):
         self.assertNotIn("_run_gmail_priority_candidate_recovery(", response_section)
 
 
+class GmailDurableMetadataFastPathContractTests(unittest.TestCase):
+    def test_fetch_route_gates_metadata_only_on_unchanged_history_and_body_proof(self):
+        route_path = Path(__file__).resolve().parents[2] / "api" / "inboxes" / "fetch-gmail.py"
+        source = route_path.read_text(encoding="utf-8")
+        self.assertIn('"knownBodyProviderMessageIds"', source)
+        self.assertIn('history_sync.status == "unchanged"', source)
+        self.assertIn("read_ready_gmail_message_metadata(", source)
+        self.assertIn('"gmailDurableMetadataOnly": True', source)
+        self.assertIn('"gmailDurableMetadata": [', source)
+        self.assertIn("durable_metadata_body_proof_incomplete", source)
+
+    def test_client_rehydrates_metadata_and_has_one_provider_fallback(self):
+        client_path = Path(__file__).resolve().parents[2] / "src" / "lib" / "inboxConnectionApi.ts"
+        source = client_path.read_text(encoding="utf-8")
+        self.assertIn("knownGmailBodyProviderIds", source)
+        self.assertIn("rehydrateGmailDurableMetadata", source)
+        self.assertIn("performGmailInboxFetch", source)
+        self.assertIn("payload.gmailDurableMetadataOnly === true", source)
+        self.assertIn("await performGmailInboxFetch(request)", source)
+        self.assertIn("knownBodyProviderMessageIds", source)
+
+        workspace_path = (
+            Path(__file__).resolve().parents[2]
+            / "src"
+            / "components"
+            / "workspace"
+            / "WorkspaceShell.tsx"
+        )
+        workspace_source = workspace_path.read_text(encoding="utf-8")
+        self.assertIn("knownBodyMessages:", workspace_source)
+        self.assertIn(".filter(hasRenderableMessagePayload)", workspace_source)
+
+
 class GmailOversizedMetadataFallbackContractTests(unittest.TestCase):
     def test_route_source_contains_bounded_metadata_fallback(self):
         route_path = Path(__file__).resolve().parents[2] / "api" / "inboxes" / "gmail_snapshot.py"

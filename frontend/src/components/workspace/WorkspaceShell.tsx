@@ -53182,6 +53182,9 @@ export function WorkspaceShell({
             ? fetchGmailInbox({
                 mailboxId: managedMailbox.id,
                 focusPreferences: effectiveFocusPreferencesByMailbox[mailboxId],
+                knownBodyMessages: (
+                  mailboxStoreRef.current[mailboxId]?.Inbox ?? []
+                ).filter(hasRenderableMessagePayload),
               })
             : connectInboxWithImap(
                 buildCustomImapRefreshRequest(isStartupRefresh ? 20 : undefined),

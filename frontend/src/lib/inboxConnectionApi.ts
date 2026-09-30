@@ -223,6 +223,15 @@ export type ConnectInboxResponse = {
   prioritySemanticNewInboundMode?: PrioritySemanticNewInboundMode;
   gmailBootstrapContinuationPending?: boolean;
   gmailPriorityMaintenancePending?: boolean;
+  gmailDurableMetadataOnly?: boolean;
+  gmailDurableMetadata?: Array<{
+    providerMessageId: string;
+    providerThreadId?: string | null;
+    rfcMessageId?: string | null;
+    labelIds: string[];
+    unread: boolean;
+    flagged: boolean;
+  }>;
   warning?: {
     code?: string;
     stage?: string;
@@ -279,10 +288,18 @@ export type OAuthInboxResponse = {
   };
 };
 
+export type GmailKnownBodyMessage = Omit<
+  LiveInboxMessageSnapshot,
+  "createdAt"
+> & {
+  createdAt?: string;
+};
+
 export type FetchGmailInboxRequest = {
   mailboxId: string;
   focusPreferences?: OnboardingState["focusPreferences"] | null;
   limit?: number | null;
+  knownBodyMessages?: GmailKnownBodyMessage[] | null;
 };
 
 export type FetchGmailThreadRequest = {
@@ -4086,24 +4103,176 @@ async function continueGmailPriorityMaintenance(
 }
 
 
+function hasRenderableKnownGmailBody(message: GmailKnownBodyMessage) {
+  return (
+    (Array.isArray(message.body) &&
+      message.body.some(
+        (line) => typeof line === "string" && line.trim().length > 0,
+      )) ||
+    (typeof message.bodyHtml === "string" &&
+      message.bodyHtml.trim().length > 0) ||
+    (Array.isArray(message.attachments) && message.attachments.length > 0)
+  );
+}
+
+function knownGmailBodyProviderIds(
+  messages: GmailKnownBodyMessage[] | null | undefined,
+) {
+  if (!Array.isArray(messages)) return [];
+
+  const ordered = [...messages].sort((first, second) => {
+    const firstMs = Date.parse(first.createdAt ?? first.timestamp);
+    const secondMs = Date.parse(second.createdAt ?? second.timestamp);
+    return (
+      (Number.isNaN(secondMs) ? 0 : secondMs) -
+      (Number.isNaN(firstMs) ? 0 : firstMs)
+    );
+  });
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const message of ordered) {
+    const providerMessageId = message.providerMessageId?.trim() ?? "";
+    if (
+      !providerMessageId ||
+      seen.has(providerMessageId) ||
+      message.providerFolder?.trim().toUpperCase() !== "INBOX" ||
+      !hasRenderableKnownGmailBody(message)
+    ) {
+      continue;
+    }
+    seen.add(providerMessageId);
+    ids.push(providerMessageId);
+    if (ids.length >= 100) break;
+  }
+  return ids;
+}
+
+function rehydrateGmailDurableMetadata(
+  request: FetchGmailInboxRequest,
+  payload: ConnectInboxResponse,
+): ConnectInboxResponse | null {
+  if (payload.gmailDurableMetadataOnly !== true) return payload;
+  if (
+    !Array.isArray(payload.gmailDurableMetadata) ||
+    !Array.isArray(payload.inboxUidSet) ||
+    !Array.isArray(request.knownBodyMessages)
+  ) {
+    return null;
+  }
+
+  const known = new Map<string, GmailKnownBodyMessage>();
+  for (const message of request.knownBodyMessages) {
+    const providerMessageId = message.providerMessageId?.trim() ?? "";
+    if (
+      !providerMessageId ||
+      message.providerFolder?.trim().toUpperCase() !== "INBOX" ||
+      (message.serverMailboxId?.trim() &&
+        message.serverMailboxId.trim() !== request.mailboxId) ||
+      !hasRenderableKnownGmailBody(message) ||
+      known.has(providerMessageId)
+    ) {
+      continue;
+    }
+    known.set(providerMessageId, message);
+  }
+
+  const metadataIds: string[] = [];
+  const messages: LiveInboxMessageSnapshot[] = [];
+  for (const row of payload.gmailDurableMetadata) {
+    if (
+      !row ||
+      typeof row !== "object" ||
+      typeof row.providerMessageId !== "string" ||
+      !row.providerMessageId.trim() ||
+      (row.providerThreadId !== undefined &&
+        row.providerThreadId !== null &&
+        (typeof row.providerThreadId !== "string" ||
+          !row.providerThreadId.trim())) ||
+      (row.rfcMessageId !== undefined &&
+        row.rfcMessageId !== null &&
+        (typeof row.rfcMessageId !== "string" ||
+          !row.rfcMessageId.trim())) ||
+      !Array.isArray(row.labelIds) ||
+      row.labelIds.length === 0 ||
+      row.labelIds.some(
+        (label) => typeof label !== "string" || !label.trim(),
+      ) ||
+      new Set(row.labelIds).size !== row.labelIds.length ||
+      !row.labelIds.includes("INBOX") ||
+      typeof row.unread !== "boolean" ||
+      typeof row.flagged !== "boolean"
+    ) {
+      return null;
+    }
+    const providerMessageId = row.providerMessageId.trim();
+    if (metadataIds.includes(providerMessageId)) return null;
+    const existing = known.get(providerMessageId);
+    if (!existing) return null;
+
+    metadataIds.push(providerMessageId);
+    messages.push({
+      ...existing,
+      serverMailboxId: request.mailboxId,
+      providerFolder: "Inbox",
+      providerMessageId,
+      ...(row.providerThreadId
+        ? { providerThreadId: row.providerThreadId }
+        : {}),
+      ...(row.rfcMessageId ? { rfcMessageId: row.rfcMessageId } : {}),
+      labelIds: [...row.labelIds],
+      unread: row.unread,
+      flagged: row.flagged,
+      createdAt: existing.createdAt ?? existing.timestamp,
+    });
+  }
+
+  if (
+    payload.inboxUidSet.length !== metadataIds.length ||
+    payload.inboxUidSet.some(
+      (providerMessageId, index) => providerMessageId !== metadataIds[index],
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    ...payload,
+    messages,
+  };
+}
+
+async function performGmailInboxFetch(
+  request: FetchGmailInboxRequest,
+  knownBodyProviderMessageIds?: string[],
+) {
+  const response = await fetch("/api/inboxes/fetch-gmail", {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      mailboxId: request.mailboxId,
+      focusPreferences: request.focusPreferences,
+      limit: request.limit,
+      ...(knownBodyProviderMessageIds !== undefined
+        ? { knownBodyProviderMessageIds }
+        : {}),
+    }),
+  });
+  const payload = (await response.json()) as ConnectInboxResponse;
+  return { response, payload };
+}
+
 export async function fetchGmailInbox(
   request: FetchGmailInboxRequest,
 ): Promise<ConnectInboxResponse> {
   try {
-    const response = await fetch("/api/inboxes/fetch-gmail", {
-      method: "POST",
-      credentials: "include",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        mailboxId: request.mailboxId,
-        focusPreferences: request.focusPreferences,
-        limit: request.limit,
-      }),
-    });
-
-    const payload = (await response.json()) as ConnectInboxResponse;
+    const bodyProof = knownGmailBodyProviderIds(request.knownBodyMessages);
+    let { response, payload } = await performGmailInboxFetch(
+      request,
+      bodyProof,
+    );
     if (!response.ok) {
       return {
         ok: false,
@@ -4114,18 +4283,36 @@ export async function fetchGmailInbox(
       };
     }
 
+    let resolvedPayload = rehydrateGmailDurableMetadata(request, payload);
+    if (payload.gmailDurableMetadataOnly === true && resolvedPayload === null) {
+      ({ response, payload } = await performGmailInboxFetch(request));
+      if (!response.ok) {
+        return {
+          ok: false,
+          error: payload.error ?? {
+            code: "gmail_fetch_failed",
+            message: "Could not fetch Gmail inbox.",
+          },
+        };
+      }
+      resolvedPayload = payload;
+    }
+    if (resolvedPayload === null) {
+      resolvedPayload = payload;
+    }
+
     const normalizedPayload = {
-      ...payload,
-      ...(Array.isArray(payload.messages)
+      ...resolvedPayload,
+      ...(Array.isArray(resolvedPayload.messages)
         ? {
-            messages: payload.messages.map(
+            messages: resolvedPayload.messages.map(
               normalizeLiveInboxMessageNoiseAssessment,
             ),
           }
         : {}),
       prioritySemanticNewInboundMode:
         normalizePrioritySemanticNewInboundMode(
-          payload.prioritySemanticNewInboundMode,
+          resolvedPayload.prioritySemanticNewInboundMode,
         ),
     };
 
