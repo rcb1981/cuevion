@@ -694,6 +694,11 @@ class handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+        bootstrap_continuation_pending = bool(
+            production_bootstrap_authority_enabled(os.environ)
+            and history_sync is not None
+            and history_sync.status in {"bootstrap_required", "full_sync_required"}
+        )
         send_json(
             self,
             200,
@@ -704,6 +709,11 @@ class handler(BaseHTTPRequestHandler):
                 "uidValidity": snapshot.get("uidValidity", "gmail-api"),
                 "prioritySemanticNewInboundMode": (
                     read_new_inbound_client_mode()
+                ),
+                **(
+                    {"gmailBootstrapContinuationPending": True}
+                    if bootstrap_continuation_pending
+                    else {}
                 ),
             },
         )

@@ -90,6 +90,10 @@ class GmailBootstrapRouteSeparationContractTests(unittest.TestCase):
         self.assertIn("production_bootstrap_authority_enabled", source)
         self.assertIn("max_pages=5", source)
         self.assertIn('"complete": result.next_history_id is not None', source)
+        fetch_route_path = Path(__file__).resolve().parents[2] / "api" / "inboxes" / "fetch-gmail.py"
+        fetch_source = fetch_route_path.read_text(encoding="utf-8")
+        self.assertIn('"gmailBootstrapContinuationPending": True', fetch_source)
+        self.assertIn('history_sync.status in {"bootstrap_required", "full_sync_required"}', fetch_source)
 
     def test_continuation_route_logs_sanitized_exception_type_only(self):
         route_path = Path(__file__).resolve().parents[2] / "api" / "inboxes" / "continue-gmail-bootstrap.py"
@@ -132,7 +136,8 @@ class GmailBootstrapRouteSeparationContractTests(unittest.TestCase):
         source = client_path.read_text(encoding="utf-8")
         self.assertIn("continueGmailBootstrapUntilComplete", source)
         self.assertIn('fetch("/api/inboxes/continue-gmail-bootstrap"', source)
-        self.assertIn("if (normalizedPayload.ok)", source)
+        self.assertIn("gmailBootstrapContinuationPending", source)
+        self.assertIn("normalizedPayload.gmailBootstrapContinuationPending === true", source)
         self.assertIn("payload.complete === true", source)
         self.assertIn("gmailBootstrapContinuations.has(mailboxId)", source)
         self.assertIn("transientRetryDelaysMs = [1_000, 3_000, 8_000]", source)
