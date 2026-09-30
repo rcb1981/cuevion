@@ -189,6 +189,11 @@ class handler(BaseHTTPRequestHandler):
                 "cuevion_mailbox_active_write gmail bootstrap_continuation_"
                 + result.status
             )
+        retryable = (
+            result.status == "recovery_unavailable"
+            and recovery_diagnostic["retry_reason"] == "provider_error"
+            and recovery_diagnostic["provider_error_code"] == "gmail_unavailable"
+        )
         send_json(
             self,
             200,
@@ -198,6 +203,7 @@ class handler(BaseHTTPRequestHandler):
                 "providerCount": result.provider_count,
                 "mutationCount": result.mutation_count,
                 "complete": result.next_history_id is not None,
+                "retryable": retryable,
             },
         )
 
