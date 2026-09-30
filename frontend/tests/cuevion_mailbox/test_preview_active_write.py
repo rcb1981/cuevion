@@ -121,6 +121,8 @@ class GmailBootstrapRouteSeparationContractTests(unittest.TestCase):
         self.assertIn('recovered.provider_error_code', source)
         self.assertIn('"retry_reason=" + recovery_diagnostic["retry_reason"]', source)
         self.assertIn('"provider_error_code=" + recovery_diagnostic["provider_error_code"]', source)
+        self.assertIn('recovery_diagnostic["provider_error_code"] == "gmail_unavailable"', source)
+        self.assertIn('"retryable": retryable', source)
         self.assertNotIn("provider_message_id=", source)
         self.assertNotIn("str(recovered", source)
         self.assertNotIn("repr(recovered", source)
@@ -133,6 +135,10 @@ class GmailBootstrapRouteSeparationContractTests(unittest.TestCase):
         self.assertIn("if (normalizedPayload.ok)", source)
         self.assertIn("payload.complete === true", source)
         self.assertIn("gmailBootstrapContinuations.has(mailboxId)", source)
+        self.assertIn("transientRetryDelaysMs = [1_000, 3_000, 8_000]", source)
+        self.assertIn('payload.status === "recovery_unavailable"', source)
+        self.assertIn("payload.retryable === true", source)
+        self.assertIn("transientRetryIndex = 0", source)
 
 
 class GmailOversizedMetadataFallbackContractTests(unittest.TestCase):
