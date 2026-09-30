@@ -3967,6 +3967,7 @@ type GmailBootstrapContinuationResponse = {
   providerCount?: number;
   mutationCount?: number;
   complete?: boolean;
+  retryable?: boolean;
 };
 
 const gmailBootstrapContinuations = new Map<string, Promise<void>>();
@@ -3978,6 +3979,9 @@ async function continueGmailBootstrapUntilComplete(
   if (!mailboxId || gmailBootstrapContinuations.has(mailboxId)) return;
 
   const continuation = (async () => {
+    const transientRetryDelaysMs = [1_000, 3_000, 8_000] as const;
+    let transientRetryIndex = 0;
+
     for (;;) {
       const response = await fetch("/api/inboxes/continue-gmail-bootstrap", {
         method: "POST",
@@ -3995,6 +3999,20 @@ async function continueGmailBootstrapUntilComplete(
       const payload =
         (await response.json()) as GmailBootstrapContinuationResponse;
       if (!payload.ok || payload.complete === true) return;
+
+      if (
+        payload.status === "recovery_unavailable" &&
+        payload.retryable === true
+      ) {
+        if (transientRetryIndex >= transientRetryDelaysMs.length) return;
+        const delayMs = transientRetryDelaysMs[transientRetryIndex];
+        transientRetryIndex += 1;
+        await new Promise<void>((resolve) => {
+          globalThis.setTimeout(resolve, delayMs);
+        });
+        continue;
+      }
+
       if (
         payload.status !== "applied" ||
         typeof payload.providerCount !== "number" ||
@@ -4002,6 +4020,8 @@ async function continueGmailBootstrapUntilComplete(
       ) {
         return;
       }
+
+      transientRetryIndex = 0;
     }
   })()
     .catch(() => undefined)
