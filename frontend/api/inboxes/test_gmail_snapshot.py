@@ -927,6 +927,44 @@ class GmailExactMessageRecoveryTests(unittest.TestCase):
                 self.assertIsNone(recovered.candidate_source)
                 request.assert_called_once()
 
+    def test_exact_helper_treats_missing_labels_as_terminally_absent(self):
+        message_id = "exact-message-1"
+        detail = gmail_detail(message_id)
+        detail.pop("labelIds")
+
+        recovered = gmail_snapshot.recover_exact_gmail_inbox_message(
+            gmail_context(),
+            provider_message_id=message_id,
+            request_with_one_refresh=Mock(
+                return_value=(detail, None, gmail_context(), None)
+            ),
+        )
+
+        self.assertIs(
+            recovered.result,
+            gmail_snapshot.GmailExactMessageRecoveryResult.TERMINAL_ABSENT,
+        )
+        self.assertIsNone(recovered.preview)
+        self.assertIsNone(recovered.candidate_source)
+
+        malformed = gmail_snapshot.recover_exact_gmail_inbox_message(
+            gmail_context(),
+            provider_message_id=message_id,
+            request_with_one_refresh=Mock(
+                return_value=(
+                    {**gmail_detail(message_id), "labelIds": None},
+                    None,
+                    gmail_context(),
+                    None,
+                )
+            ),
+        )
+        self.assertIs(
+            malformed.result,
+            gmail_snapshot.GmailExactMessageRecoveryResult.RETRY,
+        )
+        self.assertEqual(malformed.retry_reason, "invalid_labels")
+
     def test_exact_helper_terminally_classifies_non_inbox_and_404(self):
         message_id = "exact-message-1"
         for labels in (

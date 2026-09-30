@@ -616,7 +616,7 @@ def recover_exact_gmail_inbox_message(
     if not valid_identifier(detail_payload.get("threadId")):
         return GmailExactMessageRecovery(retry, next_context, retry_reason="invalid_thread_id")
 
-    raw_labels = detail_payload.get("labelIds")
+    raw_labels = detail_payload.get("labelIds", [])
     if (
         not isinstance(raw_labels, list)
         or any(not valid_identifier(label) for label in raw_labels)
