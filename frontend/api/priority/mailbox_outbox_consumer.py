@@ -16,10 +16,16 @@ from enum import Enum
 from typing import Protocol
 
 from api.priority.candidate_projection import (
+    MAX_CURRENT_WINDOW_CANDIDATES,
+    CandidateProjectionInvalid,
     PriorityCandidatePopulationAuthority,
     populate_priority_candidates,
+    project_priority_candidate,
 )
 from api.priority.candidate_store import (
+    CANDIDATE_MAX_MAILBOX_RECORDS,
+    CANDIDATE_MAX_PAGE_RECORDS,
+    PriorityCandidateMailboxScope,
     PriorityCandidateStore,
     build_runtime_candidate_store,
 )
@@ -28,6 +34,7 @@ from api.priority.mailbox_outbox import (
     PriorityMailboxOutboxAction,
     PriorityMailboxOutboxActionKind,
     plan_priority_mailbox_outbox_event,
+    priority_candidate_source_from_message_record,
 )
 from api.priority.store import (
     PriorityWorkflowStore,
@@ -35,6 +42,11 @@ from api.priority.store import (
 )
 from cuevion_mailbox.preview_active_write import preview_active_write_enabled
 from cuevion_mailbox.repository_contract import (
+    BootstrapState,
+    MailboxProvider,
+    MailboxReadAuthority,
+    MailboxStateSnapshot,
+    MessageRecord,
     OutboxEvent,
     OutboxMailboxScope,
     OutboxMessageSnapshot,
@@ -51,6 +63,7 @@ OUTBOX_PRIORITY_MAX_BATCH = 20
 OUTBOX_PRIORITY_LEASE_MILLIS = 60_000
 OUTBOX_PRIORITY_RETRY_BASE_MILLIS = 5_000
 OUTBOX_PRIORITY_RETRY_MAX_MILLIS = 300_000
+OUTBOX_PRIORITY_PRUNE_MAX = 20
 
 _SAFE_PROCESSING_ERROR = "priority_processing_failed"
 
@@ -63,6 +76,7 @@ class PriorityMailboxOutboxConsumerResult(str, Enum):
     SUPERSEDED = "superseded"
     STALE_GENERATION = "stale_generation"
     INELIGIBLE = "ineligible"
+    OUTSIDE_WINDOW = "outside_window"
     RETRIED = "retried"
     CLAIM_LOST = "claim_lost"
     ACK_UNAVAILABLE = "ack_unavailable"
@@ -102,6 +116,20 @@ class PriorityMailboxOutboxConsumerReport:
 
 
 class _OutboxReader(Protocol):
+    def resolve_current_state(
+        self,
+        authority: MailboxReadAuthority,
+    ) -> MailboxStateSnapshot | None:
+        ...
+
+    def list_gmail_inbox_records(
+        self,
+        scope,
+        *,
+        limit: int,
+    ) -> Sequence[MessageRecord]:
+        ...
+
     def resolve_outbox_message(
         self,
         event: OutboxEvent,
@@ -142,6 +170,191 @@ class _OutboxWriter(Protocol):
 
 
 PriorityOutboxActionApplier = Callable[[PriorityMailboxOutboxAction], bool]
+
+
+def _priority_mailbox_scope(
+    authority: PriorityCandidatePopulationAuthority,
+) -> PriorityCandidateMailboxScope:
+    scope = PriorityCandidateMailboxScope(
+        workspace_id=authority.workspace_id,
+        user_id=authority.user_id,
+        mailbox_id=authority.mailbox_id,
+        mailbox_account_identity=authority.mailbox_account_identity,
+        provider="google",
+    )
+    scope.canonical_bytes()
+    return scope
+
+
+def _read_current_gmail_window(
+    authority: PriorityCandidatePopulationAuthority,
+    reader: _OutboxReader,
+) -> tuple[MessageRecord, ...]:
+    read_authority = MailboxReadAuthority(
+        workspace_id=authority.workspace_id,
+        owner_user_id=authority.user_id,
+        mailbox_id=authority.mailbox_id,
+        provider=MailboxProvider.GOOGLE,
+        provider_account_identity=authority.mailbox_account_identity,
+    )
+    state = reader.resolve_current_state(read_authority)
+    if (
+        type(state) is not MailboxStateSnapshot
+        or state.bootstrap_state is not BootstrapState.READY
+        or state.scope.provider is not MailboxProvider.GOOGLE
+        or state.scope.provider_account_identity
+        != authority.mailbox_account_identity
+    ):
+        raise RuntimeError("Priority Gmail current window is unavailable")
+
+    records = tuple(
+        reader.list_gmail_inbox_records(
+            state.scope,
+            limit=MAX_CURRENT_WINDOW_CANDIDATES,
+        )
+    )
+    if (
+        len(records) > MAX_CURRENT_WINDOW_CANDIDATES
+        or any(type(record) is not MessageRecord for record in records)
+    ):
+        raise RuntimeError("invalid Priority Gmail current window")
+    provider_ids: set[str] = set()
+    for record in records:
+        record.validate_for(MailboxProvider.GOOGLE)
+        provider_message_id = record.identity.provider_message_id
+        if (
+            type(provider_message_id) is not str
+            or not provider_message_id
+            or provider_message_id in provider_ids
+            or record.identity.provider_folder.casefold() != "inbox"
+        ):
+            raise RuntimeError("invalid Priority Gmail current window")
+        provider_ids.add(provider_message_id)
+    return records
+
+
+def _current_candidate_scope_keys(
+    authority: PriorityCandidatePopulationAuthority,
+    sources: Sequence[dict],
+) -> frozenset[bytes]:
+    keys: set[bytes] = set()
+    for source in sources:
+        try:
+            scope, _snapshot = project_priority_candidate(authority, source)
+        except CandidateProjectionInvalid:
+            continue
+        keys.add(scope.canonical_bytes())
+    return frozenset(keys)
+
+
+def _prune_historical_candidates(
+    authority: PriorityCandidatePopulationAuthority,
+    *,
+    current_scope_keys: frozenset[bytes],
+    candidate_store: PriorityCandidateStore,
+    now_millis: int,
+) -> tuple[int, int]:
+    mailbox_scope = _priority_mailbox_scope(authority)
+    records = []
+    offset = 0
+    invalid_count = 0
+    mailbox_incomplete = False
+    total = 0
+
+    while True:
+        page = candidate_store.read_mailbox_prune_page(
+            mailbox_scope,
+            offset=offset,
+            limit=CANDIDATE_MAX_PAGE_RECORDS,
+        )
+        total = page.total
+        invalid_count += page.invalid_count
+        mailbox_incomplete = mailbox_incomplete or page.mailbox_incomplete
+        records.extend(page.records)
+        if page.next_offset is None:
+            break
+        if page.next_offset <= offset:
+            raise RuntimeError("invalid Priority candidate prune pagination")
+        offset = page.next_offset
+
+    if len(records) + invalid_count > total:
+        raise RuntimeError("invalid Priority candidate prune inventory")
+
+    stale = [
+        record
+        for record in records
+        if record.state == "provider_confirmed"
+        and record.scope.canonical_bytes() not in current_scope_keys
+        and all(
+            reference.expires_at <= now_millis
+            for reference in record.positive_references
+        )
+    ]
+    stale.sort(
+        key=lambda record: (
+            record.snapshot.render.created_at,
+            record.provider_observed_at,
+            record.scope.canonical_bytes(),
+        )
+    )
+
+    removed = 0
+    for record in stale[:OUTBOX_PRIORITY_PRUNE_MAX]:
+        if candidate_store.remove_candidate(record.scope):
+            removed += 1
+
+    if mailbox_incomplete and total - removed < CANDIDATE_MAX_MAILBOX_RECORDS:
+        candidate_store.clear_mailbox_incomplete(mailbox_scope)
+
+    return removed, invalid_count
+
+
+def _prepare_current_gmail_window(
+    authority: PriorityCandidatePopulationAuthority,
+    *,
+    reader: _OutboxReader,
+    candidate_store: PriorityCandidateStore,
+    workflow_store: PriorityWorkflowStore,
+    now_millis: int,
+    reconcile: bool,
+) -> frozenset[str]:
+    records = _read_current_gmail_window(authority, reader)
+    current_ids = frozenset(
+        record.identity.provider_message_id
+        for record in records
+        if type(record.identity.provider_message_id) is str
+    )
+    if not reconcile:
+        return current_ids
+
+    sources = tuple(
+        priority_candidate_source_from_message_record(record)
+        for record in records
+    )
+    current_scope_keys = _current_candidate_scope_keys(authority, sources)
+    removed, invalid_count = _prune_historical_candidates(
+        authority,
+        current_scope_keys=current_scope_keys,
+        candidate_store=candidate_store,
+        now_millis=now_millis,
+    )
+    population = populate_priority_candidates(
+        authority,
+        list(sources),
+        store=candidate_store,
+        workflow_store=workflow_store,
+    )
+    logger.info(
+        "Priority Gmail current window records=%s pruned=%s malformed_preserved=%s "
+        "written=%s skipped=%s reasons=%s",
+        len(records),
+        removed,
+        invalid_count,
+        population.written,
+        population.skipped,
+        ",".join(f"{code}:{count}" for code, count in population.reason_counts),
+    )
+    return current_ids
 
 
 def _retry_delay_millis(attempt_count: int) -> int:
@@ -212,6 +425,7 @@ def consume_priority_mailbox_outbox(
     now_millis: int,
     limit: int = OUTBOX_PRIORITY_MAX_BATCH,
     lease_millis: int = OUTBOX_PRIORITY_LEASE_MILLIS,
+    current_provider_message_ids: frozenset[str] | None = None,
 ) -> PriorityMailboxOutboxConsumerReport:
     """Claim and process one bounded exact-mailbox batch."""
 
@@ -228,6 +442,17 @@ def consume_priority_mailbox_outbox(
         or type(lease_millis) is not int
         or isinstance(lease_millis, bool)
         or not 1_000 <= lease_millis <= 300_000
+        or (
+            current_provider_message_ids is not None
+            and (
+                type(current_provider_message_ids) is not frozenset
+                or any(
+                    type(provider_message_id) is not str
+                    or not provider_message_id
+                    for provider_message_id in current_provider_message_ids
+                )
+            )
+        )
     ):
         raise ValueError("invalid Priority mailbox outbox consumer")
 
@@ -292,7 +517,14 @@ def consume_priority_mailbox_outbox(
                 event,
                 snapshot,
             )
-            applied = apply_action(action)
+            outside_window = bool(
+                action.kind is PriorityMailboxOutboxActionKind.UPSERT
+                and current_provider_message_ids is not None
+                and action.source is not None
+                and action.source.get("providerMessageId")
+                not in current_provider_message_ids
+            )
+            applied = True if outside_window else apply_action(action)
         except Exception:
             retry(event)
             continue
@@ -314,18 +546,21 @@ def consume_priority_mailbox_outbox(
             continue
 
         processed += 1
-        result = {
-            PriorityMailboxOutboxActionKind.UPSERT:
-                PriorityMailboxOutboxConsumerResult.UPSERTED,
-            PriorityMailboxOutboxActionKind.REMOVE:
-                PriorityMailboxOutboxConsumerResult.REMOVED,
-            PriorityMailboxOutboxActionKind.SUPERSEDED:
-                PriorityMailboxOutboxConsumerResult.SUPERSEDED,
-            PriorityMailboxOutboxActionKind.STALE_GENERATION:
-                PriorityMailboxOutboxConsumerResult.STALE_GENERATION,
-            PriorityMailboxOutboxActionKind.INELIGIBLE:
-                PriorityMailboxOutboxConsumerResult.INELIGIBLE,
-        }[action.kind]
+        if outside_window:
+            result = PriorityMailboxOutboxConsumerResult.OUTSIDE_WINDOW
+        else:
+            result = {
+                PriorityMailboxOutboxActionKind.UPSERT:
+                    PriorityMailboxOutboxConsumerResult.UPSERTED,
+                PriorityMailboxOutboxActionKind.REMOVE:
+                    PriorityMailboxOutboxConsumerResult.REMOVED,
+                PriorityMailboxOutboxActionKind.SUPERSEDED:
+                    PriorityMailboxOutboxConsumerResult.SUPERSEDED,
+                PriorityMailboxOutboxActionKind.STALE_GENERATION:
+                    PriorityMailboxOutboxConsumerResult.STALE_GENERATION,
+                PriorityMailboxOutboxActionKind.INELIGIBLE:
+                    PriorityMailboxOutboxConsumerResult.INELIGIBLE,
+            }[action.kind]
         record(result)
 
     return PriorityMailboxOutboxConsumerReport(
@@ -349,6 +584,7 @@ def run_preview_priority_mailbox_outbox_consumer(
     candidate_store: PriorityCandidateStore | None = None,
     workflow_store: PriorityWorkflowStore | None = None,
     hmac_secret: str | None = None,
+    reconcile_current_window: bool = True,
 ) -> PriorityMailboxOutboxConsumerReport:
     """Preview active_write runtime boundary. Production cannot activate this."""
 
@@ -382,6 +618,15 @@ def run_preview_priority_mailbox_outbox_consumer(
         else workflow_store
     )
 
+    current_provider_message_ids = _prepare_current_gmail_window(
+        authority,
+        reader=runtime_repositories.reader,
+        candidate_store=runtime_candidate_store,
+        workflow_store=runtime_workflow_store,
+        now_millis=now_millis,
+        reconcile=reconcile_current_window,
+    )
+
     report = consume_priority_mailbox_outbox(
         authority,
         reader=runtime_repositories.reader,
@@ -394,6 +639,7 @@ def run_preview_priority_mailbox_outbox_consumer(
         ),
         now_millis=now_millis,
         limit=limit,
+        current_provider_message_ids=current_provider_message_ids,
     )
     logger.info(
         "Priority mailbox outbox consumer claimed=%s processed=%s retried=%s outcomes=%s",
@@ -418,6 +664,7 @@ def run_production_priority_mailbox_outbox_consumer(
     candidate_store: PriorityCandidateStore | None = None,
     workflow_store: PriorityWorkflowStore | None = None,
     hmac_secret: str | None = None,
+    reconcile_current_window: bool = True,
 ) -> PriorityMailboxOutboxConsumerReport:
     """Production runtime boundary behind the existing exact bootstrap authority."""
 
@@ -451,6 +698,15 @@ def run_production_priority_mailbox_outbox_consumer(
         else workflow_store
     )
 
+    current_provider_message_ids = _prepare_current_gmail_window(
+        authority,
+        reader=runtime_repositories.reader,
+        candidate_store=runtime_candidate_store,
+        workflow_store=runtime_workflow_store,
+        now_millis=now_millis,
+        reconcile=reconcile_current_window,
+    )
+
     report = consume_priority_mailbox_outbox(
         authority,
         reader=runtime_repositories.reader,
@@ -463,6 +719,7 @@ def run_production_priority_mailbox_outbox_consumer(
         ),
         now_millis=now_millis,
         limit=limit,
+        current_provider_message_ids=current_provider_message_ids,
     )
     logger.info(
         "Priority production mailbox outbox consumer claimed=%s processed=%s retried=%s outcomes=%s",
@@ -477,6 +734,7 @@ def run_production_priority_mailbox_outbox_consumer(
 __all__ = (
     "OUTBOX_PRIORITY_LEASE_MILLIS",
     "OUTBOX_PRIORITY_MAX_BATCH",
+    "OUTBOX_PRIORITY_PRUNE_MAX",
     "PriorityMailboxOutboxConsumerReport",
     "PriorityMailboxOutboxConsumerResult",
     "apply_priority_mailbox_outbox_action",

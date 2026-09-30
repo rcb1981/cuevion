@@ -108,7 +108,7 @@ class handler(BaseHTTPRequestHandler):
         complete = False
         batches = 0
         try:
-            for _ in range(_PRIORITY_MAINTENANCE_MAX_BATCHES):
+            for batch_index in range(_PRIORITY_MAINTENANCE_MAX_BATCHES):
                 report = consumer(
                     environment=os.environ,
                     workspace_id=getattr(member, "workspace_id"),
@@ -117,6 +117,7 @@ class handler(BaseHTTPRequestHandler):
                     mailbox_account_identity=context["mailbox_email"],
                     now_millis=time.time_ns() // 1_000_000,
                     limit=OUTBOX_PRIORITY_MAX_BATCH,
+                    reconcile_current_window=batch_index == 0,
                 )
                 batches += 1
                 total_claimed += report.claimed

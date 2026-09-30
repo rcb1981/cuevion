@@ -603,6 +603,15 @@ class MailboxReaderRepository(Protocol):
         """Read current durable Gmail Inbox metadata in provider-time order."""
         ...
 
+    def list_gmail_inbox_records(
+        self,
+        scope: MailboxScope,
+        *,
+        limit: int,
+    ) -> Sequence[MessageRecord]:
+        """Read current durable Gmail Inbox records in provider-time order."""
+        ...
+
     def read_active_message_inventory(
         self,
         scope: MailboxScope,
