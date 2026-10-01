@@ -3239,18 +3239,25 @@ class PriorityCandidateStore:
             or len(set(members)) != len(members)
         ):
             raise CandidateStoreUnavailable()
-        values = (
-            self._command(
-                [
-                    "MGET",
-                    *(f"{self._key_prefix}record:{member}" for member in members),
-                ]
+        values: list[object] = []
+        items = tuple(
+            (
+                f"{self._key_prefix}record:{member}",
+                CANDIDATE_MAX_SERIALIZED_RECORD_BYTES,
             )
-            if members
-            else []
+            for member in members
         )
-        if type(values) is not list or len(values) != len(members):
-            raise CandidateStoreUnavailable()
+        for group in _bounded_mget_groups(items):
+            result_values = self._command(
+                ["MGET", *(key for key, _maximum in group)],
+                transport_stage="store_read_transport",
+                result_stage="store_read_result_invalid",
+            )
+            if type(result_values) is not list or len(result_values) != len(group):
+                raise CandidateStoreUnavailable("store_read_result_invalid")
+            values.extend(result_values)
+        if len(values) != len(members):
+            raise CandidateStoreUnavailable("store_read_result_invalid")
 
         records: list[PriorityCandidateRecord] = []
         invalid_count = 0
