@@ -258,29 +258,17 @@ def _prune_historical_candidates(
     now_millis: int,
 ) -> tuple[int, int]:
     mailbox_scope = _priority_mailbox_scope(authority)
-    records = []
-    offset = 0
-    invalid_count = 0
-    mailbox_incomplete = False
-    total = 0
+    page = candidate_store.read_mailbox_prune_page(
+        mailbox_scope,
+        offset=0,
+        limit=CANDIDATE_MAX_PAGE_RECORDS,
+    )
+    total = page.total
+    invalid_count = page.invalid_count
+    mailbox_incomplete = page.mailbox_incomplete
+    records = list(page.records)
 
-    while True:
-        page = candidate_store.read_mailbox_prune_page(
-            mailbox_scope,
-            offset=offset,
-            limit=CANDIDATE_MAX_PAGE_RECORDS,
-        )
-        total = page.total
-        invalid_count += page.invalid_count
-        mailbox_incomplete = mailbox_incomplete or page.mailbox_incomplete
-        records.extend(page.records)
-        if page.next_offset is None:
-            break
-        if page.next_offset <= offset:
-            raise RuntimeError("invalid Priority candidate prune pagination")
-        offset = page.next_offset
-
-    if len(records) + invalid_count > total:
+    if len(records) + invalid_count > page.scanned:
         raise RuntimeError("invalid Priority candidate prune inventory")
 
     stale = [
