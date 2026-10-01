@@ -675,6 +675,48 @@ class PriorityCandidateUnchangedConfirmation:
 
 
 @dataclass(frozen=True, slots=True)
+class PriorityCandidatePrunePage:
+    records: tuple[PriorityCandidateRecord, ...]
+    total: int
+    offset: int
+    scanned: int
+    next_offset: int | None
+    mailbox_incomplete: bool
+    user_incomplete: bool
+    invalid_count: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.records) is not tuple
+            or any(type(record) is not PriorityCandidateRecord for record in self.records)
+            or type(self.total) is not int
+            or not 0 <= self.total <= CANDIDATE_MAX_MAILBOX_RECORDS
+            or type(self.offset) is not int
+            or not 0 <= self.offset <= CANDIDATE_MAX_PAGE_OFFSET
+            or type(self.scanned) is not int
+            or not 0 <= self.scanned <= CANDIDATE_MAX_PAGE_RECORDS
+            or len(self.records) > self.scanned
+            or type(self.invalid_count) is not int
+            or self.invalid_count != self.scanned - len(self.records)
+            or type(self.mailbox_incomplete) is not bool
+            or type(self.user_incomplete) is not bool
+            or (
+                self.next_offset is not None
+                and (
+                    type(self.next_offset) is not int
+                    or self.next_offset != self.offset + self.scanned
+                    or self.next_offset >= self.total
+                )
+            )
+            or (
+                self.next_offset is None
+                and self.offset + self.scanned < self.total
+            )
+        ):
+            raise ValueError("invalid Priority candidate prune page")
+
+
+@dataclass(frozen=True, slots=True)
 class PriorityCandidatePage:
     records: tuple[PriorityCandidateRecord, ...]
     total: int
@@ -3134,6 +3176,118 @@ class PriorityCandidateStore:
             degraded=any(
                 record.state == "provider_validation_grace" for record in records
             ),
+        )
+
+    def read_mailbox_prune_page(
+        self,
+        scope: PriorityCandidateMailboxScope,
+        *,
+        offset: int = 0,
+        limit: int = CANDIDATE_MAX_PAGE_RECORDS,
+    ) -> PriorityCandidatePrunePage:
+        """Read one bounded mailbox page while preserving malformed rows in place."""
+
+        if (
+            not isinstance(scope, PriorityCandidateMailboxScope)
+            or type(offset) is not int
+            or not 0 <= offset <= CANDIDATE_MAX_PAGE_OFFSET
+            or type(limit) is not int
+            or not 1 <= limit <= CANDIDATE_MAX_PAGE_RECORDS
+        ):
+            raise ValueError("invalid Priority candidate prune page")
+        keys = self._mailbox_keys(scope)
+        result = self._command(
+            [
+                "EVAL",
+                _READ_MAILBOX_PAGE_SCRIPT,
+                3,
+                keys["mailbox_index"],
+                keys["mailbox_incomplete"],
+                keys["user_incomplete"],
+                offset,
+                limit,
+                _INCOMPLETE_VALUE,
+                _CORRUPT_SENTINEL,
+            ]
+        )
+        if (
+            type(result) is not list
+            or not result
+            or result == [_CORRUPT_SENTINEL]
+            or len(result) < 4
+            or (len(result) - 4) % 2 != 0
+        ):
+            raise CandidateStoreUnavailable()
+        current = _safe_redis_integer(result[0])
+        total = _safe_redis_integer(result[1])
+        if (
+            current is None
+            or total is None
+            or not 0 <= total <= CANDIDATE_MAX_MAILBOX_RECORDS
+            or result[2] not in {0, 1}
+            or result[3] not in {0, 1}
+        ):
+            raise CandidateStoreUnavailable()
+        members = result[4::2]
+        scores = result[5::2]
+        if (
+            len(members) > limit
+            or any(
+                type(member) is not str or _HEX_DIGEST_RE.fullmatch(member) is None
+                for member in members
+            )
+            or len(set(members)) != len(members)
+        ):
+            raise CandidateStoreUnavailable()
+        values = (
+            self._command(
+                [
+                    "MGET",
+                    *(f"{self._key_prefix}record:{member}" for member in members),
+                ]
+            )
+            if members
+            else []
+        )
+        if type(values) is not list or len(values) != len(members):
+            raise CandidateStoreUnavailable()
+
+        records: list[PriorityCandidateRecord] = []
+        invalid_count = 0
+        for member, score_value, value in zip(members, scores, values, strict=True):
+            score = _safe_redis_integer(score_value)
+            record = _decode_candidate_record(
+                value,
+                secret=self._hmac_secret,
+                expected_mailbox_scope=scope,
+                expected_member_digest=member,
+            )
+            try:
+                if record is not None:
+                    self._validate_snapshot_policy(record.scope, record.snapshot)
+            except Exception:
+                record = None
+            if (
+                score is None
+                or record is None
+                or score != record.logical_expires_at()
+                or record.authority_state_at(current) == "expired"
+            ):
+                invalid_count += 1
+                continue
+            records.append(record)
+
+        scanned = len(members)
+        next_offset = offset + scanned
+        return PriorityCandidatePrunePage(
+            records=tuple(records),
+            total=total,
+            offset=offset,
+            scanned=scanned,
+            next_offset=next_offset if next_offset < total else None,
+            mailbox_incomplete=result[2] == 1,
+            user_incomplete=result[3] == 1,
+            invalid_count=invalid_count,
         )
 
     def _prepare_workflow_references(

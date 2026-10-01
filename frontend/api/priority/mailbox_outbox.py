@@ -21,6 +21,7 @@ from api.priority.candidate_projection import (
 from api.priority.candidate_store import PriorityCandidateScope
 from cuevion_mailbox.repository_contract import (
     MailboxProvider,
+    MessageRecord,
     OutboxEvent,
     OutboxEventType,
     OutboxMessageSnapshot,
@@ -87,9 +88,17 @@ def _scope_for_google_message(
     return scope
 
 
-def _candidate_source(snapshot: OutboxMessageSnapshot) -> dict:
-    record = snapshot.record
+def priority_candidate_source_from_message_record(record: MessageRecord) -> dict:
+    if type(record) is not MessageRecord:
+        raise ValueError("invalid Priority mailbox source record")
+    record.validate_for(MailboxProvider.GOOGLE)
     identity = record.identity
+    if (
+        type(identity.provider_message_id) is not str
+        or not identity.provider_message_id
+        or identity.provider_folder.casefold() != "inbox"
+    ):
+        raise ValueError("invalid Priority mailbox source record")
     return {
         "provider": "google",
         "providerMessageId": identity.provider_message_id,
@@ -184,7 +193,7 @@ def plan_priority_mailbox_outbox_event(
     } or snapshot.provider_deleted:
         raise ValueError("invalid Priority mailbox outbox mutation")
 
-    source = _candidate_source(snapshot)
+    source = priority_candidate_source_from_message_record(snapshot.record)
     try:
         candidate_scope, _candidate_snapshot = project_priority_candidate(
             authority,
@@ -210,4 +219,5 @@ __all__ = (
     "PriorityMailboxOutboxAction",
     "PriorityMailboxOutboxActionKind",
     "plan_priority_mailbox_outbox_event",
+    "priority_candidate_source_from_message_record",
 )
