@@ -166,47 +166,6 @@ ORDER BY m.provider_timestamp DESC, m.message_id DESC
 LIMIT %s
 """.strip()
 
-_LIST_GMAIL_INBOX_RECORDS_SQL = """
-SELECT
-    m.message_id,
-    m.provider_message_id,
-    m.provider_folder,
-    m.provider_thread_id,
-    m.provider_labels,
-    m.rfc_message_id,
-    m.in_reply_to,
-    m.references_json,
-    m.sender_address,
-    m.sender_display,
-    m.to_json,
-    m.cc_json,
-    m.subject,
-    m.snippet,
-    m.provider_timestamp,
-    m.unread,
-    m.starred,
-    m.body_state,
-    m.metadata_hash
-FROM cuevion_mailbox.mailbox_messages AS m
-JOIN cuevion_mailbox.mailbox_sync_state AS s
-  ON s.workspace_id = m.workspace_id
- AND s.owner_user_id = m.owner_user_id
- AND s.mailbox_id = m.mailbox_id
- AND s.source_generation = m.source_generation
- AND s.provider = m.provider
-WHERE m.workspace_id = %s
-  AND m.owner_user_id = %s
-  AND m.mailbox_id = %s
-  AND m.source_generation = %s
-  AND m.provider = 'google'
-  AND s.provider_account_identity = %s
-  AND s.is_current = true
-  AND m.provider_deleted = false
-  AND lower(m.provider_folder) = 'inbox'
-ORDER BY m.provider_timestamp DESC, m.message_id DESC
-LIMIT %s
-""".strip()
-
 _SELECT_ACTIVE_MESSAGE_INVENTORY_SQL = """
 SELECT
     m.message_id,
@@ -694,14 +653,6 @@ class PostgreSQLMailboxReaderRepository(MailboxReaderRepository):
     ) -> Sequence[GmailMessageMetadataProjection]:
         return self._delegate.list_gmail_message_metadata(scope, limit=limit)
 
-    def list_gmail_inbox_records(
-        self,
-        scope: MailboxScope,
-        *,
-        limit: int,
-    ) -> Sequence[MessageRecord]:
-        return self._delegate.list_gmail_inbox_records(scope, limit=limit)
-
     def read_active_message_inventory(
         self,
         scope: MailboxScope,
@@ -1035,89 +986,6 @@ class PostgreSQLMailboxRepository(MailboxRepository):
                     )
                 )
             return tuple(result)
-        finally:
-            if cursor is not None:
-                getattr(cursor, "close")()
-            getattr(connection, "rollback")()
-            getattr(connection, "close")()
-
-    def list_gmail_inbox_records(
-        self,
-        scope: MailboxScope,
-        *,
-        limit: int,
-    ) -> Sequence[MessageRecord]:
-        if (
-            type(scope) is not MailboxScope
-            or scope.provider is not MailboxProvider.GOOGLE
-            or type(limit) is not int
-            or isinstance(limit, bool)
-            or not 1 <= limit <= 100
-        ):
-            raise ValueError("invalid Gmail Inbox record request")
-
-        connection = self._connection()
-        cursor = None
-        try:
-            cursor = getattr(connection, "cursor")()
-            getattr(cursor, "execute")(
-                _LIST_GMAIL_INBOX_RECORDS_SQL,
-                (
-                    scope.workspace_id,
-                    scope.owner_user_id,
-                    scope.mailbox_id,
-                    scope.source_generation,
-                    scope.provider_account_identity,
-                    limit,
-                ),
-            )
-            rows = _fetchall(cursor)
-            if len(rows) > limit:
-                raise RuntimeError("mailbox repository storage corruption")
-
-            records: list[MessageRecord] = []
-            seen: set[str] = set()
-            for row in rows:
-                provider_timestamp = row[14] if len(row) == 19 else None
-                if (
-                    len(row) != 19
-                    or type(row[1]) is not str
-                    or row[1] in seen
-                    or not isinstance(provider_timestamp, datetime)
-                    or provider_timestamp.tzinfo is None
-                ):
-                    raise RuntimeError("mailbox repository storage corruption")
-                seen.add(row[1])
-                record = MessageRecord(
-                    identity=MessageIdentity(
-                        message_id=row[0],
-                        provider_message_id=row[1],
-                        provider_folder=row[2],
-                        imap_uid_validity=None,
-                        imap_uid=None,
-                    ),
-                    provider_thread_id=row[3],
-                    provider_labels=tuple(row[4]),
-                    rfc_message_id=row[5],
-                    in_reply_to=row[6],
-                    references=tuple(row[7]),
-                    sender_address=row[8],
-                    sender_display=row[9],
-                    to_recipients=tuple(row[10]),
-                    cc_recipients=tuple(row[11]),
-                    subject=row[12],
-                    snippet=row[13],
-                    provider_timestamp_millis=int(
-                        provider_timestamp.timestamp() * 1_000
-                    ),
-                    unread=row[15],
-                    starred=row[16],
-                    body_state=BodyState(row[17]),
-                    metadata_hash=row[18],
-                )
-                record.validate_for(MailboxProvider.GOOGLE)
-                records.append(record)
-            return tuple(records)
         finally:
             if cursor is not None:
                 getattr(cursor, "close")()
