@@ -15,17 +15,17 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
 
+from api.priority.authority import PriorityMessageIdentity
 from api.priority.candidate_projection import (
     MAX_CURRENT_WINDOW_CANDIDATES,
-    CandidateProjectionInvalid,
     PriorityCandidatePopulationAuthority,
     populate_priority_candidates,
-    project_priority_candidate,
 )
 from api.priority.candidate_store import (
     CANDIDATE_MAX_MAILBOX_RECORDS,
     CANDIDATE_MAX_PAGE_RECORDS,
     PriorityCandidateMailboxScope,
+    PriorityCandidateScope,
     PriorityCandidateStore,
     build_runtime_candidate_store,
 )
@@ -34,7 +34,6 @@ from api.priority.mailbox_outbox import (
     PriorityMailboxOutboxAction,
     PriorityMailboxOutboxActionKind,
     plan_priority_mailbox_outbox_event,
-    priority_candidate_source_from_message_record,
 )
 from api.priority.store import (
     PriorityWorkflowStore,
@@ -43,10 +42,10 @@ from api.priority.store import (
 from cuevion_mailbox.preview_active_write import preview_active_write_enabled
 from cuevion_mailbox.repository_contract import (
     BootstrapState,
+    GmailMessageMetadataProjection,
     MailboxProvider,
     MailboxReadAuthority,
     MailboxStateSnapshot,
-    MessageRecord,
     OutboxEvent,
     OutboxMailboxScope,
     OutboxMessageSnapshot,
@@ -122,12 +121,12 @@ class _OutboxReader(Protocol):
     ) -> MailboxStateSnapshot | None:
         ...
 
-    def list_gmail_inbox_records(
+    def list_gmail_message_metadata(
         self,
         scope,
         *,
         limit: int,
-    ) -> Sequence[MessageRecord]:
+    ) -> Sequence[GmailMessageMetadataProjection]:
         ...
 
     def resolve_outbox_message(
@@ -189,7 +188,7 @@ def _priority_mailbox_scope(
 def _read_current_gmail_window(
     authority: PriorityCandidatePopulationAuthority,
     reader: _OutboxReader,
-) -> tuple[MessageRecord, ...]:
+) -> tuple[GmailMessageMetadataProjection, ...]:
     read_authority = MailboxReadAuthority(
         workspace_id=authority.workspace_id,
         owner_user_id=authority.user_id,
@@ -207,42 +206,46 @@ def _read_current_gmail_window(
     ):
         raise RuntimeError("Priority Gmail current window is unavailable")
 
-    records = tuple(
-        reader.list_gmail_inbox_records(
+    rows = tuple(
+        reader.list_gmail_message_metadata(
             state.scope,
             limit=MAX_CURRENT_WINDOW_CANDIDATES,
         )
     )
     if (
-        len(records) > MAX_CURRENT_WINDOW_CANDIDATES
-        or any(type(record) is not MessageRecord for record in records)
+        len(rows) > MAX_CURRENT_WINDOW_CANDIDATES
+        or any(type(row) is not GmailMessageMetadataProjection for row in rows)
     ):
         raise RuntimeError("invalid Priority Gmail current window")
     provider_ids: set[str] = set()
-    for record in records:
-        record.validate_for(MailboxProvider.GOOGLE)
-        provider_message_id = record.identity.provider_message_id
+    for row in rows:
+        provider_message_id = row.provider_message_id
         if (
-            type(provider_message_id) is not str
-            or not provider_message_id
-            or provider_message_id in provider_ids
-            or record.identity.provider_folder.casefold() != "inbox"
+            provider_message_id in provider_ids
+            or row.provider_folder.casefold() != "inbox"
         ):
             raise RuntimeError("invalid Priority Gmail current window")
         provider_ids.add(provider_message_id)
-    return records
+    return rows
 
 
 def _current_candidate_scope_keys(
     authority: PriorityCandidatePopulationAuthority,
-    sources: Sequence[dict],
+    provider_message_ids: frozenset[str],
 ) -> frozenset[bytes]:
     keys: set[bytes] = set()
-    for source in sources:
-        try:
-            scope, _snapshot = project_priority_candidate(authority, source)
-        except CandidateProjectionInvalid:
-            continue
+    for provider_message_id in provider_message_ids:
+        scope = PriorityCandidateScope(
+            workspace_id=authority.workspace_id,
+            user_id=authority.user_id,
+            mailbox_id=authority.mailbox_id,
+            mailbox_account_identity=authority.mailbox_account_identity,
+            provider="google",
+            identity=PriorityMessageIdentity(
+                provider="google",
+                provider_message_id=provider_message_id,
+            ),
+        )
         keys.add(scope.canonical_bytes())
     return frozenset(keys)
 
@@ -314,45 +317,40 @@ def _prepare_current_gmail_window(
     *,
     reader: _OutboxReader,
     candidate_store: PriorityCandidateStore,
-    workflow_store: PriorityWorkflowStore,
     now_millis: int,
     reconcile: bool,
 ) -> frozenset[str]:
-    records = _read_current_gmail_window(authority, reader)
-    current_ids = frozenset(
-        record.identity.provider_message_id
-        for record in records
-        if type(record.identity.provider_message_id) is str
-    )
+    try:
+        rows = _read_current_gmail_window(authority, reader)
+    except Exception:
+        logger.warning(
+            "Priority Gmail current window unavailable stage=durable_metadata"
+        )
+        raise
+
+    current_ids = frozenset(row.provider_message_id for row in rows)
     if not reconcile:
         return current_ids
 
-    sources = tuple(
-        priority_candidate_source_from_message_record(record)
-        for record in records
-    )
-    current_scope_keys = _current_candidate_scope_keys(authority, sources)
-    removed, invalid_count = _prune_historical_candidates(
-        authority,
-        current_scope_keys=current_scope_keys,
-        candidate_store=candidate_store,
-        now_millis=now_millis,
-    )
-    population = populate_priority_candidates(
-        authority,
-        list(sources),
-        store=candidate_store,
-        workflow_store=workflow_store,
-    )
+    try:
+        removed, invalid_count = _prune_historical_candidates(
+            authority,
+            current_scope_keys=_current_candidate_scope_keys(
+                authority,
+                current_ids,
+            ),
+            candidate_store=candidate_store,
+            now_millis=now_millis,
+        )
+    except Exception:
+        logger.warning("Priority Gmail current window unavailable stage=prune")
+        raise
+
     logger.info(
-        "Priority Gmail current window records=%s pruned=%s malformed_preserved=%s "
-        "written=%s skipped=%s reasons=%s",
-        len(records),
+        "Priority Gmail current window records=%s pruned=%s malformed_preserved=%s",
+        len(rows),
         removed,
         invalid_count,
-        population.written,
-        population.skipped,
-        ",".join(f"{code}:{count}" for code, count in population.reason_counts),
     )
     return current_ids
 
@@ -622,7 +620,6 @@ def run_preview_priority_mailbox_outbox_consumer(
         authority,
         reader=runtime_repositories.reader,
         candidate_store=runtime_candidate_store,
-        workflow_store=runtime_workflow_store,
         now_millis=now_millis,
         reconcile=reconcile_current_window,
     )
@@ -702,7 +699,6 @@ def run_production_priority_mailbox_outbox_consumer(
         authority,
         reader=runtime_repositories.reader,
         candidate_store=runtime_candidate_store,
-        workflow_store=runtime_workflow_store,
         now_millis=now_millis,
         reconcile=reconcile_current_window,
     )
