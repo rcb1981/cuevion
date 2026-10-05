@@ -26,7 +26,8 @@ from cuevion_auth.session_credentials import (
 
 
 SESSION_COOKIE_NAME = "__Host-cuevion_session"
-SESSION_TTL_SECONDS = 8 * 60 * 60
+SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
+SESSION_RENEWAL_THRESHOLD_SECONDS = 24 * 60 * 60
 SESSION_SCHEMA_VERSION = 1
 SESSION_KEY_PREFIX = "cuevion:auth:v1:session:"
 TRANSACTION_USE_KEY_PREFIX = "cuevion:auth:v1:tx-used:"
@@ -58,6 +59,16 @@ if not current or redis.call('PTTL', KEYS[1]) <= 0 then return 0 end
 if current == ARGV[2] then return 1 end
 if current ~= ARGV[1] then return 0 end
 redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')
+return 1
+"""
+
+_ROTATE_SESSION = """
+local current = redis.call('GET', KEYS[1])
+if not current or current ~= ARGV[1] or redis.call('PTTL', KEYS[1]) <= 0 then return 0 end
+if KEYS[1] == KEYS[2] or redis.call('EXISTS', KEYS[2]) ~= 0 then return 0 end
+local written = redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3], 'NX')
+if not written then return 0 end
+redis.call('DEL', KEYS[1])
 return 1
 """
 
@@ -522,6 +533,43 @@ class AuthSessionStore:
         if type(result) is not int or type(result) is bool or result not in (0, 1):
             raise SessionStoreUnavailable()
 
+    def rotate_session(
+        self,
+        old_lookup_digest: str,
+        expected_record: ServerSessionRecord,
+        new_lookup_digest: str,
+        new_record: ServerSessionRecord,
+        *,
+        now: int,
+    ) -> bool:
+        if (
+            type(now) is not int
+            or type(old_lookup_digest) is not str
+            or type(new_lookup_digest) is not str
+            or old_lookup_digest == new_lookup_digest
+            or type(expected_record) is not ServerSessionRecord
+            or type(new_record) is not ServerSessionRecord
+            or not expected_record.created_at <= now < expected_record.expires_at
+            or new_record.created_at != now
+            or new_record.expires_at - new_record.created_at != SESSION_TTL_SECONDS
+        ):
+            raise SessionConfigurationError()
+        result = self._command(
+            [
+                "EVAL",
+                _ROTATE_SESSION,
+                2,
+                SESSION_KEY_PREFIX + old_lookup_digest,
+                SESSION_KEY_PREFIX + new_lookup_digest,
+                _encode_record(expected_record),
+                _encode_record(new_record),
+                SESSION_TTL_SECONDS,
+            ]
+        )
+        if type(result) is not int or type(result) is bool or result not in (0, 1):
+            raise SessionStoreUnavailable()
+        return result == 1
+
     def consume_transaction(
         self,
         transaction_id: str,
@@ -795,6 +843,56 @@ def load_server_session(
     return record, lookup_digest
 
 
+def rotate_server_session(
+    store: AuthSessionStore,
+    *,
+    headers: object,
+    secret: str,
+    record: ServerSessionRecord,
+    now: int,
+    random_bytes: Callable[[int], bytes] = secrets.token_bytes,
+) -> tuple[ServerSessionRecord, str] | None:
+    if (
+        type(record) is not ServerSessionRecord
+        or type(now) is not int
+        or not record.created_at <= now < record.expires_at
+    ):
+        raise SessionConfigurationError()
+    current = derive_session_credential(headers, secret)
+    if current is None:
+        return None
+    raw_secret = random_bytes(32)
+    raw_session_id = random_bytes(32)
+    if type(raw_secret) is not bytes or len(raw_secret) != 32:
+        raise SessionConfigurationError()
+    if type(raw_session_id) is not bytes or len(raw_session_id) != 32:
+        raise SessionConfigurationError()
+    cookie_value = f"v1.1.1.1.{_base64url(raw_secret)}"
+    derived = _credential_for_cookie_value(cookie_value, secret)
+    renewed = ServerSessionRecord(
+        schema_version=record.schema_version,
+        session_id=_base64url(raw_session_id),
+        user_id=record.user_id,
+        workspace_id=record.workspace_id,
+        security_epoch=record.security_epoch,
+        issuer=record.issuer,
+        subject=record.subject,
+        created_at=now,
+        expires_at=now + SESSION_TTL_SECONDS,
+        binding_digest=derived.credential_binding_digest,
+        workspace_role=record.workspace_role,
+    )
+    if not store.rotate_session(
+        current.credential_lookup_digest,
+        record,
+        derived.credential_lookup_digest,
+        renewed,
+        now=now,
+    ):
+        return None
+    return renewed, build_session_cookie(cookie_value)
+
+
 def revoke_request_session(
     store: AuthSessionStore,
     *,
@@ -809,6 +907,7 @@ def revoke_request_session(
 __all__ = (
     "SESSION_COOKIE_NAME",
     "SESSION_TTL_SECONDS",
+    "SESSION_RENEWAL_THRESHOLD_SECONDS",
     "TEAM_INVITE_CONTINUATION_KEY_PREFIX",
     "TEAM_INVITE_CONTINUATION_TTL_SECONDS",
     "SessionStoreUnavailable",
@@ -823,6 +922,7 @@ __all__ = (
     "build_kv_command_transport",
     "build_runtime_session_store",
     "create_server_session",
+    "rotate_server_session",
     "load_server_session",
     "revoke_request_session",
 )
