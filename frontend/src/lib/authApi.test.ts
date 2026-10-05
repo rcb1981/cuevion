@@ -283,6 +283,46 @@ assert.equal(appSource.includes('authenticationContext="collaboration"'), true);
 assert.equal(appSource.includes('authenticationContext="auth0"'), true);
 assert.equal(appSource.includes("normalizeCollaborationUser"), true);
 assert.equal(appSource.includes("memberSessionProbeRef.current ??= loadStartupSession()"), true);
+
+const authSessionBoundaryRegion = sourceBetween(
+  appSource,
+  "function Auth0SessionBoundary({",
+  "export default function App()",
+);
+assert.equal(
+  appSource.includes("const AUTH_SESSION_KEEPALIVE_INTERVAL_MS = 30 * 60 * 1000;"),
+  true,
+);
+assert.equal(
+  appSource.includes('const AUTH_SESSION_RECHECK_EVENT = "cuevion:auth-session-recheck";'),
+  true,
+);
+assert.equal(
+  authSessionBoundaryRegion.includes('session?.status !== "authenticated"'),
+  true,
+);
+assert.equal(
+  authSessionBoundaryRegion.includes(
+    "window.setInterval(() => {\n      void refreshSession();\n    }, AUTH_SESSION_KEEPALIVE_INTERVAL_MS)",
+  ),
+  true,
+);
+assert.equal(
+  authSessionBoundaryRegion.includes('window.addEventListener("focus", handleFocus)'),
+  true,
+);
+assert.equal(
+  authSessionBoundaryRegion.includes(
+    'window.addEventListener(AUTH_SESSION_RECHECK_EVENT, handleFocus)',
+  ),
+  true,
+);
+assert.equal(
+  authSessionBoundaryRegion.includes(
+    'document.addEventListener("visibilitychange", handleVisibilityChange)',
+  ),
+  true,
+);
 assert.equal(appSource.includes("if (!sessionUser) {\n    return <Auth0LoginView />;"), true);
 
 const collaborationNormalizerRegion = sourceBetween(

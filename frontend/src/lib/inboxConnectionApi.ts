@@ -218,9 +218,27 @@ export type ConnectInboxRequest =
 const AUTH_SESSION_RECHECK_EVENT = "cuevion:auth-session-recheck";
 
 function requestAuthSessionRecheck() {
-  if (typeof window !== "undefined") {
-    window.dispatchEvent(new Event(AUTH_SESSION_RECHECK_EVENT));
+  try {
+    if (
+      typeof window !== "undefined" &&
+      typeof window.dispatchEvent === "function"
+    ) {
+      window.dispatchEvent(new Event(AUTH_SESSION_RECHECK_EVENT));
+    }
+  } catch {
+    // Session recheck notification must never replace the original API result.
   }
+}
+
+async function fetchProtectedApi(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  const response = await globalThis.fetch(input, init);
+  if (response.status === 401) {
+    requestAuthSessionRecheck();
+  }
+  return response;
 }
 
 export type ConnectInboxResponse = {
@@ -990,7 +1008,7 @@ export async function mutateInboxMessageAction(
       }
     : request;
   try {
-    const response = await fetch("/api/inboxes/message-action", {
+    const response = await fetchProtectedApi("/api/inboxes/message-action", {
       method: "POST",
       credentials: "include",
       headers: {
@@ -2618,7 +2636,7 @@ export async function fetchGmailTrash(
   }
 
   try {
-    const response = await fetch("/api/inboxes/fetch-trash", {
+    const response = await fetchProtectedApi("/api/inboxes/fetch-trash", {
       method: "POST",
       credentials: "include",
       cache: "no-store",
@@ -2689,7 +2707,7 @@ export async function mutateProviderTrashMessage(
   }
 
   try {
-    const response = await fetch("/api/inboxes/message-action", {
+    const response = await fetchProtectedApi("/api/inboxes/message-action", {
       method: "POST",
       credentials: "include",
       cache: "no-store",
@@ -2759,7 +2777,7 @@ export async function mutateProviderArchiveMessage(
     );
   }
   try {
-    const response = await fetch("/api/inboxes/message-action", {
+    const response = await fetchProtectedApi("/api/inboxes/message-action", {
       method: "POST",
       credentials: "include",
       cache: "no-store",
@@ -2835,7 +2853,7 @@ export async function fetchProviderArchive(
     );
   }
   try {
-    const response = await fetch("/api/inboxes/fetch-archive", {
+    const response = await fetchProtectedApi("/api/inboxes/fetch-archive", {
       method: "POST",
       credentials: "include",
       cache: "no-store",
@@ -2991,7 +3009,7 @@ export async function connectInboxWithImap(
   signal?: AbortSignal,
 ): Promise<ConnectInboxResponse> {
   try {
-    const response = await fetch("/api/inboxes/connect-imap", {
+    const response = await fetchProtectedApi("/api/inboxes/connect-imap", {
       method: "POST",
       credentials: "include",
       headers: {
@@ -3044,7 +3062,7 @@ export async function connectInboxWithOAuth(
   request: OAuthInboxRequest,
 ): Promise<OAuthInboxResponse> {
   try {
-    const response = await fetch("/api/inboxes/connect-oauth", {
+    const response = await fetchProtectedApi("/api/inboxes/connect-oauth", {
       method: "POST",
       credentials: "include",
       headers: {
@@ -3373,7 +3391,7 @@ export async function sendGmailMessage(
   }, 45000);
 
   try {
-    const response = await fetch("/api/inboxes/send-gmail", {
+    const response = await fetchProtectedApi("/api/inboxes/send-gmail", {
       method: "POST",
       credentials: "include",
       headers: {
@@ -3548,7 +3566,7 @@ export async function requestPrioritySemanticAssessment(
   }, PRIORITY_SEMANTIC_ASSESSMENT_TIMEOUT_MS);
 
   try {
-    const response = await fetch("/api/priority/semantic-assessment", {
+    const response = await fetchProtectedApi("/api/priority/semantic-assessment", {
       method: "POST",
       credentials: "include",
       cache: "no-store",
@@ -3639,7 +3657,7 @@ export async function requestPrioritySemanticNewInboundAssessment(
   }, PRIORITY_SEMANTIC_ASSESSMENT_TIMEOUT_MS);
 
   try {
-    const response = await fetch("/api/priority/semantic-assessment", {
+    const response = await fetchProtectedApi("/api/priority/semantic-assessment", {
       method: "POST",
       credentials: "include",
       cache: "no-store",
@@ -3730,7 +3748,7 @@ export async function requestPrioritySemanticNewInboundHydration(
   }, PRIORITY_SEMANTIC_ASSESSMENT_TIMEOUT_MS);
 
   try {
-    const response = await fetch("/api/priority/semantic-assessment", {
+    const response = await fetchProtectedApi("/api/priority/semantic-assessment", {
       method: "POST",
       credentials: "include",
       cache: "no-store",
@@ -3831,7 +3849,7 @@ export async function requestPrioritySemanticNewInboundDismissal(
   }, PRIORITY_SEMANTIC_ASSESSMENT_TIMEOUT_MS);
 
   try {
-    const response = await fetch("/api/priority/semantic-assessment", {
+    const response = await fetchProtectedApi("/api/priority/semantic-assessment", {
       method: "POST",
       credentials: "include",
       cache: "no-store",
@@ -3941,7 +3959,7 @@ export async function downloadAttachment(
         attachmentId: request.attachmentId,
       }
     : request;
-  const response = await fetch("/api/inboxes/download-attachment", {
+  const response = await fetchProtectedApi("/api/inboxes/download-attachment", {
     method: "POST",
     credentials: "include",
     headers: {
@@ -3977,7 +3995,7 @@ export async function getMailboxCredentialStatuses(
     const params = new URLSearchParams({
       mailboxIds: normalizedMailboxIds.join(","),
     });
-    const response = await fetch(`/api/inboxes/credentials?${params.toString()}`, {
+    const response = await fetchProtectedApi(`/api/inboxes/credentials?${params.toString()}`, {
       method: "GET",
       credentials: "include",
       cache: "no-store",
@@ -4017,7 +4035,7 @@ async function continueGmailBootstrapUntilComplete(
     let transientRetryIndex = 0;
 
     for (;;) {
-      const response = await fetch("/api/inboxes/continue-gmail-bootstrap", {
+      const response = await fetchProtectedApi("/api/inboxes/continue-gmail-bootstrap", {
         method: "POST",
         credentials: "include",
         headers: {
@@ -4085,7 +4103,7 @@ async function continueGmailPriorityMaintenance(
 
   const continuation = (async () => {
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      const response = await fetch("/api/inboxes/continue-gmail-priority", {
+      const response = await fetchProtectedApi("/api/inboxes/continue-gmail-priority", {
         method: "POST",
         credentials: "include",
         headers: {
@@ -4260,7 +4278,7 @@ async function performGmailInboxFetch(
   request: FetchGmailInboxRequest,
   knownBodyProviderMessageIds?: string[],
 ) {
-  const response = await fetch("/api/inboxes/fetch-gmail", {
+  const response = await fetchProtectedApi("/api/inboxes/fetch-gmail", {
     method: "POST",
     credentials: "include",
     headers: {
@@ -4380,7 +4398,7 @@ export async function fetchGmailThread(
   request: FetchGmailThreadRequest,
 ): Promise<FetchGmailThreadResponse> {
   try {
-    const response = await fetch("/api/inboxes/fetch-gmail-thread", {
+    const response = await fetchProtectedApi("/api/inboxes/fetch-gmail-thread", {
       method: "POST",
       credentials: "include",
       cache: "no-store",
