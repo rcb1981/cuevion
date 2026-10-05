@@ -77,6 +77,7 @@ class AuthenticatedMemberSessionContext:
     subject: str
     session_id: str
     credential_digest: str
+    security_epoch: int
     issued_at: int
     expires_at: int
 
@@ -93,6 +94,8 @@ class AuthenticatedMemberSessionContext:
             or not self.session_id
             or type(self.credential_digest) is not str
             or not self.credential_digest
+            or type(self.security_epoch) is not int
+            or self.security_epoch < 1
             or type(self.issued_at) is not int
             or type(self.expires_at) is not int
             or not 0 <= self.issued_at < self.expires_at
@@ -799,6 +802,7 @@ def resolve_authenticated_member_session(
                 subject=record.subject,
                 session_id=record.session_id,
                 credential_digest=record.binding_digest,
+                security_epoch=record.security_epoch,
                 issued_at=record.created_at,
                 expires_at=record.expires_at,
             ),
@@ -841,15 +845,18 @@ def session_response(
     now: int | None = None,
     session_store_factory: Callable[[Mapping[str, str]], session_store.AuthSessionStore] = session_store.build_runtime_session_store,
     authority_factory: Callable[[Mapping[str, str]], object] = account_authority.build_runtime_account_authority,
+    random_bytes: Callable[[int], bytes] = secrets.token_bytes,
 ) -> http.PublicResponse:
+    source = os.environ if environment is None else environment
     try:
         http.require_method(method, "GET")
         headers = http.validate_header_pairs(raw_headers)
         http.require_canonical_host(headers)
-        resolution = resolve_authenticated_member(
+        timestamp = int(time.time()) if now is None else now
+        resolution = resolve_authenticated_member_session(
             headers,
-            environment=environment,
-            now=now,
+            environment=source,
+            now=timestamp,
             session_store_factory=session_store_factory,
             authority_factory=authority_factory,
         )
@@ -862,9 +869,47 @@ def session_response(
         return _unauthenticated_response(set_cookies=resolution.set_cookies)
     if resolution.outcome is MemberResolutionOutcome.UNAVAILABLE:
         return _authentication_unavailable_response(set_cookies=resolution.set_cookies)
-    member = resolution.member
-    if member is None:
+    session = resolution.session
+    if session is None:
         return _authentication_unavailable_response()
+
+    set_cookies = resolution.set_cookies
+    if session.expires_at - timestamp <= session_store.SESSION_RENEWAL_THRESHOLD_SECONDS:
+        try:
+            store = session_store_factory(source)
+            secret = session_store.resolve_session_secret(source)
+            current_record = session_store.ServerSessionRecord(
+                schema_version=session.authentication_version,
+                session_id=session.session_id,
+                user_id=session.member.user_id,
+                workspace_id=session.member.workspace_id,
+                security_epoch=session.security_epoch,
+                issuer=session.issuer,
+                subject=session.subject,
+                created_at=session.issued_at,
+                expires_at=session.expires_at,
+                binding_digest=session.credential_digest,
+                workspace_role=session.member.membership_role,
+            )
+            renewed = session_store.rotate_server_session(
+                store,
+                headers=headers,
+                secret=secret,
+                record=current_record,
+                now=timestamp,
+                random_bytes=random_bytes,
+            )
+            if renewed is not None:
+                _renewed_record, renewed_cookie = renewed
+                set_cookies = (*set_cookies, renewed_cookie)
+        except (
+            session_store.SessionStoreUnavailable,
+            session_store.SessionConfigurationError,
+            ValueError,
+        ):
+            return _authentication_unavailable_response()
+
+    member = session.member
     return http.json_response(
         200,
         {
@@ -877,6 +922,7 @@ def session_response(
             "userType": member.user_type,
             "workspaceRole": member.membership_role,
         },
+        set_cookies=set_cookies,
     )
 
 

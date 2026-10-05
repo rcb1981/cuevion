@@ -4,6 +4,7 @@ import path from "node:path";
 
 let fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
 const originalFetch = globalThis.fetch;
+const originalWindow = (globalThis as any).window;
 
 globalThis.fetch = (async (url: string, init?: RequestInit) => {
   fetchCalls.push({ url, init });
@@ -42,6 +43,52 @@ async function run() {
   assert.deepEqual(await api.fetchGmailThread(request), {
     ok: false,
     error: { code: "gmail_thread_not_found", message: "Not found." },
+  });
+
+  let sessionRecheckEvents = 0;
+  (globalThis as any).window = {
+    dispatchEvent(event: Event) {
+      if (event.type === "cuevion:auth-session-recheck") {
+        sessionRecheckEvents += 1;
+      }
+      return true;
+    },
+  };
+  let unauthorizedAttempts = 0;
+  globalThis.fetch = (async () => {
+    unauthorizedAttempts += 1;
+    return {
+      ok: false,
+      status: 401,
+      json: async () => ({
+        ok: false,
+        error: { code: "session_expired", message: "Sign in again." },
+      }),
+    } as Response;
+  }) as typeof fetch;
+  assert.deepEqual(await api.fetchGmailThread(request), {
+    ok: false,
+    error: { code: "session_expired", message: "Sign in again." },
+  });
+  assert.equal(sessionRecheckEvents, 1, "401 must request one auth session recheck");
+  assert.equal(unauthorizedAttempts, 1, "401 handling must not retry");
+
+  (globalThis as any).window = {
+    dispatchEvent() {
+      throw new Error("session recheck listener unavailable");
+    },
+  };
+  globalThis.fetch = (async () => ({
+    ok: false,
+    status: 401,
+    json: async () => ({
+      ok: false,
+      error: { code: "session_expired", message: "Sign in again." },
+    }),
+  })) as typeof fetch;
+  assert.deepEqual(await api.fetchGmailThread(request), {
+    ok: false,
+    error: { code: "session_expired", message: "Sign in again." },
   });
 
   let networkAttempts = 0;
@@ -110,4 +157,5 @@ run()
   })
   .finally(() => {
     globalThis.fetch = originalFetch;
+    (globalThis as any).window = originalWindow;
   });

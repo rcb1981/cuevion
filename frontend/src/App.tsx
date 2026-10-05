@@ -98,6 +98,8 @@ const MAILBOX_TITLE_OVERRIDES_STORAGE_KEY = "cuevion-mailbox-title-overrides";
 const MAILBOX_FOCUS_PREFERENCE_OVERRIDES_STORAGE_KEY =
   "cuevion-mailbox-focus-preference-overrides";
 const SMART_FOLDERS_STORAGE_KEY = "cuevion-smart-folders";
+const AUTH_SESSION_KEEPALIVE_INTERVAL_MS = 30 * 60 * 1000;
+const AUTH_SESSION_RECHECK_EVENT = "cuevion:auth-session-recheck";
 const premiumAccessButtonClass =
   "inline-flex h-10 items-center justify-center rounded-full border border-[rgba(218,194,142,0.56)] bg-[linear-gradient(180deg,rgba(237,222,184,0.98),rgba(199,166,104,0.96))] px-5 text-[0.72rem] font-semibold uppercase tracking-[0.15em] text-[rgba(29,58,48,0.96)] shadow-[inset_0_1px_0_rgba(255,252,240,0.66),inset_0_-1px_0_rgba(119,82,38,0.14),0_10px_22px_rgba(15,36,30,0.18)] transition-[background-image,border-color,transform,box-shadow] duration-150 hover:border-[rgba(231,207,156,0.66)] hover:bg-[linear-gradient(180deg,rgba(242,228,192,0.98),rgba(184,149,88,0.98))] hover:shadow-[inset_0_1px_0_rgba(255,252,240,0.72),inset_0_-1px_0_rgba(99,68,32,0.16),0_12px_26px_rgba(15,36,30,0.22)] hover:-translate-y-px active:translate-y-0 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(237,222,184,0.78)] focus-visible:ring-offset-2 focus-visible:ring-offset-[rgba(38,66,56,1)] disabled:cursor-not-allowed disabled:opacity-60";
 
@@ -5228,13 +5230,70 @@ function Auth0SessionBoundary({
 }) {
   const [session, setSession] = useState<StartupSessionResult | null>(null);
   const probe = useRef<Promise<StartupSessionResult> | null>(null);
+
   useEffect(() => {
     let cancelled = false;
     void (probe.current ??= loadStartupSession()).then((result) => {
       if (!cancelled) setSession(result);
     });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  useEffect(() => {
+    if (session?.status !== "authenticated") {
+      return;
+    }
+
+    let cancelled = false;
+    let inFlight: Promise<StartupSessionResult> | null = null;
+
+    const refreshSession = () => {
+      if (inFlight) {
+        return inFlight;
+      }
+      inFlight = loadStartupSession()
+        .then((result) => {
+          if (
+            !cancelled &&
+            (result.status === "authenticated" || result.status === "unauthenticated")
+          ) {
+            setSession(result);
+          }
+          return result;
+        })
+        .finally(() => {
+          inFlight = null;
+        });
+      return inFlight;
+    };
+
+    const intervalId = window.setInterval(() => {
+      void refreshSession();
+    }, AUTH_SESSION_KEEPALIVE_INTERVAL_MS);
+    const handleFocus = () => {
+      void refreshSession();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void refreshSession();
+      }
+    };
+
+    window.addEventListener("focus", handleFocus);
+    window.addEventListener(AUTH_SESSION_RECHECK_EVENT, handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", handleFocus);
+      window.removeEventListener(AUTH_SESSION_RECHECK_EVENT, handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [session?.status]);
+
   return <Auth0SessionRoute session={session} appRoute={appRoute} onExitPreview={onExitPreview} />;
 }
 
