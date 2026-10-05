@@ -106,6 +106,20 @@ class MemoryCommands:
             existed = key in self.values
             self.values.pop(key, None)
             return {"result": 1 if existed else 0}
+        if operation == "EVAL" and command[2] == 2:
+            old_key = str(command[3])
+            new_key = str(command[4])
+            current = self.values.get(old_key)
+            if (
+                current is None
+                or current != command[5]
+                or old_key == new_key
+                or new_key in self.values
+            ):
+                return {"result": 0}
+            self.values[new_key] = str(command[6])
+            self.values.pop(old_key, None)
+            return {"result": 1}
         raise AssertionError(operation)
 
 
@@ -638,6 +652,87 @@ class SessionAndLogoutTests(unittest.TestCase):
         self.assertEqual(authority.user_calls, [(USER_ID, WORKSPACE_ID)])
         self.assertNotIn("issuer", _json(response))
         self.assertNotIn("subject", _json(response))
+
+    def test_session_revalidation_rotates_near_expiry(self):
+        commands, store, headers = self._stored_session()
+        authority = FakeAuthority(user_result=_user_result())
+        renew_at = (
+            NOW
+            + session_store.SESSION_TTL_SECONDS
+            - session_store.SESSION_RENEWAL_THRESHOLD_SECONDS
+        )
+        renewal_values = iter((b"E" * 32, b"F" * 32))
+        response = runtime.session_response(
+            "GET",
+            headers,
+            environment=ENVIRONMENT,
+            now=renew_at,
+            session_store_factory=lambda _environment: store,
+            authority_factory=lambda _environment: authority,
+            random_bytes=lambda length: next(renewal_values),
+        )
+        self.assertEqual(response.status, 200)
+        cookies = [
+            value
+            for value in _header(response, "set-cookie")
+            if value.startswith(session_store.SESSION_COOKIE_NAME + "=")
+        ]
+        self.assertEqual(len(cookies), 1)
+        self.assertIn("Max-Age=604800", cookies[0])
+        self.assertEqual(
+            [command[0] for command in commands.commands if command[0] == "EVAL"],
+            ["EVAL"],
+        )
+
+        old_loaded, _old_lookup = session_store.load_server_session(
+            store,
+            headers=SimpleNamespace(raw_items=lambda: list(headers)),
+            secret=ENVIRONMENT["CUEVION_AUTH_SESSION_SECRET"],
+            now=renew_at + 1,
+        )
+        self.assertIsNone(old_loaded)
+
+        renewed_pair = cookies[0].split(";", 1)[0]
+        renewed_headers = (
+            ("host", "app.cuevion.com"),
+            ("cookie", renewed_pair),
+        )
+        renewed_loaded, _renewed_lookup = session_store.load_server_session(
+            store,
+            headers=SimpleNamespace(raw_items=lambda: list(renewed_headers)),
+            secret=ENVIRONMENT["CUEVION_AUTH_SESSION_SECRET"],
+            now=renew_at + 1,
+        )
+        self.assertIsNotNone(renewed_loaded)
+        self.assertEqual(renewed_loaded.created_at, renew_at)
+        self.assertEqual(
+            renewed_loaded.expires_at,
+            renew_at + session_store.SESSION_TTL_SECONDS,
+        )
+        self.assertEqual(renewed_loaded.user_id, USER_ID)
+        self.assertEqual(renewed_loaded.workspace_id, WORKSPACE_ID)
+        self.assertEqual(renewed_loaded.workspace_role, "member")
+
+    def test_session_revalidation_does_not_rotate_before_threshold(self):
+        commands, store, headers = self._stored_session()
+        response = runtime.session_response(
+            "GET",
+            headers,
+            environment=ENVIRONMENT,
+            now=(
+                NOW
+                + session_store.SESSION_TTL_SECONDS
+                - session_store.SESSION_RENEWAL_THRESHOLD_SECONDS
+                - 1
+            ),
+            session_store_factory=lambda _environment: store,
+            authority_factory=lambda _environment: FakeAuthority(
+                user_result=_user_result()
+            ),
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(_header(response, "set-cookie"), [])
+        self.assertNotIn("EVAL", [command[0] for command in commands.commands])
 
     def test_missing_record_and_security_epoch_mismatch_clear_cookie(self):
         commands, store, headers = self._stored_session()
