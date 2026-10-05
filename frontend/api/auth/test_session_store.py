@@ -48,6 +48,28 @@ class MemoryCommands:
             self.expirations.pop(key, None)
             return {"result": 1 if existed else 0}
         if operation == "EVAL":
+            if command[2] == 2:
+                new_key = command[4]
+                if (
+                    new_key in self.expirations
+                    and self.expirations[new_key] <= self.now
+                ):
+                    self.values.pop(new_key, None)
+                    self.expirations.pop(new_key, None)
+                current = self.values.get(key)
+                if (
+                    current is None
+                    or self.expirations.get(key, self.now) <= self.now
+                    or current != command[5]
+                    or key == new_key
+                    or new_key in self.values
+                ):
+                    return {"result": 0}
+                self.values[new_key] = command[6]
+                self.expirations[new_key] = self.now + int(command[7])
+                self.values.pop(key, None)
+                self.expirations.pop(key, None)
+                return {"result": 1}
             current = self.values.get(key)
             if current is None or self.expirations.get(key, self.now) <= self.now:
                 return {"result": 0}
@@ -165,12 +187,12 @@ class ServerSessionTests(unittest.TestCase):
                     _new_session(new_commands, workspace_role=role)
                 self.assertEqual(new_commands.commands, [])
 
-    def test_cookie_flags_and_eight_hour_lifetime_are_exact(self):
+    def test_cookie_flags_and_seven_day_lifetime_are_exact(self):
         commands = MemoryCommands()
         _store, _record, cookie, _headers = _new_session(commands)
         self.assertIn("__Host-cuevion_session=", cookie)
         self.assertIn("Path=/", cookie)
-        self.assertIn("Max-Age=28800", cookie)
+        self.assertIn("Max-Age=604800", cookie)
         self.assertIn("Secure", cookie)
         self.assertIn("HttpOnly", cookie)
         self.assertIn("SameSite=Lax", cookie)
@@ -190,6 +212,54 @@ class ServerSessionTests(unittest.TestCase):
         )
         self.assertIsNone(missing)
         self.assertEqual(missing_lookup, lookup)
+
+    def test_atomic_rotation_replaces_old_credential_and_preserves_authority(self):
+        commands = MemoryCommands()
+        store, record, _cookie, headers = _new_session(commands)
+        commands.now = 2_000
+        values = iter((bytes([6]) * 32, bytes([7]) * 32))
+        renewed = session_store.rotate_server_session(
+            store,
+            headers=headers,
+            secret=SECRET,
+            record=record,
+            now=2_000,
+            random_bytes=lambda length: next(values),
+        )
+        self.assertIsNotNone(renewed)
+        renewed_record, renewed_cookie = renewed
+        self.assertEqual(renewed_record.user_id, record.user_id)
+        self.assertEqual(renewed_record.workspace_id, record.workspace_id)
+        self.assertEqual(renewed_record.security_epoch, record.security_epoch)
+        self.assertEqual(renewed_record.issuer, record.issuer)
+        self.assertEqual(renewed_record.subject, record.subject)
+        self.assertEqual(renewed_record.workspace_role, record.workspace_role)
+        self.assertEqual(renewed_record.created_at, 2_000)
+        self.assertEqual(
+            renewed_record.expires_at,
+            2_000 + session_store.SESSION_TTL_SECONDS,
+        )
+        self.assertNotEqual(renewed_record.session_id, record.session_id)
+
+        old_loaded, _old_lookup = session_store.load_server_session(
+            store, headers=headers, secret=SECRET, now=2_001
+        )
+        self.assertIsNone(old_loaded)
+        new_headers = Headers(renewed_cookie.split(";", 1)[0])
+        new_loaded, _new_lookup = session_store.load_server_session(
+            store, headers=new_headers, secret=SECRET, now=2_001
+        )
+        self.assertEqual(new_loaded, renewed_record)
+        self.assertEqual(
+            len(
+                [
+                    command
+                    for command in commands.commands
+                    if command[0] == "EVAL" and command[2] == 2
+                ]
+            ),
+            1,
+        )
 
     def test_expired_record_is_deleted(self):
         commands = MemoryCommands()
