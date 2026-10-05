@@ -215,6 +215,14 @@ export type ConnectInboxRequest =
   | ReconnectInboxRequest
   | RefreshConnectInboxRequest;
 
+const AUTH_SESSION_RECHECK_EVENT = "cuevion:auth-session-recheck";
+
+function requestAuthSessionRecheck() {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event(AUTH_SESSION_RECHECK_EVENT));
+  }
+}
+
 export type ConnectInboxResponse = {
   ok: boolean;
   messages?: LiveInboxMessageSnapshot[];
@@ -2621,6 +2629,13 @@ export async function fetchGmailTrash(
     });
     const payload = await readGmailTrashFetchResponsePayload(response);
     if (response.status !== 200) {
+      if (response.status === 401) {
+        requestAuthSessionRecheck();
+        return gmailTrashFetchFailure(
+          "session_expired",
+          "Your session has expired. Please sign in again.",
+        );
+      }
       return gmailTrashFetchErrorFromPayload(payload) ?? gmailTrashFetchFailure(
         "gmail_trash_fetch_response_invalid",
         "Trash did not return a valid Gmail provider snapshot.",
@@ -4274,6 +4289,16 @@ export async function fetchGmailInbox(
       bodyProof,
     );
     if (!response.ok) {
+      if (response.status === 401) {
+        requestAuthSessionRecheck();
+        return {
+          ok: false,
+          error: {
+            code: "session_expired",
+            message: "Your session has expired. Please sign in again.",
+          },
+        };
+      }
       return {
         ok: false,
         error: payload.error ?? {
@@ -4287,6 +4312,16 @@ export async function fetchGmailInbox(
     if (payload.gmailDurableMetadataOnly === true && resolvedPayload === null) {
       ({ response, payload } = await performGmailInboxFetch(request));
       if (!response.ok) {
+        if (response.status === 401) {
+          requestAuthSessionRecheck();
+          return {
+            ok: false,
+            error: {
+              code: "session_expired",
+              message: "Your session has expired. Please sign in again.",
+            },
+          };
+        }
         return {
           ok: false,
           error: payload.error ?? {
