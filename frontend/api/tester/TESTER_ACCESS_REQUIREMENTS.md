@@ -46,9 +46,9 @@ Before the first Production Tester Invite is issued:
 
 Preview Tester Access is disabled unless Preview has a separately reviewed, isolated Auth0 tenant/trust configuration, account reader/writer database, registration-authority secret, session authority, and Tester Invite durable store/namespace. Production Tester Invite tokens or registration grants must never authenticate Preview, and Preview credentials must never authenticate Production.
 
-A shared generic KV integration is not sufficient evidence of isolation. If the same physical KV service is retained for multiple environments, a separately reviewed environment-specific namespace and all related session/registration boundaries must prove that cross-environment reads and writes are impossible.
+Tester Invite durable keys are namespaced by the platform-controlled `VERCEL_ENV` value. Production, Preview and Development therefore use disjoint keyspaces even when the underlying KV integration is shared. An optional `CUEVION_TESTER_AUTHORITY_NAMESPACE` is accepted only when it exactly matches `VERCEL_ENV`; a mismatch fails closed.
 
-Until those Preview requirements are satisfied, `CUEVION_TESTER_ADMIN_USER_IDS` must not be configured for Preview.
+Until Preview has the remaining isolated Auth0/account authority required for Tester authentication, `CUEVION_TESTER_ADMIN_USER_IDS` must not be configured for Preview. Public lookup in Preview can only access the Preview Tester Invite namespace and cannot read a Production Tester Invite record.
 
 ### Early Access handoff
 

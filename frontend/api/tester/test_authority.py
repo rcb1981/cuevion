@@ -87,7 +87,10 @@ def build(clock=None):
     memory = MemoryRedis()
     runtime = authority.RuntimeTesterInviteAuthority(
         memory,
-        environment={"CUEVION_TESTER_ADMIN_USER_IDS": ADMIN},
+        environment={
+            "CUEVION_TESTER_ADMIN_USER_IDS": ADMIN,
+            "VERCEL_ENV": "production",
+        },
         now_ms=clock or Clock(),
         random_bytes=FixedRandom(),
     )
@@ -187,6 +190,83 @@ class AuthorityTests(unittest.TestCase):
                 user_id=OTHER,
                 workspace_id=WORKSPACE,
             )
+
+    def test_missing_or_mismatched_environment_namespace_fails_closed(self):
+        memory = MemoryRedis()
+        for environment in (
+            {"CUEVION_TESTER_ADMIN_USER_IDS": ADMIN},
+            {
+                "CUEVION_TESTER_ADMIN_USER_IDS": ADMIN,
+                "VERCEL_ENV": "preview",
+                "CUEVION_TESTER_AUTHORITY_NAMESPACE": "production",
+            },
+        ):
+            runtime = authority.RuntimeTesterInviteAuthority(
+                memory,
+                environment=environment,
+                now_ms=Clock(),
+                random_bytes=FixedRandom(),
+            )
+            with self.assertRaises(authority.TesterInviteAuthorityError) as error:
+                runtime.issue_invitation(
+                    actor_user_id=ADMIN,
+                    invitee_email="tester@example.com",
+                    invitee_name="Tester",
+                )
+            self.assertEqual(
+                error.exception.code,
+                "tester_authority_unavailable",
+            )
+        self.assertEqual(memory.values, {})
+
+    def test_platform_namespaces_isolate_shared_kv_store(self):
+        memory = MemoryRedis()
+        production = authority.RuntimeTesterInviteAuthority(
+            memory,
+            environment={
+                "CUEVION_TESTER_ADMIN_USER_IDS": ADMIN,
+                "VERCEL_ENV": "production",
+            },
+            now_ms=Clock(),
+            random_bytes=FixedRandom(),
+        )
+        preview = authority.RuntimeTesterInviteAuthority(
+            memory,
+            environment={
+                "CUEVION_TESTER_ADMIN_USER_IDS": ADMIN,
+                "VERCEL_ENV": "preview",
+            },
+            now_ms=Clock(),
+            random_bytes=FixedRandom(),
+        )
+
+        production_issue = production.issue_invitation(
+            actor_user_id=ADMIN,
+            invitee_email="tester@example.com",
+            invitee_name="Tester",
+        )
+        preview_issue = preview.issue_invitation(
+            actor_user_id=ADMIN,
+            invitee_email="tester@example.com",
+            invitee_name="Tester",
+        )
+
+        self.assertEqual(
+            production_issue["rawToken"],
+            preview_issue["rawToken"],
+        )
+        self.assertTrue(
+            any(
+                key.startswith("cuevion:tester:v1:production:")
+                for key in memory.values
+            )
+        )
+        self.assertTrue(
+            any(
+                key.startswith("cuevion:tester:v1:preview:")
+                for key in memory.values
+            )
+        )
 
     def test_expiry_fails_closed(self):
         clock = Clock()

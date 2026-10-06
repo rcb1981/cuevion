@@ -31,9 +31,12 @@ TESTER_INVITE_STATUSES = frozenset({"invited", "provisioned", "cancelled"})
 _KV_URL_ENV = "KV_REST_API_URL"
 _KV_TOKEN_ENV = "KV_REST_API_TOKEN"
 _ADMIN_IDS_ENV = "CUEVION_TESTER_ADMIN_USER_IDS"
+_NAMESPACE_ENV = "CUEVION_TESTER_AUTHORITY_NAMESPACE"
+_PLATFORM_ENV = "VERCEL_ENV"
+_ALLOWED_NAMESPACES = frozenset({"production", "preview", "development"})
 _KV_TIMEOUT_SECONDS = 10
 _KV_MAX_RESPONSE_BYTES = 128 * 1024
-_PREFIX = "cuevion:tester:v1"
+_BASE_PREFIX = "cuevion:tester:v1"
 
 _INVITATION_ID_RE = re.compile(r"tsti_[A-Za-z0-9_-]{22}")
 _TOKEN_SECRET_RE = re.compile(r"[A-Za-z0-9_-]{43}")
@@ -259,16 +262,43 @@ def project_public_invitation(value: object) -> dict[str, object] | None:
     return {"inviteeName": record["inviteeName"], "status": record["status"], "expiresAt": record["expiresAt"]}
 
 
-def _token_key(invitation_id: str, digest: str) -> str:
-    return f"{_PREFIX}:token:{invitation_id}:{digest}"
+def _resolve_namespace(environment: Mapping[str, str]) -> str | None:
+    platform = environment.get(_PLATFORM_ENV)
+    explicit = environment.get(_NAMESPACE_ENV)
+
+    if platform is not None:
+        if (
+            type(platform) is not str
+            or platform not in _ALLOWED_NAMESPACES
+            or (
+                explicit is not None
+                and (
+                    type(explicit) is not str
+                    or explicit != platform
+                )
+            )
+        ):
+            return None
+        return platform
+
+    if (
+        type(explicit) is str
+        and explicit in _ALLOWED_NAMESPACES
+    ):
+        return explicit
+    return None
 
 
-def _invitation_key(invitation_id: str) -> str:
-    return f"{_PREFIX}:invite:{invitation_id}"
+def _token_key(namespace: str, invitation_id: str, digest: str) -> str:
+    return f"{_BASE_PREFIX}:{namespace}:token:{invitation_id}:{digest}"
 
 
-def _recipient_key(email: str) -> str:
-    return f"{_PREFIX}:recipient:{email}"
+def _invitation_key(namespace: str, invitation_id: str) -> str:
+    return f"{_BASE_PREFIX}:{namespace}:invite:{invitation_id}"
+
+
+def _recipient_key(namespace: str, email: str) -> str:
+    return f"{_BASE_PREFIX}:{namespace}:recipient:{email}"
 
 
 _PRIMARY_SNAPSHOT_LUA = """
@@ -351,8 +381,14 @@ class RuntimeTesterInviteAuthority:
     def __init__(self, command_transport: CommandTransport | None, *, environment: Mapping[str, str] | None = None, now_ms: Clock | None = None, random_bytes: RandomBytes = secrets.token_bytes) -> None:
         self._transport = command_transport
         self._environment = dict(os.environ if environment is None else environment)
+        self._namespace = _resolve_namespace(self._environment)
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
         self._random_bytes = random_bytes
+
+    def _require_namespace(self) -> str:
+        if self._namespace is None:
+            raise TesterInviteAuthorityError()
+        return self._namespace
 
     def _command(self, command: list[object]) -> object:
         if self._transport is None:
@@ -400,7 +436,12 @@ class RuntimeTesterInviteAuthority:
         raw_token, digest = generate_invitation_token(invitation_id, random_bytes=self._random_bytes)
         record = _build_record(invitation_id=invitation_id, email=email, display_name=name, token_digest=digest, created_by_user_id=actor, now_ms=now_ms, source_request_id=source)
         wire = _canonical_json(record)
-        keys = [_token_key(invitation_id, digest), _invitation_key(invitation_id), _recipient_key(email)]
+        namespace = self._require_namespace()
+        keys = [
+            _token_key(namespace, invitation_id, digest),
+            _invitation_key(namespace, invitation_id),
+            _recipient_key(namespace, email),
+        ]
         result, command_error = self._atomic(_ISSUE_INVITATION_LUA, keys, [wire, now_ms])
         if result == "invite_live":
             raise TesterInviteAuthorityError("live_invitation_exists")
@@ -425,7 +466,8 @@ class RuntimeTesterInviteAuthority:
             raise TesterInviteAuthorityError("invalid_invite")
         invitation_id, _ = parsed
         digest = hashlib.sha256(raw_token.encode("ascii")).hexdigest()
-        token_key = _token_key(invitation_id, digest)
+        namespace = self._require_namespace()
+        token_key = _token_key(namespace, invitation_id, digest)
         result = self._command(["EVAL", _PRIMARY_SNAPSHOT_LUA, 1, token_key])
         if type(result) is not list or len(result) != 1 or type(result[0]) is not str:
             raise TesterInviteAuthorityError("invalid_invite")
@@ -436,7 +478,11 @@ class RuntimeTesterInviteAuthority:
             record = None
         if record is None or raw != _canonical_json(record) or record["id"] != invitation_id or record["tokenDigest"] != digest or not verify_invitation_token(raw_token, digest):
             raise TesterInviteAuthorityError("invalid_invite")
-        keys = [token_key, _invitation_key(invitation_id), _recipient_key(str(record["inviteeEmail"]))]
+        keys = [
+            token_key,
+            _invitation_key(namespace, invitation_id),
+            _recipient_key(namespace, str(record["inviteeEmail"])),
+        ]
         if any(item != raw for item in self._snapshot(keys)):
             raise TesterInviteAuthorityError("conflict")
         now_ms = self._now_ms()
@@ -464,7 +510,12 @@ class RuntimeTesterInviteAuthority:
         if not _valid_invitation_id(invitation_id):
             raise TesterInviteAuthorityError("invalid_request")
         result = self._command(
-            ["EVAL", _PRIMARY_SNAPSHOT_LUA, 1, _invitation_key(invitation_id)]
+            [
+                "EVAL",
+                _PRIMARY_SNAPSHOT_LUA,
+                1,
+                _invitation_key(self._require_namespace(), invitation_id),
+            ]
         )
         if type(result) is not list or len(result) != 1 or type(result[0]) is not str:
             raise TesterInviteAuthorityError("invalid_invite")
@@ -498,9 +549,16 @@ class RuntimeTesterInviteAuthority:
         }
         next_wire = _canonical_json(candidate)
         keys = [
-            _token_key(invitation_id, str(record["tokenDigest"])),
-            _invitation_key(invitation_id),
-            _recipient_key(str(record["inviteeEmail"])),
+            _token_key(
+                self._require_namespace(),
+                invitation_id,
+                str(record["tokenDigest"]),
+            ),
+            _invitation_key(self._require_namespace(), invitation_id),
+            _recipient_key(
+                self._require_namespace(),
+                str(record["inviteeEmail"]),
+            ),
         ]
         result, command_error = self._atomic(
             _TRANSITION_INVITATION_LUA,
@@ -529,7 +587,15 @@ class RuntimeTesterInviteAuthority:
         if not _valid_user_id(user_id) or not _valid_workspace_id(workspace_id):
             raise TesterInviteAuthorityError("invalid_request")
         invitation_id, digest, now_ms = current.invitation_id, current.token_digest, self._now_ms()
-        result = self._command(["EVAL", _PRIMARY_SNAPSHOT_LUA, 1, _invitation_key(invitation_id)])
+        namespace = self._require_namespace()
+        result = self._command(
+            [
+                "EVAL",
+                _PRIMARY_SNAPSHOT_LUA,
+                1,
+                _invitation_key(namespace, invitation_id),
+            ]
+        )
         if type(result) is not list or len(result) != 1 or type(result[0]) is not str:
             raise TesterInviteAuthorityError()
         raw = result[0]
@@ -538,7 +604,11 @@ class RuntimeTesterInviteAuthority:
             raise TesterInviteAuthorityError("conflict")
         candidate = {**record, "status": "provisioned", "updatedAt": now_ms, "provisionedAt": now_ms, "provisionedUserId": user_id, "provisionedWorkspaceId": workspace_id}
         next_wire = _canonical_json(candidate)
-        keys = [_token_key(invitation_id, digest), _invitation_key(invitation_id), _recipient_key(current.email)]
+        keys = [
+            _token_key(namespace, invitation_id, digest),
+            _invitation_key(namespace, invitation_id),
+            _recipient_key(namespace, current.email),
+        ]
         result, command_error = self._atomic(_TRANSITION_INVITATION_LUA, keys, [raw, next_wire])
         if result not in {"applied", None}:
             raise TesterInviteAuthorityError("conflict")
