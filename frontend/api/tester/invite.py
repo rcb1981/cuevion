@@ -48,7 +48,7 @@ def _operation(raw_path: str) -> str:
         encoding="utf-8",
         errors="strict",
     )
-    if len(pairs) != 1 or pairs[0][0] != "op" or pairs[0][1] not in {"lookup", "issue", "cancel"}:
+    if len(pairs) != 1 or pairs[0][0] != "op" or pairs[0][1] not in {"lookup", "capability", "issue", "cancel"}:
         raise ValueError
     return pairs[0][1]
 
@@ -147,6 +147,18 @@ class handler(BaseHTTPRequestHandler):
 
             actor_user_id = _authenticated_actor(self, headers)
             if actor_user_id is None:
+                return
+
+            if operation == "capability":
+                if payload:
+                    raise TesterInviteAuthorityError("invalid_request")
+                if not authority.has_admin_authority(actor_user_id):
+                    raise TesterInviteAuthorityError("forbidden")
+                _send(
+                    self,
+                    200,
+                    {"ok": True, "canManageTesterAccess": True},
+                )
                 return
 
             if operation == "issue":

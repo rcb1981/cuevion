@@ -416,6 +416,13 @@ class RuntimeTesterInviteAuthority:
             return None, error
         return (result, None) if type(result) is str else (None, TesterInviteAuthorityError())
 
+    def has_admin_authority(self, actor_user_id: object) -> bool:
+        return (
+            self._namespace is not None
+            and _valid_user_id(actor_user_id)
+            and actor_user_id in _resolve_admin_ids(self._environment)
+        )
+
     def _require_admin(self, actor_user_id: object) -> str:
         if not _valid_user_id(actor_user_id) or actor_user_id not in _resolve_admin_ids(self._environment):
             raise TesterInviteAuthorityError("forbidden")

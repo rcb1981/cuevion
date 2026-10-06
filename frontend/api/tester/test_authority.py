@@ -98,6 +98,19 @@ def build(clock=None):
 
 
 class AuthorityTests(unittest.TestCase):
+    def test_admin_capability_is_namespace_and_allowlist_bound(self):
+        runtime, _ = build()
+        self.assertTrue(runtime.has_admin_authority(ADMIN))
+        self.assertFalse(runtime.has_admin_authority(OTHER))
+
+        without_namespace = authority.RuntimeTesterInviteAuthority(
+            MemoryRedis(),
+            environment={"CUEVION_TESTER_ADMIN_USER_IDS": ADMIN},
+            now_ms=Clock(),
+            random_bytes=FixedRandom(),
+        )
+        self.assertFalse(without_namespace.has_admin_authority(ADMIN))
+
     def test_admin_only_issue_and_digest_only_storage(self):
         runtime, memory = build()
         with self.assertRaises(authority.TesterInviteAuthorityError):

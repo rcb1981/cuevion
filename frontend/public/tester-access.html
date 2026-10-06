@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex,nofollow,noarchive" />
+    <meta name="referrer" content="no-referrer" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; object-src 'none'"
+    />
+    <title>Tester Access · Cuevion</title>
+    <link rel="stylesheet" href="/tester-access.css" />
+    <script type="module" src="/tester-access.js"></script>
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="panel" aria-labelledby="page-title">
+        <a class="back-link" href="/">← Back to Cuevion</a>
+        <p class="eyebrow">Cuevion · Internal</p>
+        <h1 id="page-title">Tester Access</h1>
+        <p class="intro">
+          Invite a tester to create their own Cuevion workspace. Access is
+          checked server-side against the Tester Access admin allowlist.
+        </p>
+
+        <div id="loading" class="status-box" role="status">
+          Checking Tester Access authority…
+        </div>
+
+        <div id="signed-out" class="status-box hidden" role="alert">
+          <strong>Sign in required.</strong>
+          <p>Sign in to Cuevion first, then return to this page.</p>
+          <a class="button secondary" href="/login">Sign in</a>
+        </div>
+
+        <div id="denied" class="status-box hidden" role="alert">
+          <strong>Tester Access is not enabled for this account.</strong>
+        </div>
+
+        <div id="unavailable" class="status-box hidden" role="alert">
+          <strong>Tester Access is temporarily unavailable.</strong>
+          <button id="retry" class="button secondary" type="button">Retry</button>
+        </div>
+
+        <div id="admin-panel" class="hidden">
+          <div class="notice">
+            <strong>Direct tester invite</strong>
+            <span>
+              The invite is bound to one email address, expires after seven
+              days and creates a separate owner workspace after Auth0
+              verification.
+            </span>
+          </div>
+
+          <form id="invite-form" novalidate>
+            <div class="field-grid">
+              <label>
+                <span>Tester name</span>
+                <input
+                  id="invitee-name"
+                  name="inviteeName"
+                  type="text"
+                  autocomplete="off"
+                  maxlength="256"
+                  required
+                />
+              </label>
+              <label>
+                <span>Email address</span>
+                <input
+                  id="invitee-email"
+                  name="inviteeEmail"
+                  type="email"
+                  autocomplete="off"
+                  maxlength="320"
+                  required
+                />
+              </label>
+            </div>
+            <button id="create-invite" class="button primary" type="submit">
+              Create tester invite
+            </button>
+          </form>
+
+          <div id="result" class="result hidden" aria-live="polite">
+            <p class="eyebrow success">Invite ready</p>
+            <h2 id="result-name"></h2>
+            <p id="result-meta" class="muted"></p>
+            <label>
+              <span>Invite link</span>
+              <input id="invite-link" type="text" readonly />
+            </label>
+            <div class="actions">
+              <button id="copy-link" class="button primary" type="button">
+                Copy invite link
+              </button>
+              <button id="revoke-invite" class="button danger" type="button">
+                Revoke invite
+              </button>
+              <button id="new-invite" class="button secondary" type="button">
+                Create another
+              </button>
+            </div>
+          </div>
+
+          <p id="feedback" class="feedback" role="status" aria-live="polite"></p>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
