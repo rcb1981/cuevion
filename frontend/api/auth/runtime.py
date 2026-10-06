@@ -294,14 +294,18 @@ def login_response(
     random_bytes: Callable[[int], bytes] = secrets.token_bytes,
     team_invite_token: str | None = None,
     team_authority_factory: Callable[[Mapping[str, str]], object] | None = None,
+    tester_invite_token: str | None = None,
+    tester_authority_factory: Callable[[Mapping[str, str]], object] | None = None,
 ) -> http.PublicResponse:
     try:
         http.require_method(method, "GET")
         headers = http.validate_header_pairs(raw_headers)
         http.require_canonical_host(headers)
+        if team_invite_token is not None and tester_invite_token is not None:
+            raise ValueError("ambiguous login request")
         if raw_path is not None:
             try:
-                if team_invite_token is not None:
+                if team_invite_token is not None or tester_invite_token is not None:
                     raise ValueError("ambiguous login request")
                 team_invite_token = _parse_login_invite(raw_path)
             except (TypeError, ValueError, UnicodeError):
@@ -324,11 +328,19 @@ def login_response(
             team.read_provisioning_invitation(
                 team_invite_token, allow_accepted=True
             )
+        if tester_invite_token is not None:
+            tester = _tester_authority(source, tester_authority_factory)
+            # T1.2 only transports server-validated Tester intent. Owner
+            # provisioning remains a later callback phase and must re-prove it.
+            tester.read_provisioning_invitation(
+                tester_invite_token, allow_provisioned=True
+            )
         request = auth0_flow.build_authorization_request(
             config,
             int(time.time()) if now is None else now,
             random_bytes=random_bytes,
             team_invite_token=team_invite_token,
+            tester_invite_token=tester_invite_token,
         )
         return http.redirect_response(
             request.authorization_url,
@@ -345,6 +357,14 @@ def _team_authority(source, factory):
         from api.team.authority import build_runtime_team_authority
 
         factory = build_runtime_team_authority
+    return factory(source)
+
+
+def _tester_authority(source, factory):
+    if factory is None:
+        from api.tester.authority import build_runtime_tester_invite_authority
+
+        factory = build_runtime_tester_invite_authority
     return factory(source)
 
 
