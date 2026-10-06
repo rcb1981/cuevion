@@ -35,10 +35,15 @@ _SHARED_SECRET_ENV = "CUEVION_AUTH0_REGISTRATION_AUTHORITY_SECRET"
 
 _GRANT_RE = re.compile(r"[A-Za-z0-9_-]{43}")
 _STATE_RE = re.compile(r"[A-Za-z0-9_-]{43}")
-_INVITATION_ID_RE = re.compile(r"tinv_[A-Za-z0-9_-]{1,64}")
+_TEAM_INVITATION_ID_RE = re.compile(r"tinv_[A-Za-z0-9_-]{1,64}")
+_TESTER_INVITATION_ID_RE = re.compile(r"tsti_[A-Za-z0-9_-]{22}")
 _TOKEN_DIGEST_RE = re.compile(r"[a-f0-9]{64}")
 _CLIENT_ID_RE = re.compile(r"[!-~]{1,512}")
-_ACTIVE_SOURCES = frozenset({"team_invite"})
+_ACTIVE_SOURCES = frozenset({"team_invite", "tester_invite"})
+_AUTHORITY_ID_RE = {
+    "team_invite": _TEAM_INVITATION_ID_RE,
+    "tester_invite": _TESTER_INVITATION_ID_RE,
+}
 
 _CONSUME_GRANT = """
 local current = redis.call('GET', KEYS[1])
@@ -75,7 +80,8 @@ class RegistrationGrantRecord:
             and type(self.client_id) is str
             and _CLIENT_ID_RE.fullmatch(self.client_id) is not None
             and type(self.authority_id) is str
-            and _INVITATION_ID_RE.fullmatch(self.authority_id) is not None
+            and self.source in _AUTHORITY_ID_RE
+            and _AUTHORITY_ID_RE[self.source].fullmatch(self.authority_id) is not None
             and type(self.authority_digest) is str
             and _TOKEN_DIGEST_RE.fullmatch(self.authority_digest) is not None
             and type(self.created_at) is int
@@ -246,6 +252,56 @@ def build_runtime_registration_store(
     return RegistrationGrantStore(session_store.build_kv_command_transport(environment))
 
 
+def _issue_invite_grant(
+    store: RegistrationGrantStore,
+    *,
+    source: str,
+    email: str,
+    client_id: str,
+    authority_id: str,
+    authority_digest: str,
+    authority_expires_at_ms: int,
+    now: int,
+    random_bytes: Callable[[int], bytes] = secrets.token_bytes,
+) -> str:
+    canonical_email = email_address.normalize_auth_email(email)
+    authority_pattern = _AUTHORITY_ID_RE.get(source)
+    if (
+        source not in _ACTIVE_SOURCES
+        or authority_pattern is None
+        or not email_address.is_valid_auth_email(canonical_email)
+        or type(client_id) is not str
+        or _CLIENT_ID_RE.fullmatch(client_id) is None
+        or type(authority_id) is not str
+        or authority_pattern.fullmatch(authority_id) is None
+        or type(authority_digest) is not str
+        or _TOKEN_DIGEST_RE.fullmatch(authority_digest) is None
+        or type(authority_expires_at_ms) is not int
+        or authority_expires_at_ms < 0
+        or type(now) is not int
+    ):
+        raise ValueError("invalid registration authority")
+    expires_at = min(now + GRANT_TTL_SECONDS, authority_expires_at_ms // 1_000)
+    if expires_at <= now:
+        raise ValueError("invalid registration authority")
+    raw = random_bytes(32)
+    if type(raw) is not bytes or len(raw) != 32:
+        raise RegistrationAuthorityUnavailable()
+    grant = _base64url(raw)
+    record = RegistrationGrantRecord(
+        source=source,
+        email=canonical_email,
+        client_id=client_id,
+        authority_id=authority_id,
+        authority_digest=authority_digest,
+        created_at=now,
+        expires_at=expires_at,
+    )
+    if not store.put(grant, record, now=now):
+        raise RegistrationAuthorityUnavailable()
+    return grant
+
+
 def issue_team_invite_grant(
     store: RegistrationGrantStore,
     *,
@@ -257,39 +313,41 @@ def issue_team_invite_grant(
     now: int,
     random_bytes: Callable[[int], bytes] = secrets.token_bytes,
 ) -> str:
-    canonical_email = email_address.normalize_auth_email(email)
-    if (
-        not email_address.is_valid_auth_email(canonical_email)
-        or type(client_id) is not str
-        or _CLIENT_ID_RE.fullmatch(client_id) is None
-        or type(invitation_id) is not str
-        or _INVITATION_ID_RE.fullmatch(invitation_id) is None
-        or type(invitation_token_digest) is not str
-        or _TOKEN_DIGEST_RE.fullmatch(invitation_token_digest) is None
-        or type(invitation_expires_at_ms) is not int
-        or invitation_expires_at_ms < 0
-    ):
-        raise ValueError("invalid registration authority")
-    expires_at = min(now + GRANT_TTL_SECONDS, invitation_expires_at_ms // 1_000)
-    if type(now) is not int or expires_at <= now:
-        raise ValueError("invalid registration authority")
-    raw = random_bytes(32)
-    if type(raw) is not bytes or len(raw) != 32:
-        raise RegistrationAuthorityUnavailable()
-    grant = _base64url(raw)
-    record = RegistrationGrantRecord(
+    return _issue_invite_grant(
+        store,
         source="team_invite",
-        email=canonical_email,
+        email=email,
         client_id=client_id,
         authority_id=invitation_id,
         authority_digest=invitation_token_digest,
-        created_at=now,
-        expires_at=expires_at,
+        authority_expires_at_ms=invitation_expires_at_ms,
+        now=now,
+        random_bytes=random_bytes,
     )
-    if not store.put(grant, record, now=now):
-        raise RegistrationAuthorityUnavailable()
-    return grant
 
+
+def issue_tester_invite_grant(
+    store: RegistrationGrantStore,
+    *,
+    email: str,
+    client_id: str,
+    invitation_id: str,
+    invitation_token_digest: str,
+    invitation_expires_at_ms: int,
+    now: int,
+    random_bytes: Callable[[int], bytes] = secrets.token_bytes,
+) -> str:
+    return _issue_invite_grant(
+        store,
+        source="tester_invite",
+        email=email,
+        client_id=client_id,
+        authority_id=invitation_id,
+        authority_digest=invitation_token_digest,
+        authority_expires_at_ms=invitation_expires_at_ms,
+        now=now,
+        random_bytes=random_bytes,
+    )
 
 def _authorization_context(
     response: http.PublicResponse,
@@ -404,6 +462,167 @@ def login_response(
         # registration authority could not be established.
         return runtime._authentication_unavailable_response()
 
+
+
+_TESTER_LOGIN_PATH = "/api/auth/tester-login"
+_TESTER_LOGIN_MAX_BODY_BYTES = 512
+_TESTER_TOKEN_RE = re.compile(r"tsti_[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}")
+
+
+def _tester_authority(source, factory):
+    if factory is None:
+        from api.tester.authority import build_runtime_tester_invite_authority
+        factory = build_runtime_tester_invite_authority
+    return factory(source)
+
+
+def _tester_login_token(
+    raw_headers: tuple[tuple[str, str], ...],
+    body: bytes,
+) -> str:
+    content_types = [
+        value for name, value in raw_headers
+        if name.casefold() == "content-type"
+    ]
+    origins = [
+        value for name, value in raw_headers
+        if name.casefold() == "origin"
+    ]
+    sites = [
+        value for name, value in raw_headers
+        if name.casefold() == "sec-fetch-site"
+    ]
+    lengths = [
+        value for name, value in raw_headers
+        if name.casefold() == "content-length"
+    ]
+    if (
+        origins != [http.CANONICAL_APP_ORIGIN]
+        or len(sites) > 1
+        or (sites and sites != ["same-origin"])
+    ):
+        raise PermissionError("invalid tester login origin")
+    if (
+        type(body) is not bytes
+        or not 1 <= len(body) <= _TESTER_LOGIN_MAX_BODY_BYTES
+        or len(content_types) != 1
+        or content_types[0].split(";", 1)[0].strip().lower()
+        != "application/x-www-form-urlencoded"
+        or len(lengths) != 1
+        or not lengths[0].isascii()
+        or not lengths[0].isdigit()
+        or int(lengths[0]) != len(body)
+        or any(
+            name.casefold() == "transfer-encoding"
+            for name, _value in raw_headers
+        )
+    ):
+        raise ValueError("invalid tester login")
+    pairs = parse_qsl(
+        body.decode("ascii", errors="strict"),
+        keep_blank_values=True,
+        strict_parsing=True,
+        max_num_fields=1,
+        encoding="utf-8",
+        errors="strict",
+    )
+    if (
+        len(pairs) != 1
+        or pairs[0][0] != "tester_invite"
+        or _TESTER_TOKEN_RE.fullmatch(pairs[0][1]) is None
+    ):
+        raise ValueError("invalid tester login")
+    return pairs[0][1]
+
+
+def tester_login_response(
+    method: str,
+    raw_headers: tuple[tuple[str, str], ...],
+    body: bytes,
+    *,
+    environment: Mapping[str, str] | None = None,
+    now: int | None = None,
+    tester_authority_factory=None,
+    store_factory: Callable[
+        [Mapping[str, str]], RegistrationGrantStore
+    ] = build_runtime_registration_store,
+) -> http.PublicResponse:
+    """Exchange one same-origin POSTed Tester bearer for an Auth0 redirect.
+
+    The raw Tester bearer never appears in the redirect URL. The encrypted
+    Auth0 transaction cookie carries it only so callback can later re-prove the
+    exact Tester authority before owner provisioning.
+    """
+    source = os.environ if environment is None else environment
+    try:
+        http.require_method(method, "POST")
+        headers = http.validate_header_pairs(raw_headers)
+        http.require_canonical_host(headers)
+        token = _tester_login_token(headers, body)
+        timestamp = int(time.time()) if now is None else now
+
+        # Build the ordinary encrypted Auth0 transaction only after the Tester
+        # authority has proven the exact live bearer.
+        response = runtime.login_response(
+            "GET",
+            headers,
+            None,
+            environment=source,
+            now=timestamp,
+            tester_invite_token=token,
+            tester_authority_factory=tester_authority_factory,
+        )
+        authorization = _authorization_context(response)
+        if authorization is None:
+            return response
+
+        configuration = auth0_flow.parse_auth0_configuration(source)
+        location, _oauth_state, client_id = authorization
+        if client_id != configuration.client_id:
+            raise RegistrationAuthorityUnavailable()
+
+        tester = _tester_authority(source, tester_authority_factory)
+        invitation = tester.read_provisioning_invitation(
+            token, allow_provisioned=True
+        )
+        grant = issue_tester_invite_grant(
+            store_factory(source),
+            email=invitation.email,
+            client_id=configuration.client_id,
+            invitation_id=invitation.invitation_id,
+            invitation_token_digest=invitation.token_digest,
+            invitation_expires_at_ms=invitation.expires_at,
+            now=timestamp,
+        )
+        return _replace_location(response, _with_grant(location, grant))
+    except http.HttpBoundaryError as error:
+        return http.json_response(
+            error.status,
+            {"error": {
+                "code": "invalid_request",
+                "message": "The authentication request was rejected.",
+            }},
+        )
+    except PermissionError:
+        return http.json_response(
+            403,
+            {"error": {
+                "code": "forbidden",
+                "message": "The authentication request was rejected.",
+            }},
+        )
+    except (TypeError, ValueError, UnicodeError):
+        return http.json_response(
+            400,
+            {"error": {
+                "code": "invalid_request",
+                "message": "The authentication request was rejected.",
+            }},
+        )
+    except Exception:
+        # Never publish a transaction cookie when Tester registration authority
+        # could not be established.
+        return runtime._authentication_unavailable_response()
 
 def _shared_secret(source: Mapping[str, str]) -> str:
     try:

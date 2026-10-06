@@ -69,6 +69,7 @@ _BASE64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _PKCE_RE = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
 _VISIBLE_ASCII_RE = re.compile(r"^[!-~]+$")
 _TEAM_INVITE_TOKEN_RE = re.compile(r"tinv_[A-Za-z0-9_-]{1,64}\.[A-Za-z0-9_-]{43}")
+_TESTER_INVITE_TOKEN_RE = re.compile(r"tsti_[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}")
 _EMAIL_RE = re.compile(
     r"[a-z0-9!#$%&'*+/=?^_`{|}~-]+"
     r"(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@"
@@ -137,6 +138,7 @@ class AuthTransaction:
     issued_at: int
     expires_at: int
     team_invite_token: str | None = None
+    tester_invite_token: str | None = None
     owner_migration_id: str | None = None
 
     def __repr__(self) -> str:
@@ -400,6 +402,7 @@ def _new_transaction(
     issued_at: object,
     expires_at: object,
     team_invite_token: object = None,
+    tester_invite_token: object = None,
     owner_migration_id: object = None,
 ) -> AuthTransaction:
     if (
@@ -412,14 +415,27 @@ def _new_transaction(
         or type(expires_at) is not int
         or not 0 <= issued_at < expires_at <= _MAX_UNIX_TIMESTAMP
         or expires_at - issued_at != AUTH_TRANSACTION_TTL_SECONDS
-        or (owner_migration_id is not None and (
-            not _is_exact_opaque_value(owner_migration_id) or team_invite_token is not None
-        ))
+        or (
+            owner_migration_id is not None
+            and (
+                not _is_exact_opaque_value(owner_migration_id)
+                or team_invite_token is not None
+                or tester_invite_token is not None
+            )
+        )
+        or (team_invite_token is not None and tester_invite_token is not None)
         or (
             team_invite_token is not None
             and (
                 type(team_invite_token) is not str
                 or _TEAM_INVITE_TOKEN_RE.fullmatch(team_invite_token) is None
+            )
+        )
+        or (
+            tester_invite_token is not None
+            and (
+                type(tester_invite_token) is not str
+                or _TESTER_INVITE_TOKEN_RE.fullmatch(tester_invite_token) is None
             )
         )
     ):
@@ -431,6 +447,7 @@ def _new_transaction(
         issued_at=issued_at,
         expires_at=expires_at,
         team_invite_token=team_invite_token,
+        tester_invite_token=tester_invite_token,
         owner_migration_id=owner_migration_id,
     )
 
@@ -446,6 +463,8 @@ def _transaction_plaintext(transaction: AuthTransaction) -> bytes:
     }
     if transaction.team_invite_token is not None:
         value["team_invite_token"] = transaction.team_invite_token
+    if transaction.tester_invite_token is not None:
+        value["tester_invite_token"] = transaction.tester_invite_token
     if transaction.owner_migration_id is not None:
         value["owner_migration_id"] = transaction.owner_migration_id
     encoded = json.dumps(
@@ -489,6 +508,7 @@ def build_authorization_request(
     random_bytes: Callable[[int], bytes] = secrets.token_bytes,
     *,
     team_invite_token: str | None = None,
+    tester_invite_token: str | None = None,
     owner_migration_id: str | None = None,
 ) -> AuthorizationRequest:
     """Create one Auth0 authorize URL and its encrypted PKCE transaction."""
@@ -501,6 +521,13 @@ def build_authorization_request(
         type(team_invite_token) is not str
         or _TEAM_INVITE_TOKEN_RE.fullmatch(team_invite_token) is None
     ):
+        _fail("invalid_transaction")
+    if tester_invite_token is not None and (
+        type(tester_invite_token) is not str
+        or _TESTER_INVITE_TOKEN_RE.fullmatch(tester_invite_token) is None
+    ):
+        _fail("invalid_transaction")
+    if team_invite_token is not None and tester_invite_token is not None:
         _fail("invalid_transaction")
 
     state = _base64url_encode(_random_bytes(random_bytes, _OPAQUE_VALUE_BYTES))
@@ -515,6 +542,7 @@ def build_authorization_request(
         issued_at=issued_at,
         expires_at=issued_at + AUTH_TRANSACTION_TTL_SECONDS,
         team_invite_token=team_invite_token,
+        tester_invite_token=tester_invite_token,
         owner_migration_id=owner_migration_id,
     )
     code_challenge = _base64url_encode(
@@ -620,12 +648,23 @@ def decrypt_transaction_cookie(
     if type(payload) is not dict or set(payload) not in (
         required_fields,
         required_fields | {"team_invite_token"},
+        required_fields | {"tester_invite_token"},
         required_fields | {"owner_migration_id"},
     ):
         _fail("invalid_transaction")
     if "team_invite_token" in payload and (
         type(payload["team_invite_token"]) is not str
         or _TEAM_INVITE_TOKEN_RE.fullmatch(payload["team_invite_token"]) is None
+    ):
+        _fail("invalid_transaction")
+    if "tester_invite_token" in payload and (
+        type(payload["tester_invite_token"]) is not str
+        or _TESTER_INVITE_TOKEN_RE.fullmatch(payload["tester_invite_token"]) is None
+    ):
+        _fail("invalid_transaction")
+    if (
+        "team_invite_token" in payload
+        and "tester_invite_token" in payload
     ):
         _fail("invalid_transaction")
     if "owner_migration_id" in payload and not _is_exact_opaque_value(payload["owner_migration_id"]):
@@ -639,6 +678,7 @@ def decrypt_transaction_cookie(
         issued_at=payload["issued_at"],
         expires_at=payload["expires_at"],
         team_invite_token=payload.get("team_invite_token"),
+        tester_invite_token=payload.get("tester_invite_token"),
         owner_migration_id=payload.get("owner_migration_id"),
     )
     if not transaction.issued_at <= current_time < transaction.expires_at:
