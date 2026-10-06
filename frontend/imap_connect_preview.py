@@ -1724,7 +1724,9 @@ def build_priority_candidate_render_source(
     }
 
 
-def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+def build_connect_preview_response(
+    payload: dict[str, Any], *, durable_snapshot_consumer=None,
+) -> tuple[int, dict[str, Any]]:
     request_start = time.perf_counter()
     provider = str(payload.get("provider") or "").strip().lower()
     log_provider = (
@@ -1847,7 +1849,11 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
         login_duration_ms = (time.perf_counter() - login_start) * 1000
 
         fetch_start = time.perf_counter()
-        fetch_result = fetch_recent_messages(mailbox, folder=folder, limit=limit)
+        fetch_result = (
+            fetch_recent_messages(mailbox, folder=folder, limit=limit, readonly=True)
+            if provider == "custom_imap" and durable_snapshot_consumer is not None
+            else fetch_recent_messages(mailbox, folder=folder, limit=limit)
+        )
         messages = fetch_result["messages"]
         fetch_warnings = fetch_result["warnings"]
         fetch_error = fetch_result.get("error")
@@ -2030,6 +2036,17 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             response_body["_priorityCandidateSources"] = (
                 priority_candidate_sources
             )
+            if durable_snapshot_consumer is not None:
+                try:
+                    durable_snapshot_consumer(
+                        mailbox=mailbox, folder=folder, uid_validity=uid_validity,
+                        uid_search_response=(uid_status, uid_data),
+                        messages=messages, warnings=fetch_warnings, limit=limit,
+                    )
+                except Exception:
+                    # A projection failure must not change a successful client
+                    # snapshot, expose message content, or change Priority.
+                    logger.warning("Custom IMAP durable snapshot failed")
         return 200, response_body
     except imaplib.IMAP4.error as exc:
         code = "quota_exceeded" if is_quota_error(exc) else "invalid_credentials"

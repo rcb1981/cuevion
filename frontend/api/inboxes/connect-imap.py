@@ -1,5 +1,6 @@
 import json
 import re
+import os
 import sys
 import uuid
 from copy import deepcopy
@@ -42,6 +43,7 @@ from api.priority.candidate_projection import (  # noqa: E402
     populate_runtime_priority_candidates,
 )
 from api.priority.semantic_config import read_new_inbound_client_mode  # noqa: E402
+from cuevion_mailbox.imap_refresh import prepare_authenticated_imap_refresh  # noqa: E402
 
 INITIAL_FIELDS = {
     "mode",
@@ -2916,7 +2918,17 @@ class handler(BaseHTTPRequestHandler):
         try:
             from imap_connect_preview import build_connect_preview_response
 
-            status_code, response_payload = build_connect_preview_response(preview_request)
+            durable_consumer = prepare_authenticated_imap_refresh(
+                environment=os.environ, member=resolved.get("memberAuthority"),
+                mailbox=mailbox,
+            )
+            status_code, response_payload = (
+                build_connect_preview_response(
+                    preview_request, durable_snapshot_consumer=durable_consumer,
+                )
+                if durable_consumer is not None
+                else build_connect_preview_response(preview_request)
+            )
         except Exception:
             self._send_json(502, _error("connection_failed", "Could not refresh this inbox."))
             return

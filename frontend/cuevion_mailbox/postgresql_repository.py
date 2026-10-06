@@ -68,6 +68,46 @@ INSERT INTO cuevion_mailbox.mailbox_sync_state (
 ON CONFLICT DO NOTHING
 """.strip()
 
+_RETIRE_IMAP_STATE_SQL = """
+UPDATE cuevion_mailbox.mailbox_sync_state AS s
+SET is_current = false, updated_at = %s
+WHERE workspace_id = %s AND owner_user_id = %s AND mailbox_id = %s
+  AND source_generation = %s AND provider = 'custom_imap'
+  AND provider_account_identity = %s AND row_version = %s AND is_current = true
+  AND NOT EXISTS (
+    SELECT 1 FROM cuevion_mailbox.mailbox_sync_cursor AS c
+    WHERE c.workspace_id = s.workspace_id AND c.owner_user_id = s.owner_user_id
+      AND c.mailbox_id = s.mailbox_id AND c.source_generation = s.source_generation
+      AND c.scope_key <> %s
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM cuevion_mailbox.mailbox_messages AS m
+    WHERE m.workspace_id = s.workspace_id AND m.owner_user_id = s.owner_user_id
+      AND m.mailbox_id = s.mailbox_id AND m.source_generation = s.source_generation
+      AND m.provider_folder <> %s
+  )
+""".strip()
+
+_INSERT_IMAP_GENERATION_SQL = """
+INSERT INTO cuevion_mailbox.mailbox_sync_state (
+    schema_version, workspace_id, owner_user_id, mailbox_id, provider,
+    provider_account_identity, source_generation, is_current, bootstrap_state,
+    created_at, updated_at, row_version
+) VALUES (1, %s, %s, %s, 'custom_imap', %s, %s, true, 'not_started', %s, %s, %s)
+""".strip()
+
+_UPSERT_BODY_SQL = """
+INSERT INTO cuevion_mailbox.mailbox_message_bodies AS b (
+    schema_version, workspace_id, owner_user_id, mailbox_id, message_id,
+    body_text, body_html, content_hash, body_version, fetched_at, row_version
+) VALUES (1, %s, %s, %s, %s, %s, %s, %s, 1, %s, 1)
+ON CONFLICT (workspace_id, owner_user_id, mailbox_id, message_id) DO UPDATE
+SET body_text = EXCLUDED.body_text, body_html = EXCLUDED.body_html,
+    content_hash = EXCLUDED.content_hash, body_version = b.body_version + 1,
+    fetched_at = EXCLUDED.fetched_at, row_version = b.row_version + 1
+WHERE b.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+""".strip()
+
 
 class PostgreSQLConnectionFactory(Protocol):
     def __call__(self) -> object:
@@ -229,6 +269,27 @@ WHERE m.workspace_id = %s
   AND s.is_current = true
   AND m.provider_message_id = ANY(%s::text[])
 ORDER BY m.provider_message_id
+""".strip()
+
+_SELECT_IMAP_PROJECTIONS_SQL = """
+SELECT m.message_id, m.provider_message_id, m.provider_folder,
+       m.imap_uid_validity, m.imap_uid, m.provider_thread_id, m.metadata_hash,
+       m.body_state, m.unread, m.starred, m.provider_deleted, m.row_version
+FROM cuevion_mailbox.mailbox_messages AS m
+JOIN cuevion_mailbox.mailbox_sync_state AS s
+  ON s.workspace_id = m.workspace_id AND s.owner_user_id = m.owner_user_id
+ AND s.mailbox_id = m.mailbox_id AND s.source_generation = m.source_generation
+ AND s.provider = m.provider
+WHERE m.workspace_id = %s AND m.owner_user_id = %s AND m.mailbox_id = %s
+  AND m.source_generation = %s AND m.provider = %s
+  AND s.provider_account_identity = %s AND s.is_current = true
+  AND m.provider_folder_digest = %s AND m.provider_folder = %s
+  AND m.imap_uid_validity = %s
+  AND ((%s = false AND m.imap_uid = ANY(%s::bigint[]))
+    OR (%s = true AND NOT (m.imap_uid = ANY(%s::bigint[]))
+        AND m.provider_deleted = false))
+ORDER BY m.imap_uid
+LIMIT %s
 """.strip()
 
 _SELECT_OUTBOX_SCOPE_CURRENT_SQL = """
@@ -686,6 +747,9 @@ class PostgreSQLMailboxReaderRepository(MailboxReaderRepository):
         message_id: str,
     ) -> CachedBody | None:
         return self._delegate.read_cached_body(scope, message_id)
+
+    def read_imap_projections(self, scope, **kwargs):
+        return self._delegate.read_imap_projections(scope, **kwargs)
 
 
 class PostgreSQLMailboxRepository(MailboxRepository):
@@ -1269,6 +1333,55 @@ class PostgreSQLMailboxRepository(MailboxRepository):
             getattr(connection, "rollback")()
             getattr(connection, "close")()
 
+    def read_imap_projections(
+        self, scope: MailboxScope, *, folder: str, uid_validity: str,
+        uids: Sequence[int], absent_from_uid_set: bool = False, limit: int = 200,
+    ) -> Sequence[MessageProjection]:
+        if (
+            type(scope) is not MailboxScope
+            or scope.provider is not MailboxProvider.CUSTOM_IMAP
+            or type(folder) is not str or not folder or "\x00" in folder
+            or type(uid_validity) is not str
+            or not uid_validity.isascii() or not uid_validity.isdigit()
+            or uid_validity.startswith("0") or len(uid_validity) > 20
+            or type(uids) not in (list, tuple) or len(uids) > 100_000
+            or any(type(uid) is not int or not 1 <= uid <= 4_294_967_295 for uid in uids)
+            or len(set(uids)) != len(uids)
+            or type(absent_from_uid_set) is not bool
+            or type(limit) is not int or not 1 <= limit <= 200
+        ):
+            raise ValueError("invalid IMAP projection request")
+        connection = self._connection()
+        cursor = None
+        try:
+            cursor = getattr(connection, "cursor")()
+            getattr(cursor, "execute")(
+                _SELECT_IMAP_PROJECTIONS_SQL,
+                _scope_params(scope) + (
+                    scope.provider_account_identity, derive_locator_digest(folder),
+                    folder, uid_validity, absent_from_uid_set, list(uids),
+                    absent_from_uid_set, list(uids), limit,
+                ),
+            )
+            result = []
+            for row in _fetchall(cursor):
+                if len(row) != 12:
+                    raise RuntimeError("mailbox repository storage corruption")
+                projection = MessageProjection(
+                    identity=MessageIdentity(*row[:5]),
+                    provider_thread_id=row[5], metadata_hash=row[6],
+                    body_state=BodyState(row[7]), unread=row[8], starred=row[9],
+                    provider_deleted=row[10], row_version=row[11],
+                )
+                projection.validate_for(scope.provider)
+                result.append(projection)
+            return tuple(result)
+        finally:
+            if cursor is not None:
+                getattr(cursor, "close")()
+            getattr(connection, "rollback")()
+            getattr(connection, "close")()
+
     def commit_provider_delta(
         self,
         commit: ProviderDeltaCommit,
@@ -1278,13 +1391,20 @@ class PostgreSQLMailboxRepository(MailboxRepository):
         cursor = None
         try:
             cursor = getattr(connection, "cursor")()
+            if commit.initialize_imap_state:
+                now = _dt(commit.committed_at_millis)
+                getattr(cursor, "execute")(
+                    _INSERT_INITIAL_STATE_SQL,
+                    (scope.workspace_id, scope.owner_user_id, scope.mailbox_id,
+                     scope.provider.value, scope.provider_account_identity, now, now),
+                )
             getattr(cursor, "execute")(
                 _LOCK_STATE_SQL,
                 (
                     scope.workspace_id,
                     scope.owner_user_id,
                     scope.mailbox_id,
-                    scope.source_generation,
+                    commit.previous_source_generation or scope.source_generation,
                 ),
             )
             rows = _fetchall(cursor)
@@ -1304,6 +1424,28 @@ class PostgreSQLMailboxRepository(MailboxRepository):
             if state_version != commit.expected_state_row_version:
                 getattr(connection, "rollback")()
                 return DeltaCommitOutcome.CONFLICT
+
+            if commit.previous_source_generation is not None:
+                now = _dt(commit.committed_at_millis)
+                # source_generation is mailbox-wide, while UIDVALIDITY belongs
+                # to one folder. Fail closed rather than hide unrelated folders
+                # when this INBOX refresh would retire their current state.
+                getattr(cursor, "execute")(
+                    _RETIRE_IMAP_STATE_SQL,
+                    (now, scope.workspace_id, scope.owner_user_id, scope.mailbox_id,
+                     commit.previous_source_generation, scope.provider_account_identity,
+                     commit.expected_state_row_version, commit.scope_key,
+                     commit.scope_key),
+                )
+                if _rowcount(cursor) != 1:
+                    getattr(connection, "rollback")()
+                    return DeltaCommitOutcome.CONFLICT
+                getattr(cursor, "execute")(
+                    _INSERT_IMAP_GENERATION_SQL,
+                    (scope.workspace_id, scope.owner_user_id, scope.mailbox_id,
+                     scope.provider_account_identity, scope.source_generation,
+                     now, now, commit.expected_state_row_version),
+                )
 
             digest = derive_locator_digest(commit.scope_key)
             getattr(cursor, "execute")(
@@ -1443,6 +1585,14 @@ class PostgreSQLMailboxRepository(MailboxRepository):
                         mutation.outbox_event_type.value,
                         now,
                     ),
+                )
+
+            for body in commit.cached_bodies:
+                getattr(cursor, "execute")(
+                    _UPSERT_BODY_SQL,
+                    (scope.workspace_id, scope.owner_user_id, scope.mailbox_id,
+                     body.message_id, body.body_text, body.body_html,
+                     body.content_hash, now),
                 )
 
             next_cursor = commit.next_cursor

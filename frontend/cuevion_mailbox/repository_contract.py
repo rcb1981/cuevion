@@ -455,8 +455,21 @@ class ProviderDeltaCommit:
     mutations: tuple[MessageMutation, ...]
     next_cursor: SyncCursor
     next_bootstrap_state: BootstrapState
+    # IMAP-only extensions. Generation replacement and body writes participate
+    # in the same transaction as the existing message/cursor/outbox commit.
+    previous_source_generation: int | None = None
+    cached_bodies: tuple[CachedBody, ...] = ()
+    initialize_imap_state: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.initialize_imap_state) is not bool or (self.initialize_imap_state and (
+            self.scope.provider is not MailboxProvider.CUSTOM_IMAP
+            or self.scope.source_generation != 1
+            or self.previous_source_generation is not None
+            or self.expected_state_row_version != 1
+            or self.expected_cursor_row_version is not None
+        )):
+            raise ValueError("invalid IMAP state initialization")
         if (
             type(self.scope_key) is not str
             or not self.scope_key
@@ -491,6 +504,45 @@ class ProviderDeltaCommit:
             if mutation.event_id in event_ids:
                 raise ValueError("invalid provider delta commit")
             event_ids.add(mutation.event_id)
+
+        if self.previous_source_generation is not None and (
+            self.scope.provider is not MailboxProvider.CUSTOM_IMAP
+            or type(self.previous_source_generation) is not int
+            or self.previous_source_generation < 1
+            or self.scope.source_generation != self.previous_source_generation + 1
+            or self.expected_cursor_row_version is not None
+        ):
+            raise ValueError("invalid mailbox generation replacement")
+        if type(self.cached_bodies) is not tuple:
+            raise ValueError("invalid cached body commit")
+        upserts = {
+            mutation.identity.message_id: mutation
+            for mutation in self.mutations
+            if mutation.kind is MessageMutationKind.UPSERT
+        }
+        seen_bodies: set[str] = set()
+        for body in self.cached_bodies:
+            mutation = upserts.get(body.message_id) if type(body) is CachedBody else None
+            if (
+                self.scope.provider is not MailboxProvider.CUSTOM_IMAP
+                or mutation is None
+                or mutation.record.body_state is not BodyState.CACHED
+                or body.message_id in seen_bodies
+                or any(value is not None and (type(value) is not str or "\x00" in value)
+                       for value in (body.body_text, body.body_html))
+                or type(body.content_hash) is not str
+                or len(body.content_hash) != 64
+                or any(char not in "0123456789abcdef" for char in body.content_hash)
+                or body.body_version != 1
+                or body.row_version != 1
+            ):
+                raise ValueError("invalid cached body commit")
+            seen_bodies.add(body.message_id)
+        if self.scope.provider is MailboxProvider.CUSTOM_IMAP and any(
+            mutation.record.body_state is BodyState.CACHED and message_id not in seen_bodies
+            for message_id, mutation in upserts.items()
+        ):
+            raise ValueError("missing cached body commit")
 
 
 @dataclass(frozen=True, slots=True)
@@ -643,6 +695,13 @@ class MailboxReaderRepository(Protocol):
         scope: MailboxScope,
         message_id: str,
     ) -> CachedBody | None:
+        ...
+
+    def read_imap_projections(
+        self, scope: MailboxScope, *, folder: str, uid_validity: str,
+        uids: Sequence[int], absent_from_uid_set: bool = False, limit: int = 200,
+    ) -> Sequence[MessageProjection]:
+        """Exact IMAP copies, or bounded live rows absent from a full UID inventory."""
         ...
 
 
