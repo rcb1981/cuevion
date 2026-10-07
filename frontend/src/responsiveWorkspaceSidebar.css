@@ -7,6 +7,24 @@
  * width. The existing xl+ sidebar remains untouched.
  */
 @media (min-width: 768px) and (max-width: 1279px) {
+  /*
+   * Mailbox content uses a three-column desktop grid at xl+. Without an
+   * explicit medium layout those same children become vertical grid rows.
+   * Keep the desktop interaction model, but compress the columns so folders,
+   * message list and reading pane remain visible side-by-side.
+   */
+  .grid.h-0.min-h-0.flex-1.items-stretch.gap-6.overflow-hidden {
+    grid-template-columns: 96px minmax(220px, 0.9fr) minmax(0, 1.35fr);
+    gap: 10px;
+  }
+
+  /* Smart Folder views omit the folder column and therefore have two children. */
+  .grid.h-0.min-h-0.flex-1.items-stretch.gap-6.overflow-hidden:not(
+      :has(> div:nth-child(3))
+    ) {
+    grid-template-columns: minmax(240px, 0.9fr) minmax(0, 1.35fr);
+  }
+
   aside:has(nav[aria-label="Workspace navigation"]) {
     z-index: 40;
     transition:

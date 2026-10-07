@@ -7,6 +7,10 @@ const css = readFileSync(
   "utf8",
 );
 const mainSource = readFileSync(resolve(process.cwd(), "src/main.tsx"), "utf8");
+const workspaceShellSource = readFileSync(
+  resolve(process.cwd(), "src/components/workspace/WorkspaceShell.tsx"),
+  "utf8",
+);
 
 assert.match(
   mainSource,
@@ -17,6 +21,23 @@ assert.match(
   css,
   /@media \(min-width: 768px\) and \(max-width: 1279px\)/,
   "the compact rail rules must stay scoped between md and xl",
+);
+const mailboxGridMarker =
+  "grid h-0 min-h-0 flex-1 items-stretch gap-6 overflow-hidden";
+assert.equal(
+  workspaceShellSource.split(mailboxGridMarker).length - 1,
+  1,
+  "the responsive mailbox layout must remain scoped to one canonical mailbox grid",
+);
+assert.match(
+  css,
+  /\.grid\.h-0\.min-h-0\.flex-1\.items-stretch\.gap-6\.overflow-hidden\s*\{[\s\S]*?grid-template-columns:\s*96px minmax\(220px, 0\.9fr\) minmax\(0, 1\.35fr\);[\s\S]*?gap:\s*10px;/,
+  "medium-width mailbox content must keep folders, list and reading pane side-by-side",
+);
+assert.match(
+  css,
+  /\.grid\.h-0\.min-h-0\.flex-1\.items-stretch\.gap-6\.overflow-hidden:not\([\s\S]*?:has\(> div:nth-child\(3\)\)[\s\S]*?grid-template-columns:\s*minmax\(240px, 0\.9fr\) minmax\(0, 1\.35fr\);/,
+  "medium-width Smart Folder views must keep list and reading pane side-by-side",
 );
 assert.match(
   css,
