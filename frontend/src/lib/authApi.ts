@@ -1,4 +1,5 @@
 export const AUTH0_LOGIN_ENDPOINT = "/api/auth/login";
+export const AUTH0_TESTER_LOGIN_ENDPOINT = "/api/auth/tester-login";
 export const AUTH0_SESSION_ENDPOINT = "/api/auth/session";
 export const AUTH0_LOGOUT_ENDPOINT = "/api/auth/logout";
 
@@ -161,6 +162,55 @@ export function startTeamInviteAuthentication(
   const query = new URLSearchParams({ team_invite: token });
   try {
     (navigation ?? window.location).replace(`${AUTH0_LOGIN_ENDPOINT}?${query}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+
+export function buildTesterInviteAuthenticationSubmission(token: string) {
+  if (
+    typeof token !== "string" ||
+    token !== token.trim() ||
+    !/^tsti_[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/.test(token)
+  ) {
+    return null;
+  }
+
+  return {
+    action: AUTH0_TESTER_LOGIN_ENDPOINT,
+    method: "POST" as const,
+    enctype: "application/x-www-form-urlencoded" as const,
+    fieldName: "tester_invite" as const,
+    fieldValue: token,
+  };
+}
+
+export function startTesterInviteAuthentication(
+  token: string,
+  documentImplementation: Document = document,
+): boolean {
+  const submission = buildTesterInviteAuthenticationSubmission(token);
+  if (!submission) {
+    return false;
+  }
+
+  try {
+    const form = documentImplementation.createElement("form");
+    form.method = submission.method;
+    form.action = submission.action;
+    form.enctype = submission.enctype;
+    form.hidden = true;
+
+    const input = documentImplementation.createElement("input");
+    input.type = "hidden";
+    input.name = submission.fieldName;
+    input.value = submission.fieldValue;
+    form.appendChild(input);
+
+    documentImplementation.body.appendChild(form);
+    form.submit();
     return true;
   } catch {
     return false;

@@ -56,10 +56,19 @@ import {
   isAuth0LoginPath,
   loadStartupSession,
   startTeamInviteAuthentication,
+  startTesterInviteAuthentication,
   type StartupSessionResult,
   type WorkspaceRole,
 } from "./lib/authApi";
 import { GMAIL_OAUTH_RECONNECT_REQUIRED_CONNECTION_MESSAGE } from "./lib/inboxConnectionApi";
+import {
+  consumeTesterInviteRoute,
+  type TesterInviteRoute,
+} from "./lib/testerInviteRoute";
+import {
+  fetchTesterInvite,
+  type PublicTesterInvite,
+} from "./lib/testerInviteApi";
 import { ExternalCollaborationGuestView } from "./components/collaboration/ExternalCollaborationGuestView";
 import {
   parseCollaborationGuestEntryRoute,
@@ -3835,6 +3844,115 @@ export function TeamInviteContinuationRouteView({ route }: { route: TeamInviteCo
   );
 }
 
+export function TesterInviteRouteView({
+  route,
+}: {
+  route: TesterInviteRoute;
+}) {
+  const [invite, setInvite] = useState<PublicTesterInvite | null>(null);
+  const [status, setStatus] = useState<
+    "loading" | "ready" | "invalid" | "expired" | "used" | "unavailable"
+  >(route.inviteToken ? "loading" : "invalid");
+  const started = useRef(false);
+
+  useEffect(() => {
+    if (!route.inviteToken) {
+      setInvite(null);
+      setStatus("invalid");
+      return;
+    }
+
+    let cancelled = false;
+    const load = async () => {
+      const result = await fetchTesterInvite(route.inviteToken!);
+      if (cancelled) return;
+      if (!result.ok) {
+        setInvite(null);
+        setStatus(
+          result.code.includes("expired")
+            ? "expired"
+            : result.code.includes("cancelled") ||
+                result.code.includes("used") ||
+                result.status === 409
+              ? "used"
+              : result.status === 400 || result.status === 404
+                ? "invalid"
+                : "unavailable",
+        );
+        return;
+      }
+      setInvite(result.invite);
+      setStatus(result.invite.status === "invited" ? "ready" : "used");
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [route.inviteToken]);
+
+  const continueAuthentication = () => {
+    if (status !== "ready" || !route.inviteToken || started.current) {
+      return;
+    }
+    started.current = true;
+    if (!startTesterInviteAuthentication(route.inviteToken)) {
+      started.current = false;
+      setStatus("unavailable");
+    }
+  };
+
+  let message = "Tester invitation authority is temporarily unavailable.";
+  if (status === "loading") {
+    message = "Checking your invitation…";
+  } else if (status === "invalid") {
+    message = "This tester invitation link is invalid.";
+  } else if (status === "expired") {
+    message = "This tester invitation has expired.";
+  } else if (status === "used") {
+    message = "This tester invitation has already been used or cancelled.";
+  } else if (status === "ready") {
+    message =
+      "You have been invited to create your own Cuevion workspace" +
+      (invite?.inviteeName ? ", " + invite.inviteeName : "") +
+      ".";
+  }
+
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-sand px-6 text-moss">
+      <div className="w-full max-w-lg space-y-6 rounded-3xl border border-moss/15 bg-white/70 p-8">
+        <div>
+          <div className="text-[0.72rem] font-medium uppercase tracking-[0.2em] text-moss/55">
+            Cuevion Early Access
+          </div>
+          <h1 className="mt-2 text-2xl font-medium">Your Cuevion workspace</h1>
+        </div>
+        <p role={status === "loading" || status === "ready" ? "status" : "alert"}>
+          {message}
+        </p>
+        {status === "ready" ? (
+          <button
+            type="button"
+            className={premiumAccessButtonClass}
+            onClick={continueAuthentication}
+          >
+            Continue to Cuevion
+          </button>
+        ) : null}
+        {status === "unavailable" ? (
+          <button
+            type="button"
+            className="rounded-full border border-moss/20 px-5 py-2"
+            onClick={() => window.location.reload()}
+          >
+            Retry
+          </button>
+        ) : null}
+      </div>
+    </main>
+  );
+}
+
+
 export function TeamInviteRouteView({
   route,
   sessionStatus,
@@ -5298,6 +5416,11 @@ function Auth0SessionBoundary({
 }
 
 export default function App() {
+  // Consume and scrub the secret Tester Invite fragment synchronously during
+  // initial render, before effects or the Auth0 session probe can run.
+  const [testerInviteRoute] = useState<TesterInviteRoute | null>(() =>
+    consumeTesterInviteRoute(),
+  );
   const [teamInviteContinuationRoute, setTeamInviteContinuationRoute] =
     useState<TeamInviteContinuationRoute | null>(() => parseTeamInviteContinuationRoute());
   const [collaborationGuestRoute, setCollaborationGuestRoute] =
@@ -5328,6 +5451,10 @@ export default function App() {
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
+
+  if (testerInviteRoute) {
+    return <TesterInviteRouteView route={testerInviteRoute} />;
+  }
 
   if (teamInviteContinuationRoute) {
     return (
