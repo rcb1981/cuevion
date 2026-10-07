@@ -3,6 +3,9 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./index.css";
 import "./responsiveWorkspaceSidebar.css";
+import { installResponsiveWorkspaceSidebarBehavior } from "./responsiveWorkspaceSidebarBehavior";
+
+installResponsiveWorkspaceSidebarBehavior();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

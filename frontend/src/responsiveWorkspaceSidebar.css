@@ -47,36 +47,36 @@
    * Expand only while the user is interacting with the rail. This is an
    * overlay: the workspace keeps its existing 96px medium-width offset.
    */
-  aside:has(nav[aria-label="Workspace navigation"]):hover,
-  aside:has(nav[aria-label="Workspace navigation"]):focus-within {
+  aside:has(nav[aria-label="Workspace navigation"]):not([data-responsive-sidebar-collapsed="true"]):hover,
+  aside:has(nav[aria-label="Workspace navigation"]):not([data-responsive-sidebar-collapsed="true"]):focus-within {
     width: 240px;
     padding-left: 1.25rem;
     padding-right: 1.25rem;
     box-shadow: 18px 0 38px rgba(18, 30, 25, 0.18);
   }
 
-  aside:has(nav[aria-label="Workspace navigation"]):hover .xl\:hidden,
-  aside:has(nav[aria-label="Workspace navigation"]):focus-within .xl\:hidden {
+  aside:has(nav[aria-label="Workspace navigation"]):not([data-responsive-sidebar-collapsed="true"]):hover .xl\:hidden,
+  aside:has(nav[aria-label="Workspace navigation"]):not([data-responsive-sidebar-collapsed="true"]):focus-within .xl\:hidden {
     display: none !important;
   }
 
-  aside:has(nav[aria-label="Workspace navigation"]):hover .hidden.xl\:flex,
-  aside:has(nav[aria-label="Workspace navigation"]):focus-within .hidden.xl\:flex {
+  aside:has(nav[aria-label="Workspace navigation"]):not([data-responsive-sidebar-collapsed="true"]):hover .hidden.xl\:flex,
+  aside:has(nav[aria-label="Workspace navigation"]):not([data-responsive-sidebar-collapsed="true"]):focus-within .hidden.xl\:flex {
     display: flex !important;
   }
 
-  aside:has(nav[aria-label="Workspace navigation"]):hover .hidden.xl\:inline-flex,
-  aside:has(nav[aria-label="Workspace navigation"]):focus-within .hidden.xl\:inline-flex {
+  aside:has(nav[aria-label="Workspace navigation"]):not([data-responsive-sidebar-collapsed="true"]):hover .hidden.xl\:inline-flex,
+  aside:has(nav[aria-label="Workspace navigation"]):not([data-responsive-sidebar-collapsed="true"]):focus-within .hidden.xl\:inline-flex {
     display: inline-flex !important;
   }
 
-  aside:has(nav[aria-label="Workspace navigation"]):hover .hidden.xl\:block,
-  aside:has(nav[aria-label="Workspace navigation"]):focus-within .hidden.xl\:block {
+  aside:has(nav[aria-label="Workspace navigation"]):not([data-responsive-sidebar-collapsed="true"]):hover .hidden.xl\:block,
+  aside:has(nav[aria-label="Workspace navigation"]):not([data-responsive-sidebar-collapsed="true"]):focus-within .hidden.xl\:block {
     display: block !important;
   }
 
   /* Keep an opened Smart Folders tree out of the collapsed icon rail. */
-  aside:has(nav[aria-label="Workspace navigation"]):not(:hover):not(:focus-within)
+  aside:has(nav[aria-label="Workspace navigation"]):is([data-responsive-sidebar-collapsed="true"], :not(:hover):not(:focus-within))
     nav[aria-label="Workspace navigation"]
     > ul
     > li:has(> button[aria-label="Smart Folders"])
@@ -84,12 +84,12 @@
     display: none;
   }
 
-  aside:has(nav[aria-label="Workspace navigation"]):hover
+  aside:has(nav[aria-label="Workspace navigation"]):not([data-responsive-sidebar-collapsed="true"]):hover
     nav[aria-label="Workspace navigation"]
     > ul
     > li:has(> button[aria-label="Smart Folders"])
     > ul,
-  aside:has(nav[aria-label="Workspace navigation"]):focus-within
+  aside:has(nav[aria-label="Workspace navigation"]):not([data-responsive-sidebar-collapsed="true"]):focus-within
     nav[aria-label="Workspace navigation"]
     > ul
     > li:has(> button[aria-label="Smart Folders"])
@@ -97,10 +97,10 @@
     display: block;
   }
 
-  aside:has(nav[aria-label="Workspace navigation"]):hover
+  aside:has(nav[aria-label="Workspace navigation"]):not([data-responsive-sidebar-collapsed="true"]):hover
     nav[aria-label="Workspace navigation"]
     button[class~="h-9"],
-  aside:has(nav[aria-label="Workspace navigation"]):focus-within
+  aside:has(nav[aria-label="Workspace navigation"]):not([data-responsive-sidebar-collapsed="true"]):focus-within
     nav[aria-label="Workspace navigation"]
     button[class~="h-9"] {
     justify-content: flex-start;
@@ -114,7 +114,7 @@
    * existing mailbox button as an inbox icon while the rail is collapsed.
    * Focusing or hovering expands the rail and restores the real mailbox label.
    */
-  aside:has(nav[aria-label="Workspace navigation"]):not(:hover):not(:focus-within)
+  aside:has(nav[aria-label="Workspace navigation"]):is([data-responsive-sidebar-collapsed="true"], :not(:hover):not(:focus-within))
     nav[aria-label="Workspace navigation"]
     > ul
     > li[class~="pt-1"]
@@ -128,7 +128,7 @@
     padding: 0;
   }
 
-  aside:has(nav[aria-label="Workspace navigation"]):not(:hover):not(:focus-within)
+  aside:has(nav[aria-label="Workspace navigation"]):is([data-responsive-sidebar-collapsed="true"], :not(:hover):not(:focus-within))
     nav[aria-label="Workspace navigation"]
     > ul
     > li[class~="pt-1"]
@@ -139,7 +139,7 @@
     display: none;
   }
 
-  aside:has(nav[aria-label="Workspace navigation"]):not(:hover):not(:focus-within)
+  aside:has(nav[aria-label="Workspace navigation"]):is([data-responsive-sidebar-collapsed="true"], :not(:hover):not(:focus-within))
     nav[aria-label="Workspace navigation"]
     > ul
     > li[class~="pt-1"]

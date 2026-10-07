@@ -11,11 +11,50 @@ const workspaceShellSource = readFileSync(
   resolve(process.cwd(), "src/components/workspace/WorkspaceShell.tsx"),
   "utf8",
 );
+const sidebarBehaviorSource = readFileSync(
+  resolve(process.cwd(), "src/responsiveWorkspaceSidebarBehavior.ts"),
+  "utf8",
+);
 
 assert.match(
   mainSource,
   /import "\.\/responsiveWorkspaceSidebar\.css";/,
   "the responsive sidebar stylesheet must load with the application shell",
+);
+assert.match(
+  mainSource,
+  /installResponsiveWorkspaceSidebarBehavior\(\);/,
+  "the responsive sidebar interaction behavior must initialize before the app renders",
+);
+assert.match(
+  sidebarBehaviorSource,
+  /event\.detail > 0/,
+  "mouse and pointer clicks may auto-collapse while keyboard activation remains focus-driven",
+);
+assert.match(
+  sidebarBehaviorSource,
+  /ariaExpanded !== null/,
+  "submenu toggles such as Inboxes and Smart Folders must remain expanded while choosing a child",
+);
+assert.match(
+  sidebarBehaviorSource,
+  /ariaLabel\?\.startsWith\("Manage "\)/,
+  "Smart Folder management controls must not collapse the rail before their menu action",
+);
+assert.match(
+  sidebarBehaviorSource,
+  /setAttribute\(COLLAPSED_ATTRIBUTE, "true"\)[\s\S]*?button\.blur\(\)/,
+  "a pointer navigation action must collapse the rail immediately and clear pointer focus",
+);
+assert.match(
+  sidebarBehaviorSource,
+  /const handlePointerOut[\s\S]*?relatedTarget[\s\S]*?removeAttribute\(COLLAPSED_ATTRIBUTE\)/,
+  "the temporary collapse lock must reset only after the pointer leaves the sidebar",
+);
+assert.match(
+  sidebarBehaviorSource,
+  /addEventListener\("pointerout", handlePointerOut\)/,
+  "the pointer-leave reset handler must be installed on the document boundary",
 );
 assert.match(
   css,
@@ -48,6 +87,16 @@ assert.match(
   css,
   /:hover,[\s\S]*?:focus-within[\s\S]*?width: 240px;/,
   "mouse and keyboard interaction must temporarily expand the compact rail",
+);
+assert.match(
+  css,
+  /:not\(\[data-responsive-sidebar-collapsed="true"\]\):hover/,
+  "a pointer navigation action must be able to suppress hover expansion until the pointer exits",
+);
+assert.match(
+  css,
+  /:is\(\[data-responsive-sidebar-collapsed="true"\], :not\(:hover\):not\(:focus-within\)\)/,
+  "the forced-collapsed state must reuse the normal compact-rail presentation",
 );
 assert.match(
   css,
