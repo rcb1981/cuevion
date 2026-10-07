@@ -40,6 +40,11 @@ assert.match(
 );
 assert.match(
   css,
+  /li:has\(> button\[aria-label="Smart Folders"\]\)[\s\S]*?> ul[\s\S]*?display: none;/,
+  "an open Smart Folders tree must not leak labels into the collapsed icon rail",
+);
+assert.match(
+  css,
   /li\[class~="pt-1"\][\s\S]*?button\.hidden\.xl\\:flex[\s\S]*?display: flex !important;/,
   "single-mailbox users must retain a reachable inbox control in the collapsed rail",
 );
