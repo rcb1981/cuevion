@@ -61,10 +61,14 @@ class FakeHttp:
 
 
 class FakeAuthority:
-    def __init__(self):
+    def __init__(self, *, admin=True):
+        self.admin = admin
         self.issue_calls = []
         self.cancel_calls = []
         self.lookup_calls = []
+
+    def has_admin_authority(self, actor_user_id):
+        return self.admin and actor_user_id == ADMIN
 
     def read_provisioning_invitation(self, token, *, allow_provisioned=False):
         self.lookup_calls.append((token, allow_provisioned))
@@ -138,6 +142,29 @@ class TesterInviteRouteTests(unittest.TestCase):
         self.assertNotIn("tester@example.com", request.wfile.getvalue().decode("utf-8"))
         self.assertEqual(authority.lookup_calls, [(TOKEN, True)])
         authenticated.assert_not_called()
+
+    def test_capability_is_authenticated_and_server_authoritative(self):
+        authority = FakeAuthority()
+        request = FakeHttp("/api/tester/invite?op=capability", {})
+        authenticated = self._run(request, authority)
+
+        self.assertEqual(request.status, 200)
+        self.assertEqual(
+            request.json(),
+            {"ok": True, "canManageTesterAccess": True},
+        )
+        authenticated.assert_called_once()
+
+        denied = FakeHttp("/api/tester/invite?op=capability", {})
+        self._run(denied, FakeAuthority(admin=False))
+        self.assertEqual(denied.status, 403)
+        self.assertEqual(denied.json()["error"]["code"], "forbidden")
+
+    def test_capability_requires_authenticated_session(self):
+        authority = FakeAuthority()
+        request = FakeHttp("/api/tester/invite?op=capability", {})
+        self._run(request, authority, actor=None)
+        self.assertNotEqual(request.status, 200)
 
     def test_issue_returns_fragment_url_and_uses_authenticated_admin_id(self):
         authority = FakeAuthority()
