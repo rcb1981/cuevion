@@ -24,6 +24,7 @@ import {
 } from "../../lib/customImapOnboardingAttempt";
 import {
   createDefaultCustomSmtpSettings,
+  createICloudMailPreset,
   getPasswordLabel,
   getProviderConnectionMethod,
   isImapCredentialsProvider,
@@ -986,6 +987,61 @@ export function StepConnectInboxes({
 
               {isImapCredentialsProvider(connection.provider) ? (
                 <>
+                {connection.provider === "custom_imap" && !incomingIsConnected ? (
+                  <div className="mt-2 flex flex-col gap-3 rounded-[22px] border border-moss/12 bg-white/68 px-4 py-4 md:flex-row md:items-center md:justify-between">
+                    <div className="max-w-2xl">
+                      <p className="text-sm font-semibold text-ink">iCloud Mail</p>
+                      <p className="mt-1 text-sm leading-6 text-ink/58">
+                        Fill in Apple&apos;s IMAP and SMTP server settings automatically.
+                        Use an app-specific password from your Apple Account, not your
+                        normal Apple Account password.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      data-attempt-control={"icloud-preset-" + inboxId}
+                      disabled={
+                        customImapInteractionLocked || !connection.email.trim()
+                      }
+                      onClick={() => {
+                        if (customImapMutationIsLocked()) {
+                          return;
+                        }
+
+                        const preset = createICloudMailPreset(connection.email);
+                        clearConnectionFeedback(inboxId);
+                        clearImapPassword(inboxId);
+                        clearSmtpPassword(inboxId);
+
+                        onCustomImapChange(inboxId, "host", preset.imap.host);
+                        onCustomImapChange(inboxId, "port", preset.imap.port);
+                        onCustomImapChange(inboxId, "ssl", preset.imap.ssl);
+                        onCustomImapChange(inboxId, "username", preset.imap.username);
+
+                        onCustomSmtpChange(inboxId, "host", preset.smtp.host);
+                        onCustomSmtpChange(inboxId, "port", preset.smtp.port);
+                        onCustomSmtpChange(
+                          inboxId,
+                          "username",
+                          preset.smtp.username,
+                        );
+                        onCustomSmtpChange(
+                          inboxId,
+                          "security",
+                          preset.smtp.security,
+                        );
+                        onCustomSmtpChange(
+                          inboxId,
+                          "useSameCredentials",
+                          preset.smtp.useSameCredentials,
+                        );
+                      }}
+                      className="shrink-0 rounded-full border border-moss/22 bg-sand/45 px-4 py-2 text-sm font-medium text-moss transition hover:border-moss/40 hover:bg-sand disabled:cursor-not-allowed disabled:border-ink/8 disabled:bg-ink/[0.03] disabled:text-ink/32"
+                    >
+                      Use iCloud settings
+                    </button>
+                  </div>
+                ) : null}
                 <div className="mt-6 space-y-4 rounded-[24px] border border-ink/8 bg-sand/20 p-5">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
