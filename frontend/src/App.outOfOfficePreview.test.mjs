@@ -29,3 +29,14 @@ assert.doesNotMatch(
   /cuevion-k7cspbgrj|vercel\.app.*forbidden_host/,
   "Preview review access must not be implemented by loosening host allowlists",
 );
+
+const vercel = JSON.parse(
+  readFileSync(resolve(process.cwd(), "vercel.json"), "utf8"),
+);
+assert.ok(
+  vercel.rewrites?.some(
+    (rewrite) =>
+      rewrite.source === "/out-of-office-preview" && rewrite.destination === "/",
+  ),
+  "Vercel must rewrite the review-only OOO route to the SPA entrypoint",
+);
