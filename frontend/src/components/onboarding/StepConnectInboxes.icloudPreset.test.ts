@@ -42,3 +42,8 @@ assert.doesNotMatch(
   /Use iCloud settings/,
   "the old duplicate iCloud quick-setup button must be removed",
 );
+assert.match(
+  source,
+  /Gmail \/ Google Workspace, iCloud Mail, or[\s\S]*?Custom IMAP account/,
+  "the onboarding guidance must name all three supported provider choices",
+);

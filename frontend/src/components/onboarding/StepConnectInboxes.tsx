@@ -844,8 +844,8 @@ export function StepConnectInboxes({
           {onboardingText.connect.description}
         </p>
         <p className="max-w-2xl text-sm leading-6 text-ink/54">
-          Connect every selected Gmail / Google Workspace or Custom IMAP
-          account. You can add more inboxes later in Settings &gt; Inboxes.
+          Connect every selected Gmail / Google Workspace, iCloud Mail, or
+          Custom IMAP account. You can add more inboxes later in Settings &gt; Inboxes.
         </p>
       </div>
 
