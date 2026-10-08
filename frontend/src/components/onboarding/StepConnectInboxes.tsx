@@ -1,8 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  createInboxConnection,
-  providerOptions,
-} from "../../data/onboardingOptions";
+import { createInboxConnection } from "../../data/onboardingOptions";
 import type {
   InboxConnectionAttemptResult,
   LiveInboxMessageSnapshot,
@@ -27,6 +24,7 @@ import {
   createICloudMailPreset,
   getPasswordLabel,
   getProviderConnectionMethod,
+  isICloudMailPreset,
   isImapCredentialsProvider,
   isOAuthConnectionProvider,
 } from "../../lib/inboxProviderDefaults";
@@ -49,6 +47,24 @@ interface ConnectionFeedback {
   smtpHost?: string;
   smtpPassword?: string;
   general?: string;
+}
+
+type OnboardingProviderChoiceId = "google" | "icloud" | "custom_imap";
+
+const onboardingProviderChoices: Array<{
+  id: OnboardingProviderChoiceId;
+  label: string;
+}> = [
+  { id: "google", label: "Gmail / Google Workspace" },
+  { id: "icloud", label: "iCloud Mail" },
+  { id: "custom_imap", label: "Custom IMAP" },
+];
+
+function isICloudOnboardingConnection(connection: InboxConnection) {
+  return (
+    connection.provider === "custom_imap" &&
+    isICloudMailPreset(connection.customImap, connection.customSmtp)
+  );
 }
 
 interface StepConnectInboxesProps {
@@ -921,9 +937,16 @@ export function StepConnectInboxes({
                 ) : null}
               </div>
 
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {providerOptions.map((provider) => {
-                  const selected = connection.provider === provider.id;
+              <div className="grid gap-3 md:grid-cols-3">
+                {onboardingProviderChoices.map((provider) => {
+                  const iCloudSelected = isICloudOnboardingConnection(connection);
+                  const selected =
+                    provider.id === "icloud"
+                      ? iCloudSelected
+                      : provider.id === "custom_imap"
+                        ? connection.provider === "custom_imap" && !iCloudSelected
+                        : connection.provider === provider.id;
+
                   return (
                     <button
                       key={provider.id}
@@ -941,10 +964,73 @@ export function StepConnectInboxes({
                         clearConnectionFeedback(inboxId);
                         clearImapPassword(inboxId);
                         clearSmtpPassword(inboxId);
+
+                        if (provider.id === "icloud") {
+                          const preset = createICloudMailPreset(connection.email);
+                          onProviderChange(inboxId, "custom_imap");
+                          onCustomImapChange(inboxId, "host", preset.imap.host);
+                          onCustomImapChange(inboxId, "port", preset.imap.port);
+                          onCustomImapChange(inboxId, "ssl", preset.imap.ssl);
+                          onCustomImapChange(
+                            inboxId,
+                            "username",
+                            preset.imap.username,
+                          );
+                          onCustomSmtpChange(inboxId, "host", preset.smtp.host);
+                          onCustomSmtpChange(inboxId, "port", preset.smtp.port);
+                          onCustomSmtpChange(
+                            inboxId,
+                            "username",
+                            preset.smtp.username,
+                          );
+                          onCustomSmtpChange(
+                            inboxId,
+                            "security",
+                            preset.smtp.security,
+                          );
+                          onCustomSmtpChange(
+                            inboxId,
+                            "useSameCredentials",
+                            preset.smtp.useSameCredentials,
+                          );
+                          return;
+                        }
+
+                        if (provider.id === "custom_imap" && iCloudSelected) {
+                          const blankImap = createInboxConnection().customImap;
+                          const blankSmtp = createDefaultCustomSmtpSettings();
+                          onProviderChange(inboxId, "custom_imap");
+                          onCustomImapChange(inboxId, "host", blankImap.host);
+                          onCustomImapChange(inboxId, "port", blankImap.port);
+                          onCustomImapChange(inboxId, "ssl", blankImap.ssl);
+                          onCustomImapChange(
+                            inboxId,
+                            "username",
+                            blankImap.username,
+                          );
+                          onCustomSmtpChange(inboxId, "host", blankSmtp.host);
+                          onCustomSmtpChange(inboxId, "port", blankSmtp.port);
+                          onCustomSmtpChange(
+                            inboxId,
+                            "username",
+                            blankSmtp.username,
+                          );
+                          onCustomSmtpChange(
+                            inboxId,
+                            "security",
+                            blankSmtp.security,
+                          );
+                          onCustomSmtpChange(
+                            inboxId,
+                            "useSameCredentials",
+                            blankSmtp.useSameCredentials,
+                          );
+                          return;
+                        }
+
                         onProviderChange(inboxId, provider.id);
                       }}
-                      className={`rounded-3xl border px-4 py-3 text-left transition ${
-                        selected
+                      className={`rounded-3xl border px-4 py-3 text-left transition ${selected
                           ? "border-[var(--workspace-provider-selected-border)] bg-[var(--workspace-provider-selected-surface)] text-[var(--workspace-provider-selected-text)] shadow-panel"
                           : "border-ink/10 bg-sand/35 text-ink hover:border-moss/35 dark:border-[var(--workspace-border-soft)] dark:bg-[var(--workspace-card-subtle)] dark:text-[var(--workspace-text)] dark:hover:border-[var(--workspace-border-hover)] dark:hover:bg-[var(--workspace-hover-surface)]"
                       } outline-none focus-visible:border-[var(--workspace-provider-selected-border)] focus-visible:bg-[var(--workspace-provider-selected-surface)] focus-visible:text-[var(--workspace-provider-selected-text)] focus-visible:shadow-panel`}
@@ -972,10 +1058,18 @@ export function StepConnectInboxes({
                     if (customImapMutationIsLocked()) {
                       return;
                     }
+                    const nextEmail = event.target.value;
                     clearConnectionFeedback(inboxId);
                     clearImapPassword(inboxId);
                     clearSmtpPassword(inboxId);
-                    onEmailChange(inboxId, event.target.value);
+                    onEmailChange(inboxId, nextEmail);
+                    if (isICloudOnboardingConnection(connection)) {
+                      onCustomImapChange(
+                        inboxId,
+                        "username",
+                        nextEmail.trim(),
+                      );
+                    }
                   }}
                   placeholder="name@company.com"
                   className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 text-ink outline-none transition focus:border-moss"
@@ -987,59 +1081,14 @@ export function StepConnectInboxes({
 
               {isImapCredentialsProvider(connection.provider) ? (
                 <>
-                {connection.provider === "custom_imap" && !incomingIsConnected ? (
-                  <div className="mt-2 flex flex-col gap-3 rounded-[22px] border border-moss/12 bg-white/68 px-4 py-4 md:flex-row md:items-center md:justify-between">
-                    <div className="max-w-2xl">
-                      <p className="text-sm font-semibold text-ink">iCloud Mail</p>
-                      <p className="mt-1 text-sm leading-6 text-ink/58">
-                        Fill in Apple&apos;s IMAP and SMTP server settings automatically.
-                        Use an app-specific password from your Apple Account, not your
-                        normal Apple Account password.
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      data-attempt-control={"icloud-preset-" + inboxId}
-                      disabled={
-                        customImapInteractionLocked || !connection.email.trim()
-                      }
-                      onClick={() => {
-                        if (customImapMutationIsLocked()) {
-                          return;
-                        }
-
-                        const preset = createICloudMailPreset(connection.email);
-                        clearConnectionFeedback(inboxId);
-                        clearImapPassword(inboxId);
-                        clearSmtpPassword(inboxId);
-
-                        onCustomImapChange(inboxId, "host", preset.imap.host);
-                        onCustomImapChange(inboxId, "port", preset.imap.port);
-                        onCustomImapChange(inboxId, "ssl", preset.imap.ssl);
-                        onCustomImapChange(inboxId, "username", preset.imap.username);
-
-                        onCustomSmtpChange(inboxId, "host", preset.smtp.host);
-                        onCustomSmtpChange(inboxId, "port", preset.smtp.port);
-                        onCustomSmtpChange(
-                          inboxId,
-                          "username",
-                          preset.smtp.username,
-                        );
-                        onCustomSmtpChange(
-                          inboxId,
-                          "security",
-                          preset.smtp.security,
-                        );
-                        onCustomSmtpChange(
-                          inboxId,
-                          "useSameCredentials",
-                          preset.smtp.useSameCredentials,
-                        );
-                      }}
-                      className="shrink-0 rounded-full border border-moss/22 bg-sand/45 px-4 py-2 text-sm font-medium text-moss transition hover:border-moss/40 hover:bg-sand disabled:cursor-not-allowed disabled:border-ink/8 disabled:bg-ink/[0.03] disabled:text-ink/32"
-                    >
-                      Use iCloud settings
-                    </button>
+                {isICloudOnboardingConnection(connection) && !incomingIsConnected ? (
+                  <div className="mt-2 rounded-[22px] border border-moss/12 bg-white/68 px-4 py-4">
+                    <p className="text-sm font-semibold text-ink">iCloud Mail</p>
+                    <p className="mt-1 text-sm leading-6 text-ink/58">
+                      Apple&apos;s IMAP and SMTP settings are filled in automatically.
+                      Use an app-specific password from your Apple Account, not your
+                      normal Apple Account password.
+                    </p>
                   </div>
                 ) : null}
                 <div className="mt-6 space-y-4 rounded-[24px] border border-ink/8 bg-sand/20 p-5">

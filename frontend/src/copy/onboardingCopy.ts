@@ -220,7 +220,7 @@ export const onboardingCopy = {
       title: "Connect your inboxes",
       description: "Connect the source accounts Cuevion should organize first.",
       inboxHint:
-        "Gmail / Google Workspace and Custom IMAP are supported in this private beta.",
+        "Gmail / Google Workspace, iCloud Mail and Custom IMAP are supported in this private beta.",
       email: "Email",
       connectInbox: "Connect inbox",
       continueWithGoogle: "Continue with Google",
@@ -238,7 +238,7 @@ export const onboardingCopy = {
       connectionTimedOut: "Connection timed out",
       googleOAuthTitle: "Gmail connects with OAuth",
       googleOAuthDescription:
-        "Use secure Google authentication for Gmail and Google Workspace. For other providers, choose Custom IMAP during this beta.",
+        "Use secure Google authentication for Gmail and Google Workspace. For iCloud, choose iCloud Mail. For other providers, choose Custom IMAP.",
       googleOAuthPending:
         "Authentication will continue in Google once the runtime OAuth endpoint is available.",
       googleOAuthActivationPending:

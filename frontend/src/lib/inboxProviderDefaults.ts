@@ -94,6 +94,21 @@ export function createICloudMailPreset(email = ""): {
   };
 }
 
+export function isICloudMailPreset(
+  imap: CustomImapSettings,
+  smtp: CustomSmtpSettings,
+) {
+  return (
+    imap.host.trim().toLowerCase() === "imap.mail.me.com" &&
+    imap.port.trim() === "993" &&
+    imap.ssl === true &&
+    smtp.host.trim().toLowerCase() === "smtp.mail.me.com" &&
+    smtp.port.trim() === "587" &&
+    smtp.security === "starttls" &&
+    smtp.useSameCredentials === true
+  );
+}
+
 export function usesEmailAsImapUsername(provider: ProviderId | null) {
   return provider === "microsoft";
 }
