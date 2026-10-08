@@ -98,13 +98,13 @@ test("unresolved and unavailable sessions never mount owner startup", () => {
   assert.equal(unavailable.type, "main");
 });
 
-test("review-only onboarding preview remains available when preview auth is unavailable", () => {
+test("review-only preview routing remains available when preview auth is unavailable", () => {
   const result = route(
     { status: "unavailable", authSource: null, user: null },
     "",
     "preview",
   );
-  assert.equal(result.type.name, "OnboardingPreviewRoute");
+  assert.equal(result.type.name, "ReviewPreviewRoute");
 });
 
 test("ordinary unauthenticated owner login retains Auth0's existing view", () => {

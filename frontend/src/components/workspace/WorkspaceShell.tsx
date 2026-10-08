@@ -38342,6 +38342,81 @@ const OutOfOfficeSettingsModal = memo(function OutOfOfficeSettingsModal({
   );
 });
 
+export function OutOfOfficeSettingsPreview() {
+  const [draft, setDraft] = useState<InboxOutOfOfficeSettings>(() => ({
+    enabled: true,
+    startsAt: "2026-10-09T07:00:00.000Z",
+    endsAt: "2026-10-12T16:00:00.000Z",
+    subject: "Out of office",
+    message:
+      "Thanks for your email. I’m currently out of office and will get back to you as soon as I return.",
+  }));
+  const [previewNotice, setPreviewNotice] = useState<string | null>(null);
+
+  return (
+    <div className="min-h-screen bg-sand px-5 py-5">
+      <div className="mx-auto mb-4 flex max-w-[1180px] items-center justify-between rounded-[18px] bg-[rgba(39,38,34,0.9)] px-5 py-3 text-white shadow-panel">
+        <div>
+          <div className="text-[0.68rem] font-medium uppercase tracking-[0.2em] text-white/62">
+            Preview mode
+          </div>
+          <div className="mt-0.5 text-[0.82rem] text-white/68">
+            Review-only Out of Office. Nothing is saved and no email is sent.
+          </div>
+        </div>
+      </div>
+
+      {previewNotice ? (
+        <div className="mx-auto mb-4 max-w-[780px] rounded-[16px] border border-moss/20 bg-white/82 px-4 py-3 text-[0.82rem] text-moss shadow-panel">
+          {previewNotice}
+        </div>
+      ) : null}
+
+      <OutOfOfficeSettingsModal
+        open
+        themeMode="light"
+        inboxEmail="demo@hysteriarecs.com"
+        outOfOffice={draft}
+        reuseOptions={[
+          {
+            inboxEmail: "promo@hysteriarecs.com",
+            subject: "Out of office",
+            message:
+              "Thanks for reaching out. I’m currently away and will reply when I’m back.",
+          },
+        ]}
+        isSaving={false}
+        saveError={null}
+        onChangeEnabled={(enabled) =>
+          setDraft((current) => ({ ...current, enabled }))
+        }
+        onChangeStartsAt={(startsAt) =>
+          setDraft((current) => ({ ...current, startsAt }))
+        }
+        onChangeEndsAt={(endsAt) =>
+          setDraft((current) => ({ ...current, endsAt }))
+        }
+        onChangeSubject={(subject) =>
+          setDraft((current) => ({ ...current, subject }))
+        }
+        onChangeMessage={(message) =>
+          setDraft((current) => ({ ...current, message }))
+        }
+        onReuseMessage={(option) =>
+          setDraft((current) => ({
+            ...current,
+            enabled: true,
+            subject: option.subject,
+            message: option.message,
+          }))
+        }
+        onCancel={() => setPreviewNotice("Preview only — nothing was changed.")}
+        onSave={() => setPreviewNotice("Preview only — nothing was saved or sent.")}
+      />
+    </div>
+  );
+}
+
 const SmartFolderModal = memo(function SmartFolderModal({
   themeMode,
   connectedInboxes,

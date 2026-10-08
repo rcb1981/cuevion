@@ -81,6 +81,12 @@ const WorkspaceShell = lazy(() =>
   })),
 );
 
+const OutOfOfficeSettingsPreview = lazy(() =>
+  import("./components/workspace/WorkspaceShell").then((module) => ({
+    default: module.OutOfOfficeSettingsPreview,
+  })),
+);
+
 const TeamMemberShell = lazy(() =>
   import("./components/workspace/TeamMemberShell").then((module) => ({
     default: module.TeamMemberShell,
@@ -599,6 +605,39 @@ function isOnboardingPreviewRoute() {
   );
 }
 
+function isOutOfOfficePreviewRoute() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  return (
+    window.location.pathname.replace(/\/+$/, "") === "/out-of-office-preview" ||
+    params.get("preview") === "out-of-office"
+  );
+}
+
+function resolveReviewPreviewKind(): "onboarding" | "out-of-office" | null {
+  if (isOutOfOfficePreviewRoute()) {
+    return "out-of-office";
+  }
+  if (isOnboardingPreviewRoute()) {
+    return "onboarding";
+  }
+  return null;
+}
+
+function ReviewPreviewRoute({ onExit }: { onExit: () => void }) {
+  if (resolveReviewPreviewKind() === "out-of-office") {
+    return (
+      <Suspense fallback={<WorkspaceLoadingFallback />}>
+        <OutOfOfficeSettingsPreview />
+      </Suspense>
+    );
+  }
+  return <OnboardingPreviewRoute onExit={onExit} />;
+}
+
 function resolveRootAppRoute(): RootAppRoute {
   if (typeof window === "undefined") {
     return "app";
@@ -608,7 +647,7 @@ function resolveRootAppRoute(): RootAppRoute {
     return "login";
   }
 
-  return isOnboardingPreviewRoute() ? "preview" : "app";
+  return resolveReviewPreviewKind() ? "preview" : "app";
 }
 
 export function resolveSafeCollaborationGuestRoute(): CollaborationGuestRoute | null {
@@ -5320,7 +5359,7 @@ export function Auth0SessionRoute({
     );
   }
   if (appRoute === "preview" && session.status === "unavailable") {
-    return <OnboardingPreviewRoute onExit={onExitPreview} />;
+    return <ReviewPreviewRoute onExit={onExitPreview} />;
   }
   if (
     session.status === "unavailable" ||
@@ -5334,7 +5373,7 @@ export function Auth0SessionRoute({
     );
   }
   if (appRoute === "preview") {
-    return <OnboardingPreviewRoute onExit={onExitPreview} />;
+    return <ReviewPreviewRoute onExit={onExitPreview} />;
   }
   if (session.status === "unauthenticated" && !parseCollaborationInviteRoute()) {
     return <Auth0LoginView />;
