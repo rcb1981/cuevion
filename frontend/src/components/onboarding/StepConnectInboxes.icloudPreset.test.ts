@@ -9,31 +9,41 @@ const source = readFileSync(
 
 assert.match(
   source,
-  /createICloudMailPreset/,
-  "the connect-inboxes step must use the canonical iCloud preset helper",
+  /id: "icloud", label: "iCloud Mail"/,
+  "iCloud must be a first-class onboarding choice",
 );
 assert.match(
   source,
-  /Use iCloud settings/,
-  "Custom IMAP onboarding must expose an iCloud quick-setup action",
+  /provider\.id === "icloud"[\s\S]*?createICloudMailPreset\(connection\.email\)/,
+  "iCloud selection must apply the canonical Apple preset",
+);
+assert.match(
+  source,
+  /provider\.id === "icloud"[\s\S]*?onProviderChange\(inboxId, "custom_imap"\)/,
+  "iCloud must keep using the proven Custom IMAP runtime path",
+);
+assert.match(
+  source,
+  /provider\.id === "custom_imap" && iCloudSelected[\s\S]*?createInboxConnection\(\)\.customImap/,
+  "switching from iCloud to Custom IMAP must clear Apple-specific settings",
+);
+assert.match(
+  source,
+  /isICloudOnboardingConnection\(connection\)[\s\S]*?"username"[\s\S]*?nextEmail\.trim\(\)/,
+  "iCloud IMAP username must follow later email edits",
 );
 assert.match(
   source,
   /app-specific password from your Apple Account/,
-  "iCloud onboarding must tell users to use an app-specific password",
+  "iCloud must explain the app-specific password requirement",
+);
+assert.doesNotMatch(
+  source,
+  /Use iCloud settings/,
+  "the old duplicate iCloud quick-setup button must be removed",
 );
 assert.match(
   source,
-  /customImapInteractionLocked \|\| !connection\.email\.trim\(\)/,
-  "the iCloud preset must require an email identity and respect the IMAP mutation lock",
-);
-assert.match(
-  source,
-  /onCustomImapChange\(inboxId, "host", preset\.imap\.host\)[\s\S]*?onCustomImapChange\(inboxId, "port", preset\.imap\.port\)[\s\S]*?onCustomImapChange\(inboxId, "ssl", preset\.imap\.ssl\)[\s\S]*?onCustomImapChange\(inboxId, "username", preset\.imap\.username\)/,
-  "the iCloud preset must populate all incoming-mail settings",
-);
-assert.match(
-  source,
-  /onCustomSmtpChange\(inboxId, "host", preset\.smtp\.host\)[\s\S]*?onCustomSmtpChange\(inboxId, "port", preset\.smtp\.port\)[\s\S]*?"username"[\s\S]*?preset\.smtp\.username[\s\S]*?"security"[\s\S]*?preset\.smtp\.security[\s\S]*?"useSameCredentials"[\s\S]*?preset\.smtp\.useSameCredentials/,
-  "the iCloud preset must populate secure SMTP settings using the same credentials",
+  /Gmail \/ Google Workspace, iCloud Mail, or[\s\S]*?Custom IMAP account/,
+  "the onboarding guidance must name all three supported provider choices",
 );

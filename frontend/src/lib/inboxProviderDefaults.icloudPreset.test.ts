@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createICloudMailPreset } from "./inboxProviderDefaults";
+import { createICloudMailPreset, isICloudMailPreset } from "./inboxProviderDefaults";
 
 const preset = createICloudMailPreset("  test.user@icloud.com  ");
 
@@ -18,3 +18,13 @@ assert.deepEqual(preset.smtp, {
   password: "",
   useSameCredentials: true,
 });
+
+assert.equal(isICloudMailPreset(preset.imap, preset.smtp), true);
+assert.equal(
+  isICloudMailPreset({ ...preset.imap, host: "imap.example.com" }, preset.smtp),
+  false,
+);
+assert.equal(
+  isICloudMailPreset(preset.imap, { ...preset.smtp, useSameCredentials: false }),
+  false,
+);
