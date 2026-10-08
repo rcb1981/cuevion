@@ -5319,6 +5319,9 @@ export function Auth0SessionRoute({
       </Suspense>
     );
   }
+  if (appRoute === "preview" && session.status === "unavailable") {
+    return <OnboardingPreviewRoute onExit={onExitPreview} />;
+  }
   if (
     session.status === "unavailable" ||
     (session.status === "authenticated" &&
