@@ -21,6 +21,18 @@ import {
 import { createPortal, flushSync } from "react-dom";
 import { ServerNotifications, type ServerNotificationsProps } from "./ServerNotifications";
 import { useWorkspaceNotifications } from "../../lib/useWorkspaceNotifications";
+import {
+  loadOutOfOfficeSettings,
+  saveOutOfOfficeSettings,
+} from "../../lib/outOfOfficeApi";
+import {
+  createEmptyOutOfOfficeDraft,
+  isoToLocalDateTimeValue,
+  localDateTimeValueToIso,
+  normalizeOutOfOfficeUiDraft,
+  validateOutOfOfficeUiDraft,
+  type OutOfOfficeUiDraft,
+} from "../../lib/outOfOfficeUi";
 import { notificationScopeKey, type ServerNotification } from "../../lib/notificationsApi";
 import { buildExactNotificationMessageIndex, exactNotificationSourceKey, createNotificationNavigator, type NotificationDisplayRequest, type NotificationNavigationPorts, type ExactNotificationTarget } from "../../lib/notificationNavigation";
 import { matchesExactMailboxMessageIdentity } from "../../lib/exactMailboxMessageApi";
@@ -1363,12 +1375,9 @@ type InboxSignatureSettings = {
   showDivider: boolean;
 };
 type InboxSignatureStore = Partial<Record<InboxId, InboxSignatureSettings>>;
-type InboxOutOfOfficeSettings = {
-  enabled: boolean;
-  message: string;
-};
+type InboxOutOfOfficeSettings = OutOfOfficeUiDraft;
 type InboxOutOfOfficeStore = Partial<Record<InboxId, InboxOutOfOfficeSettings>>;
-type OutOfOfficeReplyLogStore = Partial<Record<InboxId, Record<string, number>>>;
+type OutOfOfficeLoadState = "idle" | "loading" | "ready" | "error";
 type SmartFolderRuleField = "From" | "Subject" | "Domain" | "Label";
 type SmartFolderRule = {
   id: string;
@@ -3538,8 +3547,6 @@ const CUEVION_WAITING_ON_OTHER_STORAGE_KEY = "cuevion-waiting-on-other";
 const CUEVION_MANUAL_LABEL_OVERRIDES_STORAGE_KEY = "cuevion-manual-label-overrides";
 const CUEVION_SPAM_SUPPRESSION_STORAGE_KEY = "cuevion-spam-suppression";
 const MAIL_SIGNATURES_STORAGE_KEY = "cuevion-mail-signatures";
-const MAIL_OUT_OF_OFFICE_STORAGE_KEY = "cuevion-mail-out-of-office";
-const OUT_OF_OFFICE_REPLY_LOG_STORAGE_KEY = "cuevion-out-of-office-reply-log";
 const MANAGED_INBOXES_STORAGE_KEY = "cuevion-managed-inboxes";
 const PENDING_OAUTH_MANAGED_INBOX_STORAGE_KEY = "cuevion-pending-oauth-managed-inbox";
 export { GMAIL_OAUTH_RECONNECT_REQUIRED_CONNECTION_MESSAGE };
@@ -3549,7 +3556,6 @@ const CONTACT_REQUESTS_STORAGE_KEY = "cuevion-contact-requests";
 const MAILBOX_TITLE_OVERRIDES_STORAGE_KEY = "cuevion-mailbox-title-overrides";
 const MAILBOX_FOCUS_PREFERENCE_OVERRIDES_STORAGE_KEY =
   "cuevion-mailbox-focus-preference-overrides";
-const OUT_OF_OFFICE_SUPPRESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
 const SMART_FOLDERS_STORAGE_KEY = "cuevion-smart-folders";
 const MAIL_LIST_PANE_WIDTH_STORAGE_KEY = "cuevion-mail-list-pane-width";
 const COMPOSE_RECIPIENT_MEMORY_STORAGE_KEY = "cuevion-compose-recipient-memory";
@@ -3926,48 +3932,7 @@ function normalizeInboxSignatureSettings(
 function normalizeInboxOutOfOfficeSettings(
   settings?: Partial<InboxOutOfOfficeSettings> | null,
 ): InboxOutOfOfficeSettings {
-  return {
-    enabled: settings?.enabled ?? false,
-    message: settings?.message ?? "",
-  };
-}
-
-function normalizeOutOfOfficeReplyLogStore(
-  store?: OutOfOfficeReplyLogStore | null,
-): OutOfOfficeReplyLogStore {
-  if (!store) {
-    return {};
-  }
-
-  return Object.fromEntries(
-    Object.entries(store).map(([inboxId, senderLog]) => [
-      inboxId,
-      Object.fromEntries(
-        Object.entries(senderLog ?? {}).filter(([, timestamp]) =>
-          typeof timestamp === "number" && Number.isFinite(timestamp),
-        ),
-      ),
-    ]),
-  ) as OutOfOfficeReplyLogStore;
-}
-
-function isNoReplyAddress(email: string) {
-  const normalized = normalizeSenderLearningKey(email);
-  return (
-    normalized.includes("noreply") ||
-    normalized.includes("no-reply") ||
-    normalized.includes("donotreply")
-  );
-}
-
-function buildOutOfOfficeReplySubject(subject: string) {
-  const trimmedSubject = subject.trim();
-
-  if (trimmedSubject.toLowerCase().startsWith("re:")) {
-    return trimmedSubject;
-  }
-
-  return `Re: ${trimmedSubject || "Untitled message"}`;
+  return normalizeOutOfOfficeUiDraft(settings);
 }
 
 function createEmptySmartFolderRule(): SmartFolderRule {
@@ -38157,7 +38122,12 @@ const OutOfOfficeSettingsModal = memo(function OutOfOfficeSettingsModal({
   inboxEmail,
   outOfOffice,
   reuseOptions,
+  isSaving,
+  saveError,
   onChangeEnabled,
+  onChangeStartsAt,
+  onChangeEndsAt,
+  onChangeSubject,
   onChangeMessage,
   onReuseMessage,
   onCancel,
@@ -38167,28 +38137,40 @@ const OutOfOfficeSettingsModal = memo(function OutOfOfficeSettingsModal({
   themeMode: "light" | "dark";
   inboxEmail: string;
   outOfOffice: InboxOutOfOfficeSettings;
-  reuseOptions: Array<{ inboxEmail: string; message: string }>;
+  reuseOptions: Array<{ inboxEmail: string; subject: string; message: string }>;
+  isSaving: boolean;
+  saveError: string | null;
   onChangeEnabled: (nextValue: boolean) => void;
+  onChangeStartsAt: (nextValue: string | null) => void;
+  onChangeEndsAt: (nextValue: string | null) => void;
+  onChangeSubject: (nextValue: string) => void;
   onChangeMessage: (nextValue: string) => void;
-  onReuseMessage: (message: string) => void;
+  onReuseMessage: (option: { subject: string; message: string }) => void;
   onCancel: () => void;
   onSave: () => void;
 }) {
+  const validationError = validateOutOfOfficeUiDraft(outOfOffice);
+  const visibleError = saveError ?? validationError;
+
   return (
     <SettingsModalShell
       open={open}
       themeMode={themeMode}
-      maxWidthClass="max-w-[760px]"
+      maxWidthClass="max-w-[780px]"
     >
       <div className="flex items-start justify-between gap-4">
         <div>
           <h2 className="text-[1.25rem] font-medium tracking-tight text-[var(--workspace-text)]">
             Out of office — {inboxEmail}
           </h2>
+          <p className="mt-1 text-[0.82rem] leading-6 text-[var(--workspace-text-muted)]">
+            Automatic replies are configured for this inbox only.
+          </p>
         </div>
         <div className="flex items-center gap-3">
           <DesktopActionButton
             onClick={onCancel}
+            disabled={isSaving}
             variant="secondary"
             className="w-[7.5rem]"
           >
@@ -38196,10 +38178,11 @@ const OutOfOfficeSettingsModal = memo(function OutOfOfficeSettingsModal({
           </DesktopActionButton>
           <DesktopActionButton
             onClick={onSave}
+            disabled={isSaving || Boolean(validationError)}
             variant="primary"
             className="w-[7.5rem]"
           >
-            Save
+            {isSaving ? "Saving..." : "Save"}
           </DesktopActionButton>
         </div>
       </div>
@@ -38211,70 +38194,149 @@ const OutOfOfficeSettingsModal = memo(function OutOfOfficeSettingsModal({
               <div className="text-[0.88rem] font-medium text-[var(--workspace-text)]">
                 Out of office enabled
               </div>
+              <p className="mt-1 text-[0.78rem] leading-5 text-[var(--workspace-text-muted)]">
+                Cuevion checks this inbox continuously, even when the app is closed.
+              </p>
             </div>
             <button
               type="button"
               role="switch"
               aria-checked={outOfOffice.enabled}
               aria-label="Out of office enabled"
+              disabled={isSaving}
               onClick={() => onChangeEnabled(!outOfOffice.enabled)}
-              className={settingsToggleButtonClass()}
+              className={`relative inline-flex h-7 w-12 flex-none items-center rounded-full border transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-border-hover)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] disabled:cursor-not-allowed disabled:opacity-60 ${
+                outOfOffice.enabled
+                  ? "border-moss/45 bg-moss/85"
+                  : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)]"
+              }`}
             >
-              <span className={settingsToggleTrackClass(outOfOffice.enabled)}>
-                <span
-                  className={`${settingsToggleThumbClass} ${
-                    outOfOffice.enabled ? "ring-1 ring-white/40" : ""
-                  }`}
-                />
-              </span>
+              <span
+                className={`inline-block h-5 w-5 rounded-full bg-white shadow-sm transition-transform duration-150 ${
+                  outOfOffice.enabled ? "translate-x-6" : "translate-x-1"
+                }`}
+              />
             </button>
           </div>
         </div>
 
-        {reuseOptions.length > 0 ? (
-          <div className="space-y-2">
-            <div className="text-[0.76rem] leading-6 text-[var(--workspace-text-faint)]">
-              {reuseOptions.length === 1
-                ? "Use message from:"
-                : "Use message from:"}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {reuseOptions.map((option) => (
-                <DesktopActionButton
-                  key={`${inboxEmail}-${option.inboxEmail}`}
-                  onClick={() => onReuseMessage(option.message)}
-                  variant="tertiary"
-                  size="compact"
-                >
-                  {option.inboxEmail}
-                </DesktopActionButton>
-              ))}
-            </div>
-          </div>
-        ) : null}
-
         {outOfOffice.enabled ? (
-          <div className="space-y-3">
+          <>
+            <div className={settingsCardSectionClass}>
+              <div className="mb-3">
+                <div className="text-[0.88rem] font-medium text-[var(--workspace-text)]">
+                  Schedule
+                </div>
+                <p className="mt-1 text-[0.78rem] leading-5 text-[var(--workspace-text-muted)]">
+                  Leave start or end empty to start immediately or keep it on until you disable it.
+                </p>
+              </div>
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="block">
+                  <span className="mb-2 block text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                    Start
+                  </span>
+                  <input
+                    type="datetime-local"
+                    value={isoToLocalDateTimeValue(outOfOffice.startsAt)}
+                    disabled={isSaving}
+                    onChange={(event) =>
+                      onChangeStartsAt(localDateTimeValueToIso(event.target.value))
+                    }
+                    className="w-full rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3.5 py-3 text-[0.88rem] text-[var(--workspace-text)] outline-none transition focus:border-[color:rgba(103,141,103,0.42)] focus:bg-[var(--workspace-input-focus-bg)]"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-2 block text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                    End
+                  </span>
+                  <input
+                    type="datetime-local"
+                    value={isoToLocalDateTimeValue(outOfOffice.endsAt)}
+                    disabled={isSaving}
+                    onChange={(event) =>
+                      onChangeEndsAt(localDateTimeValueToIso(event.target.value))
+                    }
+                    className="w-full rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3.5 py-3 text-[0.88rem] text-[var(--workspace-text)] outline-none transition focus:border-[color:rgba(103,141,103,0.42)] focus:bg-[var(--workspace-input-focus-bg)]"
+                  />
+                </label>
+              </div>
+            </div>
+
+            {reuseOptions.length > 0 ? (
+              <div className="space-y-2">
+                <div className="text-[0.76rem] leading-6 text-[var(--workspace-text-faint)]">
+                  Reuse reply from:
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {reuseOptions.map((option) => (
+                    <DesktopActionButton
+                      key={`${inboxEmail}-${option.inboxEmail}`}
+                      onClick={() =>
+                        onReuseMessage({
+                          subject: option.subject,
+                          message: option.message,
+                        })
+                      }
+                      disabled={isSaving}
+                      variant="tertiary"
+                      size="compact"
+                    >
+                      {option.inboxEmail}
+                    </DesktopActionButton>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            <div className={settingsCardSectionClass}>
+              <label className="block">
+                <span className="mb-2 block text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                  Subject
+                </span>
+                <input
+                  type="text"
+                  value={outOfOffice.subject}
+                  maxLength={200}
+                  disabled={isSaving}
+                  onChange={(event) => onChangeSubject(event.target.value)}
+                  placeholder="Out of office"
+                  className="w-full rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3.5 py-3 text-[0.9rem] text-[var(--workspace-text)] outline-none transition focus:border-[color:rgba(103,141,103,0.42)] focus:bg-[var(--workspace-input-focus-bg)]"
+                />
+              </label>
+            </div>
+
             <div className={settingsCardSectionClass}>
               <label className="mb-2 block text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                Auto-reply message
+                Automatic reply
               </label>
               <textarea
                 value={outOfOffice.message}
+                maxLength={10000}
+                disabled={isSaving}
                 onChange={(event) => onChangeMessage(event.target.value)}
                 placeholder="Write your automatic reply..."
                 className="min-h-[220px] w-full resize-none rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-4 text-[0.92rem] leading-7 text-[var(--workspace-text)] outline-none transition-[border-color,box-shadow,background-color] duration-150 placeholder:text-[var(--workspace-text-faint)] focus:border-[color:rgba(103,141,103,0.42)] focus:bg-[var(--workspace-input-focus-bg)] focus:shadow-[0_0_0_4px_rgba(103,141,103,0.08)]"
               />
+              <p className="mt-3 text-[0.82rem] leading-6 text-[var(--workspace-text-muted)]">
+                One automatic reply is sent per sender in a 24-hour period. Automated messages, mailing lists and no-reply addresses are skipped.
+              </p>
             </div>
-            <p className="text-[0.82rem] leading-6 text-[var(--workspace-text-muted)]">
-              This reply will be sent automatically for this inbox only.
-            </p>
-          </div>
+          </>
         ) : (
           <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-4 text-[0.88rem] leading-6 text-[var(--workspace-text-muted)]">
-            Auto-replies are currently turned off for this inbox.
+            Automatic replies are currently turned off for this inbox.
           </div>
         )}
+
+        {visibleError ? (
+          <div
+            role="alert"
+            className="rounded-[16px] border border-[rgba(173,106,86,0.24)] bg-[rgba(173,106,86,0.06)] px-4 py-3 text-[0.82rem] leading-6 text-[rgba(146,88,74,0.96)]"
+          >
+            {visibleError}
+          </div>
+        ) : null}
       </div>
     </SettingsModalShell>
   );
@@ -38596,6 +38658,8 @@ const SmartFolderModal = memo(function SmartFolderModal({
 const MailSettingsCard = memo(function MailSettingsCard({
   managedInboxes,
   inboxOutOfOffice,
+  outOfOfficeLoadState,
+  outOfOfficeLoadError,
   themeMode,
   showOutOfOfficeSettings,
   conversationOrder,
@@ -38605,6 +38669,8 @@ const MailSettingsCard = memo(function MailSettingsCard({
 }: {
   managedInboxes: ManagedWorkspaceInbox[];
   inboxOutOfOffice: InboxOutOfOfficeStore;
+  outOfOfficeLoadState: Partial<Record<InboxId, OutOfOfficeLoadState>>;
+  outOfOfficeLoadError: Partial<Record<InboxId, string>>;
   themeMode: "light" | "dark";
   showOutOfOfficeSettings: boolean;
   conversationOrder: ConversationOrder;
@@ -38614,6 +38680,10 @@ const MailSettingsCard = memo(function MailSettingsCard({
 }) {
   const connectedInboxes = managedInboxes.filter(
     (mailbox) => mailbox.email.trim().length > 0,
+  );
+  const outOfOfficeInboxes = connectedInboxes.filter(
+    (mailbox) =>
+      mailbox.provider === "google" || mailbox.provider === "custom_imap",
   );
 
   return (
@@ -38709,12 +38779,22 @@ const MailSettingsCard = memo(function MailSettingsCard({
                 Out of office
               </div>
 
-              {connectedInboxes.length > 0 ? (
+              {outOfOfficeInboxes.length > 0 ? (
                 <div className="overflow-hidden rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)]">
-                  {connectedInboxes.map((mailbox, index) => {
+                  {outOfOfficeInboxes.map((mailbox, index) => {
+                    const inboxId = mailbox.id as InboxId;
+                    const loadState = outOfOfficeLoadState[inboxId] ?? "loading";
                     const outOfOfficeEnabled = normalizeInboxOutOfOfficeSettings(
-                      inboxOutOfOffice[mailbox.id as InboxId],
+                      inboxOutOfOffice[inboxId],
                     ).enabled;
+                    const statusLabel =
+                      loadState === "loading"
+                        ? "Loading"
+                        : loadState === "error"
+                          ? "Unavailable"
+                          : outOfOfficeEnabled
+                            ? "On"
+                            : "Off";
 
                     return (
                       <div
@@ -38729,19 +38809,28 @@ const MailSettingsCard = memo(function MailSettingsCard({
                           <div className="truncate text-[0.92rem] font-medium text-[var(--workspace-text)]">
                             {mailbox.email}
                           </div>
+                          {loadState === "error" ? (
+                            <div className="mt-0.5 truncate text-[0.72rem] text-[rgba(146,88,74,0.92)]">
+                              {outOfOfficeLoadError[inboxId] ??
+                                "Out of office settings are unavailable."}
+                            </div>
+                          ) : null}
                         </div>
                         <div className="flex flex-none items-center gap-3">
                           <span
                             className={`inline-flex min-w-[3.25rem] items-center justify-center rounded-full border px-3 py-1 text-[0.66rem] font-medium uppercase tracking-[0.14em] ${
-                              outOfOfficeEnabled
+                              loadState === "ready" && outOfOfficeEnabled
                                 ? "border-[var(--workspace-status-success-border)] bg-[var(--workspace-status-success-bg)] text-[var(--workspace-status-success-text)]"
-                                : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-soft)]"
+                                : loadState === "error"
+                                  ? "border-[rgba(173,106,86,0.24)] bg-[rgba(173,106,86,0.06)] text-[rgba(146,88,74,0.96)]"
+                                  : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-soft)]"
                             }`}
                           >
-                            {outOfOfficeEnabled ? "On" : "Off"}
+                            {statusLabel}
                           </span>
                           <DesktopActionButton
                             onClick={() => onManageOutOfOffice(mailbox)}
+                            disabled={loadState !== "ready"}
                             variant="tertiary"
                           >
                             Manage
@@ -38753,7 +38842,7 @@ const MailSettingsCard = memo(function MailSettingsCard({
                 </div>
               ) : (
                 <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-6 text-[0.9rem] text-[var(--workspace-text-muted)]">
-                  No inboxes connected
+                  No supported inboxes available
                 </div>
               )}
             </div>
@@ -39737,7 +39826,6 @@ function SettingsView({
   themeMode,
   workspaceMode,
   inboxSignatures,
-  inboxOutOfOffice,
   showOutOfOfficeSettings,
   onChangeWorkspaceMode,
   conversationOrder,
@@ -39760,7 +39848,6 @@ function SettingsView({
   onSetPrimaryManagedInbox,
   onManagedInboxesDirtyChange,
   onSaveInboxSignature,
-  onSaveInboxOutOfOffice,
   onProductAccessChange,
   onAccountNameChange,
   onOpenContact,
@@ -39784,7 +39871,6 @@ function SettingsView({
   themeMode: "light" | "dark";
   workspaceMode: SettingsMode;
   inboxSignatures: InboxSignatureStore;
-  inboxOutOfOffice: InboxOutOfOfficeStore;
   showOutOfOfficeSettings: boolean;
   onChangeWorkspaceMode: (mode: SettingsMode) => void;
   conversationOrder: ConversationOrder;
@@ -39818,10 +39904,6 @@ function SettingsView({
   onSetPrimaryManagedInbox: (inboxId: string) => void;
   onManagedInboxesDirtyChange: (hasUnsavedChanges: boolean) => void;
   onSaveInboxSignature: (inboxId: InboxId, signature: InboxSignatureSettings) => void;
-  onSaveInboxOutOfOffice: (
-    inboxId: InboxId,
-    outOfOffice: InboxOutOfOfficeSettings,
-  ) => void;
   onProductAccessChange: (nextAccess: ProductAccess) => void;
   onAccountNameChange?: (name: string) => void;
   onOpenContact: () => void;
@@ -39838,8 +39920,29 @@ function SettingsView({
   );
   const [activeOutOfOfficeInboxId, setActiveOutOfOfficeInboxId] = useState<string | null>(null);
   const [outOfOfficeDraft, setOutOfOfficeDraft] = useState<InboxOutOfOfficeSettings>(
-    normalizeInboxOutOfOfficeSettings(),
+    createEmptyOutOfOfficeDraft(),
   );
+  const [inboxOutOfOffice, setInboxOutOfOffice] = useState<InboxOutOfOfficeStore>({});
+  const [outOfOfficeLoadState, setOutOfOfficeLoadState] = useState<
+    Partial<Record<InboxId, OutOfOfficeLoadState>>
+  >({});
+  const [outOfOfficeLoadError, setOutOfOfficeLoadError] = useState<
+    Partial<Record<InboxId, string>>
+  >({});
+  const [isSavingOutOfOffice, setIsSavingOutOfOffice] = useState(false);
+  const [outOfOfficeSaveError, setOutOfOfficeSaveError] = useState<string | null>(null);
+  const outOfOfficeMailboxIds = useMemo(
+    () =>
+      savedManagedInboxes
+        .filter(
+          (mailbox) =>
+            mailbox.email.trim().length > 0 &&
+            (mailbox.provider === "google" || mailbox.provider === "custom_imap"),
+        )
+        .map((mailbox) => mailbox.id as InboxId),
+    [savedManagedInboxes],
+  );
+  const outOfOfficeMailboxHydrationKey = JSON.stringify(outOfOfficeMailboxIds);
 
   const activeSignatureInbox =
     activeSignatureInboxId === null
@@ -39863,8 +39966,67 @@ function SettingsView({
           .filter((entry) => entry.settings.message.trim().length > 0)
           .map((entry) => ({
             inboxEmail: entry.inboxEmail,
+            subject: entry.settings.subject,
             message: entry.settings.message,
           }));
+
+  useEffect(() => {
+    if (!showOutOfOfficeSettings) {
+      setInboxOutOfOffice({});
+      setOutOfOfficeLoadState({});
+      setOutOfOfficeLoadError({});
+      return;
+    }
+
+    const controller = new AbortController();
+    const mailboxIds = outOfOfficeMailboxIds;
+
+    for (const inboxId of mailboxIds) {
+      setOutOfOfficeLoadState((current) => ({
+        ...current,
+        [inboxId]: "loading",
+      }));
+      setOutOfOfficeLoadError((current) => {
+        const next = { ...current };
+        delete next[inboxId];
+        return next;
+      });
+
+      void loadOutOfOfficeSettings(inboxId, controller.signal)
+        .then((settings) => {
+          if (controller.signal.aborted) {
+            return;
+          }
+          setInboxOutOfOffice((current) => ({
+            ...current,
+            [inboxId]: normalizeInboxOutOfOfficeSettings(settings),
+          }));
+          setOutOfOfficeLoadState((current) => ({
+            ...current,
+            [inboxId]: "ready",
+          }));
+        })
+        .catch((error: unknown) => {
+          if (controller.signal.aborted) {
+            return;
+          }
+          const message =
+            error instanceof Error && error.message.trim()
+              ? error.message
+              : "Out of office settings are temporarily unavailable.";
+          setOutOfOfficeLoadState((current) => ({
+            ...current,
+            [inboxId]: "error",
+          }));
+          setOutOfOfficeLoadError((current) => ({
+            ...current,
+            [inboxId]: message,
+          }));
+        });
+    }
+
+    return () => controller.abort();
+  }, [showOutOfOfficeSettings, outOfOfficeMailboxHydrationKey]);
 
   useEffect(() => {
     if (!activeSignatureInboxId) {
@@ -39888,6 +40050,7 @@ function SettingsView({
     );
 
     setOutOfOfficeDraft(savedOutOfOffice);
+    setOutOfOfficeSaveError(null);
   }, [activeOutOfOfficeInboxId, inboxOutOfOffice]);
 
   useEffect(() => {
@@ -39992,6 +40155,8 @@ function SettingsView({
           <MailSettingsCard
             managedInboxes={savedManagedInboxes}
             inboxOutOfOffice={inboxOutOfOffice}
+            outOfOfficeLoadState={outOfOfficeLoadState}
+            outOfOfficeLoadError={outOfOfficeLoadError}
             themeMode={themeMode}
             showOutOfOfficeSettings={showOutOfOfficeSettings}
             conversationOrder={conversationOrder}
@@ -40000,6 +40165,7 @@ function SettingsView({
               setActiveSignatureInboxId(mailbox.id);
             }}
             onManageOutOfOffice={(mailbox) => {
+              setOutOfOfficeSaveError(null);
               setActiveOutOfOfficeInboxId(mailbox.id);
             }}
           />
@@ -40120,10 +40286,34 @@ function SettingsView({
         inboxEmail={activeOutOfOfficeInbox?.email ?? ""}
         outOfOffice={outOfOfficeDraft}
         reuseOptions={outOfOfficeReuseOptions}
+        isSaving={isSavingOutOfOffice}
+        saveError={outOfOfficeSaveError}
         onChangeEnabled={(nextValue) =>
           setOutOfOfficeDraft((current) => ({
             ...current,
             enabled: nextValue,
+            subject:
+              nextValue && !current.subject.trim()
+                ? "Out of office"
+                : current.subject,
+          }))
+        }
+        onChangeStartsAt={(nextValue) =>
+          setOutOfOfficeDraft((current) => ({
+            ...current,
+            startsAt: nextValue,
+          }))
+        }
+        onChangeEndsAt={(nextValue) =>
+          setOutOfOfficeDraft((current) => ({
+            ...current,
+            endsAt: nextValue,
+          }))
+        }
+        onChangeSubject={(nextValue) =>
+          setOutOfOfficeDraft((current) => ({
+            ...current,
+            subject: nextValue,
           }))
         }
         onChangeMessage={(nextValue) =>
@@ -40132,24 +40322,66 @@ function SettingsView({
             message: nextValue,
           }))
         }
-        onReuseMessage={(message) =>
+        onReuseMessage={(option) =>
           setOutOfOfficeDraft((current) => ({
             ...current,
             enabled: true,
-            message,
+            subject: option.subject,
+            message: option.message,
           }))
         }
-        onCancel={() => setActiveOutOfOfficeInboxId(null)}
+        onCancel={() => {
+          if (!isSavingOutOfOffice) {
+            setOutOfOfficeSaveError(null);
+            setActiveOutOfOfficeInboxId(null);
+          }
+        }}
         onSave={() => {
-          if (!activeOutOfOfficeInboxId) {
+          if (!activeOutOfOfficeInboxId || isSavingOutOfOffice) {
             return;
           }
 
-          onSaveInboxOutOfOffice(activeOutOfOfficeInboxId as InboxId, {
-            enabled: outOfOfficeDraft.enabled,
-            message: outOfOfficeDraft.message,
-          });
-          setActiveOutOfOfficeInboxId(null);
+          const validationError = validateOutOfOfficeUiDraft(outOfOfficeDraft);
+          if (validationError) {
+            setOutOfOfficeSaveError(validationError);
+            return;
+          }
+
+          const inboxId = activeOutOfOfficeInboxId as InboxId;
+          setIsSavingOutOfOffice(true);
+          setOutOfOfficeSaveError(null);
+
+          void saveOutOfOfficeSettings(inboxId, {
+            ...outOfOfficeDraft,
+            subject: outOfOfficeDraft.subject.trim(),
+            message: outOfOfficeDraft.message.trim(),
+          })
+            .then((settings) => {
+              const normalized = normalizeInboxOutOfOfficeSettings(settings);
+              setInboxOutOfOffice((current) => ({
+                ...current,
+                [inboxId]: normalized,
+              }));
+              setOutOfOfficeDraft(normalized);
+              setOutOfOfficeLoadState((current) => ({
+                ...current,
+                [inboxId]: "ready",
+              }));
+              setOutOfOfficeLoadError((current) => {
+                const next = { ...current };
+                delete next[inboxId];
+                return next;
+              });
+              setActiveOutOfOfficeInboxId(null);
+            })
+            .catch((error: unknown) => {
+              const message =
+                error instanceof Error && error.message.trim()
+                  ? error.message
+                  : "Out of office settings could not be saved.";
+              setOutOfOfficeSaveError(message);
+            })
+            .finally(() => setIsSavingOutOfOffice(false));
         }}
       />
     </div>
@@ -46091,49 +46323,6 @@ export function WorkspaceShell({
       return {};
     }
   });
-  const [inboxOutOfOffice, setInboxOutOfOffice] = useState<InboxOutOfOfficeStore>(() => {
-    if (typeof window === "undefined") {
-      return {};
-    }
-
-    const storedValue = window.localStorage.getItem(MAIL_OUT_OF_OFFICE_STORAGE_KEY);
-
-    if (!storedValue) {
-      return {};
-    }
-
-    try {
-      const parsed = JSON.parse(storedValue) as InboxOutOfOfficeStore;
-
-      return Object.fromEntries(
-        Object.entries(parsed).map(([inboxId, value]) => [
-          inboxId,
-          normalizeInboxOutOfOfficeSettings(value),
-        ]),
-      ) as InboxOutOfOfficeStore;
-    } catch {
-      return {};
-    }
-  });
-  const [outOfOfficeReplyLog, setOutOfOfficeReplyLog] = useState<OutOfOfficeReplyLogStore>(() => {
-    if (typeof window === "undefined") {
-      return {};
-    }
-
-    const storedValue = window.localStorage.getItem(OUT_OF_OFFICE_REPLY_LOG_STORAGE_KEY);
-
-    if (!storedValue) {
-      return {};
-    }
-
-    try {
-      return normalizeOutOfOfficeReplyLogStore(
-        JSON.parse(storedValue) as OutOfOfficeReplyLogStore,
-      );
-    } catch {
-      return {};
-    }
-  });
   const [smartFolders, setSmartFolders] = useState<SmartFolderDefinition[]>(() => {
     if (typeof window === "undefined") {
       return [];
@@ -46375,7 +46564,6 @@ export function WorkspaceShell({
   const [smartFolderModalTarget, setSmartFolderModalTarget] =
     useState<SmartFolderModalTarget>(null);
   const workspaceModalHostRef = useRef<HTMLDivElement | null>(null);
-  const seenIncomingMessageIdsRef = useRef<Set<string>>(new Set());
   const isInboxView = activeMailbox !== null;
   const usesOrganizerWorkspaceLayout =
     activeSection === "Organizer" && productAccess === "bundle";
@@ -55189,160 +55377,6 @@ export function WorkspaceShell({
   }, [messageOwnershipInteractions]);
 
   useEffect(() => {
-    if (!isDemoWorkspace) {
-      return;
-    }
-
-    const currentInboxMessageIds = new Set(
-      Object.values(mailboxStore).flatMap((collections) =>
-        collections.Inbox.map((message) => message.id),
-      ),
-    );
-
-    if (seenIncomingMessageIdsRef.current.size === 0) {
-      seenIncomingMessageIdsRef.current = currentInboxMessageIds;
-      return;
-    }
-
-    const ownInboxAddresses = new Set(
-      orderedMailboxes.map((mailbox) => normalizeSenderLearningKey(mailbox.email)),
-    );
-    const pendingReplies: Array<{ inboxId: InboxId; message: MailMessage }> = [];
-    const nextReplyLog = normalizeOutOfOfficeReplyLogStore(outOfOfficeReplyLog);
-    const now = Date.now();
-
-    for (const mailbox of orderedMailboxes) {
-      const inboxMessages = mailboxStore[mailbox.id]?.Inbox ?? [];
-      const outOfOfficeSettings = normalizeInboxOutOfOfficeSettings(
-        inboxOutOfOffice[mailbox.id],
-      );
-
-      for (const message of inboxMessages) {
-        if (seenIncomingMessageIdsRef.current.has(message.id)) {
-          continue;
-        }
-
-        seenIncomingMessageIdsRef.current.add(message.id);
-
-        if (
-          !outOfOfficeSettings.enabled ||
-          outOfOfficeSettings.message.trim().length === 0 ||
-          message.isAutoReply
-        ) {
-          continue;
-        }
-
-        const normalizedSender = normalizeSenderLearningKey(message.from);
-
-        if (
-          ownInboxAddresses.has(normalizedSender) ||
-          isNoReplyAddress(message.from)
-        ) {
-          continue;
-        }
-
-        const lastReplyTimestamp = nextReplyLog[mailbox.id]?.[normalizedSender];
-
-        if (
-          typeof lastReplyTimestamp === "number" &&
-          now - lastReplyTimestamp < OUT_OF_OFFICE_SUPPRESSION_WINDOW_MS
-        ) {
-          continue;
-        }
-
-        const autoReplyId = `${mailbox.id}-ooo-${message.id}`;
-        const autoReplySentAt = new Date(now).toISOString();
-        const autoReplyTimeLabel = resolveDesktopThreadTimestamp(
-          {
-            createdAt: autoReplySentAt,
-            timestamp: autoReplySentAt,
-          },
-          now,
-        ).label;
-        const autoReplyBody = outOfOfficeSettings.message
-          .replace(/\r\n/g, "\n")
-          .split("\n")
-          .filter((paragraph) => paragraph.length > 0);
-
-        pendingReplies.push({
-          inboxId: mailbox.id,
-          message: normalizeMailMessage(
-            {
-              id: autoReplyId,
-              threadId: message.threadId,
-              sender: "You",
-              subject: buildOutOfOfficeReplySubject(message.subject),
-              snippet: outOfOfficeSettings.message.replace(/\s+/g, " ").trim().slice(0, 96),
-              time: autoReplyTimeLabel,
-              createdAt: autoReplySentAt,
-              signal: "Auto-reply",
-              from: mailbox.email,
-              to: message.from,
-              timestamp: autoReplySentAt,
-              body:
-                autoReplyBody.length > 0
-                  ? autoReplyBody
-                  : ["Automatic reply"],
-              isAutoReply: true,
-              autoReplyType: "out_of_office",
-            },
-            mailbox.id,
-            senderCategoryLearning,
-            messageOwnershipInteractions,
-            currentWorkspaceUserId,
-            mailboxStore,
-          ),
-        });
-
-        nextReplyLog[mailbox.id] = {
-          ...(nextReplyLog[mailbox.id] ?? {}),
-          [normalizedSender]: now,
-        };
-      }
-    }
-
-    if (pendingReplies.length === 0) {
-      return;
-    }
-
-    setMailboxStore((currentStore) => {
-      const nextStore = { ...currentStore };
-
-      for (const { inboxId, message } of pendingReplies) {
-        const collections = nextStore[inboxId];
-
-        if (!collections || collections.Sent.some((entry) => entry.id === message.id)) {
-          continue;
-        }
-
-        nextStore[inboxId] = {
-          ...collections,
-          Sent: [message, ...collections.Sent],
-        };
-      }
-
-      return normalizeMailboxStore(
-        nextStore,
-        orderedMailboxes,
-        senderCategoryLearning,
-        messageOwnershipInteractions,
-        currentWorkspaceUserId,
-        manualPriorityOverrides,
-      );
-    });
-    setOutOfOfficeReplyLog(nextReplyLog);
-  }, [
-    currentWorkspaceUserId,
-    inboxOutOfOffice,
-    isDemoWorkspace,
-    mailboxStore,
-    messageOwnershipInteractions,
-    orderedMailboxes,
-    outOfOfficeReplyLog,
-    senderCategoryLearning,
-  ]);
-
-  useEffect(() => {
     setMailboxStore((currentStore) =>
       normalizeMailboxStore(
         currentStore,
@@ -55506,20 +55540,6 @@ export function WorkspaceShell({
       JSON.stringify(inboxSignatures),
     );
   }, [inboxSignatures]);
-
-  useEffect(() => {
-    window.localStorage.setItem(
-      MAIL_OUT_OF_OFFICE_STORAGE_KEY,
-      JSON.stringify(inboxOutOfOffice),
-    );
-  }, [inboxOutOfOffice]);
-
-  useEffect(() => {
-    window.localStorage.setItem(
-      OUT_OF_OFFICE_REPLY_LOG_STORAGE_KEY,
-      JSON.stringify(outOfOfficeReplyLog),
-    );
-  }, [outOfOfficeReplyLog]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -56944,8 +56964,7 @@ export function WorkspaceShell({
                   themeMode={resolvedTheme}
                   workspaceMode={workspaceMode}
                   inboxSignatures={inboxSignatures}
-                  inboxOutOfOffice={inboxOutOfOffice}
-                  showOutOfOfficeSettings={isDemoWorkspace}
+                  showOutOfOfficeSettings={!isDemoWorkspace}
                   onChangeWorkspaceMode={setWorkspaceMode}
                   conversationOrder={conversationOrder}
                   onChangeConversationOrder={setConversationOrder}
@@ -56982,12 +57001,6 @@ export function WorkspaceShell({
                     setInboxSignatures((current) => ({
                       ...current,
                       [inboxId]: normalizeInboxSignatureSettings(signature),
-                    }));
-                  }}
-                  onSaveInboxOutOfOffice={(inboxId, outOfOffice) => {
-                    setInboxOutOfOffice((current) => ({
-                      ...current,
-                      [inboxId]: normalizeInboxOutOfOfficeSettings(outOfOffice),
                     }));
                   }}
                   onProductAccessChange={handleProductAccessChange}
