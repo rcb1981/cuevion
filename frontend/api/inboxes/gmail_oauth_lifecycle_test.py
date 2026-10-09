@@ -1030,6 +1030,62 @@ class MicrosoftIdentityBoundaryTests(unittest.TestCase):
         self.assertIsNone(identity)
         self.assertEqual(error, {"code": "microsoft_identity_mismatch"})
 
+    def test_current_microsoft_callback_owner_is_reverified(self):
+        owner = SimpleNamespace(
+            user_id="auth0|owner", email="owner@example.com",
+            name="Owner", workspace_id="workspace-1", membership_role="owner",
+        )
+        request = object()
+        signed = {"provider": "microsoft", "owner_email": "owner@example.com"}
+        with patch.object(
+            oauth_callback, "_resolve_current_gmail_callback_member",
+            return_value=(owner, None),
+        ) as recheck:
+            member, error = oauth_callback._resolve_current_microsoft_callback_owner(
+                request, state_payload=signed, state_signing_secret="test-secret",
+            )
+        self.assertIs(member, owner)
+        self.assertIsNone(error)
+        recheck.assert_called_once_with(
+            request, state_payload=signed, state_signing_secret="test-secret",
+        )
+
+    def test_non_owner_microsoft_session_is_denied(self):
+        for role in ("admin", "member"):
+            member = SimpleNamespace(
+                user_id="auth0|tester", email="tester@example.com",
+                name="Tester", workspace_id="workspace-1", membership_role=role,
+            )
+            with self.subTest(role=role), patch.object(
+                oauth_callback, "_resolve_current_gmail_callback_member",
+                return_value=(member, None),
+            ):
+                current, error = oauth_callback._resolve_current_microsoft_callback_owner(
+                    object(), state_payload={}, state_signing_secret="test-secret",
+                )
+                self.assertIsNone(current)
+                self.assertEqual(error, "microsoft_owner_required")
+
+    def test_invalid_current_member_or_owner_binding_fails_closed(self):
+        for failure_code in ("owner_binding_invalid", "member_unauthenticated", "member_authority_unavailable"):
+            with self.subTest(failure_code=failure_code), patch.object(
+                oauth_callback, "_resolve_current_gmail_callback_member",
+                return_value=(None, failure_code),
+            ):
+                member, error = oauth_callback._resolve_current_microsoft_callback_owner(
+                    object(), state_payload={}, state_signing_secret="test-secret",
+                )
+                self.assertIsNone(member)
+                self.assertEqual(error, failure_code)
+
+    def test_callback_checks_microsoft_owner_before_token_exchange(self):
+        source = inspect.getsource(oauth_callback.handler._handle_get)
+        self.assertIn('if provider == "microsoft" and member.membership_role != "owner":', source)
+        self.assertIn("_resolve_current_microsoft_callback_owner(", source)
+        self.assertIn('failure_code="microsoft_owner_required"', source)
+        self.assertIn('failure_code="microsoft_activation_not_ready"', source)
+
+
     def test_incomplete_microsoft_registration_cannot_claim_connected(self):
         source = inspect.getsource(oauth_callback.handler._handle_get)
         self.assertIn("_fetch_verified_microsoft_identity(", source)

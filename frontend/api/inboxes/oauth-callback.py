@@ -1649,6 +1649,25 @@ def _resolve_current_gmail_callback_member(
     return member, None
 
 
+def _resolve_current_microsoft_callback_owner(
+    request: BaseHTTPRequestHandler,
+    *,
+    state_payload: dict,
+    state_signing_secret: str,
+) -> tuple[runtime.AuthenticatedMemberContext | None, str | None]:
+    """Reverify the exact current Auth0 owner before Microsoft activation."""
+    member, error = _resolve_current_gmail_callback_member(
+        request,
+        state_payload=state_payload,
+        state_signing_secret=state_signing_secret,
+    )
+    if error or member is None:
+        return None, error or "member_authority_unavailable"
+    if member.membership_role != "owner":
+        return None, "microsoft_owner_required"
+    return member, None
+
+
 def _format_name_from_email(email: str) -> str:
     local_part = email.split("@", 1)[0].replace(".", " ").replace("_", " ").strip()
     if not local_part:
@@ -3154,6 +3173,22 @@ class handler(BaseHTTPRequestHandler):
             )
             return
         state_owner_email = normalize_auth_email(member.email)
+        # Microsoft token authority is intentionally owner-scoped. Other
+        # workspace roles must never begin a token exchange on this path.
+        if provider == "microsoft" and member.membership_role != "owner":
+            _send_gmail_callback_failure(
+                self,
+                _build_callback_payload(
+                    provider="microsoft",
+                    email="",
+                    connection_status="connection_failed",
+                    message="Microsoft mailbox authorization requires the workspace owner.",
+                    connected=False,
+                ),
+                failure_code="microsoft_owner_required",
+                inbox_position=inbox_position,
+            )
+            return
 
         public_app_origin = resolve_public_app_origin(self.headers)
         if not public_app_origin:
@@ -3402,6 +3437,27 @@ class handler(BaseHTTPRequestHandler):
                 )
                 return
         else:
+            current_owner, current_owner_error = (
+                _resolve_current_microsoft_callback_owner(
+                    self,
+                    state_payload=state_payload,
+                    state_signing_secret=state_signing_secret,
+                )
+            )
+            if current_owner_error or current_owner is None:
+                _send_gmail_callback_failure(
+                    self,
+                    _build_callback_payload(
+                        provider="microsoft",
+                        email="",
+                        connection_status="connection_failed",
+                        message="The Microsoft mailbox authorization session changed.",
+                        connected=False,
+                    ),
+                    failure_code=current_owner_error or "member_authority_unavailable",
+                    inbox_position=inbox_position,
+                )
+                return
             oauth_identity, identity_error = _fetch_verified_microsoft_identity(
                 str(token_payload["access_token"]),
                 email,
