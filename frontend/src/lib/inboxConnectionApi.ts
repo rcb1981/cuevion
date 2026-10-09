@@ -298,8 +298,17 @@ export type OAuthInboxRequest =
     }
   | {
       provider: "microsoft";
-      email?: string;
-      inboxPosition?: string;
+      email: string;
+      inboxPosition?: never;
+      mode: "initial";
+      mailboxId?: never;
+    }
+  | {
+      provider: "microsoft";
+      email: string;
+      inboxPosition?: never;
+      mode: "reconnect";
+      mailboxId: string;
     };
 
 export type OAuthInboxResponse = {
@@ -748,10 +757,28 @@ export function buildOAuthInboxRequest(options: {
     };
   }
 
+  if (!email) {
+    throw new Error("A Microsoft mailbox email is required for OAuth.");
+  }
+  const mode = options.mode ?? "initial";
+  if (mode === "reconnect") {
+    if (!mailboxId) {
+      throw new Error("An exact mailbox ID is required to reconnect Microsoft.");
+    }
+    return {
+      provider: "microsoft",
+      email,
+      mode,
+      mailboxId,
+    };
+  }
+
+  // Microsoft OAuth never accepts an onboarding position or mailbox ID as
+  // an initial ownership claim; the server resolves the actual member.
   return {
     provider: "microsoft",
-    ...(email ? { email } : {}),
-    ...(inboxPosition ? { inboxPosition } : {}),
+    email,
+    mode,
   };
 }
 

@@ -400,6 +400,7 @@ from api.inboxes.microsoft_graph import (
 from api.inboxes.microsoft_activation import (
     MicrosoftActivationError,
     activate_initial_microsoft_mailbox,
+    activate_reconnected_microsoft_mailbox,
 )
 from api import user_config_store
 from api.auth import http, runtime
@@ -616,7 +617,7 @@ def verify_signed_state(
 
     if mode == "reconnect":
         if (
-            payload.get("provider") != "google"
+            payload.get("provider") not in {"google", "microsoft"}
             or not isinstance(mailbox_id, str)
             or OAUTH_MAILBOX_ID_PATTERN.fullmatch(mailbox_id) is None
             or not isinstance(expected_email, str)
@@ -3625,27 +3626,25 @@ class handler(BaseHTTPRequestHandler):
             # The initial Microsoft flow stages a *disconnected* owned mailbox,
             # saves its generation-bound token by CAS, then activates by CAS
             # only after exact user-config and token readback.
-            if mode != "initial":
-                _send_gmail_callback_failure(
-                    self,
-                    _build_callback_payload(
-                        provider="microsoft",
-                        email="",
-                        connection_status="connection_failed",
-                        message="Microsoft reconnect is not yet available.",
-                        connected=False,
-                    ),
-                    failure_code="microsoft_reconnect_not_ready",
-                    inbox_position=inbox_position,
-                )
-                return
             try:
-                activated_mailbox = activate_initial_microsoft_mailbox(
-                    current_owner,
-                    oauth_identity,
-                    credential_generation,
-                    token_payload,
-                )
+                if mode == "reconnect":
+                    activated_mailbox = activate_reconnected_microsoft_mailbox(
+                        current_owner,
+                        oauth_identity,
+                        credential_generation,
+                        token_payload,
+                        mailbox_id=mailbox_id,
+                        expected_email=expected_email,
+                    )
+                else:
+                    activated_mailbox = activate_initial_microsoft_mailbox(
+                        current_owner,
+                        oauth_identity,
+                        credential_generation,
+                        token_payload,
+                        authorization_issued_at=state_payload["issued_at"],
+                        authorization_nonce=state_payload["nonce"],
+                    )
             except MicrosoftActivationError as error:
                 _send_gmail_callback_failure(
                     self,

@@ -981,6 +981,45 @@ class ExactTargetRegistrationTests(unittest.TestCase):
             self.assertNotIn(secret_name, json.dumps(payload))
 
 
+class MicrosoftSignedReconnectStateTests(unittest.TestCase):
+    def test_microsoft_reconnect_state_round_trips_with_exact_mailbox(self):
+        encoded, verifier = connect_oauth.build_signed_state(
+            "microsoft",
+            MAILBOX_EMAIL,
+            OWNER_EMAIL,
+            STATE_SECRET,
+            member_user_id="member-1",
+            member_workspace_id="workspace-1",
+            mode="reconnect",
+            mailbox_id="microsoft-exact-owned",
+            expected_email=MAILBOX_EMAIL,
+            credential_generation=NEW_GENERATION,
+        )
+        payload, error = oauth_callback.verify_signed_state(encoded, STATE_SECRET, expected_provider="microsoft")
+        self.assertIsNone(error)
+        self.assertEqual(payload["provider"], "microsoft")
+        self.assertEqual(payload["mode"], "reconnect")
+        self.assertEqual(payload["mailboxId"], "microsoft-exact-owned")
+        self.assertEqual(payload["expected_email"], MAILBOX_EMAIL)
+        self.assertEqual(payload["credential_generation"], NEW_GENERATION)
+        self.assertEqual(payload["code_verifier"], verifier)
+        self.assertIsInstance(payload["issued_at"], int)
+        self.assertIsInstance(payload["nonce"], str)
+        self.assertTrue(oauth_callback.verify_owner_binding(
+            payload, OWNER_EMAIL, STATE_SECRET,
+            member_user_id="member-1",
+            member_workspace_id="workspace-1",
+        ))
+
+    def test_microsoft_callback_uses_signed_recency_for_initial_recovery(self):
+        source = inspect.getsource(oauth_callback.handler._handle_get)
+        self.assertIn('authorization_issued_at=state_payload["issued_at"]', source)
+        self.assertIn('authorization_nonce=state_payload["nonce"]', source)
+        self.assertIn("activate_reconnected_microsoft_mailbox(", source)
+        start_source = inspect.getsource(connect_oauth.handler.do_POST)
+        self.assertIn("reserve_authoritative_microsoft_reconnect(", start_source)
+
+
 class MicrosoftIdentityBoundaryTests(unittest.TestCase):
     def test_default_scopes_include_graph_profile_permission(self):
         with patch.dict(os.environ, {"MICROSOFT_OAUTH_SCOPES": ""}):

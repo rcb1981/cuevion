@@ -12,11 +12,20 @@ generation-bound connect, reconnect and rotating refresh; atomic CAS writes
 without automatic expiry; race-safe concurrent refresh; fail-closed error paths.
 Server-side microsoft_mailbox_access.py resolves the current Auth0 owner
 and one exact connected mailbox before loading scoped tokens or using Graph.
-The Microsoft initial OAuth callback now uses microsoft_activation.py:
+The Microsoft OAuth callback uses microsoft_activation.py:
 1) CAS-stage a disconnected owned mailbox; 2) CAS-persist an exact
 owner/mailbox/generation-bound token; 3) CAS-activate only after both durable
 readbacks. Failure must leave the mailbox disconnected, never report
-Connected, and never erase an unrelated inbox.
+Connected, and never erase an unrelated inbox. Initial activation stores
+the signed OAuth issue timestamp and nonce while pending. A newer initial
+grant can safely recover a stalled pending record; an older/equal-time grant
+cannot revert a newer reservation. Successful activation clears both markers.
+Reconnect is CAS-reserved by the authenticated owner before OAuth redirection:
+it immediately disables the existing mailbox for Graph access, records the
+new generation and reservation, and permits a newer reservation to supersede
+an abandoned attempt. The callback matches the signed mailbox ID, verified
+email and Graph account ID, atomically rotates the existing scoped token (or
+creates it if absent), and CAS-reactivates only after durable readback.
 The Microsoft OAuth start requires an owner and a selected mailbox email.
 No Microsoft tokens or authorization metadata are returned in browser JSON.
 
@@ -51,9 +60,13 @@ No Microsoft tokens or authorization metadata are returned in browser JSON.
 
 - The initial callback may report Connected only after staged config,
   scoped token and final active config have all been verified.
-- Interrupted initial activation with the same generation may be retried
-  safely. A NEW authorization generation against a stale pending record is
-  intentionally blocked until explicit fail-closed recovery is implemented.
+- Interrupted initial activation can be recovered using a fresh grant,
+  only if the signed issue time is newer and owner/account binding matches.
+- Interrupted Microsoft reconnect can be recovered by a new reserved
+  generation. A stale callback cannot override a newer reservation.
+- During any reconnect reservation, the mailbox is disconnected and the
+  owner-bound Graph access gate rejects it before token or Graph calls.
+- Reconnect writes do not update Google or unrelated mailbox records.
 - Never revive legacy Microsoft token storage keyed only by email.
 - Never skip CAS for reconnect or refresh.
 - Keep Out of Office and Production branches untouched during Microsoft work.
@@ -61,20 +74,19 @@ No Microsoft tokens or authorization metadata are returned in browser JSON.
 
 ## Remaining release gates (not ready for Preview or Production)
 
-1. Recover interrupted pending Microsoft activations when the next OAuth
-   authorization uses a fresh generation: distinguish unpersisted/stale
-   tokens with exact owner-bound durable CAS; never overwrite a foreign token.
-2. Implement Microsoft reconnect in connect-oauth and callback using the
-   prior active generation, matched Graph identity, and CAS-updated account
-   config. Do not re-enable operation on partial reconnect.
-3. Wire authenticated Graph handlers into the workspace mailbox contracts,
+1. Validate the complete Microsoft OAuth POST and browser callback
+   flows with request-level fixtures and state-collision/recovery cases.
+   Current unit tests cover signed-state roundtrip, owner reservation, tokens
+   and partial-failure safety.
+2. Wire authenticated Graph handlers into workspace mailbox contracts,
    including Inbox, read/unread, Sent, reply, send, trash and paging.
-4. Validate OAuth start and browser callback integration with full request
-   fixtures, and test production user-config presentation-only saves preserve
-   all server-held Microsoft account and generation fields.
-5. Configure the Microsoft app registration through Vercel environment
-   variables, then complete Preview and real-account acceptance testing.
-6. Existing broad Gmail ownership suite has 87 baseline failures, identical
+   Connect the Microsoft reconnect action in the real mailbox UI (client
+   request builder currently supports it; production UI still does not).
+3. Validate normal user-config presentation-only saves preserve every
+   server-held Microsoft account/user/workspace/generation field.
+4. Configure Microsoft app registration through Vercel environment
+   variables; complete Preview and real-account acceptance testing.
+5. Existing broad Gmail ownership suite has 87 baseline failures, identical
    on the previous Microsoft commit; treat as separate known test debt until
    repaired. Narrow Gmail OAuth regression must remain green.
 

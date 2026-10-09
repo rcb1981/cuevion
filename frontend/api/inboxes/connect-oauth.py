@@ -29,6 +29,10 @@ from user_config_store import (  # noqa: E402
     write_user_config_record_if_unchanged,
 )
 from api.auth.email_address import normalize_auth_email  # noqa: E402
+from api.inboxes.microsoft_activation import (
+    MicrosoftActivationError,
+    reserve_authoritative_microsoft_reconnect,
+)
 from api.user.config import _classify_stored_onboarding_session  # noqa: E402
 
 GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -289,7 +293,7 @@ def build_signed_state(
         raise ValueError("OAuth connection mode is invalid.")
     if mode == "reconnect":
         if (
-            provider != "google"
+            provider not in {"google", "microsoft"}
             or not isinstance(mailbox_id, str)
             or OAUTH_MAILBOX_ID_PATTERN.fullmatch(mailbox_id) is None
             or not isinstance(expected_email, str)
@@ -756,7 +760,7 @@ class handler(BaseHTTPRequestHandler):
 
             if mode == "reconnect":
                 if (
-                    provider != "google"
+                    provider not in ("google", "microsoft")
                     or not isinstance(mailbox_id, str)
                     or OAUTH_MAILBOX_ID_PATTERN.fullmatch(mailbox_id) is None
                     or has_inbox_position
@@ -767,7 +771,7 @@ class handler(BaseHTTPRequestHandler):
                             "ok": False,
                             "error": {
                                 "code": "invalid_request",
-                                "message": "Google reconnect requires one exact mailbox target.",
+                                "message": "OAuth reconnect requires one exact mailbox target.",
                             },
                         },
                     )
@@ -956,13 +960,44 @@ class handler(BaseHTTPRequestHandler):
                         expected_email,
                         reconnect_error_status,
                         reconnect_error_payload,
-                    ) = reserve_authoritative_google_reconnect(
-                        self.headers,
-                        session_member,
-                        mailbox_id,
-                        email,
-                        credential_generation,
-                    )
+                    ) = (None, None, None)
+                    if provider == "google":
+                        (
+                            expected_email,
+                            reconnect_error_status,
+                            reconnect_error_payload,
+                        ) = reserve_authoritative_google_reconnect(
+                            self.headers,
+                            session_member,
+                            mailbox_id,
+                            email,
+                            credential_generation,
+                        )
+                    else:
+                        try:
+                            expected_email = reserve_authoritative_microsoft_reconnect(
+                                self.headers,
+                                session_member,
+                                mailbox_id,
+                                email,
+                                credential_generation,
+                            )
+                        except MicrosoftActivationError as error:
+                            code = error.code
+                            reconnect_error_status = (
+                                403 if code == "microsoft_owner_required"
+                                else 401 if code == "microsoft_unauthorized"
+                                else 404 if code == "microsoft_mailbox_not_found"
+                                else 503 if code.endswith("_unavailable")
+                                else 409
+                            )
+                            reconnect_error_payload = {
+                                "ok": False,
+                                "error": {
+                                    "code": code,
+                                    "message": "The selected Microsoft mailbox could not be reserved safely.",
+                                },
+                            }
                 finally:
                     release_mailbox_mutation_lease(
                         session_member.email,

@@ -298,6 +298,31 @@ def load_owned_microsoft_token(authority: MicrosoftMailboxAuthority) -> dict:
     return _validate_record(current, auth)
 
 
+def read_owned_microsoft_token_generation(
+    authority: MicrosoftMailboxAuthority,
+) -> str | None:
+    """Inspect one durable token generation without exposing credentials.
+
+    The key is derived only from the authenticated owner and exact mailbox;
+    every other stored authority field is validated before returning the
+    generation. None means no token exists, not a recoverable store failure.
+    """
+    auth = _canonical_authority(authority)
+    stored, _serialized = _snapshot(_durable_config(), _key(auth))
+    if stored is None:
+        return None
+    if type(stored) is not dict:
+        raise MicrosoftTokenError("microsoft_token_record_invalid")
+    generation = stored.get("credential_generation")
+    if type(generation) is not str or not GENERATION_PATTERN.fullmatch(generation):
+        raise MicrosoftTokenError("microsoft_token_record_invalid")
+    actual = MicrosoftMailboxAuthority(
+        auth.owner_email, auth.mailbox_id, auth.email, auth.account_id, generation,
+    )
+    _validate_record(stored, actual)
+    return generation
+
+
 def _exchange_refresh(refresh_token: str, *, opener=urlopen) -> dict:
     client_id = os.getenv("MICROSOFT_CLIENT_ID", "").strip()
     client_secret = os.getenv("MICROSOFT_CLIENT_SECRET", "").strip()

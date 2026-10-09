@@ -127,6 +127,46 @@ class OwnedMicrosoftTokenTests(TokenHarness, unittest.TestCase):
         self.assertNotIn("dj@example.com", key)
         self.assertIsNotNone(auth.load_owned_microsoft_token(authority())["access_token"])
 
+    def test_generation_inspection_reads_only_the_exact_owned_namespace(self):
+        self.assertIsNone(auth.read_owned_microsoft_token_generation(authority()))
+        self.connect()
+        self.assertEqual(
+            auth.read_owned_microsoft_token_generation(authority(generation=GEN2)),
+            GEN1,
+        )
+        self.assertIsNone(
+            auth.read_owned_microsoft_token_generation(
+                authority(owner="unrelated@example.com", generation=GEN2),
+            )
+        )
+
+    def test_generation_inspection_rejects_swapped_provider_identity(self):
+        self.connect()
+        key = auth._key(authority())
+        for changes in (
+            {"owner_email": "another-owner@example.com"},
+            {"email": "someoneelse@example.com"},
+            {"account_id": "another-microsoft-account"},
+            {"mailbox_id": "another-mailbox"},
+            {"provider": "google"},
+            {"credential_generation": "invalid"},
+        ):
+            original = json.loads(self.db.records[key])
+            self.db.records[key] = json.dumps({**original, **changes})
+            with self.subTest(changes=changes), self.assertRaises(auth.MicrosoftTokenError):
+                auth.read_owned_microsoft_token_generation(authority(generation=GEN2))
+            self.db.records[key] = json.dumps(original)
+
+    def test_generation_inspection_is_not_a_token_authority_bypass(self):
+        self.connect()
+        later_generation = authority(generation=GEN2)
+        self.assertEqual(
+            auth.read_owned_microsoft_token_generation(later_generation),
+            GEN1,
+        )
+        with self.assertRaises(auth.MicrosoftTokenError):
+            auth.load_owned_microsoft_token(later_generation)
+
     def test_canonical_email_forms_share_key(self):
         self.connect()
         a = authority(owner="OWNER@EXAMPLE.COM", email="DJ@EXAMPLE.COM")

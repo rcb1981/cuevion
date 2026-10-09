@@ -22,6 +22,7 @@ from api import user_config_store
 
 MAX_CONFIG_ATTEMPTS = 3
 CREDENTIAL_GENERATION = re.compile(r"^[A-Za-z0-9_-]{43}$")
+AUTHORIZATION_NONCE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 PENDING_STATUS = "authenticated_pending_activation"
 ACTIVE_STATUS = "connected"
 PENDING_MESSAGE = "Microsoft authorization is being verified."
@@ -174,7 +175,9 @@ def _find(config: dict, auth: MicrosoftMailboxAuthority) -> tuple[dict | None, l
     return (matches[0] if matches else None), managed
 
 
-def _identity_matches(box: dict, auth: MicrosoftMailboxAuthority, member: AuthenticatedMemberContext) -> bool:
+def _stable_identity_matches(
+    box: dict, auth: MicrosoftMailboxAuthority, member: AuthenticatedMemberContext
+) -> bool:
     return all((
         box.get("id") == auth.mailbox_id,
         box.get("email") == auth.email,
@@ -183,13 +186,24 @@ def _identity_matches(box: dict, auth: MicrosoftMailboxAuthority, member: Authen
         box.get("oauthOwnerUserId") == member.user_id,
         box.get("oauthWorkspaceId") == member.workspace_id,
         box.get("oauthAccountId") == auth.account_id,
-        box.get("oauthCredentialGeneration") == auth.credential_generation,
         box.get("connectionMethod") == "oauth",
-        box.get("oauthReconnectGeneration") is None,
     ))
 
 
-def _pending_box(auth: MicrosoftMailboxAuthority, member: AuthenticatedMemberContext, name: str | None) -> dict:
+def _identity_matches(
+    box: dict, auth: MicrosoftMailboxAuthority, member: AuthenticatedMemberContext
+) -> bool:
+    return (
+        _stable_identity_matches(box, auth, member)
+        and box.get("oauthCredentialGeneration") == auth.credential_generation
+        and box.get("oauthReconnectGeneration") is None
+    )
+
+
+def _pending_box(
+    auth: MicrosoftMailboxAuthority, member: AuthenticatedMemberContext,
+    name: str | None, *, issued_at: int, nonce: str,
+) -> dict:
     return {
         "id": auth.mailbox_id,
         "title": name or auth.email,
@@ -200,6 +214,8 @@ def _pending_box(auth: MicrosoftMailboxAuthority, member: AuthenticatedMemberCon
         "oauthWorkspaceId": member.workspace_id,
         "oauthAccountId": auth.account_id,
         "oauthCredentialGeneration": auth.credential_generation,
+        "oauthAuthorizationIssuedAt": issued_at,
+        "oauthAuthorizationNonce": nonce,
         "connected": False,
         "connectionMethod": "oauth",
         "connectionType": "oauth",
@@ -275,22 +291,59 @@ def _write_and_verify(
 
 
 def _stage(
-    store: dict, member: AuthenticatedMemberContext, auth: MicrosoftMailboxAuthority, title: str | None
+    store: dict, member: AuthenticatedMemberContext, auth: MicrosoftMailboxAuthority,
+    title: str | None, *, issued_at: int, nonce: str,
 ) -> None:
     for _ in range(MAX_CONFIG_ATTEMPTS):
         status, config = _read(store, auth.owner_email, allow_missing=True)
         current, _managed = _find(config, auth)
         if current is not None:
             if (
-                _identity_matches(current, auth, member)
-                and current.get("connected") is False
-                and current.get("connectionStatus") == PENDING_STATUS
+                not _stable_identity_matches(current, auth, member)
+                or current.get("connected") is not False
+                or current.get("connectionStatus") != PENDING_STATUS
+                or current.get("oauthReconnectGeneration") is not None
             ):
-                return
-            raise MicrosoftActivationError("microsoft_mailbox_conflict")
-        intended = _config_mutation(
-            config, auth.owner_email, _pending_box(auth, member, title), replace=False
-        )
+                raise MicrosoftActivationError("microsoft_mailbox_conflict")
+            previous_issue = current.get("oauthAuthorizationIssuedAt")
+            previous_nonce = current.get("oauthAuthorizationNonce")
+            if current.get("oauthCredentialGeneration") == auth.credential_generation:
+                if previous_issue == issued_at and previous_nonce == nonce:
+                    return
+                raise MicrosoftActivationError("microsoft_authorization_stale")
+            if (
+                type(previous_issue) is not int
+                or previous_issue >= issued_at
+                or type(previous_nonce) is not str
+                or AUTHORIZATION_NONCE.fullmatch(previous_nonce) is None
+            ):
+                raise MicrosoftActivationError("microsoft_authorization_stale")
+            # A previous initial OAuth callback stopped after staging or token
+            # persistence. A fresh *verified* grant may supersede ONLY that
+            # inactive exact-owner/account registration, never a live mailbox.
+            if (
+                type(current.get("oauthCredentialGeneration")) is not str
+                or CREDENTIAL_GENERATION.fullmatch(current["oauthCredentialGeneration"]) is None
+            ):
+                raise MicrosoftActivationError("microsoft_mailbox_conflict")
+            replacement = {
+                **current,
+                "oauthCredentialGeneration": auth.credential_generation,
+                "oauthAuthorizationIssuedAt": issued_at,
+                "oauthAuthorizationNonce": nonce,
+                "connected": False,
+                "connectionStatus": PENDING_STATUS,
+                "connectionMessage": PENDING_MESSAGE,
+            }
+            intended = _config_mutation(
+                config, auth.owner_email, replacement, replace=True
+            )
+        else:
+            intended = _config_mutation(
+                config, auth.owner_email,
+                _pending_box(auth, member, title, issued_at=issued_at, nonce=nonce),
+                replace=False
+            )
         if _write_and_verify(store, auth.owner_email, status, config, intended) == "saved":
             return
     raise MicrosoftActivationError("microsoft_config_conflict")
@@ -298,11 +351,21 @@ def _stage(
 
 def _ensure_token(auth: MicrosoftMailboxAuthority, token_payload: dict) -> None:
     try:
-        token_authority.persist_owned_microsoft_token(auth, token_payload, mode="connect")
+        stored_generation = token_authority.read_owned_microsoft_token_generation(auth)
+        if stored_generation is None:
+            token_authority.persist_owned_microsoft_token(
+                auth, token_payload, mode="connect",
+            )
+        elif stored_generation != auth.credential_generation:
+            token_authority.persist_owned_microsoft_token(
+                auth, token_payload, mode="reconnect",
+                previous_generation=stored_generation,
+            )
+        # A previous attempt may have saved the same generation already.
+        # The exact authority readback is still mandatory.
     except MicrosoftTokenError as error:
         if error.code != "microsoft_token_write_conflict":
             raise MicrosoftActivationError(error.code) from None
-        # A prior attempt may have saved this *exact* generation already.
         try:
             token_authority.load_owned_microsoft_token(auth)
         except MicrosoftTokenError:
@@ -320,12 +383,20 @@ def _ensure_token(auth: MicrosoftMailboxAuthority, token_payload: dict) -> None:
 
 
 def _activate(
-    store: dict, member: AuthenticatedMemberContext, auth: MicrosoftMailboxAuthority
+    store: dict, member: AuthenticatedMemberContext, auth: MicrosoftMailboxAuthority,
+    *, reconnect: bool = False,
 ) -> dict:
     for _ in range(MAX_CONFIG_ATTEMPTS):
         _status, config = _read(store, auth.owner_email, allow_missing=False)
         current, _managed = _find(config, auth)
-        if not isinstance(current, dict) or not _identity_matches(current, auth, member):
+        if (
+            not isinstance(current, dict)
+            or not _stable_identity_matches(current, auth, member)
+            or current.get("oauthCredentialGeneration") != auth.credential_generation
+            or current.get("oauthReconnectGeneration") != (
+                auth.credential_generation if reconnect else None
+            )
+        ):
             raise MicrosoftActivationError("microsoft_mailbox_conflict")
         if current.get("connected") is True and current.get("connectionStatus") == ACTIVE_STATUS:
             return deepcopy(current)
@@ -346,6 +417,9 @@ def _activate(
             "connectionStatus": ACTIVE_STATUS,
             "connectionMessage": ACTIVE_MESSAGE,
         }
+        box.pop("oauthReconnectGeneration", None)
+        box.pop("oauthAuthorizationIssuedAt", None)
+        box.pop("oauthAuthorizationNonce", None)
         intended = _config_mutation(config, auth.owner_email, box, replace=True)
         if _write_and_verify(store, auth.owner_email, "ok", config, intended) == "saved":
             return deepcopy(box)
@@ -357,6 +431,9 @@ def activate_initial_microsoft_mailbox(
     identity: dict,
     credential_generation: str,
     token_payload: dict,
+    *,
+    authorization_issued_at: int,
+    authorization_nonce: str,
 ) -> dict:
     """Initial connection, never reconnect or arbitrary browser mailbox IDs.
 
@@ -364,9 +441,181 @@ def activate_initial_microsoft_mailbox(
     but never a falsely Connected mailbox. Reauthorization recovery will be
     handled separately before turning on the Microsoft UI.
     """
+    if (
+        type(authorization_issued_at) is not int
+        or authorization_issued_at < 0
+        or type(authorization_nonce) is not str
+        or AUTHORIZATION_NONCE.fullmatch(authorization_nonce) is None
+    ):
+        raise MicrosoftActivationError("microsoft_authorization_invalid")
     auth, title = _prepare(member, identity, credential_generation, token_payload)
     store = _config_store()
-    _stage(store, member, auth, title)
+    _stage(
+        store, member, auth, title,
+        issued_at=authorization_issued_at, nonce=authorization_nonce,
+    )
     _ensure_token(auth, token_payload)
     result = _activate(store, member, auth)
     return result
+
+
+def reserve_authoritative_microsoft_reconnect(
+    headers,
+    member: AuthenticatedMemberContext,
+    mailbox_id: str,
+    asserted_email: str,
+    credential_generation: str,
+) -> str:
+    """CAS-reserve one EXACT owned mailbox before an OAuth reconnect redirect.
+
+    The reservation blocks Graph operations immediately. Only a new verified
+    OAuth grant for the same owner, workspace, mailbox and Graph account can
+    re-enable the mailbox. A second reconnect may supersede an abandoned one.
+    """
+    owner = _member_owner(member)
+    if (
+        type(mailbox_id) is not str
+        or not mailbox_id.startswith("microsoft-")
+        or len(mailbox_id) != len("microsoft-") + 28
+        or type(asserted_email) is not str
+        or not is_valid_auth_email(asserted_email)
+        or type(credential_generation) is not str
+        or CREDENTIAL_GENERATION.fullmatch(credential_generation) is None
+    ):
+        raise MicrosoftActivationError("microsoft_mailbox_conflict")
+    try:
+        resolved = user_config_store.resolve_owned_managed_inbox_record(
+            headers, mailbox_id, include_member_authority=True,
+        )
+    except Exception:
+        raise MicrosoftActivationError("microsoft_config_unavailable") from None
+    if not isinstance(resolved, dict):
+        raise MicrosoftActivationError("microsoft_config_unavailable")
+    status = resolved.get("status")
+    if status != "ok":
+        raise MicrosoftActivationError(
+            "microsoft_unauthorized" if status == "unauthorized"
+            else "microsoft_mailbox_not_found" if status == "not_found"
+            else "microsoft_config_unavailable"
+        )
+    current_member = resolved.get("memberAuthority")
+    user = resolved.get("user")
+    stored_config = resolved.get("config")
+    stored_mailbox = resolved.get("inbox")
+    if (
+        type(current_member) is not AuthenticatedMemberContext
+        or current_member.membership_role != "owner"
+        or current_member.user_id != owner.user_id
+        or current_member.workspace_id != owner.workspace_id
+        or current_member.email != owner.email
+        or not isinstance(user, dict)
+        or user.get("email") != normalize_auth_email(owner.email)
+        or not isinstance(stored_config, dict)
+        or stored_config.get("email") != normalize_auth_email(owner.email)
+        or not isinstance(stored_mailbox, dict)
+        or stored_mailbox.get("id") != mailbox_id
+    ):
+        raise MicrosoftActivationError("microsoft_mailbox_conflict")
+
+    mailbox_email = stored_mailbox.get("email")
+    account_id = stored_mailbox.get("oauthAccountId")
+    previous_generation = stored_mailbox.get("oauthCredentialGeneration")
+    if (
+        type(mailbox_email) is not str
+        or mailbox_email != normalize_auth_email(mailbox_email)
+        or mailbox_email != normalize_auth_email(asserted_email)
+        or type(account_id) is not str
+        or type(previous_generation) is not str
+        or CREDENTIAL_GENERATION.fullmatch(previous_generation) is None
+    ):
+        raise MicrosoftActivationError("microsoft_mailbox_conflict")
+    auth = MicrosoftMailboxAuthority(
+        normalize_auth_email(owner.email), mailbox_id, mailbox_email,
+        account_id, credential_generation,
+    )
+    try:
+        token_authority._canonical_authority(auth)
+    except MicrosoftTokenError:
+        raise MicrosoftActivationError("microsoft_mailbox_conflict") from None
+    if mailbox_id != _mailbox_id(auth.owner_email, auth.email):
+        raise MicrosoftActivationError("microsoft_mailbox_conflict")
+
+    store = _config_store()
+    for _ in range(MAX_CONFIG_ATTEMPTS):
+        read_status, config = _read(store, auth.owner_email, allow_missing=False)
+        current, _ = _find(config, auth)
+        if (
+            read_status != "ok"
+            or not isinstance(current, dict)
+            or not _stable_identity_matches(current, auth, owner)
+        ):
+            raise MicrosoftActivationError("microsoft_mailbox_conflict")
+        active = (
+            current.get("connected") is True
+            and current.get("connectionStatus") == ACTIVE_STATUS
+            and current.get("oauthReconnectGeneration") is None
+        )
+        previously_reserved = (
+            current.get("connected") is False
+            and current.get("connectionStatus") == PENDING_STATUS
+            and type(current.get("oauthReconnectGeneration")) is str
+            and CREDENTIAL_GENERATION.fullmatch(current["oauthReconnectGeneration"]) is not None
+        )
+        if not active and not previously_reserved:
+            raise MicrosoftActivationError("microsoft_mailbox_conflict")
+        stored_generation = current.get("oauthCredentialGeneration")
+        if type(stored_generation) is not str or not CREDENTIAL_GENERATION.fullmatch(stored_generation):
+            raise MicrosoftActivationError("microsoft_mailbox_conflict")
+        if stored_generation == credential_generation:
+            # A reconnect must rotate to a genuinely fresh state generation.
+            # Never authorize a new consent using the generation of an old
+            # token, even if a random-state collision were to occur.
+            raise MicrosoftActivationError("microsoft_generation_conflict")
+        replacement = {
+            **current,
+            "connected": False,
+            "connectionStatus": PENDING_STATUS,
+            "connectionMessage": PENDING_MESSAGE,
+            "oauthCredentialGeneration": credential_generation,
+            "oauthReconnectGeneration": credential_generation,
+        }
+        intended = _config_mutation(
+            config, auth.owner_email, replacement, replace=True
+        )
+        if _write_and_verify(store, auth.owner_email, "ok", config, intended) == "saved":
+            return auth.email
+    raise MicrosoftActivationError("microsoft_config_conflict")
+
+
+def activate_reconnected_microsoft_mailbox(
+    member: AuthenticatedMemberContext,
+    identity: dict,
+    credential_generation: str,
+    token_payload: dict,
+    *,
+    mailbox_id: str,
+    expected_email: str,
+) -> dict:
+    """Complete only an exact, previously reserved reconnect OAuth state."""
+    auth, _title = _prepare(member, identity, credential_generation, token_payload)
+    if (
+        type(mailbox_id) is not str
+        or mailbox_id != auth.mailbox_id
+        or type(expected_email) is not str
+        or expected_email != auth.email
+    ):
+        raise MicrosoftActivationError("microsoft_mailbox_conflict")
+    store = _config_store()
+    _, config = _read(store, auth.owner_email, allow_missing=False)
+    current, _ = _find(config, auth)
+    if (
+        not isinstance(current, dict)
+        or not _stable_identity_matches(current, auth, member)
+        or current.get("oauthCredentialGeneration") != auth.credential_generation
+        or current.get("oauthReconnectGeneration") != auth.credential_generation
+        or current.get("connected") is not False
+        or current.get("connectionStatus") != PENDING_STATUS
+    ):
+        raise MicrosoftActivationError("microsoft_mailbox_conflict")
+    _ensure_token(auth, token_payload)
+    return _activate(store, member, auth, reconnect=True)
