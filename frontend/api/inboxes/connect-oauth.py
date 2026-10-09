@@ -52,6 +52,7 @@ DEFAULT_MICROSOFT_SCOPES = [
     "email",
     "profile",
     "offline_access",
+    "https://graph.microsoft.com/User.Read",
     "https://graph.microsoft.com/Mail.Read",
 ]
 MAX_REQUEST_BODY_BYTES = 16 * 1024
@@ -371,9 +372,13 @@ def resolve_google_scopes() -> list[str]:
 def resolve_microsoft_scopes() -> list[str]:
     configured_scopes = os.getenv("MICROSOFT_OAUTH_SCOPES", "").strip()
     if not configured_scopes:
-        return DEFAULT_MICROSOFT_SCOPES
+        return list(DEFAULT_MICROSOFT_SCOPES)
 
-    return [scope for scope in configured_scopes.split() if scope]
+    # User.Read is required to verify the actual signed-in account at /me;
+    # Mail.Read and offline_access are required for the intended mailbox path.
+    # Custom scopes may add consent, but must not silently remove these guards.
+    configured = [scope for scope in configured_scopes.split() if scope]
+    return list(dict.fromkeys([*DEFAULT_MICROSOFT_SCOPES, *configured]))
 
 
 def resolve_authoritative_onboarding_position(

@@ -393,7 +393,10 @@ if str(CURRENT_DIR) not in sys.path:
 if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
-from oauth_token_store import persist_microsoft_token_record
+from api.inboxes.microsoft_graph import (
+    MicrosoftGraphError,
+    verify_microsoft_identity_for_hint,
+)
 from api import user_config_store
 from api.auth import http, runtime
 from api.auth.email_address import normalize_auth_email
@@ -2860,6 +2863,19 @@ def _fetch_verified_google_identity(access_token: str) -> tuple[dict | None, dic
     }, None
 
 
+def _fetch_verified_microsoft_identity(
+    access_token: str,
+    email_hint: str,
+) -> tuple[dict | None, dict | None]:
+    # A signed OAuth state carries an *intent* to link an address. Only
+    # Graph /me identifies the account which actually consented.
+    try:
+        identity = verify_microsoft_identity_for_hint(access_token, email_hint)
+    except MicrosoftGraphError as error:
+        return None, {"code": error.code}
+    return identity, None
+
+
 def _exchange_microsoft_code(
     *,
     code: str,
@@ -3386,7 +3402,38 @@ class handler(BaseHTTPRequestHandler):
                 )
                 return
         else:
-            oauth_identity = {"email": email.strip().lower(), "display_name": None}
+            oauth_identity, identity_error = _fetch_verified_microsoft_identity(
+                str(token_payload["access_token"]),
+                email,
+            )
+            if identity_error or not oauth_identity:
+                identity_code = (
+                    identity_error.get("code")
+                    if isinstance(identity_error, dict)
+                    else "microsoft_identity_invalid"
+                )
+                if identity_code not in {
+                    "microsoft_identity_invalid",
+                    "microsoft_identity_mismatch",
+                    "microsoft_reconnect_required",
+                    "microsoft_graph_unavailable",
+                    "microsoft_graph_invalid_response",
+                    "microsoft_graph_rate_limited",
+                }:
+                    identity_code = "microsoft_identity_invalid"
+                _send_gmail_callback_failure(
+                    self,
+                    _build_callback_payload(
+                        provider=provider,
+                        email="",
+                        connection_status="connection_failed",
+                        message="The selected Microsoft account could not be verified. Please try again.",
+                        connected=False,
+                    ),
+                    failure_code=identity_code,
+                    inbox_position=inbox_position,
+                )
+                return
         mailbox_email = oauth_identity["email"]
         display_name = oauth_identity.get("display_name")
 
@@ -3504,10 +3551,28 @@ class handler(BaseHTTPRequestHandler):
                 credential_generation=credential_generation,
             )
         else:
-            persisted_record, persistence_error = persist_microsoft_token_record(
-                email=mailbox_email,
-                token_payload=token_payload,
+            # Until Microsoft tokens are bound to an authenticated Cuevion
+            # owner AND a persisted managed mailbox, there is no safe live
+            # activation. In particular, never store a token globally under
+            # only the mailbox email or return a false "connected" state.
+            _send_gmail_callback_failure(
+                self,
+                _build_callback_payload(
+                    provider="microsoft",
+                    email=mailbox_email,
+                    connection_status="authenticated_pending_activation",
+                    message=(
+                        "Microsoft account identity verified. Microsoft mailbox "
+                        "activation is not available until secure owner-bound "
+                        "mailbox registration is complete."
+                    ),
+                    connected=False,
+                    inbox_position=inbox_position,
+                ),
+                failure_code="microsoft_activation_not_ready",
+                inbox_position=inbox_position,
             )
+            return
 
         if persistence_error:
             persistence_failure_code = _resolve_gmail_callback_failure_code(

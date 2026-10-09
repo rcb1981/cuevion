@@ -981,5 +981,63 @@ class ExactTargetRegistrationTests(unittest.TestCase):
             self.assertNotIn(secret_name, json.dumps(payload))
 
 
+class MicrosoftIdentityBoundaryTests(unittest.TestCase):
+    def test_default_scopes_include_graph_profile_permission(self):
+        with patch.dict(os.environ, {"MICROSOFT_OAUTH_SCOPES": ""}):
+            scopes = connect_oauth.resolve_microsoft_scopes()
+        self.assertIn("https://graph.microsoft.com/User.Read", scopes)
+        self.assertIn("https://graph.microsoft.com/Mail.Read", scopes)
+        self.assertIn("offline_access", scopes)
+
+    def test_custom_scopes_cannot_omit_graph_identity_or_inbox_read(self):
+        with patch.dict(os.environ, {"MICROSOFT_OAUTH_SCOPES": "offline_access Custom.Scope"}):
+            scopes = connect_oauth.resolve_microsoft_scopes()
+        self.assertIn("https://graph.microsoft.com/User.Read", scopes)
+        self.assertIn("https://graph.microsoft.com/Mail.Read", scopes)
+        self.assertIn("offline_access", scopes)
+        self.assertEqual(scopes.count("offline_access"), 1)
+        self.assertIn("Custom.Scope", scopes)
+
+    def test_callback_uses_verified_graph_identity(self):
+        identity = {
+            "id": "user-id",
+            "email": "verified@example.com",
+            "verifiedEmails": ("verified@example.com",),
+            "display_name": "Verified User",
+        }
+        with patch.object(
+            oauth_callback,
+            "verify_microsoft_identity_for_hint",
+            return_value=identity,
+        ) as validator:
+            result, error = oauth_callback._fetch_verified_microsoft_identity(
+                "opaque-microsoft-token", "verified@example.com"
+            )
+        self.assertIsNone(error)
+        self.assertEqual(result, identity)
+        validator.assert_called_once_with("opaque-microsoft-token", "verified@example.com")
+
+    def test_identity_mismatch_is_not_silently_accepted(self):
+        from api.inboxes.microsoft_graph import MicrosoftGraphError
+        with patch.object(
+            oauth_callback,
+            "verify_microsoft_identity_for_hint",
+            side_effect=MicrosoftGraphError("microsoft_identity_mismatch"),
+        ):
+            identity, error = oauth_callback._fetch_verified_microsoft_identity(
+                "opaque-microsoft-token", "other@example.com"
+            )
+        self.assertIsNone(identity)
+        self.assertEqual(error, {"code": "microsoft_identity_mismatch"})
+
+    def test_incomplete_microsoft_registration_cannot_claim_connected(self):
+        source = inspect.getsource(oauth_callback.handler._handle_get)
+        self.assertIn("_fetch_verified_microsoft_identity(", source)
+        self.assertIn('failure_code="microsoft_activation_not_ready"', source)
+        self.assertIn('connection_status="authenticated_pending_activation"', source)
+        self.assertIn("connected=False", source)
+        self.assertNotIn("persist_microsoft_token_record(", source)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
