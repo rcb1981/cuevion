@@ -4495,6 +4495,11 @@ const MICROSOFT_INBOX_SAFE_ERRORS: Record<string, string> = {
   microsoft_graph_invalid_response: "Microsoft mailbox returned invalid data.",
   microsoft_graph_unavailable: "Microsoft mailbox is temporarily unavailable.",
   microsoft_mailbox_unavailable: "Microsoft mailbox is temporarily unavailable.",
+  microsoft_write_permission_required: "Reconnect Microsoft to approve message changes.",
+  microsoft_mutation_in_progress: "Another mailbox change is still in progress.",
+  microsoft_mutation_conflict: "Microsoft message changed. Refresh Inbox and try again.",
+  microsoft_mutation_unconfirmed: "The message change could not be confirmed. Refresh Inbox.",
+  microsoft_message_not_found: "The message is no longer in this Inbox.",
 };
 
 function safeMicrosoftFetchError(payload: unknown): { code: string; message: string } {
@@ -4674,6 +4679,100 @@ export async function fetchMicrosoftMessage(
     return {
       ok: false,
       error: safeMicrosoftFetchError(null),
+    };
+  }
+}
+
+
+export type MicrosoftReadFlagRequest = {
+  mailboxId: string;
+  providerMessageId: string;
+  unread: boolean;
+};
+
+export type MicrosoftReadFlagResponse =
+  | {
+      ok: true;
+      providerMessageId: string;
+      unread: boolean;
+      changed: boolean;
+    }
+  | {
+      ok: false;
+      error: { code: string; message: string };
+    };
+
+export async function setMicrosoftMessageUnread(
+  request: MicrosoftReadFlagRequest,
+): Promise<MicrosoftReadFlagResponse> {
+  if (
+    typeof request?.mailboxId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
+    typeof request.providerMessageId !== "string" ||
+    !/^[^\x00-\x20\x7f-\x9f?#]{1,512}$/.test(request.providerMessageId) ||
+    new TextEncoder().encode(request.providerMessageId).byteLength > 512 ||
+    request.providerMessageId === "." ||
+    request.providerMessageId.includes("..") ||
+    typeof request.unread !== "boolean"
+  ) {
+    return {
+      ok: false,
+      error: {
+        code: "invalid_request",
+        message: "Invalid Microsoft message status request.",
+      },
+    };
+  }
+
+  try {
+    // A read/unread PATCH can have an indeterminate outcome. Never retry
+    // automatically if the POST or response was interrupted.
+    const response = await fetchProtectedApi("/api/inboxes/mark-microsoft-read", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mailboxId: request.mailboxId,
+        providerMessageId: request.providerMessageId,
+        unread: request.unread,
+      }),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: safeMicrosoftFetchError(payload),
+      };
+    }
+    if (
+      !payload ||
+      typeof payload !== "object" ||
+      Array.isArray(payload)
+    ) {
+      throw new Error("invalid_response");
+    }
+    const data = payload as Record<string, unknown>;
+    if (
+      data.ok !== true ||
+      data.providerMessageId !== request.providerMessageId ||
+      data.unread !== request.unread ||
+      typeof data.changed !== "boolean"
+    ) {
+      throw new Error("invalid_response");
+    }
+    return {
+      ok: true,
+      providerMessageId: request.providerMessageId,
+      unread: request.unread,
+      changed: data.changed,
+    };
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: "microsoft_mutation_unconfirmed",
+        message: "Microsoft did not confirm the message change. Refresh Inbox.",
+      },
     };
   }
 }

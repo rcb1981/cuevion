@@ -31,6 +31,11 @@ def _error(status: int, code: str):
         "microsoft_mailbox_not_found": "Microsoft mailbox not found.",
         "microsoft_reconnect_required": "Reconnect the Microsoft mailbox to continue.",
         "microsoft_graph_rate_limited": "Microsoft mailbox is temporarily rate limited.",
+        "microsoft_write_permission_required": "Reconnect Microsoft to approve message changes.",
+        "microsoft_mutation_in_progress": "Another mailbox change is still in progress.",
+        "microsoft_mutation_conflict": "Microsoft message changed. Refresh the Inbox and try again.",
+        "microsoft_mutation_unconfirmed": "The message change could not be confirmed. Refresh Inbox.",
+        "microsoft_message_not_found": "The message is no longer in this Inbox.",
     }
     return json_response(
         status,
@@ -69,8 +74,12 @@ def _parse_body(request, headers: tuple) -> dict:
     return decoded
 
 
-def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str]:
-    expected = {"mailboxId", "limit"} if mode == "list" else {"mailboxId", "providerMessageId"}
+def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dict]:
+    expected = (
+        {"mailboxId", "limit"} if mode == "list"
+        else {"mailboxId", "providerMessageId", "unread"} if mode == "flag"
+        else {"mailboxId", "providerMessageId"}
+    )
     if not set(payload) <= expected or "mailboxId" not in payload:
         raise ValueError("invalid")
     mailbox = payload.get("mailboxId")
@@ -92,6 +101,17 @@ def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str]:
         ):
             raise ValueError("invalid")
         return mailbox, message_id
+    if mode == "flag":
+        # Reuse Graph's immutable opaque-ID validation, not a browser path.
+        from api.inboxes.microsoft_graph import _required_message_id
+        value = payload.get("providerMessageId")
+        try:
+            exact_id = _required_message_id(value)
+        except MicrosoftGraphError:
+            raise ValueError("invalid") from None
+        if set(payload) != expected or type(payload.get("unread")) is not bool:
+            raise ValueError("invalid")
+        return mailbox, {"providerMessageId": exact_id, "unread": payload["unread"]}
     raise ValueError("invalid")
 
 
@@ -118,6 +138,23 @@ def microsoft_inbox_response(request, *, mode: str):
                 headers, mailbox_id, page_size=selector,
             )
             return json_response(200, project_inbox(snapshot, mailbox_id))
+        if mode == "flag":
+            assert type(selector) is dict
+            confirmation = owned.mark_owned_microsoft_inbox_read(
+                headers,
+                mailbox_id,
+                selector["providerMessageId"],
+                unread=selector["unread"],
+            )
+            if (
+                type(confirmation) is not dict
+                or type(confirmation.get("providerMessageId")) is not str
+                or confirmation["providerMessageId"] != selector["providerMessageId"]
+                or confirmation.get("unread") is not selector["unread"]
+                or type(confirmation.get("changed")) is not bool
+            ):
+                raise MicrosoftGraphError("microsoft_mutation_unconfirmed")
+            return json_response(200, {"ok": True, **confirmation})
         if mode == "exact":
             assert type(selector) is str
             message = owned.read_owned_microsoft_message(
@@ -137,6 +174,12 @@ def microsoft_inbox_response(request, *, mode: str):
             return _error(404, code)
         if code in {"microsoft_reconnect_required", "microsoft_token_record_invalid"}:
             return _error(409, "microsoft_reconnect_required")
+        if code == "microsoft_write_permission_required":
+            return _error(403, code)
+        if code == "microsoft_mutation_in_progress":
+            return _error(409, code)
+        if code == "microsoft_mutation_unconfirmed":
+            return _error(503, code)
         return _error(503, "microsoft_mailbox_unavailable")
     except MicrosoftGraphError as error:
         if error.code == "microsoft_graph_rate_limited":
@@ -145,6 +188,12 @@ def microsoft_inbox_response(request, *, mode: str):
             return _error(409, "microsoft_reconnect_required")
         if error.code == "microsoft_graph_invalid_response":
             return _error(502, "microsoft_graph_invalid_response")
+        if error.code == "microsoft_message_not_found":
+            return _error(404, error.code)
+        if error.code == "microsoft_mutation_conflict":
+            return _error(409, error.code)
+        if error.code == "microsoft_mutation_unconfirmed":
+            return _error(503, error.code)
         return _error(503, "microsoft_graph_unavailable")
     except Exception:
         return _error(503, "microsoft_mailbox_unavailable")

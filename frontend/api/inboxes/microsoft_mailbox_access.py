@@ -17,7 +17,11 @@ from api.inboxes.microsoft_token_authority import (
     MicrosoftTokenError,
     ensure_owned_microsoft_access_token,
 )
-from api.user_config_store import resolve_owned_managed_inbox_record
+from api.user_config_store import (
+    acquire_mailbox_mutation_lease,
+    release_mailbox_mutation_lease,
+    resolve_owned_managed_inbox_record,
+)
 
 MAILBOX_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$")
 GENERATION_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
@@ -141,7 +145,9 @@ def resolve_owned_microsoft_mailbox(headers, mailbox_id: object) -> MicrosoftMai
     )
 
 
-def _owned_token(headers, mailbox_id: object) -> tuple[str, MicrosoftMailboxAuthority]:
+def _owned_token(
+    headers, mailbox_id: object, *, require_read_write: bool = False,
+) -> tuple[str, MicrosoftMailboxAuthority]:
     authority = resolve_owned_microsoft_mailbox(headers, mailbox_id)
     try:
         record = ensure_owned_microsoft_access_token(authority)
@@ -153,6 +159,16 @@ def _owned_token(headers, mailbox_id: object) -> tuple[str, MicrosoftMailboxAuth
     token = record.get("access_token")
     if not isinstance(token, str) or not token:
         raise MicrosoftMailboxAccessError("microsoft_reconnect_required")
+    if require_read_write:
+        scope = record.get("scope")
+        if (
+            type(scope) is not str
+            or not (
+                {"Mail.ReadWrite", "https://graph.microsoft.com/Mail.ReadWrite"}
+                & set(scope.split())
+            )
+        ):
+            raise MicrosoftMailboxAccessError("microsoft_write_permission_required")
     return token, authority
 
 
@@ -183,3 +199,70 @@ def read_owned_microsoft_message(headers, mailbox_id: object, message_id: str) -
     message = microsoft_graph.get_microsoft_message(token, message_id)
     _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
     return message
+
+
+def mark_owned_microsoft_inbox_read(
+    headers,
+    mailbox_id: object,
+    message_id: str,
+    *,
+    unread: bool,
+) -> dict:
+    """Serialize one exact Microsoft Inbox flag mutation under owner authority.
+
+    The shared mailbox mutation lease prevents independent in-flight operations
+    from silently racing each other. We do not retry a PATCH if its result is
+    unknown. The Graph writer reads the Inbox-scoped message before and after.
+    """
+    from api.inboxes import microsoft_graph, microsoft_message_flags
+
+    if type(unread) is not bool:
+        raise MicrosoftMailboxAccessError("microsoft_mutation_invalid")
+    microsoft_graph._required_message_id(message_id)
+    captured = resolve_owned_microsoft_mailbox(headers, mailbox_id)
+    try:
+        lease = acquire_mailbox_mutation_lease(
+            captured.owner_email, captured.mailbox_id,
+        )
+    except Exception:
+        raise MicrosoftMailboxAccessError("microsoft_mailbox_unavailable") from None
+    if not isinstance(lease, dict):
+        raise MicrosoftMailboxAccessError("microsoft_mailbox_unavailable")
+    if lease.get("status") != "acquired":
+        if lease.get("status") == "held":
+            raise MicrosoftMailboxAccessError("microsoft_mutation_in_progress")
+        raise MicrosoftMailboxAccessError("microsoft_mailbox_unavailable")
+    lease_token = lease.get("token")
+    if type(lease_token) is not str or not lease_token:
+        raise MicrosoftMailboxAccessError("microsoft_mailbox_unavailable")
+
+    succeeded = False
+    try:
+        token, checked = _owned_token(
+            headers, mailbox_id, require_read_write=True,
+        )
+        if checked != captured:
+            raise MicrosoftMailboxAccessError("microsoft_reconnect_required")
+        result = microsoft_message_flags.set_exact_microsoft_inbox_read(
+            token, message_id, unread=unread,
+            before_write=lambda: _verify_unchanged_owned_mailbox(
+                headers, mailbox_id, captured,
+            ),
+        )
+        _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+        succeeded = True
+        return result
+    finally:
+        # A failed release never authorizes another mutation or triggers a
+        # second PATCH. If the write had been confirmed, fail visibly so
+        # the client refreshes rather than claiming an unverified operation.
+        released = False
+        try:
+            release = release_mailbox_mutation_lease(
+                captured.owner_email, captured.mailbox_id, lease_token,
+            )
+            released = isinstance(release, dict) and release.get("status") == "released"
+        except Exception:
+            pass
+        if succeeded and not released:
+            raise MicrosoftMailboxAccessError("microsoft_mutation_unconfirmed")

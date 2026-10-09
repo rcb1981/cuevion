@@ -95,7 +95,7 @@ No Microsoft tokens or authorization metadata are returned in browser JSON.
   `src/lib/microsoftInboxApi.test.ts`, plus existing authority and OAuth
   regressions. No real mailbox was connected or fetched by these tests.
 
-## Desktop workspace integration — read-only local implementation
+## Desktop workspace integration — explicit Inbox read-status actions
 
 The existing WorkspaceShell now detects an authenticated, managed Microsoft
 mailbox and mounts MicrosoftMailboxReadOnlyView IN THE NORMAL WORKSPACE
@@ -103,7 +103,7 @@ NAVIGATION. Other providers still use the original MailboxView and its
 unmodified Gmail/IMAP synchronization, archive, actions and snapshots.
 
 - The Microsoft view is deliberately independent of mailboxStore,
-  Gmail/IMAP local snapshots, threading, priority and unread mutations.
+  Gmail/IMAP local snapshots, threading, priority and non-Microsoft actions.
 - When connected, it loads the 25 newest messages on mount, refreshes every
   two minutes while mounted and offers a manual Refresh button.
 - Selecting one inbox item requests exact content via fetchMicrosoftMessage;
@@ -114,14 +114,49 @@ unmodified Gmail/IMAP synchronization, archive, actions and snapshots.
   preventing responses from racing a reconnect or ownership change.
 - Connection-status transitions remount the view; any 401/reconnect-required
   result clears local message content and requests reauthorization.
-- The view has no Send, Reply, Delete, Move or attachment interaction.
+- The view has NO Send, Reply, Delete, Move or attachment interaction.
+- Opening a message never auto-marks it as read. The explicit
+  Mark as read / Mark as unread button is the only Microsoft mutation
+  exposed here, disabled during in-flight changes; it updates local UI
+  only after exact server proof. An uncertain result suggests Refresh Inbox.
 - No real Microsoft account has yet been connected in a browser.
 
-Important: MobileWorkspaceShell is STILL separate and has not been wired for
-Microsoft read-only views. Microsoft unread counts, priority, archive/Sent,
-pagination beyond the newest 25, full HTML/attachments, reply/send and mailbox
-mutations are not integrated. Do not claim the general workspace Inbox is
-fully Microsoft-enabled until those release gates are completed.
+Important: MobileWorkspaceShell is STILL separate and has not been wired
+for Microsoft mailbox views. Global unread counts, priority, archive/Sent,
+pagination beyond the newest 25, full HTML/attachments, reply/send and other
+mailbox mutations are not integrated. The Microsoft view shows only unread
+counts within its latest 25 messages; this is NOT the global badge count.
+Do not claim the general workspace Inbox is fully Microsoft-enabled.
+
+## Exact Microsoft read/unread action — implemented locally
+
+- Microsoft Graph requires the delegated Mail.ReadWrite permission for
+  PATCH of the message isRead property. Microsoft OAuth defaults and custom
+  scopes now include this permission, while the operation still verifies
+  it in the actual stored Microsoft token; otherwise it fails closed.
+- New `microsoft_message_flags.py` uses ONLY
+  /v1.0/me/mailFolders/inbox/messages/{exact immutable ID}. A scoped
+  preflight GET proves Inbox membership, a single PATCH changes only
+  isRead, and a second scoped GET confirms the result. The operation is
+  idempotent when already satisfied. It never follows provider URLs.
+- `mark_owned_microsoft_inbox_read` acquires the existing CAS-backed
+  mailbox mutation lease, revalidates owner+mailbox generation before the
+  PATCH and after the Graph readback, and releases the lease in a finally
+  block. No write is attempted for unowned, pending, reconnecting or
+  permission-deficient mailboxes.
+- New POST-only `mark-microsoft-read.py` requires exactly mailboxId,
+  providerMessageId and a boolean unread. Responses contain ONLY the
+  confirmed exact provider message ID, unread flag and changed status.
+- The client `setMicrosoftMessageUnread` does NOT retry unknown-status
+  operations; it accepts no browser-supplied provider URLs or tokens, and
+  strips arbitrary remote error text.
+- MicrosoftMailboxReadOnlyView retains a segregated state model and only
+  publishes confirmed flags to the selected message and its list row.
+  Stale fetches, double-clicks and selection changes are suppressed. The
+  UI provides an explicit Refresh Inbox path when confirmation fails.
+- Fake Graph, lease/authority, HTTP and client tests cover permission
+  denial, concurrency, PATCH failure, stale authorization and exact
+  post-write status. No actual Microsoft mailbox was changed during tests.
 
 ## Remaining release gates (not ready for Preview or Production)
 
@@ -132,8 +167,10 @@ fully Microsoft-enabled until those release gates are completed.
 2. Integrate Microsoft into MobileWorkspaceShell and, when the
    current read-only UI is accepted, reconcile its Inbox state with normal
    Cuevion mailbox presentation without using Gmail/IMAP-only assumptions.
-   Add read/unread, Sent, reply, send, trash, pagination, attachment handling,
-   and unread/priority calculations separately. The reconnect client request
+   Add Sent, reply, send, trash, pagination, attachment handling, and
+   global unread/priority calculations separately. Inbox mark-read/unread
+   is already present but requires live Microsoft acceptance testing.
+   The reconnect client request
    builder exists, but connection UI is not fully integrated.
 3. Validate normal user-config presentation-only saves preserve every
    server-held Microsoft account/user/workspace/generation field.

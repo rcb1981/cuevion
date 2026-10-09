@@ -1026,6 +1026,7 @@ class MicrosoftIdentityBoundaryTests(unittest.TestCase):
             scopes = connect_oauth.resolve_microsoft_scopes()
         self.assertIn("https://graph.microsoft.com/User.Read", scopes)
         self.assertIn("https://graph.microsoft.com/Mail.Read", scopes)
+        self.assertIn("https://graph.microsoft.com/Mail.ReadWrite", scopes)
         self.assertIn("offline_access", scopes)
 
     def test_custom_scopes_cannot_omit_graph_identity_or_inbox_read(self):
@@ -1033,6 +1034,7 @@ class MicrosoftIdentityBoundaryTests(unittest.TestCase):
             scopes = connect_oauth.resolve_microsoft_scopes()
         self.assertIn("https://graph.microsoft.com/User.Read", scopes)
         self.assertIn("https://graph.microsoft.com/Mail.Read", scopes)
+        self.assertIn("https://graph.microsoft.com/Mail.ReadWrite", scopes)
         self.assertIn("offline_access", scopes)
         self.assertEqual(scopes.count("offline_access"), 1)
         self.assertIn("Custom.Scope", scopes)
