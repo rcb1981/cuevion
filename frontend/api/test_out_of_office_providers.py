@@ -18,7 +18,7 @@ from api.out_of_office_store import (
     build_imap_out_of_office_cursor,
     normalize_out_of_office_settings,
 )
-from api.out_of_office_worker import OutOfOfficeCursorReset
+from api.out_of_office_worker import OutOfOfficeCursorReset, OutOfOfficeProviderError
 
 
 NOW = datetime(2026, 10, 8, 10, 0, tzinfo=timezone.utc)
@@ -279,12 +279,29 @@ RAW_HEADERS = (
 
 
 class FakeImap:
-    def __init__(self, *, uid_validity="777", uid_next="43", search_uids=""):
+    def __init__(
+        self, *, uid_validity="777", uid_next="43", search_uids="",
+        sent_search_uids="", folders=None, append_status="OK",
+    ):
         self.uid_validity = uid_validity
         self.uid_next = uid_next
         self.search_uids = search_uids
+        self.sent_search_uids = sent_search_uids
+        self.folders = [b'(\\Sent) "/" "Sent Messages"'] if folders is None else folders
+        self.append_status = append_status
+        self.appended = []
         self.calls = []
         self.logged_out = False
+
+    def list(self):
+        self.calls.append(("list",))
+        return "OK", self.folders
+
+    def append(self, folder, flags, date_time, content):
+        self.calls.append(("append", folder))
+        self.appended.append((folder, flags, date_time, content))
+        status = self.append_status.pop(0) if isinstance(self.append_status, list) else self.append_status
+        return status, [b"append"]
 
     def select(self, folder, readonly=False):
         self.calls.append(("select", folder, readonly))
@@ -301,6 +318,8 @@ class FakeImap:
     def uid(self, command, *args):
         self.calls.append(("uid", command, *args))
         if command == "SEARCH":
+            if "HEADER" in args:
+                return "OK", [self.sent_search_uids.encode("ascii")]
             return "OK", [self.search_uids.encode("ascii")]
         if command == "FETCH":
             uid = args[0]
@@ -420,6 +439,79 @@ class ImapAdapterTests(unittest.TestCase):
         self.assertEqual(raised.exception.cursor["lastUid"], "59")
         self.assertFalse(any(call[:2] == ("uid", "SEARCH") for call in fake.calls))
 
+    def test_sent_folder_missing_stops_before_smtp(self):
+        fake = FakeImap(folders=[b'() "/" "Archive"'])
+        adapter, sent = self._adapter(fake)
+        settings = normalize_out_of_office_settings(
+            {"enabled": True, "startsAt": None, "endsAt": None,
+             "subject": "Away", "message": "Back soon."},
+            now=NOW,
+        )
+        with self.assertRaises(OutOfOfficeProviderError) as caught:
+            adapter.send_reply(
+                imap_mailbox(),
+                {"providerMessageId": "43", "senderEmail": "artist@example.com",
+                 "rfcMessageId": None, "receivedAt": None, "headers": {}},
+                settings, owner_email="owner@example.com",
+            )
+        self.assertEqual(caught.exception.code, "imap_sent_unavailable")
+        self.assertEqual(sent, [])
+        self.assertEqual(fake.appended, [])
+
+    def test_smtp_saved_copy_search_prevents_duplicate_append(self):
+        fake = FakeImap(sent_search_uids="55")
+        adapter, sent = self._adapter(fake)
+        settings = normalize_out_of_office_settings(
+            {"enabled": True, "startsAt": None, "endsAt": None,
+             "subject": "Away", "message": "Back soon."},
+            now=NOW,
+        )
+        outcome = adapter.send_reply(
+            imap_mailbox(),
+            {"providerMessageId": "43", "senderEmail": "artist@example.com",
+             "rfcMessageId": None, "receivedAt": None, "headers": {}},
+            settings, owner_email="owner@example.com",
+        )
+        self.assertEqual(outcome, "already_stored")
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(fake.appended, [])
+
+    def test_sent_append_retry_only_repeats_imap_operation(self):
+        fake = FakeImap(append_status=["NO", "OK"])
+        adapter, sent = self._adapter(fake)
+        settings = normalize_out_of_office_settings(
+            {"enabled": True, "startsAt": None, "endsAt": None,
+             "subject": "Away", "message": "Back soon."},
+            now=NOW,
+        )
+        outcome = adapter.send_reply(
+            imap_mailbox(),
+            {"providerMessageId": "43", "senderEmail": "artist@example.com",
+             "rfcMessageId": None, "receivedAt": None, "headers": {}},
+            settings, owner_email="owner@example.com",
+        )
+        self.assertEqual(outcome, "stored")
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(len(fake.appended), 2)
+
+    def test_sent_append_failure_never_retries_smtp(self):
+        fake = FakeImap(append_status="NO")
+        adapter, sent = self._adapter(fake)
+        settings = normalize_out_of_office_settings(
+            {"enabled": True, "startsAt": None, "endsAt": None,
+             "subject": "Away", "message": "Back soon."},
+            now=NOW,
+        )
+        outcome = adapter.send_reply(
+            imap_mailbox(),
+            {"providerMessageId": "43", "senderEmail": "artist@example.com",
+             "rfcMessageId": None, "receivedAt": None, "headers": {}},
+            settings, owner_email="owner@example.com",
+        )
+        self.assertEqual(outcome, "sent_copy_failed")
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(len(fake.appended), 2)
+
     def test_send_uses_safe_smtp_runtime_and_loop_headers(self):
         fake = FakeImap()
         adapter, sent = self._adapter(fake)
@@ -460,6 +552,16 @@ class ImapAdapterTests(unittest.TestCase):
         self.assertEqual(item["recipients"], ["artist@example.com"])
         self.assertEqual(item["message"]["Auto-Submitted"], "auto-replied")
         self.assertEqual(item["message"]["Subject"], "Away")
+        self.assertIsNotNone(item["message"]["Message-ID"])
+        self.assertIsNotNone(item["message"]["Date"])
+        self.assertEqual(len(fake.appended), 1)
+        folder, flags, date_time, raw = fake.appended[0]
+        self.assertEqual(folder, "Sent Messages")
+        self.assertEqual(flags, r"(\Seen)")
+        self.assertIsNone(date_time)
+        self.assertIn(item["message"]["Message-ID"].encode(), raw)
+        self.assertIn(b"Auto-Submitted: auto-replied", raw)
+        self.assertTrue(fake.logged_out)
 
 
 if __name__ == "__main__":

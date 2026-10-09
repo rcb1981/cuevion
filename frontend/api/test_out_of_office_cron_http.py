@@ -96,6 +96,7 @@ class OutOfOfficeCronHttpTests(unittest.TestCase):
                     "mailboxId": "secret-mailbox-id",
                     "status": "processed",
                     "sent": 1,
+                    "sentCopyFailures": 1,
                     "suppressed": 2,
                     "skipped": 3,
                     "error": None,
@@ -119,6 +120,7 @@ class OutOfOfficeCronHttpTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["processedTargets"], 2)
         self.assertEqual(payload["sent"], 1)
+        self.assertEqual(payload["sentCopyFailures"], 1)
         self.assertEqual(payload["suppressed"], 2)
         self.assertEqual(payload["skipped"], 3)
         self.assertEqual(payload["statuses"], {"inactive": 1, "processed": 1})

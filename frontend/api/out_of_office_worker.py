@@ -34,6 +34,7 @@ class TargetRunResult(TypedDict):
     sent: int
     suppressed: int
     skipped: int
+    sentCopyFailures: int
     error: str | None
 
 
@@ -82,7 +83,7 @@ class OutOfOfficeProviderAdapter(Protocol):
         settings: OutOfOfficeSettings,
         *,
         owner_email: str,
-    ) -> None:
+    ) -> str | None:
         ...
 
 
@@ -193,6 +194,7 @@ def _result(
     sent: int = 0,
     suppressed: int = 0,
     skipped: int = 0,
+    sent_copy_failures: int = 0,
     error: str | None = None,
 ) -> TargetRunResult:
     return {
@@ -202,6 +204,7 @@ def _result(
         "sent": sent,
         "suppressed": suppressed,
         "skipped": skipped,
+        "sentCopyFailures": sent_copy_failures,
         "error": error,
     }
 
@@ -292,6 +295,7 @@ def process_out_of_office_target(
         sent = 0
         suppressed = 0
         skipped = 0
+        sent_copy_failures = 0
 
         for candidate in batch["candidates"]:
             if not candidate_is_in_active_window(candidate, settings, now=current):
@@ -317,6 +321,7 @@ def process_out_of_office_target(
                     target,
                     "error",
                     sent=sent,
+                    sent_copy_failures=sent_copy_failures,
                     suppressed=suppressed,
                     skipped=skipped,
                     error="suppression_unavailable",
@@ -327,7 +332,7 @@ def process_out_of_office_target(
                 continue
 
             try:
-                adapter.send_reply(
+                sent_copy_outcome = adapter.send_reply(
                     mailbox,
                     candidate,
                     settings,
@@ -347,6 +352,7 @@ def process_out_of_office_target(
                     target,
                     "error",
                     sent=sent,
+                    sent_copy_failures=sent_copy_failures,
                     suppressed=suppressed,
                     skipped=skipped,
                     error=exc.code,
@@ -365,10 +371,16 @@ def process_out_of_office_target(
                     target,
                     "error",
                     sent=sent,
+                    sent_copy_failures=sent_copy_failures,
                     suppressed=suppressed,
                     skipped=skipped,
                     error="send_failed",
                 )
+
+            # SMTP succeeded even if the IMAP Sent append failed. Never
+            # release the sender claim or retry SMTP for a Sent-only failure.
+            if sent_copy_outcome == "sent_copy_failed":
+                sent_copy_failures += 1
 
             try:
                 claim_is_still_owned = store.complete_sender_reply(
@@ -385,6 +397,7 @@ def process_out_of_office_target(
                     target,
                     "error",
                     sent=sent + 1,
+                    sent_copy_failures=sent_copy_failures,
                     suppressed=suppressed,
                     skipped=skipped,
                     error="suppression_confirmation_failed",
@@ -403,6 +416,7 @@ def process_out_of_office_target(
                 target,
                 "error",
                 sent=sent,
+                sent_copy_failures=sent_copy_failures,
                 suppressed=suppressed,
                 skipped=skipped,
                 error="cursor_unavailable",
@@ -412,6 +426,7 @@ def process_out_of_office_target(
             target,
             "processed",
             sent=sent,
+            sent_copy_failures=sent_copy_failures,
             suppressed=suppressed,
             skipped=skipped,
         )

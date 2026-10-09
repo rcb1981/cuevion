@@ -71,6 +71,12 @@ def _summary(results: list[dict]) -> dict:
             for result in results
             if isinstance(result, dict) and isinstance(result.get("sent"), int)
         ),
+        "sentCopyFailures": sum(
+            result.get("sentCopyFailures", 0)
+            for result in results
+            if isinstance(result, dict)
+            and isinstance(result.get("sentCopyFailures"), int)
+        ),
         "suppressed": sum(
             result.get("suppressed", 0)
             for result in results

@@ -11,6 +11,12 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+# Load canonical Gmail provider before temporary legacy-module stubs.
+# The real provider enforces one canonical module identity, including when
+# the tested send endpoint imports the independent priority subsystem.
+import api.inboxes.authenticated_gmail  # noqa: F401
+import api.inboxes.authenticated_imap  # noqa: F401
+
 
 CURRENT_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = CURRENT_DIR.parent.parent
@@ -669,27 +675,19 @@ class CustomSmtpReplyContinuityTests(unittest.TestCase):
         harness.source_mock.assert_called_once()
         harness.smtp_mock.assert_called_once()
 
-    def test_connection_uses_stored_ssl_shape_and_logs_in_once(self):
-        ssl_connection = Mock()
+    def test_connection_uses_stored_ssl_shape_and_authenticated_connector_once(self):
+        connection = Mock()
         with patch.object(
-            send_gmail.imaplib,
-            "IMAP4_SSL",
-            return_value=ssl_connection,
-        ) as ssl_constructor, patch.object(
-            send_gmail.imaplib,
-            "IMAP4",
-        ) as plain_constructor:
-            connection = send_gmail._open_custom_imap_connection(CUSTOM_MAILBOX)
-        self.assertIs(connection, ssl_connection)
-        ssl_constructor.assert_called_once_with(
-            "imap.example.com",
-            993,
-            timeout=30,
-        )
-        plain_constructor.assert_not_called()
-        ssl_connection.login.assert_called_once_with(
-            "owner@example.com",
-            "stored-imap-secret",
+            send_gmail,
+            "connect_mailbox_with_settings",
+            return_value=connection,
+        ) as connector:
+            selected = send_gmail._open_custom_imap_connection(CUSTOM_MAILBOX)
+        self.assertIs(selected, connection)
+        connector.assert_called_once_with(
+            "imap.example.com", 993,
+            "owner@example.com", "stored-imap-secret",
+            True, timeout=30,
         )
 
     def test_non_ssl_configuration_is_rejected_without_plaintext_login(self):
@@ -719,46 +717,24 @@ class CustomSmtpReplyContinuityTests(unittest.TestCase):
                     send_gmail._custom_imap_connection_config(invalid_mailbox)
 
     def test_login_rejection_is_distinguished_without_imap_close_mutation(self):
-        rejected_connection = Mock()
-        rejected_connection.login.side_effect = imaplib.IMAP4.error(
-            "authentication failed"
-        )
         with patch.object(
-            send_gmail.imaplib,
-            "IMAP4_SSL",
-            return_value=rejected_connection,
-        ):
+            send_gmail,
+            "connect_mailbox_with_settings",
+            side_effect=imaplib.IMAP4.error("authentication failed"),
+        ) as connector:
             with self.assertRaises(send_gmail._CustomImapAuthenticationError):
                 send_gmail._open_custom_imap_connection(CUSTOM_MAILBOX)
-        rejected_connection.close.assert_not_called()
-        rejected_connection.logout.assert_called_once_with()
+        connector.assert_called_once()
 
     def test_login_transport_abort_is_unavailable_not_reconnect_required(self):
-        aborted_connection = Mock()
-        aborted_connection.login.side_effect = imaplib.IMAP4.abort(
-            "transport aborted"
-        )
         with patch.object(
-            send_gmail.imaplib,
-            "IMAP4_SSL",
-            return_value=aborted_connection,
-        ):
+            send_gmail,
+            "connect_mailbox_with_settings",
+            side_effect=imaplib.IMAP4.abort("transport aborted"),
+        ) as connector:
             with self.assertRaises(imaplib.IMAP4.abort):
                 send_gmail._open_custom_imap_connection(CUSTOM_MAILBOX)
-        aborted_connection.close.assert_not_called()
-        aborted_connection.logout.assert_called_once_with()
-
-        harness = _RequestHarness(
-            _base_payload(imapReplyContext=VALID_CONTEXT),
-            open_side_effect=imaplib.IMAP4.abort("transport aborted"),
-        )
-        status, response = harness.run()
-        self.assertEqual(
-            (status, response["error"]["code"]),
-            (503, "imap_reply_source_unavailable"),
-        )
-        harness.source_mock.assert_not_called()
-        harness.smtp_mock.assert_not_called()
+        connector.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -89,6 +89,7 @@ class FakeAdapter:
         }
         self.reset_cursor = None
         self.send_error = None
+        self.sent_copy_outcome = None
 
     def baseline(self, _mailbox, *, owner_email, now):
         self.baseline_calls += 1
@@ -104,6 +105,7 @@ class FakeAdapter:
         if self.send_error:
             raise OutOfOfficeProviderError(self.send_error)
         self.sent.append(candidate["senderEmail"])
+        return self.sent_copy_outcome
 
 
 def mailbox():
@@ -194,6 +196,28 @@ class OutOfOfficeWorkerTests(unittest.TestCase):
         )
         self.assertEqual(second["sent"], 0)
         self.assertEqual(second["suppressed"], 1)
+
+    def test_sent_append_failure_preserves_24h_suppression(self):
+        store = FakeStore(cursor=build_gmail_out_of_office_cursor("10", now=NOW))
+        adapter = FakeAdapter()
+        adapter.batch["candidates"] = [candidate()]
+        adapter.sent_copy_outcome = "sent_copy_failed"
+        result = process_out_of_office_target(
+            TARGET, store=store, load_mailbox=lambda *_args: mailbox(),
+            resolve_adapter=lambda *_args: adapter, now=NOW,
+        )
+        self.assertEqual(result["status"], "processed")
+        self.assertEqual(result["sent"], 1)
+        self.assertEqual(result["sentCopyFailures"], 1)
+        self.assertEqual(adapter.sent, ["artist@example.com"])
+        self.assertIn("artist@example.com", store.claims)
+        second = process_out_of_office_target(
+            TARGET, store=store, load_mailbox=lambda *_args: mailbox(),
+            resolve_adapter=lambda *_args: adapter, now=NOW,
+        )
+        self.assertEqual(second["sent"], 0)
+        self.assertEqual(second["suppressed"], 1)
+        self.assertEqual(adapter.sent, ["artist@example.com"])
 
     def test_send_failure_releases_sender_claim_and_keeps_old_cursor(self):
         old_cursor = build_gmail_out_of_office_cursor("10", now=NOW)

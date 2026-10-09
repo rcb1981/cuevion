@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesHeaderParser
-from email.utils import getaddresses, parsedate_to_datetime
+from email.utils import formatdate, getaddresses, make_msgid, parsedate_to_datetime
 from http.client import IncompleteRead
 from typing import Callable
 from urllib.error import HTTPError, URLError
@@ -18,6 +18,12 @@ from urllib.request import Request, urlopen
 from api.auth.email_address import normalize_auth_email
 from api.inboxes.imap_snapshot import _parse_uid_search_response
 from api.inboxes.imap_uid_validity import read_selected_mailbox_uid_validity
+from api.inboxes.imap_sent_copy import (
+    SentCopyStorageError,
+    append_sent_copy,
+    find_sent_folder,
+    select_sent_folder,
+)
 from api.inboxes.mailbox_secret_store import (
     is_valid_mailbox_credential_version,
     read_mailbox_secret,
@@ -294,6 +300,8 @@ def _build_auto_reply_message(
     message["From"] = mailbox
     message["To"] = sender
     message["Subject"] = settings["subject"]
+    message["Message-ID"] = make_msgid(domain=mailbox.rsplit("@", 1)[1])
+    message["Date"] = formatdate(localtime=False, usegmt=True)
     message["Auto-Submitted"] = "auto-replied"
     message["X-Auto-Response-Suppress"] = "All"
     message["X-Autoreply"] = "yes"
@@ -1011,25 +1019,60 @@ class ImapOutOfOfficeAdapter:
         settings: OutOfOfficeSettings,
         *,
         owner_email: str,
-    ) -> None:
+    ) -> str:
         runtime = self._runtime(mailbox, owner_email)
-        message = _build_auto_reply_message(runtime["email"], candidate, settings)
-        smtp = runtime["smtp"]
+        # Preflight Sent before SMTP. A mailbox without a discoverable/writable
+        # Sent folder must not send a message it cannot normally file.
+        connection = self._open(runtime)
         try:
-            self._send_smtp(
-                smtp["host"],
-                smtp["port"],
-                smtp["security"],
-                smtp["username"],
-                smtp["password"],
-                message,
-                [candidate["senderEmail"]],
-                timeout=30,
-            )
-        except SmtpConnectionError as error:
-            raise OutOfOfficeProviderError(error.code) from None
-        except Exception:
-            raise OutOfOfficeProviderError("smtp_send_failed") from None
+            sent_folder = find_sent_folder(connection)
+            if sent_folder is None:
+                raise OutOfOfficeProviderError("imap_sent_unavailable")
+            try:
+                select_sent_folder(connection, sent_folder)
+            except SentCopyStorageError:
+                raise OutOfOfficeProviderError("imap_sent_unavailable") from None
+
+            message = _build_auto_reply_message(runtime["email"], candidate, settings)
+            smtp = runtime["smtp"]
+            try:
+                self._send_smtp(
+                    smtp["host"],
+                    smtp["port"],
+                    smtp["security"],
+                    smtp["username"],
+                    smtp["password"],
+                    message,
+                    [candidate["senderEmail"]],
+                    timeout=30,
+                )
+            except SmtpConnectionError as error:
+                raise OutOfOfficeProviderError(error.code) from None
+            except Exception:
+                raise OutOfOfficeProviderError("smtp_send_failed") from None
+
+            # From this point SMTP already succeeded: failures must never raise
+            # to the worker, since releasing its suppression claim would resend.
+            try:
+                return append_sent_copy(connection, sent_folder, message)
+            except SentCopyStorageError:
+                pass
+
+            # A bounded IMAP-only retry on a fresh authenticated connection.
+            # The Message-ID search prevents duplicate APPEND if the first
+            # attempt reached the server but its success response was lost.
+            try:
+                retry_connection = self._open(runtime)
+                try:
+                    select_sent_folder(retry_connection, sent_folder)
+                    return append_sent_copy(retry_connection, sent_folder, message)
+                finally:
+                    _safe_logout(retry_connection)
+            except Exception:
+                return "sent_copy_failed"
+        finally:
+            _safe_logout(connection)
+
 
 
 _GMAIL_ADAPTER = GmailOutOfOfficeAdapter()
