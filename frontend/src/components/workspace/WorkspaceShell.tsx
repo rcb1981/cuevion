@@ -38279,10 +38279,10 @@ const OutOfOfficeSettingsModal = memo(function OutOfOfficeSettingsModal({
                         })
                       }
                       disabled={isSaving}
-                      variant="tertiary"
+                      variant="secondary"
                       size="compact"
                     >
-                      {option.inboxEmail}
+                      Use {option.inboxEmail}
                     </DesktopActionButton>
                   ))}
                 </div>

@@ -14,6 +14,11 @@ const preview = source.slice(start, end);
 assert.match(preview, /Review-only Out of Office\. Nothing is saved and no email is sent\./);
 assert.match(preview, /<OutOfOfficeSettingsModal/);
 assert.match(preview, /demo@hysteriarecs\.com/);
+assert.match(
+  source,
+  /Reuse reply from:[\s\S]*?variant="secondary"[\s\S]*?Use \{option\.inboxEmail\}/,
+  "reuse reply must render as an explicit secondary pill action",
+);
 assert.doesNotMatch(preview, /fetch\s*\(/);
 assert.doesNotMatch(preview, /loadOutOfOfficeSettings\s*\(/);
 assert.doesNotMatch(preview, /saveOutOfOfficeSettings\s*\(/);
