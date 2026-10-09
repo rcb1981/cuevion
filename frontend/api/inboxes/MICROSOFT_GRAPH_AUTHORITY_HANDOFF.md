@@ -179,8 +179,8 @@ Do not claim the general workspace Inbox is fully Microsoft-enabled.
 - Mark as read / unread remains available only in Inbox, not in Sent.
 - Gmail/IMAP mailboxStore, priority, archive, reply, send and trash logic
   remain untouched; no live Microsoft mailbox was contacted in tests.
-- Still open: older-message paging, attachments, rich HTML, sending,
-  replies, global unread counts, mobile and real-account acceptance.
+- Still open: older-message paging, attachments, rich HTML, global
+  unread counts, mobile and real-account send/reply/Sent acceptance.
 
 ## Remaining release gates (not ready for Preview or Production)
 
@@ -191,9 +191,10 @@ Do not claim the general workspace Inbox is fully Microsoft-enabled.
 2. Integrate Microsoft into MobileWorkspaceShell and, when the
    current read-only UI is accepted, reconcile its Inbox state with normal
    Cuevion mailbox presentation without using Gmail/IMAP-only assumptions.
-   Add reply, send, trash, pagination, attachment handling, and
-   global unread/priority calculations separately. Inbox mark-read/unread
-   is already present but requires live Microsoft acceptance testing.
+   Add trash, pagination, attachment handling, and global unread/priority
+   calculations separately. New message and reply sending are now locally
+   implemented but not yet proven against a real Microsoft account.
+   Inbox mark-read/unread also requires live acceptance testing.
    The reconnect client request
    builder exists, but connection UI is not fully integrated.
 3. Validate normal user-config presentation-only saves preserve every
@@ -206,3 +207,56 @@ Do not claim the general workspace Inbox is fully Microsoft-enabled.
 
 No production change, GitHub push, or Vercel deployment was performed by
 the current activation development step.
+
+## Microsoft outbound draft, reply and send — local implementation
+
+- Microsoft OAuth now requests delegated Mail.Send alongside Mail.ReadWrite.
+  Operational sending verifies both scopes from the actual stored token;
+  an older connection without either scope must reconnect.
+- The new Graph transport creates a NEW draft via POST /me/messages,
+  or a reply/reply-all draft via the exact Inbox source message endpoint
+  POST /me/mailFolders/inbox/messages/{sourceId}/createReply (or
+  createReplyAll). Graph owns Reply-To recipients and conversation threading;
+  the browser cannot override a reply's recipients or source mailbox.
+- For a new draft, server verifies subject, To and Cc recipients, body,
+  immutable draft ID and isDraft status; for replies, server checks the
+  Inbox source's exact conversation ID and validates the reply draft.
+- Only after these checks can ONE POST /me/messages/{draftId}/send occur.
+  Its HTTP 202 means Microsoft accepted the request, NOT delivered;
+  neither Sent copy nor inbox delivery is claimed as verified.
+- New private CAS-based outbound-attempt ledger reserves an unpredictable
+  43-character operation ID before any Graph draft call, records the draft,
+  marks send_started DURABLY before Graph send, and records acceptance
+  afterward. No plaintext subject/body/recipients or OAuth tokens are
+  persisted in the ledger. Attempts never automatically retry.
+- Repeating the same operation ID can report an existing accepted receipt
+  but must NEVER make a second Graph call. Uncertain drafts and sends
+  remain blocked for that ID; user must check Drafts/Sent before any
+  deliberate new message.
+- Every operation runs under Cuevion's exact authenticated-owner mailbox
+  authority and shared mailbox mutation lease. Owner/generation is rechecked
+  before draft creation, before send and after the Graph response.
+- New strict POST-only /api/inboxes/send-microsoft enforces canonical
+  Host and same Origin, bounded JSON, exact allowed fields and safe errors.
+  This currently REJECTS arbitrary Vercel Preview hosts by design;
+  a verified Preview host policy is required before live Preview sending.
+- A desktop New message / Reply composer performs one explicit Send click.
+  It uses CSPRNG attempt IDs, no HTML or attachments, and freezes the
+  attempted form to prevent automatic retries and double clicks. UI labels
+  success only as accepted, with Sent copy and delivery still unconfirmed.
+- All provider HTTP actions were tested with simulated Graph and CAS data;
+  NO real message was sent in this build step.
+
+## Next Microsoft acceptance and completion gates
+
+1. Verify Microsoft app registration, exact OAuth redirect/scope behavior,
+   a trusted Preview origin policy, and owner-bound login before live tests.
+2. Run real Microsoft sandbox-account NEW and REPLY delivery acceptance:
+   verify To/Cc, Reply-To behavior, thread identity, and eventual Sent copy.
+   Explicitly test ambiguous HTTP 202/lost ACK versus durable attempt status.
+3. Add Sent-copy proof/status reconciliation by immutable message ID;
+   202 alone does not establish message delivery.
+4. Add secure attachments, rich HTML where appropriate, drafts recovery,
+   pagination, mobile view, general unread/priority and remaining actions.
+5. Repair or classify 87 known baseline failures in the broad Gmail ownership
+   suite before any Production merge.

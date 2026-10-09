@@ -13,6 +13,7 @@ import {
   type LiveInboxMessageSnapshot,
 } from "../../lib/inboxConnectionApi";
 import { applyConfirmedMicrosoftUnread } from "./microsoftReadState";
+import { MicrosoftComposePanel } from "./MicrosoftComposePanel";
 
 const MICROSOFT_POLL_INTERVAL_MS = 120_000;
 const MICROSOFT_INBOX_LIMIT = 25;
@@ -71,6 +72,11 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const selectedIdRef = React.useRef<string | null>(null);
   const folderRef = React.useRef<"Inbox" | "Sent">("Inbox");
   const [folder, setFolder] = useState<"Inbox" | "Sent">("Inbox");
+  const [composer, setComposer] = useState<{
+    mode: "new" | "reply";
+    sourceProviderMessageId?: string;
+    sourceDisplay?: string;
+  } | null>(null);
   const mutationTicket = React.useRef(0);
   const mutationInFlight = React.useRef(false);
   const [mutationBusy, setMutationBusy] = useState(false);
@@ -87,7 +93,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    if (!connected || mutationInFlight.current) {
+    if (!connected || mutationInFlight.current || composer !== null) {
       return;
     }
     const ticket = ++inboxTicket.current;
@@ -153,7 +159,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
         setListBusy(false);
       }
     }
-  }, [connected, mailbox.id, folder]);
+  }, [connected, mailbox.id, folder, composer]);
 
   useEffect(() => {
     if (!connected) {
@@ -172,9 +178,13 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     };
   }, [connected, refresh]);
 
-  const selectFolder = useCallback((nextFolder: "Inbox" | "Sent") => {
+  const selectFolder = useCallback((
+    nextFolder: "Inbox" | "Sent",
+    allowComposer = false,
+  ) => {
     if (
       !connected ||
+      (composer !== null && !allowComposer) ||
       mutationInFlight.current ||
       folderRef.current === nextFolder
     ) {
@@ -199,11 +209,29 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     setHasMore(false);
     setLastUpdated(null);
     setFolder(nextFolder);
-  }, [connected]);
+  }, [connected, composer]);
+
+  const openComposer = useCallback((mode: "new" | "reply") => {
+    if (!connected || composer !== null || mutationInFlight.current) return;
+    const source = mode === "reply" && folderRef.current === "Inbox"
+      ? selectedMessage
+      : null;
+    if (mode === "reply" && !source?.providerMessageId) return;
+    inboxTicket.current += 1;
+    messageTicket.current += 1;
+    setListBusy(false);
+    setMessageBusy(false);
+    setComposer({
+      mode,
+      sourceProviderMessageId: source?.providerMessageId,
+      sourceDisplay: source?.from,
+    });
+  }, [connected, composer, selectedMessage]);
 
   const openMessage = useCallback(async (providerMessageId: string) => {
     if (
       !connected ||
+      composer !== null ||
       mutationInFlight.current ||
       !rows.some((entry) => entry.providerMessageId === providerMessageId)
     ) {
@@ -271,7 +299,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
         setMessageBusy(false);
       }
     }
-  }, [connected, mailbox.id, rows]);
+  }, [connected, mailbox.id, rows, composer]);
 
   const changeReadState = useCallback(async (nextUnread: boolean) => {
     const targetId = selectedMessage?.providerMessageId;
@@ -377,8 +405,16 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           </span>
           <button
             type="button"
+            disabled={!connected || composer !== null || mutationBusy}
+            onClick={() => openComposer("new")}
+            className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-semibold disabled:opacity-50"
+          >
+            New message
+          </button>
+          <button
+            type="button"
             aria-pressed={folder === "Inbox"}
-            disabled={!connected || mutationBusy}
+            disabled={!connected || composer !== null || mutationBusy}
             onClick={() => selectFolder("Inbox")}
             className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium aria-pressed:bg-[var(--workspace-card-subtle)] disabled:opacity-50"
           >
@@ -387,7 +423,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           <button
             type="button"
             aria-pressed={folder === "Sent"}
-            disabled={!connected || mutationBusy}
+            disabled={!connected || composer !== null || mutationBusy}
             onClick={() => selectFolder("Sent")}
             className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium aria-pressed:bg-[var(--workspace-card-subtle)] disabled:opacity-50"
           >
@@ -396,7 +432,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           <button
             type="button"
             onClick={() => void refresh()}
-            disabled={!connected || listBusy || mutationBusy}
+            disabled={!connected || composer !== null || listBusy || mutationBusy}
             className="rounded-xl border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium disabled:opacity-50"
           >
             {listBusy ? "Refreshing…" : "Refresh"}
@@ -414,6 +450,19 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
             Connection settings
           </button>
         </div>
+      ) : composer !== null ? (
+        <MicrosoftComposePanel
+          key={mailbox.id + "-" + composer.mode + "-" + (composer.sourceProviderMessageId ?? "new")}
+          mailboxId={mailbox.id}
+          mode={composer.mode}
+          sourceProviderMessageId={composer.sourceProviderMessageId}
+          sourceDisplay={composer.sourceDisplay}
+          onClose={() => setComposer(null)}
+          onOpenSent={() => {
+            setComposer(null);
+            selectFolder("Sent", true);
+          }}
+        />
       ) : (
         <div className="grid min-h-0 flex-1 grid-cols-1 gap-0 md:grid-cols-[minmax(245px,37%)_minmax(0,1fr)]">
           <section aria-label={"Microsoft " + folder + " messages"} className="flex min-h-0 flex-col border-b border-[var(--workspace-border-soft)] md:border-b-0 md:border-r">
@@ -484,6 +533,14 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                 {folder === "Inbox" && (
                   <>
                 <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    disabled={mutationBusy}
+                    onClick={() => openComposer("reply")}
+                    className="rounded-xl border border-[var(--workspace-border)] px-4 py-2 text-xs font-semibold disabled:opacity-50"
+                  >
+                    Reply
+                  </button>
                   <button
                     type="button"
                     disabled={mutationBusy}

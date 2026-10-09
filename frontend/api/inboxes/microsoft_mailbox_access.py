@@ -147,6 +147,7 @@ def resolve_owned_microsoft_mailbox(headers, mailbox_id: object) -> MicrosoftMai
 
 def _owned_token(
     headers, mailbox_id: object, *, require_read_write: bool = False,
+    require_mail_send: bool = False,
 ) -> tuple[str, MicrosoftMailboxAuthority]:
     authority = resolve_owned_microsoft_mailbox(headers, mailbox_id)
     try:
@@ -169,6 +170,13 @@ def _owned_token(
             )
         ):
             raise MicrosoftMailboxAccessError("microsoft_write_permission_required")
+    if require_mail_send:
+        scope = record.get("scope")
+        if (
+            type(scope) is not str
+            or not ({"Mail.Send", "https://graph.microsoft.com/Mail.Send"} & set(scope.split()))
+        ):
+            raise MicrosoftMailboxAccessError("microsoft_send_permission_required")
     return token, authority
 
 

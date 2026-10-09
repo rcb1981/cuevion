@@ -4933,3 +4933,161 @@ export async function fetchMicrosoftSentMessage(
     return { ok: false, error: safeMicrosoftFetchError(null) };
   }
 }
+
+
+export type MicrosoftOutboundCompose =
+  | { mode: "new"; to: string[]; cc?: string[]; subject: string; body: string }
+  | { mode: "reply" | "reply_all"; sourceProviderMessageId: string; body: string };
+
+export type MicrosoftSendRequest = {
+  mailboxId: string;
+  attemptId: string;
+  compose: MicrosoftOutboundCompose;
+};
+
+export type MicrosoftSendResponse =
+  | {
+      ok: true;
+      attemptId: string;
+      status: "accepted_by_microsoft";
+      deliveryConfirmed: false;
+      sentCopyConfirmed: false;
+      replayed: boolean;
+    }
+  | { ok: false; error: { code: string; message: string } };
+
+const MICROSOFT_SEND_SAFE_ERRORS: Record<string, string> = {
+  invalid_request: "Check the message, recipients and subject.",
+  request_too_large: "The message exceeds the allowed size.",
+  microsoft_unauthorized: "Your Cuevion session has expired.",
+  microsoft_mailbox_not_found: "The Microsoft mailbox is no longer available.",
+  microsoft_reconnect_required: "Reconnect the Microsoft mailbox.",
+  microsoft_write_permission_required: "Reconnect Microsoft to authorize draft creation.",
+  microsoft_send_permission_required: "Reconnect Microsoft to authorize sending.",
+  microsoft_mutation_in_progress: "Another mailbox operation is in progress.",
+  microsoft_send_attempt_already_started: "This message was already submitted. Check Sent before trying again.",
+  microsoft_send_attempt_conflict: "This sending request cannot be reused.",
+  microsoft_send_store_unavailable: "Secure send tracking is temporarily unavailable.",
+  microsoft_graph_rate_limited: "Microsoft is limiting requests. Wait before trying again.",
+  microsoft_draft_unconfirmed: "Draft status is uncertain. Review Drafts before trying again.",
+  microsoft_send_unconfirmed: "Send status is uncertain. Check Sent before trying again.",
+  microsoft_draft_conflict: "The Microsoft draft changed. Review the mailbox.",
+  microsoft_reply_source_invalid: "The original message cannot be verified.",
+  microsoft_mailbox_unavailable: "The Microsoft mailbox is temporarily unavailable.",
+};
+
+export function createMicrosoftSendAttemptId(): string {
+  // 32 CSPRNG bytes -> 43-character URL-safe identifier, no timestamps/PII.
+  const bytes = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(bytes);
+  let binary = "";
+  bytes.forEach((value) => { binary += String.fromCharCode(value); });
+  const encoded = globalThis.btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  if (!/^[A-Za-z0-9_-]{43}$/.test(encoded)) {
+    throw new Error("microsoft_send_attempt_unavailable");
+  }
+  return encoded;
+}
+
+function validMicrosoftCompose(value: MicrosoftOutboundCompose): boolean {
+  if (!value || typeof value !== "object") return false;
+  const body = value.body;
+  if (
+    typeof body !== "string" ||
+    !body.trim() ||
+    body.length > 64_000 ||
+    body.includes("\0")
+  ) return false;
+  if (value.mode === "new") {
+    if (
+      !Array.isArray(value.to) || value.to.length < 1 ||
+      !Array.isArray(value.cc ?? []) || value.to.length + (value.cc ?? []).length > 20 ||
+      typeof value.subject !== "string" ||
+      !value.subject.trim() || value.subject.length > 250 ||
+      /[\r\n\x00-\x1f\x7f]/.test(value.subject)
+    ) return false;
+    const all = [...value.to, ...(value.cc ?? [])];
+    return all.every(address =>
+      typeof address === "string" &&
+      /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(address) &&
+      address === address.toLowerCase()
+    ) && new Set(all).size === all.length;
+  }
+  if (value.mode === "reply" || value.mode === "reply_all") {
+    return (
+      typeof value.sourceProviderMessageId === "string" &&
+      /^[^\x00-\x20\x7f-\x9f?#]{1,512}$/.test(value.sourceProviderMessageId) &&
+      value.sourceProviderMessageId !== "." &&
+      !value.sourceProviderMessageId.includes("..")
+    );
+  }
+  return false;
+}
+
+export async function sendMicrosoftMessage(
+  request: MicrosoftSendRequest,
+): Promise<MicrosoftSendResponse> {
+  if (
+    !request ||
+    typeof request.mailboxId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
+    typeof request.attemptId !== "string" ||
+    !/^[A-Za-z0-9_-]{43}$/.test(request.attemptId) ||
+    !validMicrosoftCompose(request.compose)
+  ) {
+    return { ok: false, error: {
+      code: "invalid_request", message: "Invalid Microsoft message request.",
+    }};
+  }
+  try {
+    // Never automatically retransmit a POST, even after a timeout. An
+    // in-flight or uncertain attempt must be inspected, not resubmitted.
+    const response = await fetchProtectedApi("/api/inboxes/send-microsoft", {
+      method: "POST",
+      credentials: "include",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        mailboxId: request.mailboxId,
+        attemptId: request.attemptId,
+        compose: request.compose,
+      }),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      const code = (
+        typeof payload === "object" && payload !== null && !Array.isArray(payload) &&
+        "error" in payload && typeof payload.error === "object" &&
+        payload.error !== null && !Array.isArray(payload.error) &&
+        "code" in payload.error && typeof payload.error.code === "string"
+      ) ? payload.error.code : "microsoft_send_unconfirmed";
+      const selected = Object.prototype.hasOwnProperty.call(MICROSOFT_SEND_SAFE_ERRORS, code)
+        ? code : "microsoft_send_unconfirmed";
+      return { ok: false, error: {code:selected, message:MICROSOFT_SEND_SAFE_ERRORS[selected]}};
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw Error("invalid_send_response");
+    }
+    const proof = payload as Record<string, unknown>;
+    if (
+      response.status !== 202 ||
+      proof.ok !== true ||
+      proof.attemptId !== request.attemptId ||
+      proof.status !== "accepted_by_microsoft" ||
+      proof.deliveryConfirmed !== false ||
+      proof.sentCopyConfirmed !== false ||
+      typeof proof.replayed !== "boolean"
+    ) {
+      throw Error("invalid_send_response");
+    }
+    return {
+      ok:true, attemptId:request.attemptId, status:"accepted_by_microsoft",
+      deliveryConfirmed:false, sentCopyConfirmed:false,
+      replayed:proof.replayed,
+    };
+  } catch {
+    return {ok:false,error:{
+      code:"microsoft_send_unconfirmed",
+      message:MICROSOFT_SEND_SAFE_ERRORS.microsoft_send_unconfirmed,
+    }};
+  }
+}

@@ -249,6 +249,37 @@ class OperationalMicrosoftGraphTests(MailboxAuthorityFixture, unittest.TestCase)
         self.assertEqual(result, {"id": "message-1"})
         graph.assert_called_once_with("secure-token", "message-1")
 
+    def test_outbound_requires_actual_mail_send_and_readwrite_grants(self):
+        for scope,code in (
+            ("Mail.Read User.Read", "microsoft_write_permission_required"),
+            ("Mail.ReadWrite User.Read", "microsoft_send_permission_required"),
+            ("Mail.ReadWrite https://hostile.example/Mail.Send", "microsoft_send_permission_required"),
+        ):
+            with self.subTest(scope=scope),patch.object(
+                access, "ensure_owned_microsoft_access_token",
+                return_value={"provider":"microsoft","access_token":"test-access","scope":scope},
+            ):
+                with self.assertRaises(access.MicrosoftMailboxAccessError) as caught:
+                    access._owned_token(
+                        HEADERS,MAILBOX_ID,require_read_write=True,require_mail_send=True,
+                    )
+                self.assertEqual(caught.exception.code,code)
+
+    def test_outbound_accepts_exact_mail_send_permission_from_token(self):
+        for scope in (
+            "Mail.ReadWrite Mail.Send User.Read Mail.Read",
+            "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send",
+        ):
+            with self.subTest(scope=scope),patch.object(
+                access, "ensure_owned_microsoft_access_token",
+                return_value={"provider":"microsoft","access_token":"test-access","scope":scope},
+            ):
+                token,authority=access._owned_token(
+                    HEADERS,MAILBOX_ID,require_read_write=True,require_mail_send=True,
+                )
+                self.assertEqual(token,"test-access")
+                self.assertEqual(authority.mailbox_id,MAILBOX_ID)
+
     def test_reconnect_during_graph_list_blocks_returning_old_messages(self):
         def graph_response(_token, *, page_size):
             self.response = resolved(box=mailbox(

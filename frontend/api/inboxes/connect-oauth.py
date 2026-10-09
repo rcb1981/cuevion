@@ -59,6 +59,7 @@ DEFAULT_MICROSOFT_SCOPES = [
     "https://graph.microsoft.com/User.Read",
     "https://graph.microsoft.com/Mail.Read",
     "https://graph.microsoft.com/Mail.ReadWrite",
+    "https://graph.microsoft.com/Mail.Send",
 ]
 MAX_REQUEST_BODY_BYTES = 16 * 1024
 OAUTH_STATE_VERSION = 3
