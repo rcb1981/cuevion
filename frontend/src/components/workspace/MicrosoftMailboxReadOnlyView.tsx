@@ -7,6 +7,8 @@ import React, {
 import {
   fetchMicrosoftInbox,
   fetchMicrosoftMessage,
+  fetchMicrosoftSent,
+  fetchMicrosoftSentMessage,
   setMicrosoftMessageUnread,
   type LiveInboxMessageSnapshot,
 } from "../../lib/inboxConnectionApi";
@@ -67,6 +69,8 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const inboxTicket = React.useRef(0);
   const messageTicket = React.useRef(0);
   const selectedIdRef = React.useRef<string | null>(null);
+  const folderRef = React.useRef<"Inbox" | "Sent">("Inbox");
+  const [folder, setFolder] = useState<"Inbox" | "Sent">("Inbox");
   const mutationTicket = React.useRef(0);
   const mutationInFlight = React.useRef(false);
   const [mutationBusy, setMutationBusy] = useState(false);
@@ -90,11 +94,20 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     setListBusy(true);
     setListError(null);
     try {
-      const response = await fetchMicrosoftInbox({
-        mailboxId: mailbox.id,
-        limit: MICROSOFT_INBOX_LIMIT,
-      });
-      if (ticket !== inboxTicket.current) {
+      const requestedFolder = folder;
+      const response = requestedFolder === "Sent"
+        ? await fetchMicrosoftSent({
+            mailboxId: mailbox.id,
+            limit: MICROSOFT_INBOX_LIMIT,
+          })
+        : await fetchMicrosoftInbox({
+            mailboxId: mailbox.id,
+            limit: MICROSOFT_INBOX_LIMIT,
+          });
+      if (
+        ticket !== inboxTicket.current ||
+        folderRef.current !== requestedFolder
+      ) {
         return;
       }
       if (!response.ok || !Array.isArray(response.messages)) {
@@ -113,7 +126,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           setHasMore(false);
         }
         setListError(safeErrorMessage(
-          response.error?.code, "The Microsoft Inbox could not be refreshed.",
+          response.error?.code, "The Microsoft " + folder + " could not be refreshed.",
         ));
         return;
       }
@@ -133,14 +146,14 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       setLastUpdated(new Date().toISOString());
     } catch {
       if (ticket === inboxTicket.current) {
-        setListError("The Microsoft Inbox could not be refreshed.");
+        setListError("The Microsoft " + folder + " could not be refreshed.");
       }
     } finally {
       if (ticket === inboxTicket.current) {
         setListBusy(false);
       }
     }
-  }, [connected, mailbox.id]);
+  }, [connected, mailbox.id, folder]);
 
   useEffect(() => {
     if (!connected) {
@@ -159,6 +172,35 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     };
   }, [connected, refresh]);
 
+  const selectFolder = useCallback((nextFolder: "Inbox" | "Sent") => {
+    if (
+      !connected ||
+      mutationInFlight.current ||
+      folderRef.current === nextFolder
+    ) {
+      return;
+    }
+    // Synchronously revoke all responses for the previous folder before
+    // React schedules the next render. Never reuse Inbox or Sent body state.
+    folderRef.current = nextFolder;
+    inboxTicket.current += 1;
+    messageTicket.current += 1;
+    mutationTicket.current += 1;
+    selectedIdRef.current = null;
+    setRows([]);
+    setSelectedId(null);
+    setSelectedMessage(null);
+    setListBusy(false);
+    setMessageBusy(false);
+    setListError(null);
+    setMessageError(null);
+    setMutationError(null);
+    setMutationConfirmation(null);
+    setHasMore(false);
+    setLastUpdated(null);
+    setFolder(nextFolder);
+  }, [connected]);
+
   const openMessage = useCallback(async (providerMessageId: string) => {
     if (
       !connected ||
@@ -176,12 +218,19 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     setMutationError(null);
     setMutationConfirmation(null);
     try {
-      const response = await fetchMicrosoftMessage({
-        mailboxId: mailbox.id,
-        providerMessageId,
-      });
+      const requestedFolder = folderRef.current;
+      const response = requestedFolder === "Sent"
+        ? await fetchMicrosoftSentMessage({
+            mailboxId: mailbox.id,
+            providerMessageId,
+          })
+        : await fetchMicrosoftMessage({
+            mailboxId: mailbox.id,
+            providerMessageId,
+          });
       if (
         ticket !== messageTicket.current ||
+        folderRef.current !== requestedFolder ||
         selectedIdRef.current !== providerMessageId
       ) {
         return;
@@ -228,6 +277,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     const targetId = selectedMessage?.providerMessageId;
     if (
       !connected ||
+      folderRef.current !== "Inbox" ||
       mutationInFlight.current ||
       !targetId ||
       selectedIdRef.current !== targetId ||
@@ -323,8 +373,26 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
         </div>
         <div className="flex items-center gap-2">
           <span className="rounded-full border border-[var(--workspace-border-soft)] px-3 py-1 text-[0.7rem] font-medium text-[var(--workspace-text-muted)]">
-            Microsoft 365 · Inbox
+            Microsoft 365 · Mail
           </span>
+          <button
+            type="button"
+            aria-pressed={folder === "Inbox"}
+            disabled={!connected || mutationBusy}
+            onClick={() => selectFolder("Inbox")}
+            className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium aria-pressed:bg-[var(--workspace-card-subtle)] disabled:opacity-50"
+          >
+            Inbox
+          </button>
+          <button
+            type="button"
+            aria-pressed={folder === "Sent"}
+            disabled={!connected || mutationBusy}
+            onClick={() => selectFolder("Sent")}
+            className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium aria-pressed:bg-[var(--workspace-card-subtle)] disabled:opacity-50"
+          >
+            Sent
+          </button>
           <button
             type="button"
             onClick={() => void refresh()}
@@ -348,9 +416,13 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
         </div>
       ) : (
         <div className="grid min-h-0 flex-1 grid-cols-1 gap-0 md:grid-cols-[minmax(245px,37%)_minmax(0,1fr)]">
-          <section aria-label="Microsoft Inbox messages" className="flex min-h-0 flex-col border-b border-[var(--workspace-border-soft)] md:border-b-0 md:border-r">
+          <section aria-label={"Microsoft " + folder + " messages"} className="flex min-h-0 flex-col border-b border-[var(--workspace-border-soft)] md:border-b-0 md:border-r">
             <div className="flex shrink-0 items-center justify-between border-b border-[var(--workspace-border-soft)] px-4 py-3">
-              <h2 className="text-sm font-semibold">Inbox <span className="font-normal text-[var(--workspace-text-muted)]">({rows.length}, {rows.filter((row) => row.unread).length} unread shown)</span></h2>
+              <h2 className="text-sm font-semibold">
+                {folder} <span className="font-normal text-[var(--workspace-text-muted)]">
+                  ({rows.length}{folder === "Inbox" ? ", " + rows.filter((row) => row.unread).length + " unread shown" : " sent shown"})
+                </span>
+              </h2>
               {lastUpdated && <span className="text-[0.7rem] text-[var(--workspace-text-faint)]">Updated {readableTime(lastUpdated)}</span>}
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto" aria-busy={listBusy}>
@@ -362,7 +434,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
               )}
               {rows.length === 0 && (
                 <p className="p-5 text-sm text-[var(--workspace-text-muted)]" role="status">
-                  {listBusy ? "Loading Microsoft Inbox…" : listError ? "No new messages available." : "Your Microsoft Inbox is empty."}
+                  {listBusy ? "Loading Microsoft " + folder + "…" : listError ? "No messages available." : "Your Microsoft " + folder + " is empty."}
                 </p>
               )}
               {rows.map((message) => {
@@ -399,9 +471,18 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
               <article className="max-w-3xl">
                 <h2 className="text-xl font-semibold">{selectedMessage.subject || "(No subject)"}</h2>
                 <div className="mt-4 border-b border-[var(--workspace-border-soft)] pb-4 text-sm">
-                  <p className="font-medium">{selectedMessage.from}</p>
+                  <p className="font-medium">
+                    {folder === "Sent" ? "To: " + selectedMessage.to : selectedMessage.from}
+                  </p>
+                  {folder === "Sent" && (
+                    <p className="mt-1 text-xs text-[var(--workspace-text-muted)]">
+                      From: {selectedMessage.from}
+                    </p>
+                  )}
                   <p className="mt-1 text-xs text-[var(--workspace-text-muted)]">{readableTime(selectedMessage.createdAt)}</p>
                 </div>
+                {folder === "Inbox" && (
+                  <>
                 <div className="mt-4 flex flex-wrap items-center gap-3">
                   <button
                     type="button"
@@ -431,11 +512,15 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                     {mutationConfirmation}
                   </p>
                 )}
+                  </>
+                )}
                 <div className="mt-6 space-y-4 whitespace-pre-wrap break-words text-sm leading-7">
                   {selectedMessage.body.map((part, index) => <p key={index}>{part}</p>)}
                 </div>
                 <p className="mt-8 text-xs text-[var(--workspace-text-faint)]">
-                  Replies, attachments and other message actions are not enabled yet.
+                  {folder === "Sent"
+                    ? "Sent Items are read-only. Sending, replies and attachments are not enabled yet."
+                    : "Replies, attachments and other message actions are not enabled yet."}
                 </p>
               </article>
             )}

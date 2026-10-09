@@ -4776,3 +4776,160 @@ export async function setMicrosoftMessageUnread(
     };
   }
 }
+
+
+/** Sent Items intentionally has a separate schema and never uses Inbox IDs. */
+export type FetchMicrosoftSentResponse = {
+  ok: boolean;
+  messages?: LiveInboxMessageSnapshot[];
+  hasMore?: boolean;
+  error?: { code?: string; message?: string };
+};
+
+function isTrustedMicrosoftSentMessage(
+  candidate: unknown,
+  mailboxId: string,
+  options: { exact: boolean },
+): candidate is LiveInboxMessageSnapshot {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+    return false;
+  }
+  const item = candidate as Record<string, unknown>;
+  return (
+    typeof item.id === "string" &&
+    /^[^\x00-\x20\x7f-\x9f?#]{1,512}$/.test(item.id) &&
+    new TextEncoder().encode(item.id).byteLength <= 512 &&
+    item.id !== "." &&
+    !item.id.includes("..") &&
+    item.providerMessageId === item.id &&
+    item.serverMailboxId === mailboxId &&
+    item.providerFolder === "SENT" &&
+    Array.isArray(item.labelIds) &&
+    item.labelIds.length === 1 &&
+    item.labelIds[0] === "SENT" &&
+    item.unread === false &&
+    item.flagged === false &&
+    typeof item.sender === "string" &&
+    item.sender.startsWith("To: ") &&
+    typeof item.to === "string" &&
+    item.to.length > 0 &&
+    typeof item.from === "string" &&
+    typeof item.subject === "string" &&
+    typeof item.snippet === "string" &&
+    typeof item.createdAt === "string" &&
+    !Number.isNaN(Date.parse(item.createdAt)) &&
+    Array.isArray(item.body) &&
+    item.body.every((line) => typeof line === "string") &&
+    (options.exact ? item.body.length > 0 : item.body.length === 0) &&
+    Array.isArray(item.attachments) &&
+    item.attachments.length === 0 &&
+    Object.keys(item).every((field) => MICROSOFT_INBOX_MESSAGE_FIELDS.has(field))
+  );
+}
+
+export async function fetchMicrosoftSent(
+  request: FetchMicrosoftInboxRequest,
+): Promise<FetchMicrosoftSentResponse> {
+  const mailboxId = request?.mailboxId;
+  const limit = request?.limit ?? 20;
+  if (
+    typeof mailboxId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(mailboxId) ||
+    !Number.isInteger(limit) ||
+    limit < 1 ||
+    limit > MICROSOFT_FETCH_MAX_MESSAGES
+  ) {
+    return {
+      ok: false,
+      error: { code: "invalid_request", message: "Invalid Microsoft Sent Items request." },
+    };
+  }
+  try {
+    const response = await fetchProtectedApi("/api/inboxes/fetch-microsoft-sent", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mailboxId, limit }),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      return { ok: false, error: safeMicrosoftFetchError(payload) };
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error("invalid_sent_response");
+    }
+    const data = payload as Record<string, unknown>;
+    if (
+      data.ok !== true ||
+      !Array.isArray(data.messages) ||
+      data.messages.length > limit ||
+      !data.messages.every((entry) => isTrustedMicrosoftSentMessage(entry, mailboxId, {exact: false})) ||
+      !Array.isArray(data.sentMessageIds) ||
+      data.sentMessageIds.length !== data.messages.length ||
+      data.sentMessageIds.some((id, index) =>
+        id !== (data.messages as LiveInboxMessageSnapshot[])[index].providerMessageId
+      ) ||
+      new Set(data.sentMessageIds).size !== data.sentMessageIds.length ||
+      typeof data.hasMore !== "boolean"
+    ) {
+      throw new Error("invalid_sent_response");
+    }
+    return {
+      ok: true,
+      messages: data.messages as LiveInboxMessageSnapshot[],
+      hasMore: data.hasMore,
+    };
+  } catch {
+    return {
+      ok: false,
+      error: safeMicrosoftFetchError(null),
+    };
+  }
+}
+
+export async function fetchMicrosoftSentMessage(
+  request: { mailboxId: string; providerMessageId: string },
+): Promise<FetchMicrosoftMessageResponse> {
+  if (
+    !request ||
+    typeof request.mailboxId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
+    typeof request.providerMessageId !== "string" ||
+    !/^[^\x00-\x20\x7f-\x9f?#]{1,512}$/.test(request.providerMessageId) ||
+    new TextEncoder().encode(request.providerMessageId).byteLength > 512 ||
+    request.providerMessageId === "." ||
+    request.providerMessageId.includes("..")
+  ) {
+    return {
+      ok: false,
+      error: { code: "invalid_request", message: "Invalid Microsoft Sent message request." },
+    };
+  }
+  try {
+    const response = await fetchProtectedApi("/api/inboxes/fetch-microsoft-sent-message", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      return { ok: false, error: safeMicrosoftFetchError(payload) };
+    }
+    if (
+      !payload ||
+      typeof payload !== "object" ||
+      Array.isArray(payload) ||
+      !("ok" in payload) ||
+      payload.ok !== true ||
+      !("message" in payload) ||
+      !isTrustedMicrosoftSentMessage(payload.message, request.mailboxId, { exact: true }) ||
+      payload.message.providerMessageId !== request.providerMessageId
+    ) {
+      throw new Error("invalid_sent_response");
+    }
+    return { ok: true, message: payload.message };
+  } catch {
+    return { ok: false, error: safeMicrosoftFetchError(null) };
+  }
+}

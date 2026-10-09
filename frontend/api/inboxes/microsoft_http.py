@@ -16,7 +16,7 @@ from api.auth.http import (
 )
 from api.inboxes import microsoft_mailbox_access as owned
 from api.inboxes.microsoft_graph import MicrosoftGraphError
-from api.inboxes.microsoft_inbox_projection import project_inbox, project_message
+from api.inboxes.microsoft_inbox_projection import (project_inbox, project_message, project_sent, project_sent_message)
 
 MAX_REQUEST_BYTES = 4096
 _MAX_MAILBOX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$")
@@ -76,7 +76,7 @@ def _parse_body(request, headers: tuple) -> dict:
 
 def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dict]:
     expected = (
-        {"mailboxId", "limit"} if mode == "list"
+        {"mailboxId", "limit"} if mode in {"list", "sent"}
         else {"mailboxId", "providerMessageId", "unread"} if mode == "flag"
         else {"mailboxId", "providerMessageId"}
     )
@@ -85,12 +85,12 @@ def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dic
     mailbox = payload.get("mailboxId")
     if type(mailbox) is not str or _MAX_MAILBOX.fullmatch(mailbox) is None:
         raise ValueError("invalid")
-    if mode == "list":
+    if mode in {"list", "sent"}:
         limit = payload.get("limit", 20)
         if type(limit) is not int or not 1 <= limit <= 25:
             raise ValueError("invalid")
         return mailbox, limit
-    if mode == "exact":
+    if mode in {"exact", "sent_exact"}:
         message_id = payload.get("providerMessageId")
         if (
             type(message_id) is not str
@@ -138,6 +138,24 @@ def microsoft_inbox_response(request, *, mode: str):
                 headers, mailbox_id, page_size=selector,
             )
             return json_response(200, project_inbox(snapshot, mailbox_id))
+        if mode == "sent":
+            assert type(selector) is int
+            snapshot = owned.list_owned_microsoft_sent(
+                headers, mailbox_id, page_size=selector,
+            )
+            return json_response(200, project_sent(snapshot, mailbox_id))
+        if mode == "sent_exact":
+            assert type(selector) is str
+            message = owned.read_owned_microsoft_sent_message(
+                headers, mailbox_id, selector,
+            )
+            if not isinstance(message, dict) or message.get("id") != selector:
+                raise MicrosoftGraphError("microsoft_graph_invalid_response")
+            return json_response(
+                200, {"ok": True, "message": project_sent_message(
+                    message, mailbox_id, exact_body=True,
+                )},
+            )
         if mode == "flag":
             assert type(selector) is dict
             confirmation = owned.mark_owned_microsoft_inbox_read(

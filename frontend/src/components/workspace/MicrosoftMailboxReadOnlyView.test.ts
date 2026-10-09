@@ -24,9 +24,11 @@ const ready = renderToStaticMarkup(createElement(MicrosoftMailboxReadOnlyView, {
 }));
 assert.match(ready, /Microsoft Work/);
 assert.match(ready, /owner@example\.com/);
-assert.match(ready, /Microsoft 365 · Inbox/);
+assert.match(ready, /Microsoft 365 · Mail/);
 assert.match(ready, /Select a message to read it/);
 assert.match(ready, /Refresh/);
+assert.match(ready, /aria-pressed="true"[^>]*>Inbox<\/button>/);
+assert.match(ready, /aria-pressed="false"[^>]*>Sent<\/button>/);
 assert.match(ready, /Back to workspace/);
 assert.doesNotMatch(ready, /Send message|Reply all|Compose|Trash/);
 
@@ -55,6 +57,14 @@ assert.match(viewSource, /inboxTicket\.current \+= 1/);
 assert.match(viewSource, /messageTicket\.current \+= 1/);
 assert.match(viewSource, /selectedIdRef\.current !== providerMessageId/);
 assert.match(viewSource, /response\.error\?\.code === "microsoft_reconnect_required"/);
+assert.match(viewSource, /fetchMicrosoftSent\(/);
+assert.match(viewSource, /fetchMicrosoftSentMessage\(/);
+assert.match(viewSource, /const selectFolder = useCallback/);
+assert.match(viewSource, /folderRef\.current = nextFolder/);
+assert.match(viewSource, /folderRef\.current !== requestedFolder/);
+assert.match(viewSource, /folderRef\.current !== "Inbox"/);
+assert.match(viewSource, /folder === "Inbox" && \(/);
+assert.match(viewSource, /folder === "Sent" \? "To: " \+ selectedMessage\.to/);
 assert.match(viewSource, /setMicrosoftMessageUnread\(/);
 assert.match(viewSource, /onClick=\{\(\) => void changeReadState\(!selectedMessage\.unread\)\}/);
 assert.match(viewSource, /mutationInFlight\.current/);

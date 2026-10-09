@@ -144,3 +144,86 @@ def project_inbox(snapshot: object, mailbox_id: str) -> dict:
         "uidValidity": "microsoft-graph-immutable",
         "hasMore": snapshot["hasMore"],
     }
+
+
+
+def project_sent_message(message: object, mailbox_id: str, *, exact_body: bool = False) -> dict:
+    """Project a Graph SentItems record without inventing Inbox membership."""
+    if type(message) is not dict or type(mailbox_id) is not str or not mailbox_id:
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    needed = ("id", "subject", "preview", "sentAt", "toDisplay", "fromDisplay", "hasAttachments")
+    if any(field not in message for field in needed):
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    mid, subject, snippet, to_display, from_display = (
+        message["id"], message["subject"], message["preview"],
+        message["toDisplay"], message["fromDisplay"],
+    )
+    if any(type(value) is not str for value in (mid, subject, snippet, to_display, from_display)):
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    if not mid or type(message["hasAttachments"]) is not bool:
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    created_at, display_time = _timestamp(message["sentAt"])
+    result = {
+        "id": mid,
+        "providerMessageId": mid,
+        "serverMailboxId": mailbox_id,
+        "providerFolder": "SENT",
+        "labelIds": ["SENT"],
+        "sender": "To: " + to_display,
+        "subject": subject,
+        "snippet": snippet[:220],
+        "from": from_display,
+        "to": to_display,
+        "cc": "",
+        "timestamp": display_time,
+        "createdAt": created_at,
+        "body": [],
+        "unread": False,
+        "flagged": False,
+        "attachments": [],
+    }
+    conversation_id = message.get("conversationId")
+    if type(conversation_id) is str and conversation_id:
+        result["providerThreadId"] = conversation_id
+    if not exact_body:
+        return result
+
+    body = message.get("body")
+    if type(body) is not dict:
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    content_type = body.get("contentType")
+    content = body.get("content")
+    if content_type not in ("html", "text") or type(content) is not str:
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    if content_type == "html":
+        parser = _PlainTextHTML()
+        try:
+            parser.feed(content[:_MAX_BODY_CHARACTERS])
+            parser.close()
+            plain = parser.result()
+        except (ValueError, AssertionError):
+            raise MicrosoftGraphError("microsoft_graph_invalid_response") from None
+    else:
+        plain = content[:_MAX_BODY_CHARACTERS]
+    result["body"] = [part for part in plain.split("\n\n") if part] or [""]
+    return result
+
+
+def project_sent(snapshot: object, mailbox_id: str) -> dict:
+    if (
+        type(snapshot) is not dict
+        or type(snapshot.get("messages")) is not list
+        or type(snapshot.get("hasMore")) is not bool
+        or len(snapshot["messages"]) > 25
+    ):
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    messages = [project_sent_message(item, mailbox_id) for item in snapshot["messages"]]
+    ids = [entry["providerMessageId"] for entry in messages]
+    if len(set(ids)) != len(ids):
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    return {
+        "ok": True,
+        "messages": messages,
+        "sentMessageIds": ids,
+        "hasMore": snapshot["hasMore"],
+    }

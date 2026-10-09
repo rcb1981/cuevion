@@ -72,6 +72,8 @@ def _get_json(path: str, access_token: str, *, maximum_bytes: int, opener=urlope
         path == "/me?$select=id,displayName,mail,userPrincipalName"
         or path.startswith("/me/mailFolders/inbox/messages?")
         or path.startswith("/me/messages/")
+        or path.startswith("/me/mailFolders/sentitems/messages?")
+        or path.startswith("/me/mailFolders/sentitems/messages/")
     ):
         raise MicrosoftGraphError("microsoft_graph_path_invalid")
     token = _required_access_token(access_token)

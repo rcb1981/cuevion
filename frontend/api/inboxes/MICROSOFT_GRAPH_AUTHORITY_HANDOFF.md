@@ -158,6 +158,30 @@ Do not claim the general workspace Inbox is fully Microsoft-enabled.
   denial, concurrency, PATCH failure, stale authorization and exact
   post-write status. No actual Microsoft mailbox was changed during tests.
 
+## Microsoft Sent Items — read-only local integration
+
+- Graph Sent Items is addressed only through the well-known folder
+  /me/mailFolders/sentitems/messages and its folder-scoped exact-message
+  route. No browser-controlled Graph URL or folder is accepted.
+- The API modules microsoft_sent_graph.py, fetch-microsoft-sent.py,
+  fetch-microsoft-sent-message.py and microsoft_http.py provide POST-only
+  owner-bound reads, exact immutable IDs and capped 25-message lists.
+- Sent projection uses the SENT folder and label, explicit To recipients,
+  sentDateTime and no Inbox unread flag or fake Inbox UID set.
+- List previews are not presented as complete bodies. Exact contents are
+  converted to inert plain text, without embedding Graph HTML, tracking
+  images or fabricated attachment objects.
+- The same authenticated owner and token generation are checked before
+  and after Graph I/O. Reconnect/ownership changes invalidate stale results.
+- Frontend functions fetchMicrosoftSent and fetchMicrosoftSentMessage have
+  separate strict response schemas. Desktop Inbox / Sent switching clears
+  previous rows and selected bodies and invalidates outstanding requests.
+- Mark as read / unread remains available only in Inbox, not in Sent.
+- Gmail/IMAP mailboxStore, priority, archive, reply, send and trash logic
+  remain untouched; no live Microsoft mailbox was contacted in tests.
+- Still open: older-message paging, attachments, rich HTML, sending,
+  replies, global unread counts, mobile and real-account acceptance.
+
 ## Remaining release gates (not ready for Preview or Production)
 
 1. Validate the complete Microsoft OAuth POST and browser callback
@@ -167,7 +191,7 @@ Do not claim the general workspace Inbox is fully Microsoft-enabled.
 2. Integrate Microsoft into MobileWorkspaceShell and, when the
    current read-only UI is accepted, reconcile its Inbox state with normal
    Cuevion mailbox presentation without using Gmail/IMAP-only assumptions.
-   Add Sent, reply, send, trash, pagination, attachment handling, and
+   Add reply, send, trash, pagination, attachment handling, and
    global unread/priority calculations separately. Inbox mark-read/unread
    is already present but requires live Microsoft acceptance testing.
    The reconnect client request

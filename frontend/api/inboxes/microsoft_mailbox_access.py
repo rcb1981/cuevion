@@ -266,3 +266,28 @@ def mark_owned_microsoft_inbox_read(
             pass
         if succeeded and not released:
             raise MicrosoftMailboxAccessError("microsoft_mutation_unconfirmed")
+
+
+
+def list_owned_microsoft_sent(
+    headers, mailbox_id: object, *, page_size: int = 20,
+) -> dict:
+    """Read the exact owned Sent Items folder with post-Graph authority proof."""
+    if type(page_size) is not int or not 1 <= page_size <= 25:
+        raise MicrosoftMailboxAccessError("microsoft_page_size_invalid")
+    from api.inboxes import microsoft_sent_graph
+    token, captured = _owned_token(headers, mailbox_id)
+    snapshot = microsoft_sent_graph.list_microsoft_sent(token, page_size=page_size)
+    _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+    return snapshot
+
+
+def read_owned_microsoft_sent_message(
+    headers, mailbox_id: object, message_id: str,
+) -> dict:
+    """Read one immutable message ID only from the owned Sent Items folder."""
+    from api.inboxes import microsoft_sent_graph
+    token, captured = _owned_token(headers, mailbox_id)
+    message = microsoft_sent_graph.get_microsoft_sent_message(token, message_id)
+    _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+    return message
