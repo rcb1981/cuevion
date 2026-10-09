@@ -472,7 +472,7 @@ class MicrosoftActivationTests(unittest.TestCase):
                 {"Cookie": "authoritative-test"}, connected["id"], page_size=4,
             )
         self.assertEqual(result, {"messages": [], "hasMore": False})
-        owned.assert_called_once()
+        self.assertEqual(owned.call_count, 2)  # authority before and after Graph
         credentials.assert_called_once()
         graph.assert_called_once_with(ACCESS, page_size=4)
 

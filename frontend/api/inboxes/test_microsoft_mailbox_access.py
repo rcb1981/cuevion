@@ -249,6 +249,60 @@ class OperationalMicrosoftGraphTests(MailboxAuthorityFixture, unittest.TestCase)
         self.assertEqual(result, {"id": "message-1"})
         graph.assert_called_once_with("secure-token", "message-1")
 
+    def test_reconnect_during_graph_list_blocks_returning_old_messages(self):
+        def graph_response(_token, *, page_size):
+            self.response = resolved(box=mailbox(
+                connected=False,
+                connectionStatus="authenticated_pending_activation",
+                oauthReconnectGeneration="r"*43,
+            ))
+            return {"messages": [{"id": "private-old-message"}], "hasMore": False}
+
+        with patch.object(
+            access, "ensure_owned_microsoft_access_token",
+            return_value={"provider": "microsoft", "access_token": "secure-token"},
+        ) as tokens, patch.object(
+            microsoft_graph, "list_microsoft_inbox", side_effect=graph_response,
+        ) as graph:
+            with self.assertRaises(access.MicrosoftMailboxAccessError) as caught:
+                access.list_owned_microsoft_inbox(HEADERS, MAILBOX_ID)
+        self.assertEqual(caught.exception.code, "microsoft_reconnect_required")
+        self.assertEqual(self.resolver.call_count, 2)
+        tokens.assert_called_once()
+        graph.assert_called_once()
+
+    def test_account_switch_during_exact_graph_read_never_publishes_body(self):
+        def graph_response(_token, _mid):
+            self.response = resolved(box=mailbox(
+                oauthCredentialGeneration="s"*43,
+            ))
+            return {"id": "old-message", "body": "private-old-data"}
+        with patch.object(
+            access, "ensure_owned_microsoft_access_token",
+            return_value={"provider": "microsoft", "access_token": "secure-token"},
+        ), patch.object(
+            microsoft_graph, "get_microsoft_message", side_effect=graph_response,
+        ):
+            with self.assertRaises(access.MicrosoftMailboxAccessError) as caught:
+                access.read_owned_microsoft_message(HEADERS, MAILBOX_ID, "old-message")
+        self.assertEqual(caught.exception.code, "microsoft_reconnect_required")
+        self.assertEqual(self.resolver.call_count, 2)
+
+    def test_owner_removed_during_graph_fetch_cannot_publish_snapshot(self):
+        def graph_response(_token, *, page_size):
+            self.response = resolved(status="unauthorized")
+            return {"messages": [{"id": "previously-owned"}], "hasMore": False}
+        with patch.object(
+            access, "ensure_owned_microsoft_access_token",
+            return_value={"provider": "microsoft", "access_token": "secure-token"},
+        ), patch.object(
+            microsoft_graph, "list_microsoft_inbox", side_effect=graph_response,
+        ):
+            with self.assertRaises(access.MicrosoftMailboxAccessError) as caught:
+                access.list_owned_microsoft_inbox(HEADERS, MAILBOX_ID)
+        self.assertEqual(caught.exception.code, "microsoft_unauthorized")
+        self.assertEqual(self.resolver.call_count, 2)
+
     def test_invalid_page_size_blocks_before_auth_or_network(self):
         for size in (0, 26, -1, "5", True):
             with self.subTest(size=size), self.assertRaises(access.MicrosoftMailboxAccessError):

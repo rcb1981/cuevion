@@ -141,7 +141,7 @@ def resolve_owned_microsoft_mailbox(headers, mailbox_id: object) -> MicrosoftMai
     )
 
 
-def _owned_token(headers, mailbox_id: object) -> str:
+def _owned_token(headers, mailbox_id: object) -> tuple[str, MicrosoftMailboxAuthority]:
     authority = resolve_owned_microsoft_mailbox(headers, mailbox_id)
     try:
         record = ensure_owned_microsoft_access_token(authority)
@@ -153,22 +153,33 @@ def _owned_token(headers, mailbox_id: object) -> str:
     token = record.get("access_token")
     if not isinstance(token, str) or not token:
         raise MicrosoftMailboxAccessError("microsoft_reconnect_required")
-    return token
+    return token, authority
+
+
+def _verify_unchanged_owned_mailbox(
+    headers, mailbox_id: object, captured: MicrosoftMailboxAuthority,
+) -> None:
+    """Never publish Graph data after concurrent reconnect or owner changes."""
+    verified = resolve_owned_microsoft_mailbox(headers, mailbox_id)
+    if verified != captured:
+        raise MicrosoftMailboxAccessError("microsoft_reconnect_required")
 
 
 def list_owned_microsoft_inbox(headers, mailbox_id: object, *, page_size: int = 20) -> dict:
-    """Authorized read, with credentials kept in this server process."""
+    """Owner-scoped Graph read; exact authority must survive network I/O."""
     if type(page_size) is not int or not 1 <= page_size <= 25:
         raise MicrosoftMailboxAccessError("microsoft_page_size_invalid")
     from api.inboxes import microsoft_graph
-    return microsoft_graph.list_microsoft_inbox(
-        _owned_token(headers, mailbox_id), page_size=page_size
-    )
+    token, captured = _owned_token(headers, mailbox_id)
+    snapshot = microsoft_graph.list_microsoft_inbox(token, page_size=page_size)
+    _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+    return snapshot
 
 
 def read_owned_microsoft_message(headers, mailbox_id: object, message_id: str) -> dict:
-    """Authorized exact-ID read, without trusting URLs from the client."""
+    """Authorized exact-ID read with post-network authority readback."""
     from api.inboxes import microsoft_graph
-    return microsoft_graph.get_microsoft_message(
-        _owned_token(headers, mailbox_id), message_id
-    )
+    token, captured = _owned_token(headers, mailbox_id)
+    message = microsoft_graph.get_microsoft_message(token, message_id)
+    _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+    return message

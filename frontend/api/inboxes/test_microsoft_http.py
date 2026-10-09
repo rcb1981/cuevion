@@ -191,7 +191,7 @@ class MicrosoftHTTPTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(_body(response)["messages"][0]["providerMessageId"], MESSAGE_ID)
         self.assertNotIn("server-only-token", response.body.decode())
-        self.assertEqual(resolve.call_count, 1)
+        self.assertEqual(resolve.call_count, 2)
         credentials.assert_called_once_with(authority)
         graph.assert_called_once_with("server-only-token", page_size=3)
 
