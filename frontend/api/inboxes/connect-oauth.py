@@ -721,6 +721,26 @@ class handler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if provider == "microsoft" and session_member.membership_role != "owner":
+                self._send_json(
+                    403,
+                    {"ok": False, "error": {
+                        "code": "microsoft_owner_required",
+                        "message": "Only the workspace owner can connect Microsoft mailboxes.",
+                    }},
+                )
+                return
+
+            if provider == "microsoft" and not email:
+                self._send_json(
+                    400,
+                    {"ok": False, "error": {
+                        "code": "microsoft_email_required",
+                        "message": "Select the Microsoft mailbox email before connecting.",
+                    }},
+                )
+                return
+
             if mode not in {"initial", "reconnect"}:
                 self._send_json(
                     400,

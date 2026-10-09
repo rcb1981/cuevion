@@ -1083,15 +1083,51 @@ class MicrosoftIdentityBoundaryTests(unittest.TestCase):
         self.assertIn('if provider == "microsoft" and member.membership_role != "owner":', source)
         self.assertIn("_resolve_current_microsoft_callback_owner(", source)
         self.assertIn('failure_code="microsoft_owner_required"', source)
-        self.assertIn('failure_code="microsoft_activation_not_ready"', source)
+        self.assertIn("activate_initial_microsoft_mailbox(", source)
 
 
-    def test_incomplete_microsoft_registration_cannot_claim_connected(self):
+    def test_microsoft_callback_payload_requires_confirmed_connection_for_mailbox_id(self):
+        args = {
+            "provider": "microsoft",
+            "email": "artist@example.com",
+            "message": "test",
+            "mailbox_id": "microsoft-valid123",
+        }
+        success = oauth_callback._build_callback_payload(
+            **args, connection_status="connected", connected=True,
+        )
+        self.assertEqual(success["mailboxId"], "microsoft-valid123")
+        self.assertTrue(success["connected"])
+        for status, connected in (
+            ("authenticated_pending_activation", False),
+            ("connection_failed", False),
+            ("connected", False),
+        ):
+            payload = oauth_callback._build_callback_payload(
+                **args, connection_status=status, connected=connected,
+            )
+            self.assertNotIn("mailboxId", payload)
+
+    def test_microsoft_callback_does_not_expose_mailbox_token_values(self):
+        payload = oauth_callback._build_callback_payload(
+            provider="microsoft", email="artist@example.com",
+            message="Microsoft account connected.",
+            mailbox_id="microsoft-valid123",
+            connection_status="connected", connected=True,
+        )
+        self.assertEqual(payload["mailboxId"], "microsoft-valid123")
+        for key in ("access_token", "refresh_token", "scope", "credential_generation"):
+            self.assertNotIn(key, payload)
+
+    def test_microsoft_callback_activates_only_after_exact_two_phase_verification(self):
         source = inspect.getsource(oauth_callback.handler._handle_get)
         self.assertIn("_fetch_verified_microsoft_identity(", source)
-        self.assertIn('failure_code="microsoft_activation_not_ready"', source)
+        self.assertIn("activate_initial_microsoft_mailbox(", source)
         self.assertIn('connection_status="authenticated_pending_activation"', source)
+        self.assertIn('failure_code="microsoft_activation_unverified"', source)
+        self.assertIn('activated_mailbox.get("connected") is not True', source)
         self.assertIn("connected=False", source)
+        self.assertIn("activate_initial_microsoft_mailbox(", source)
         self.assertNotIn("persist_microsoft_token_record(", source)
 
 

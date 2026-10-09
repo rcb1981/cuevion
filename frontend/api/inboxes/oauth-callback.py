@@ -397,6 +397,10 @@ from api.inboxes.microsoft_graph import (
     MicrosoftGraphError,
     verify_microsoft_identity_for_hint,
 )
+from api.inboxes.microsoft_activation import (
+    MicrosoftActivationError,
+    activate_initial_microsoft_mailbox,
+)
 from api import user_config_store
 from api.auth import http, runtime
 from api.auth.email_address import normalize_auth_email
@@ -2717,6 +2721,16 @@ def _build_callback_payload(
     }
     if display_name:
         payload["displayName"] = display_name
+    if (
+        provider == "microsoft"
+        and connected is True
+        and connection_status == "connected"
+        and isinstance(mailbox_id, str)
+        and OAUTH_MAILBOX_ID_PATTERN.fullmatch(mailbox_id) is not None
+    ):
+        # The mailbox selector is returned only after durable activation; it
+        # cannot be supplied to grant mailbox ownership.
+        payload["mailboxId"] = mailbox_id
 
     return payload
 
@@ -3607,26 +3621,78 @@ class handler(BaseHTTPRequestHandler):
                 credential_generation=credential_generation,
             )
         else:
-            # Until Microsoft tokens are bound to an authenticated Cuevion
-            # owner AND a persisted managed mailbox, there is no safe live
-            # activation. In particular, never store a token globally under
-            # only the mailbox email or return a false "connected" state.
-            _send_gmail_callback_failure(
-                self,
+            # Graph identity and current Auth0 owner have both been verified.
+            # The initial Microsoft flow stages a *disconnected* owned mailbox,
+            # saves its generation-bound token by CAS, then activates by CAS
+            # only after exact user-config and token readback.
+            if mode != "initial":
+                _send_gmail_callback_failure(
+                    self,
+                    _build_callback_payload(
+                        provider="microsoft",
+                        email="",
+                        connection_status="connection_failed",
+                        message="Microsoft reconnect is not yet available.",
+                        connected=False,
+                    ),
+                    failure_code="microsoft_reconnect_not_ready",
+                    inbox_position=inbox_position,
+                )
+                return
+            try:
+                activated_mailbox = activate_initial_microsoft_mailbox(
+                    current_owner,
+                    oauth_identity,
+                    credential_generation,
+                    token_payload,
+                )
+            except MicrosoftActivationError as error:
+                _send_gmail_callback_failure(
+                    self,
+                    _build_callback_payload(
+                        provider="microsoft",
+                        email=mailbox_email,
+                        connection_status="authenticated_pending_activation",
+                        message=(
+                            "Microsoft mailbox activation could not be verified. "
+                            "The mailbox was not enabled."
+                        ),
+                        connected=False,
+                    ),
+                    failure_code=error.code,
+                    inbox_position=inbox_position,
+                )
+                return
+            if (
+                not isinstance(activated_mailbox, dict)
+                or activated_mailbox.get("connected") is not True
+                or activated_mailbox.get("provider") != "microsoft"
+                or activated_mailbox.get("email") != mailbox_email
+                or not isinstance(activated_mailbox.get("id"), str)
+            ):
+                _send_gmail_callback_failure(
+                    self,
+                    _build_callback_payload(
+                        provider="microsoft",
+                        email=mailbox_email,
+                        connection_status="authenticated_pending_activation",
+                        message="Microsoft mailbox activation could not be verified.",
+                        connected=False,
+                    ),
+                    failure_code="microsoft_activation_unverified",
+                    inbox_position=inbox_position,
+                )
+                return
+            self._send_callback_page(
                 _build_callback_payload(
                     provider="microsoft",
                     email=mailbox_email,
-                    connection_status="authenticated_pending_activation",
-                    message=(
-                        "Microsoft account identity verified. Microsoft mailbox "
-                        "activation is not available until secure owner-bound "
-                        "mailbox registration is complete."
-                    ),
-                    connected=False,
-                    inbox_position=inbox_position,
-                ),
-                failure_code="microsoft_activation_not_ready",
-                inbox_position=inbox_position,
+                    connection_status="connected",
+                    message="Microsoft account connected. Secure mailbox ownership verified.",
+                    connected=True,
+                    display_name=display_name,
+                    mailbox_id=activated_mailbox["id"],
+                )
             )
             return
 

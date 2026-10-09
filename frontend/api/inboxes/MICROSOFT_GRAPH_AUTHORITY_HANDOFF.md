@@ -10,12 +10,17 @@ read-only Graph Inbox and exact-message requests; required User.Read, Mail.Read
 and offline_access scopes; owner-and-mailbox-scoped durable token namespace;
 generation-bound connect, reconnect and rotating refresh; atomic CAS writes
 without automatic expiry; race-safe concurrent refresh; fail-closed error paths.
-Server-side microsoft_mailbox_access.py now resolves the current Auth0 owner
-and one exact connected mailbox before loading the scoped token or issuing
-a Graph read. The callback revalidates Auth0 owner authority and remains
-fail-closed with microsoft_activation_not_ready.
+Server-side microsoft_mailbox_access.py resolves the current Auth0 owner
+and one exact connected mailbox before loading scoped tokens or using Graph.
+The Microsoft initial OAuth callback now uses microsoft_activation.py:
+1) CAS-stage a disconnected owned mailbox; 2) CAS-persist an exact
+owner/mailbox/generation-bound token; 3) CAS-activate only after both durable
+readbacks. Failure must leave the mailbox disconnected, never report
+Connected, and never erase an unrelated inbox.
+The Microsoft OAuth start requires an owner and a selected mailbox email.
+No Microsoft tokens or authorization metadata are returned in browser JSON.
 
-## Before Microsoft mailbox activation
+## Implemented activation invariants
 
 1. Re-resolve the current authenticated Cuevion member at the callback.
    Never trust an owner email or mailbox ID supplied by the browser.
@@ -44,9 +49,34 @@ fail-closed with microsoft_activation_not_ready.
 
 ## Do not shortcut
 
-- The callback intentionally returns microsoft_activation_not_ready until
-  owner-scoped registration and activation are integrated.
+- The initial callback may report Connected only after staged config,
+  scoped token and final active config have all been verified.
+- Interrupted initial activation with the same generation may be retried
+  safely. A NEW authorization generation against a stale pending record is
+  intentionally blocked until explicit fail-closed recovery is implemented.
 - Never revive legacy Microsoft token storage keyed only by email.
 - Never skip CAS for reconnect or refresh.
 - Keep Out of Office and Production branches untouched during Microsoft work.
 - Do not use Codex and another agent simultaneously on the same Git branch.
+
+## Remaining release gates (not ready for Preview or Production)
+
+1. Recover interrupted pending Microsoft activations when the next OAuth
+   authorization uses a fresh generation: distinguish unpersisted/stale
+   tokens with exact owner-bound durable CAS; never overwrite a foreign token.
+2. Implement Microsoft reconnect in connect-oauth and callback using the
+   prior active generation, matched Graph identity, and CAS-updated account
+   config. Do not re-enable operation on partial reconnect.
+3. Wire authenticated Graph handlers into the workspace mailbox contracts,
+   including Inbox, read/unread, Sent, reply, send, trash and paging.
+4. Validate OAuth start and browser callback integration with full request
+   fixtures, and test production user-config presentation-only saves preserve
+   all server-held Microsoft account and generation fields.
+5. Configure the Microsoft app registration through Vercel environment
+   variables, then complete Preview and real-account acceptance testing.
+6. Existing broad Gmail ownership suite has 87 baseline failures, identical
+   on the previous Microsoft commit; treat as separate known test debt until
+   repaired. Narrow Gmail OAuth regression must remain green.
+
+No production change, GitHub push, or Vercel deployment was performed by
+the current activation development step.
