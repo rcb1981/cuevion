@@ -166,3 +166,32 @@ def advance_outbound_attempt(
     }
     _write(config, key, raw, updated)
     return {"phase": to_phase}
+
+
+def inspect_outbound_attempt(
+    authority: MicrosoftMailboxAuthority, attempt_id: str,
+) -> dict | None:
+    """Read exact owner/generation-bound ledger record without changing it.
+
+    No subject, recipient, body, or token is requested from the browser.
+    Missing attempt is distinct from unavailable durable storage.
+    """
+    key = _key(authority, attempt_id)
+    record, _raw = _read(_storage(), key)
+    if record is None:
+        return None
+    digest = record.get("digest") if type(record) is dict else None
+    if type(digest) is not str or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise OutboundLedgerError("microsoft_send_attempt_conflict")
+    record = _valid_record(
+        record, scope=_scope_hash(authority),
+        digest=digest, attempt_id=attempt_id,
+    )
+    draft_id = record["draftId"]
+    if draft_id is not None:
+        from api.inboxes.microsoft_graph import _required_message_id, MicrosoftGraphError
+        try:
+            _required_message_id(draft_id)
+        except MicrosoftGraphError:
+            raise OutboundLedgerError("microsoft_send_attempt_conflict") from None
+    return {"phase": record["phase"], "draftId": draft_id}

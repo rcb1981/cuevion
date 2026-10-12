@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
+  checkMicrosoftSentStatus,
   createMicrosoftSendAttemptId,
   sendMicrosoftMessage,
   type MicrosoftOutboundCompose,
@@ -23,18 +24,78 @@ export function MicrosoftComposePanel({
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [sending, setSending] = useState(false);
+  const [checkingSent, setCheckingSent] = useState(false);
+  const [sentStatusNotice, setSentStatusNotice] = useState<string | null>(null);
+  const [confirmedSentCopy, setConfirmedSentCopy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [accepted, setAccepted] = useState(false);
   const [attempted, setAttempted] = useState(false);
   const pending = useRef(false);
   const operationId = useRef<string | null>(null);
   const liveTicket = useRef(0);
+  const statusTicket = useRef(0);
+  const statusInFlight = useRef(false);
 
   useEffect(() => () => {
     // This invalidates stale UI callbacks only. A send already accepted by
     // the server continues; navigating away does not cancel an email.
     liveTicket.current += 1;
+    statusTicket.current += 1;
+    statusInFlight.current = false;
   }, []);
+
+  const checkSentStatus = async () => {
+    const attemptId = operationId.current;
+    if (!attemptId || pending.current || statusInFlight.current) {
+      return;
+    }
+    statusInFlight.current = true;
+    const ticket = ++statusTicket.current;
+    setCheckingSent(true);
+    setSentStatusNotice(null);
+    try {
+      // Read-only: the service never creates a draft or sends again.
+      const result = await checkMicrosoftSentStatus({ mailboxId, attemptId });
+      if (ticket !== statusTicket.current) {
+        return;
+      }
+      if (!result.ok) {
+        setSentStatusNotice(
+          result.error.message +
+          " This status check never resends a message.",
+        );
+        return;
+      }
+      if (result.status === "sent_copy_confirmed") {
+        setConfirmedSentCopy(true);
+        setSentStatusNotice(
+          "The message is confirmed in Microsoft Sent Items. " +
+          "Delivery to the recipient is not confirmed.",
+        );
+      } else if (result.status === "sent_copy_pending") {
+        setSentStatusNotice(
+          "The message is not yet visible in Sent Items. " +
+          "Microsoft may still be processing it. Wait before checking again; do not resend.",
+        );
+      } else {
+        setSentStatusNotice(
+          "The stored send attempt has not reached the send stage. " +
+          "Check Microsoft Drafts before creating another message.",
+        );
+      }
+    } catch {
+      if (ticket === statusTicket.current) {
+        setSentStatusNotice(
+          "Sent Items could not be checked. The status remains uncertain; do not resend.",
+        );
+      }
+    } finally {
+      if (ticket === statusTicket.current) {
+        statusInFlight.current = false;
+        setCheckingSent(false);
+      }
+    }
+  };
 
   const send = async () => {
     // A second click must not create a new operation ID or network request.
@@ -202,7 +263,22 @@ export function MicrosoftComposePanel({
             {notice}
           </div>
         )}
+        {sentStatusNotice && (
+          <div role="status" className="rounded-xl border border-[var(--workspace-border)] p-4 text-sm">
+            {sentStatusNotice}
+          </div>
+        )}
         <div className="flex flex-wrap gap-3">
+          {attempted && operationId.current !== null && (
+            <button
+              type="button"
+              disabled={sending || checkingSent}
+              onClick={() => { void checkSentStatus(); }}
+              className="rounded-xl border border-[var(--workspace-border)] px-5 py-2.5 text-sm font-semibold disabled:opacity-45"
+            >
+              {checkingSent ? "Checking Sent…" : "Check Sent status"}
+            </button>
+          )}
           {!accepted && (
             <button
               type="button"
@@ -214,7 +290,7 @@ export function MicrosoftComposePanel({
               {sending ? "Sending…" : attempted ? "Submission recorded" : "Send"}
             </button>
           )}
-          {accepted && (
+          {(accepted || confirmedSentCopy) && (
             <button
               type="button"
               onClick={onOpenSent}

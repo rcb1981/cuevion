@@ -260,3 +260,61 @@ the current activation development step.
    pagination, mobile view, general unread/priority and remaining actions.
 5. Repair or classify 87 known baseline failures in the broad Gmail ownership
    suite before any Production merge.
+
+## Microsoft Sent-copy confirmation — locally implemented
+
+- Microsoft Graph's official immutable-ID guidance explicitly states that
+  the ID of a draft created with Prefer: IdType="ImmutableId" can be used
+  after sending to find the corresponding copy in Sent Items. The copy
+  may appear asynchronously; HTTP 404 is PENDING, not a failed delivery.
+- The new read-only microsoft_sent_copy_proof.py verifies one exact
+  immutable draft ID at /me/mailFolders/sentitems/messages/{id} and
+  confirms that its parentFolderId matches the real Sent Items folder ID.
+  It requires isDraft=false and a valid sentDateTime; it does not search by
+  subject, body or recipient, follow redirects, or issue a send.
+- microsoft_outbound_ledger.inspect_outbound_attempt permits reading only
+  the exact owner/mailbox/generation-bound attempt. It never returns
+  hashed compose content, recipients, subject, body, access or refresh token.
+- microsoft_sent_status_service and POST-only
+  /api/inboxes/check-microsoft-sent-status return exactly one of:
+  sent_copy_confirmed, sent_copy_pending or send_not_started,
+  always with deliveryConfirmed=false. There is no automatic polling,
+  draft recreation or send retry. Owner and token generation are rechecked
+  after Graph I/O before publishing any proof.
+- The Microsoft composer now offers an explicit Check Sent status button
+  after a send attempt. This action is read-only and uses the same opaque
+  attempt ID, not a newly created send request. Even a positive Sent match
+  is not proof that the recipient received the message. The status is
+  checked live on request, NOT yet persisted as a terminal ledger phase.
+  Closing the composer loses its in-memory attempt ID; an owner-scoped
+  attempt-history/recovery view is a remaining production acceptance gate.
+- Unit tests cover missing/late Sent copies, invalid/mismatched IDs,
+  incorrect folder identity, unauthorized access, reconnect races,
+  malformed responses and safe HTTP/client status handling.
+
+## Preview and live-test readiness (checked October 12, 2026)
+
+- No Microsoft OAuth variables are presently configured in Vercel:
+  MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET,
+  MICROSOFT_OAUTH_REDIRECT_URI, MICROSOFT_OAUTH_TENANT and
+  MICROSOFT_OAUTH_SCOPES are absent. This was checked using environment
+  metadata only, without reading other values or secrets.
+- The Microsoft app registration needs explicit consent for User.Read,
+  Mail.Read, Mail.ReadWrite, Mail.Send and offline_access; the redirect URI
+  must match the actual intended preview callback URL exactly.
+- The existing outbound send and status endpoints require canonical Host
+  app.cuevion.com and Origin https://app.cuevion.com. They will FAIL
+  CLOSED on arbitrary Vercel preview URLs. A separately approved exact
+  preview host/origin policy must be implemented and tested before
+  real-account Preview acceptance. Do not add a wildcard/any-vercel.app rule.
+- Use a controlled Microsoft test mailbox and designated test recipient.
+  Verify initial connect, reconnect, New, Reply, CC, draft creation,
+  HTTP 202 acceptance, delayed Sent-copy confirmation, expired token,
+  ambiguous ACK and no automatic retry. Real sends require the user's
+  explicit approval immediately before execution.
+- The existing broad Gmail ownership suite has 87 baseline failures;
+  the same cases failed on the prior Microsoft commit. These require
+  separate remediation or classification before Production merge.
+
+No remote GitHub push, Preview deployment, Production change or real send
+was performed in this local Sent-copy confirmation step.

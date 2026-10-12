@@ -133,5 +133,51 @@ class LedgerTests(unittest.TestCase):
                 ledger.reserve_outbound_attempt(AUTH,bad,COMPOSE)
         self.assertFalse(self.cas.writes)
 
+
+    def test_inspection_requires_owner_generation_and_never_mutates(self):
+        self.assertIsNone(ledger.inspect_outbound_attempt(AUTH, ID))
+        ledger.reserve_outbound_attempt(AUTH, ID, COMPOSE)
+        before = len(self.cas.writes)
+        self.assertEqual(
+            ledger.inspect_outbound_attempt(AUTH, ID),
+            {"phase": "reserved", "draftId": None},
+        )
+        ledger.advance_outbound_attempt(
+            AUTH, ID, COMPOSE,
+            from_phase="reserved", to_phase="draft_prepared", draft_id="draft-id",
+        )
+        self.assertEqual(
+            ledger.inspect_outbound_attempt(AUTH, ID),
+            {"phase": "draft_prepared", "draftId": "draft-id"},
+        )
+        self.assertEqual(len(self.cas.writes), before + 1)
+        new_generation=MicrosoftMailboxAuthority(
+            AUTH.owner_email, AUTH.mailbox_id, AUTH.email, AUTH.account_id, "n"*43,
+        )
+        with self.assertRaises(ledger.OutboundLedgerError):
+            ledger.inspect_outbound_attempt(new_generation, ID)
+
+    def test_inspection_does_not_expose_private_compose_hash_or_tokens(self):
+        ledger.reserve_outbound_attempt(AUTH, ID, COMPOSE)
+        visible = ledger.inspect_outbound_attempt(AUTH, ID)
+        self.assertEqual(set(visible), {"phase", "draftId"})
+        for private in ("artist@example.com", "Private release", "Full private message"):
+            self.assertNotIn(private, str(visible))
+
+    def test_inspection_fails_closed_on_tampered_digest_and_draft(self):
+        ledger.reserve_outbound_attempt(AUTH, ID, COMPOSE)
+        key = next(iter(self.cas.records))
+        initial = json.loads(self.cas.records[key])
+        for changed in (
+            {"digest": "bad"},
+            {"scope": "wrong-authority"},
+            {"attemptId": "different"},
+            {"phase": "accepted_by_microsoft", "draftId": "../other"},
+        ):
+            self.cas.records[key] = json.dumps({**initial, **changed})
+            with self.subTest(changed=changed), self.assertRaises(ledger.OutboundLedgerError):
+                ledger.inspect_outbound_attempt(AUTH, ID)
+        self.cas.records[key] = json.dumps(initial)
+
 if __name__=="__main__":
     unittest.main()

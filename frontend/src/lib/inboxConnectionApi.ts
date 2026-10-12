@@ -5091,3 +5091,102 @@ export async function sendMicrosoftMessage(
     }};
   }
 }
+
+
+export type MicrosoftSentCopyStatus =
+  | "send_not_started"
+  | "sent_copy_pending"
+  | "sent_copy_confirmed";
+
+export type MicrosoftSentStatusResponse =
+  | {
+      ok: true;
+      attemptId: string;
+      status: MicrosoftSentCopyStatus;
+      sentCopyConfirmed: boolean;
+      deliveryConfirmed: false;
+    }
+  | { ok: false; error: { code: string; message: string } };
+
+const MICROSOFT_SENT_STATUS_SAFE_ERRORS: Record<string, string> = {
+  invalid_request: "Invalid Microsoft send-status request.",
+  microsoft_unauthorized: "Your Cuevion session has expired.",
+  microsoft_mailbox_not_found: "The Microsoft mailbox is no longer available.",
+  microsoft_reconnect_required: "Reconnect the Microsoft mailbox to continue.",
+  microsoft_send_attempt_not_found: "This send request could not be found.",
+  microsoft_send_attempt_conflict: "This send request cannot be verified.",
+  microsoft_send_store_unavailable: "Secure send tracking is temporarily unavailable.",
+  microsoft_graph_rate_limited: "Microsoft is temporarily limiting requests.",
+  microsoft_sent_copy_unavailable: "Sent Items could not be checked right now.",
+  microsoft_mailbox_unavailable: "Microsoft mailbox status is temporarily unavailable.",
+};
+
+export async function checkMicrosoftSentStatus(request: {
+  mailboxId: string;
+  attemptId: string;
+}): Promise<MicrosoftSentStatusResponse> {
+  if (
+    !request ||
+    typeof request.mailboxId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
+    typeof request.attemptId !== "string" ||
+    !/^[A-Za-z0-9_-]{43}$/.test(request.attemptId)
+  ) {
+    return {
+      ok: false,
+      error: { code: "invalid_request", message: "Invalid Microsoft send-status request." },
+    };
+  }
+  try {
+    const response = await fetchProtectedApi("/api/inboxes/check-microsoft-sent-status", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const body: unknown = await response.json();
+    if (!response.ok) {
+      const remote = (
+        body !== null && typeof body === "object" && !Array.isArray(body) &&
+        "error" in body && body.error !== null && typeof body.error === "object" &&
+        !Array.isArray(body.error) && "code" in body.error &&
+        typeof body.error.code === "string"
+      ) ? body.error.code : "microsoft_sent_copy_unavailable";
+      const code = Object.prototype.hasOwnProperty.call(MICROSOFT_SENT_STATUS_SAFE_ERRORS, remote)
+        ? remote : "microsoft_sent_copy_unavailable";
+      return { ok: false, error: {code, message:MICROSOFT_SENT_STATUS_SAFE_ERRORS[code]} };
+    }
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      throw Error("invalid_sent_status");
+    }
+    const result = body as Record<string, unknown>;
+    const status = result.status;
+    if (
+      result.ok !== true ||
+      result.attemptId !== request.attemptId ||
+      !["send_not_started", "sent_copy_pending", "sent_copy_confirmed"].includes(
+        status as string,
+      ) ||
+      typeof result.sentCopyConfirmed !== "boolean" ||
+      result.sentCopyConfirmed !== (status === "sent_copy_confirmed") ||
+      result.deliveryConfirmed !== false
+    ) {
+      throw Error("invalid_sent_status");
+    }
+    return {
+      ok: true,
+      attemptId: request.attemptId,
+      status: status as MicrosoftSentCopyStatus,
+      sentCopyConfirmed: result.sentCopyConfirmed,
+      deliveryConfirmed: false,
+    };
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: "microsoft_sent_copy_unavailable",
+        message: "Sent Items could not be checked right now.",
+      },
+    };
+  }
+}
