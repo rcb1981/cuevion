@@ -3221,6 +3221,41 @@ class handler(BaseHTTPRequestHandler):
             )
             return
         self._callback_app_redirect_url = f"{public_app_origin}/"
+        if provider == "microsoft":
+            from api.auth.http import HttpBoundaryError, snapshot_request_headers
+            from api.inboxes.microsoft_preview_origin import require_microsoft_oauth_redirect
+            try:
+                verified_microsoft_redirect_uri = require_microsoft_oauth_redirect(
+                    snapshot_request_headers(self), callback=True,
+                )
+            except HttpBoundaryError:
+                _send_gmail_callback_failure(
+                    self,
+                    _build_callback_payload(
+                        provider="microsoft",
+                        email="",
+                        connection_status="connection_failed",
+                        message="The Microsoft OAuth callback origin is not configured safely.",
+                        connected=False,
+                    ),
+                    failure_code="microsoft_preview_origin_invalid",
+                    inbox_position=inbox_position,
+                )
+                return
+            if verified_microsoft_redirect_uri != public_app_origin + OAUTH_CALLBACK_PATH:
+                _send_gmail_callback_failure(
+                    self,
+                    _build_callback_payload(
+                        provider="microsoft",
+                        email="",
+                        connection_status="connection_failed",
+                        message="The Microsoft OAuth callback origin does not match the application.",
+                        connected=False,
+                    ),
+                    failure_code="microsoft_preview_origin_invalid",
+                    inbox_position=inbox_position,
+                )
+                return
 
         if oauth_error:
             _send_gmail_callback_failure(
@@ -3356,7 +3391,7 @@ class handler(BaseHTTPRequestHandler):
         else:
             microsoft_client_id = os.getenv("MICROSOFT_CLIENT_ID", "").strip()
             microsoft_client_secret = os.getenv("MICROSOFT_CLIENT_SECRET", "").strip()
-            microsoft_redirect_uri = os.getenv("MICROSOFT_OAUTH_REDIRECT_URI", "").strip()
+            microsoft_redirect_uri = verified_microsoft_redirect_uri
             microsoft_tenant = os.getenv("MICROSOFT_OAUTH_TENANT", "").strip() or "common"
 
             if (

@@ -8,6 +8,7 @@ from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+import os
 from unittest.mock import patch
 
 from api.inboxes import microsoft_sent_status_http as http
@@ -44,6 +45,16 @@ def body(res): return json.loads(res.body.decode())
 
 
 class SentStatusHTTPTests(unittest.TestCase):
+    def setUp(self):
+        # These pre-existing tests prove strict canonical Production behavior.
+        # Preview has its own exact-host/Origin tests and no wildcard fallback.
+        scope = patch.dict(os.environ, {
+            "VERCEL_ENV": "production",
+            "MICROSOFT_OAUTH_REDIRECT_URI": "https://app.cuevion.com/api/inboxes/oauth-callback",
+        })
+        scope.start()
+        self.addCleanup(scope.stop)
+
     def test_confirmed_sent_copy_is_distinct_from_delivery(self):
         with patch.object(service,"check_owned_microsoft_sent_status",return_value=PROOF) as check:
             result=http.microsoft_sent_status_response(request())

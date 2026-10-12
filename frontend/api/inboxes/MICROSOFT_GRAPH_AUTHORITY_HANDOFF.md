@@ -236,10 +236,11 @@ the current activation development step.
 - Every operation runs under Cuevion's exact authenticated-owner mailbox
   authority and shared mailbox mutation lease. Owner/generation is rechecked
   before draft creation, before send and after the Graph response.
-- New strict POST-only /api/inboxes/send-microsoft enforces canonical
-  Host and same Origin, bounded JSON, exact allowed fields and safe errors.
-  This currently REJECTS arbitrary Vercel Preview hosts by design;
-  a verified Preview host policy is required before live Preview sending.
+- New strict POST-only /api/inboxes/send-microsoft enforces the canonical
+  production Host/Origin OR the explicitly pinned Microsoft Preview
+  Host/Origin, bounded JSON, exact allowed fields and safe errors.
+  Microsoft Preview pinning is implemented locally but not configured
+  in Vercel; arbitrary Preview hosts remain forbidden.
 - A desktop New message / Reply composer performs one explicit Send click.
   It uses CSPRNG attempt IDs, no HTML or attachments, and freezes the
   attempted form to prevent automatic retries and double clicks. UI labels
@@ -302,11 +303,13 @@ the current activation development step.
 - The Microsoft app registration needs explicit consent for User.Read,
   Mail.Read, Mail.ReadWrite, Mail.Send and offline_access; the redirect URI
   must match the actual intended preview callback URL exactly.
-- The existing outbound send and status endpoints require canonical Host
-  app.cuevion.com and Origin https://app.cuevion.com. They will FAIL
-  CLOSED on arbitrary Vercel preview URLs. A separately approved exact
-  preview host/origin policy must be implemented and tested before
-  real-account Preview acceptance. Do not add a wildcard/any-vercel.app rule.
+- Outbound send/status and Microsoft OAuth begin/callback now share
+  microsoft_preview_origin.py: Production requires exact app.cuevion.com
+  and its callback, while Preview requires the ONE pinned HTTPS Vercel
+  Host/Origin/redirect and Vercel deployment or branch hostname. Only
+  the callback GET may omit Origin. No wildcard Vercel hosts are allowed.
+  The implementation is tested but remains disabled until exact
+  Preview variables and an approved URL are configured.
 - Use a controlled Microsoft test mailbox and designated test recipient.
   Verify initial connect, reconnect, New, Reply, CC, draft creation,
   HTTP 202 acceptance, delayed Sent-copy confirmation, expired token,
@@ -318,3 +321,31 @@ the current activation development step.
 
 No remote GitHub push, Preview deployment, Production change or real send
 was performed in this local Sent-copy confirmation step.
+
+## Microsoft exact Preview gate — locally implemented, not deployed
+
+- New microsoft_preview_origin.py authorizes only Production canonical
+  https://app.cuevion.com or one exact, explicitly configured Vercel
+  Preview HTTPS origin ending in .vercel.app.
+- Preview requires VERCEL_ENV=preview, exact
+  CUEVION_MICROSOFT_PREVIEW_ORIGIN, identical CUEVION_APP_URL,
+  exact MICROSOFT_OAUTH_REDIRECT_URI=<origin>/api/inboxes/oauth-callback,
+  and exact Vercel-generated VERCEL_URL or VERCEL_BRANCH_URL host.
+- Host, optional X-Forwarded-Host/proto and POST Origin are exact.
+  The OAuth callback GET requires the host but never an Origin header.
+- Microsoft connect-oauth.py validates the pin before any reconnect
+  reservation, state signing or authorization. Microsoft oauth-callback.py
+  validates it before token exchange. The send and Sent-status HTTP routes
+  use the same policy. Gmail/IMAP code and origin logic are unchanged.
+- New exact-origin, OAuth-request and send/status HTTP tests cover spoofed
+  headers, absent settings, wildcard/foreign hosts, cross-origin requests,
+  Preview callback and Production isolation.
+- Vercel environment metadata checked October 12, 2026: Microsoft client
+  ID, secret, redirect, tenant, scopes override and
+  CUEVION_MICROSOFT_PREVIEW_ORIGIN are not configured; the scopes override
+  is optional. CUEVION_APP_URL exists but no value was read.
+  CUEVION_OAUTH_STATE_SECRET was not present in metadata; code has
+  fallback behavior, but a dedicated secure state secret is preferable.
+- Exact setup and test gates are documented in
+  MICROSOFT_PREVIEW_ACCEPTANCE.md. No credentials, Preview URL, pushes,
+  deployments or real emails were created during preparation.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import unittest
+import os
 from email.message import Message
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -40,6 +41,16 @@ PROOF={"attemptId":ID,"status":"accepted_by_microsoft",
        "deliveryConfirmed":False,"sentCopyConfirmed":False,"replayed":False}
 
 class HTTPOutboundTests(unittest.TestCase):
+    def setUp(self):
+        # These pre-existing tests prove strict canonical Production behavior.
+        # Preview has its own exact-host/Origin tests and no wildcard fallback.
+        scope = patch.dict(os.environ, {
+            "VERCEL_ENV": "production",
+            "MICROSOFT_OAUTH_REDIRECT_URI": "https://app.cuevion.com/api/inboxes/oauth-callback",
+        })
+        scope.start()
+        self.addCleanup(scope.stop)
+
     def test_new_message_returns_202_but_not_delivery_claim(self):
         with patch.object(service,"send_owned_microsoft_message",return_value=PROOF) as send:
             reply=http.microsoft_send_response(request())

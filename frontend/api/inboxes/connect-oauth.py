@@ -727,6 +727,29 @@ class handler(BaseHTTPRequestHandler):
                 )
                 return
 
+            # Exact Preview OAuth host and redirect pinning must happen BEFORE
+            # reconnect reservations, callback state creation or token exchange.
+            # Gmail and IMAP retain their original independent origin policy.
+            microsoft_redirect_uri_verified = None
+            if provider == "microsoft":
+                # Lazy provider-specific import also keeps pure Gmail OAuth
+                # regression helpers independent of the Microsoft HTTP gate.
+                from api.auth.http import HttpBoundaryError, snapshot_request_headers
+                from api.inboxes.microsoft_preview_origin import require_microsoft_oauth_redirect
+                try:
+                    microsoft_redirect_uri_verified = require_microsoft_oauth_redirect(
+                        snapshot_request_headers(self),
+                    )
+                except HttpBoundaryError as error:
+                    self._send_json(
+                        error.status,
+                        {"ok": False, "error": {
+                            "code": "microsoft_preview_origin_invalid",
+                            "message": "Microsoft OAuth origin is not configured safely.",
+                        }},
+                    )
+                    return
+
             if provider == "microsoft" and session_member.membership_role != "owner":
                 self._send_json(
                     403,
@@ -861,7 +884,7 @@ class handler(BaseHTTPRequestHandler):
             else:
                 client_id = os.getenv("MICROSOFT_CLIENT_ID", "").strip()
                 client_secret = os.getenv("MICROSOFT_CLIENT_SECRET", "").strip()
-                redirect_uri = os.getenv("MICROSOFT_OAUTH_REDIRECT_URI", "").strip()
+                redirect_uri = microsoft_redirect_uri_verified
                 oauth_state_secret = (
                     os.getenv("CUEVION_OAUTH_STATE_SECRET", "").strip()
                     or client_secret

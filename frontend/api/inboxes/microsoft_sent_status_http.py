@@ -10,8 +10,9 @@ import re
 
 from api.auth.http import (
     HttpBoundaryError, get_unique_header, json_response,
-    require_canonical_host, require_same_origin, snapshot_request_headers,
+    snapshot_request_headers,
 )
+from api.inboxes.microsoft_preview_origin import require_microsoft_request_origin
 from api.inboxes import microsoft_sent_status_service as service
 from api.inboxes import microsoft_outbound_ledger as ledger
 from api.inboxes.microsoft_mailbox_access import MicrosoftMailboxAccessError
@@ -83,8 +84,7 @@ def microsoft_sent_status_response(request):
         return _error(405, "method_not_allowed")
     try:
         headers = snapshot_request_headers(request)
-        require_canonical_host(headers)
-        require_same_origin(headers)
+        require_microsoft_request_origin(headers)
         body = _read(request, headers)
     except HttpBoundaryError as error:
         return _error(error.status, "invalid_request")

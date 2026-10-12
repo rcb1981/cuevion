@@ -11,9 +11,9 @@ import re
 
 from api.auth.http import (
     HttpBoundaryError, get_unique_header, json_response,
-    require_canonical_host, require_same_origin,
     snapshot_request_headers,
 )
+from api.inboxes.microsoft_preview_origin import require_microsoft_request_origin
 from api.inboxes.microsoft_graph import MicrosoftGraphError
 from api.inboxes import microsoft_outbound_service
 from api.inboxes import microsoft_outbound_ledger
@@ -98,8 +98,7 @@ def microsoft_send_response(request):
         headers = snapshot_request_headers(request)
         # Sending is state changing; byte-exact canonical Origin/Host are
         # mandatory. Do not rely solely on session-cookie SameSite settings.
-        require_canonical_host(headers)
-        require_same_origin(headers)
+        require_microsoft_request_origin(headers)
         payload = _read_body(request, headers)
     except HttpBoundaryError as error:
         return _error(error.status, "invalid_request")
