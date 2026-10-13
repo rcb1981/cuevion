@@ -1,8 +1,8 @@
 # Cuevion Microsoft 365 — controlled Preview acceptance plan
 
-Status: **preparation only**. No Microsoft app credentials were configured,
-no GitHub push was made, no Preview or Production deployment was started,
-and no real email was sent during this preparation.
+Status: fixed custom domain and local code preparation. Existing feature
+branch already has an older Preview deployment; the custom-host patch has
+not been pushed or deployed. No Production change or real mail send.
 
 ## 1. Preconditions and Git safety
 
@@ -15,36 +15,37 @@ and no real email was sent during this preparation.
   if building or queued, stop and await the next user turn.
 - Keep all OAuth secrets in Vercel Environment Variables; never Git.
 
-## 2. Pick ONE concrete and stable Preview deployment host
+## 2. Approved fixed Microsoft Preview domain
 
-Preview origin must be an exact HTTPS hostname ending in `.vercel.app`.
-The host must match the Vercel `VERCEL_URL` or `VERCEL_BRANCH_URL` value
-provided to the deployment. No wildcards, localhost, other domains,
-trailing slash, non-HTTPS URL, path, port, username, query or fragment.
+Vercel and Cloudflare confirm valid DNS for mail-preview.cuevion.com, with the
+project domain bound solely to branch feature/microsoft-graph-runtime.
 
-Use a placeholder here, not a made-up deployed URL:
+Fixed Preview origin: https://mail-preview.cuevion.com
+Exact new Entra Web redirect:
+https://mail-preview.cuevion.com/api/inboxes/oauth-callback
 
-    https://<one-real-cuevion-preview-host>.vercel.app
+Register the exact new URI in Microsoft Entra. Keep the older already registered
+Preview callback until the first controlled live test works. Do NOT switch the
+environment settings before the new callback registration is complete.
 
-Once the first Preview deployment URL is known, decide which deployment
-or branch alias will be the ONE test URL; get the exact host from Vercel.
-The first Preview may intentionally fail closed before these settings
-are configured. Set exact branch-scoped Preview variables and redeploy
-only after the user authorizes those changes.
+The new Microsoft-only code accepts this one literal custom hostname only
+when VERCEL_ENV=preview, VERCEL_GIT_COMMIT_REF matches the feature branch and
+three explicit environment pin values are consistent. Other Cuevion hosts
+(including app.cuevion.com) never inherit this Preview permission.
 
 ## 3. Vercel Preview variables (no values in Git)
 
 | Variable | Preview setting |
 | --- | --- |
 | `VERCEL_ENV` | `preview` (Vercel-generated) |
-| `CUEVION_MICROSOFT_PREVIEW_ORIGIN` | Exact chosen `https://<host>.vercel.app` |
-| `CUEVION_APP_URL` | Identical exact origin; used by existing callback routing |
-| `MICROSOFT_OAUTH_REDIRECT_URI` | Exact `<origin>/api/inboxes/oauth-callback` |
+| CUEVION_MICROSOFT_PREVIEW_ORIGIN | https://mail-preview.cuevion.com (Preview branch only) |
+| CUEVION_APP_URL | https://mail-preview.cuevion.com (NEW Preview-branch override; never change Production) |
+| MICROSOFT_OAUTH_REDIRECT_URI | https://mail-preview.cuevion.com/api/inboxes/oauth-callback (UPDATE existing Preview branch variable) |
 | `MICROSOFT_CLIENT_ID` | Microsoft Entra application (client) ID |
 | `MICROSOFT_CLIENT_SECRET` | Secret stored securely in Vercel; never copy to chats/logs |
 | `MICROSOFT_OAUTH_TENANT` | Approved tenant ID or appropriate tenant selector |
 | `CUEVION_OAUTH_STATE_SECRET` | Existing secure signing secret, or separately configured new secret |
-| `VERCEL_URL` / `VERCEL_BRANCH_URL` | System-generated exact hostname; one must match the pinned host |
+| VERCEL_GIT_COMMIT_REF | Vercel system variable must exactly equal feature/microsoft-graph-runtime for custom host |
 | `MICROSOFT_OAUTH_SCOPES` | Optional; the required default scopes are already enforced |
 
 Preview variables should be limited to the Microsoft feature branch
@@ -101,26 +102,27 @@ Gmail/IMAP origin checks are NOT changed by this Microsoft-only gate.
    reconnect while Graph is returning, duplicate attempt, unauthorized
    owner/workspace and cross-origin requests.
 
-## 6. Release gates and blockers
+## 6. Current configuration and release gates
 
-- Current Vercel metadata inspection on October 12, 2026 found no
-  `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`,
-  `MICROSOFT_OAUTH_REDIRECT_URI`, `MICROSOFT_OAUTH_TENANT` or
-  `MICROSOFT_OAUTH_SCOPES` entries. This is a presence check only;
-  no secret values were decrypted. The scopes override is optional.
-- A real Preview URL is not yet selected/approved for this branch;
-  pin it only after a user-approved Preview push.
-- The Sent status checker works while the composer stays mounted.
-  A persistent outbound-attempt recovery/history view is still needed
-  before Production readiness.
-- Microsoft Mobile workspace, full paging, attachments, HTML fidelity,
-  some message actions, and global unread/priority calculations remain
-  separate implementation tasks.
-- The broad Gmail ownership suite has 87 known baseline failures and
-  `WorkspaceShell.inboxReadiness.test.ts` has a pre-existing baseline
-  failure. Do not attribute them to Microsoft or silently waive them.
-- Promotion to Production requires its own diff/PR review, browser
-  acceptance, rollback plan and EXPLICIT user approval.
+- As of October 12, 2026 the four Microsoft branch-Preview variables are
+  present: MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET,
+  MICROSOFT_OAUTH_REDIRECT_URI and MICROSOFT_OAUTH_TENANT.
+  Secret values were NOT inspected, and the current redirect still points
+  to the OLD unique Vercel deployment URL.
+- CUEVION_MICROSOFT_PREVIEW_ORIGIN is NOT configured for the branch.
+  A new Preview-branch CUEVION_APP_URL override is also NOT configured.
+  An existing Production value must remain untouched.
+- The new custom hostname support is currently LOCAL CODE ONLY; no push or
+  new deployment of the custom-domain change has taken place.
+- Next, add the custom callback as a Web redirect in Entra. Then update the
+  existing Preview-branch redirect URI, add the two missing Preview-only
+  variables, verify VERCEL_GIT_COMMIT_REF exposure, and deploy only the
+  feature branch after explicit user approval.
+- Other open issues: real-account test, persistent send-attempt recovery,
+  mobile, pagination, attachments, global unread/priority calculations.
+- Broad Gmail ownership suite still has 87 known baseline failures;
+  the narrow Gmail OAuth regression must stay green.
+- No Production merge without separate rollback plan and user approval.
 
 ## 7. Safe rollback
 

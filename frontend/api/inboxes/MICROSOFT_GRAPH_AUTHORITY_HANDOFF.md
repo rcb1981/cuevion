@@ -324,9 +324,10 @@ was performed in this local Sent-copy confirmation step.
 
 ## Microsoft exact Preview gate — locally implemented, not deployed
 
-- New microsoft_preview_origin.py authorizes only Production canonical
-  https://app.cuevion.com or one exact, explicitly configured Vercel
-  Preview HTTPS origin ending in .vercel.app.
+- Microsoft preview origin validation now supports the one verified custom
+  Preview domain https://mail-preview.cuevion.com, in addition to existing
+  canonical Production and exact Vercel Preview host modes. The custom
+  allowlist is LOCAL ONLY until separately pushed and deployed.
 - Preview requires VERCEL_ENV=preview, exact
   CUEVION_MICROSOFT_PREVIEW_ORIGIN, identical CUEVION_APP_URL,
   exact MICROSOFT_OAUTH_REDIRECT_URI=<origin>/api/inboxes/oauth-callback,
@@ -349,3 +350,17 @@ was performed in this local Sent-copy confirmation step.
 - Exact setup and test gates are documented in
   MICROSOFT_PREVIEW_ACCEPTANCE.md. No credentials, Preview URL, pushes,
   deployments or real emails were created during preparation.
+
+## Fixed Cuevion Preview hostname (local-only patch)
+
+- DNS for mail-preview.cuevion.com is verified and the Vercel project domain
+  is mapped to feature/microsoft-graph-runtime; Production remains unchanged.
+- One literal custom origin is allowed only in Preview with matching:
+  CUEVION_MICROSOFT_PREVIEW_ORIGIN, CUEVION_APP_URL and
+  MICROSOFT_OAUTH_REDIRECT_URI, plus exact VERCEL_GIT_COMMIT_REF.
+- Foreign hosts, other Git branches, wildcard subdomains, wrong forwarding
+  headers and mismatched callbacks are denied. Existing exact vercel.app
+  Preview modes are unaffected.
+- Before testing: add custom Web callback to Entra, update branch-scoped
+  Vercel values, then deploy the feature branch with user approval.
+- See MICROSOFT_PREVIEW_ACCEPTANCE.md for the complete procedure.

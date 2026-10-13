@@ -24,6 +24,11 @@ PREVIEW_ORIGIN_ENV = "CUEVION_MICROSOFT_PREVIEW_ORIGIN"
 PUBLIC_APP_ORIGIN_ENV = "CUEVION_APP_URL"
 MICROSOFT_REDIRECT_ENV = "MICROSOFT_OAUTH_REDIRECT_URI"
 _DOMAIN_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+# Project-domain/branch association has been verified in Vercel. Keep the
+# custom host pinned in SOURCE, not derived from an arbitrary env or request.
+MICROSOFT_CUSTOM_PREVIEW_HOST = "mail-preview.cuevion.com"
+MICROSOFT_CUSTOM_PREVIEW_BRANCH = "feature/microsoft-graph-runtime"
+MICROSOFT_CUSTOM_PREVIEW_ORIGIN = "https://" + MICROSOFT_CUSTOM_PREVIEW_HOST
 
 
 def _fail(code: str, status: int) -> None:
@@ -59,10 +64,20 @@ def _exact_vercel_preview_origin(value: object) -> tuple[str, str] | None:
     return value, hostname
 
 
+def _exact_cuevion_preview_origin(value: object) -> tuple[str, str] | None:
+    """The one expressly approved Preview-only Cuevion project subdomain."""
+    if value != MICROSOFT_CUSTOM_PREVIEW_ORIGIN:
+        return None
+    return MICROSOFT_CUSTOM_PREVIEW_ORIGIN, MICROSOFT_CUSTOM_PREVIEW_HOST
+
+
 def _preview_origin() -> tuple[str, str]:
     if os.getenv("VERCEL_ENV", "").strip().lower() != "preview":
         _fail("internal_error", 503)
-    desired = _exact_vercel_preview_origin(os.getenv(PREVIEW_ORIGIN_ENV))
+    configured = os.getenv(PREVIEW_ORIGIN_ENV)
+    desired = _exact_cuevion_preview_origin(configured)
+    if desired is None:
+        desired = _exact_vercel_preview_origin(configured)
     if desired is None:
         _fail("internal_error", 503)
     origin, hostname = desired
@@ -71,15 +86,20 @@ def _preview_origin() -> tuple[str, str]:
     if os.getenv(MICROSOFT_REDIRECT_ENV) != origin + CALLBACK_PATH:
         _fail("internal_error", 503)
 
-    # Preview aliases differ from the immutable deployment URL. Permit the
-    # EXACT configured Vercel deployment hostname OR exact branch hostname
-    # only when one is surfaced by Vercel itself.
-    vercel_urls = (
-        os.getenv("VERCEL_URL", ""),
-        os.getenv("VERCEL_BRANCH_URL", ""),
-    )
-    if hostname not in vercel_urls:
-        _fail("internal_error", 503)
+    if hostname == MICROSOFT_CUSTOM_PREVIEW_HOST:
+        # The project DNS maps this fixed host to precisely this Preview
+        # branch. Defense-in-depth: deny the same host on any other Git ref.
+        if os.getenv("VERCEL_GIT_COMMIT_REF") != MICROSOFT_CUSTOM_PREVIEW_BRANCH:
+            _fail("internal_error", 503)
+    else:
+        # The older Vercel-only Preview mode stays equally restrictive:
+        # deployment or branch hostname must be supplied by Vercel itself.
+        vercel_urls = (
+            os.getenv("VERCEL_URL", ""),
+            os.getenv("VERCEL_BRANCH_URL", ""),
+        )
+        if hostname not in vercel_urls:
+            _fail("internal_error", 503)
     return origin, hostname
 
 

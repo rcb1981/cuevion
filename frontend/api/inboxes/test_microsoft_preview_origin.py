@@ -44,7 +44,134 @@ def rejects(code: str, callback, *args, **kwargs):
     assert caught.exception.code == code, caught.exception.code
 
 
+CUSTOM_ORIGIN = "https://mail-preview.cuevion.com"
+CUSTOM_HOST = "mail-preview.cuevion.com"
+CUSTOM_PREVIEW = {
+    **PREVIEW,
+    "CUEVION_MICROSOFT_PREVIEW_ORIGIN": CUSTOM_ORIGIN,
+    "CUEVION_APP_URL": CUSTOM_ORIGIN,
+    "MICROSOFT_OAUTH_REDIRECT_URI": CUSTOM_ORIGIN + authority.CALLBACK_PATH,
+    "VERCEL_GIT_COMMIT_REF": "feature/microsoft-graph-runtime",
+}
+
+
 class ExactPreviewOriginTests(unittest.TestCase):
+    def test_fixed_custom_preview_host_and_oauth_callback_are_allowed(self):
+        with patch.dict(os.environ, CUSTOM_PREVIEW, clear=True):
+            self.assertEqual(
+                authority.require_microsoft_request_origin(
+                    headers(host=CUSTOM_HOST, origin=CUSTOM_ORIGIN),
+                ),
+                CUSTOM_ORIGIN,
+            )
+            self.assertEqual(
+                authority.require_microsoft_oauth_redirect(
+                    headers(host=CUSTOM_HOST, origin=CUSTOM_ORIGIN),
+                ),
+                CUSTOM_ORIGIN + authority.CALLBACK_PATH,
+            )
+            self.assertEqual(
+                authority.require_microsoft_oauth_redirect(
+                    headers(host=CUSTOM_HOST, origin=None), callback=True,
+                ),
+                CUSTOM_ORIGIN + authority.CALLBACK_PATH,
+            )
+
+    def test_custom_preview_rejects_wrong_git_ref_or_missing_ref(self):
+        for git_ref in ("", "main", "feature/other", "feature/microsoft-graph-runtime-old"):
+            with self.subTest(ref=git_ref), patch.dict(
+                os.environ, {**CUSTOM_PREVIEW, "VERCEL_GIT_COMMIT_REF": git_ref},
+                clear=True,
+            ):
+                with self.assertRaises(HttpBoundaryError) as caught:
+                    authority.require_microsoft_oauth_redirect(
+                        headers(host=CUSTOM_HOST, origin=CUSTOM_ORIGIN),
+                    )
+                self.assertEqual(caught.exception.status, 503)
+
+    def test_custom_preview_never_accepts_unapproved_custom_domain(self):
+        for origin in (
+            "https://preview.cuevion.com",
+            "https://mail-preview.cuevion.com.evil.example",
+            "http://mail-preview.cuevion.com",
+            "https://MAIL-PREVIEW.cuevion.com",
+            "https://mail-preview.cuevion.com/",
+            "https://mail-preview.cuevion.com:443",
+            "https://mail-preview.cuevion.com?x=1",
+            "https://app.cuevion.com",
+        ):
+            with self.subTest(origin=origin):
+                self.assertIsNone(authority._exact_cuevion_preview_origin(origin))
+                config = {
+                    **CUSTOM_PREVIEW,
+                    "CUEVION_MICROSOFT_PREVIEW_ORIGIN": origin,
+                    "CUEVION_APP_URL": origin,
+                    "MICROSOFT_OAUTH_REDIRECT_URI": origin + authority.CALLBACK_PATH,
+                }
+                with patch.dict(os.environ, config, clear=True):
+                    with self.assertRaises(HttpBoundaryError):
+                        authority.require_microsoft_request_origin(
+                            headers(host=origin.removeprefix("https://"),
+                                    origin=origin),
+                        )
+
+    def test_custom_preview_requires_three_matching_config_values(self):
+        for changed in (
+            {"CUEVION_APP_URL": "https://app.cuevion.com"},
+            {"MICROSOFT_OAUTH_REDIRECT_URI": CUSTOM_ORIGIN},
+            {"MICROSOFT_OAUTH_REDIRECT_URI": CUSTOM_ORIGIN + "/wrong"},
+            {"CUEVION_MICROSOFT_PREVIEW_ORIGIN": ""},
+        ):
+            with self.subTest(changed=changed), patch.dict(
+                os.environ, {**CUSTOM_PREVIEW, **changed}, clear=True,
+            ):
+                with self.assertRaises(HttpBoundaryError) as caught:
+                    authority.require_microsoft_oauth_redirect(
+                        headers(host=CUSTOM_HOST, origin=CUSTOM_ORIGIN),
+                    )
+                self.assertEqual(caught.exception.status, 503)
+
+    def test_custom_preview_rejects_host_origin_or_forwarding_spoofing(self):
+        for settings in (
+            {"host": "app.cuevion.com", "origin": CUSTOM_ORIGIN},
+            {"host": CUSTOM_HOST, "origin": "https://app.cuevion.com"},
+            {"host": CUSTOM_HOST, "origin": CUSTOM_ORIGIN,
+             "forwarded": "other.cuevion.com"},
+            {"host": CUSTOM_HOST, "origin": CUSTOM_ORIGIN,
+             "forwarded_proto": "http"},
+        ):
+            with self.subTest(settings=settings), patch.dict(
+                os.environ, CUSTOM_PREVIEW, clear=True,
+            ):
+                with self.assertRaises(HttpBoundaryError) as caught:
+                    authority.require_microsoft_request_origin(headers(**settings))
+                self.assertEqual(caught.exception.code, (
+                    "forbidden_host" if settings.get("host") != CUSTOM_HOST
+                    or settings.get("forwarded") or
+                    settings.get("forwarded_proto") == "http"
+                    else "forbidden_origin"
+                ))
+
+    def test_custom_preview_does_not_enable_custom_host_in_production(self):
+        production = {
+            **CUSTOM_PREVIEW,
+            "VERCEL_ENV": "production",
+            "MICROSOFT_OAUTH_REDIRECT_URI":
+                "https://app.cuevion.com" + authority.CALLBACK_PATH,
+        }
+        with patch.dict(os.environ, production, clear=True):
+            with self.assertRaises(HttpBoundaryError):
+                authority.require_microsoft_request_origin(
+                    headers(host=CUSTOM_HOST, origin=CUSTOM_ORIGIN),
+                )
+            self.assertEqual(
+                authority.require_microsoft_request_origin(
+                    headers(host="app.cuevion.com",
+                            origin="https://app.cuevion.com"),
+                ),
+                "https://app.cuevion.com",
+            )
+
     def test_production_is_exactly_canonical_and_ignores_preview_config(self):
         config = {
             **PROD,

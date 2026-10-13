@@ -12,7 +12,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from api.inboxes.test_microsoft_preview_origin import PREVIEW, HOST, ORIGIN
+from api.inboxes.test_microsoft_preview_origin import (
+    PREVIEW, HOST, ORIGIN, CUSTOM_PREVIEW, CUSTOM_HOST, CUSTOM_ORIGIN,
+)
 
 FOLDER = Path(__file__).resolve().parent
 
@@ -86,6 +88,26 @@ class MicrosoftOauthGateTests(unittest.TestCase):
         reports, reserve, state = self._start(origin="https://other.vercel.app")
         self.assertEqual(len(reports), 1)
         self.assertEqual(reports[0][0], 403)
+        reserve.assert_not_called()
+        state.assert_not_called()
+
+    def test_custom_cuevion_preview_accepts_correct_callback_pin(self):
+        reports, reserve, state = self._start(
+            origin=CUSTOM_ORIGIN, host=CUSTOM_HOST, env=CUSTOM_PREVIEW,
+        )
+        self.assertTrue(reports)
+        self.assertEqual(reports[-1][0], 503)
+        self.assertEqual(reports[-1][1]["error"]["code"], "oauth_not_configured")
+        reserve.assert_not_called()
+        state.assert_not_called()
+
+    def test_custom_cuevion_preview_blocks_foreign_branch_before_oauth_state(self):
+        reports, reserve, state = self._start(
+            origin=CUSTOM_ORIGIN, host=CUSTOM_HOST,
+            env={**CUSTOM_PREVIEW, "VERCEL_GIT_COMMIT_REF": "main"},
+        )
+        self.assertEqual(reports[0][0], 503)
+        self.assertEqual(reports[0][1]["error"]["code"], "microsoft_preview_origin_invalid")
         reserve.assert_not_called()
         state.assert_not_called()
 
