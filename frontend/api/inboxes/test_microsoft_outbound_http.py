@@ -42,6 +42,12 @@ PROOF={"attemptId":ID,"status":"accepted_by_microsoft",
 
 class HTTPOutboundTests(unittest.TestCase):
     def setUp(self):
+        # Exercise the pre-existing outbound validation/service contract
+        # independently of the newly hard-disabled Production pilot boundary.
+        # Real Production does NOT have this test-only mock.
+        allowed = patch.object(http, "production_pilot_writes_blocked", return_value=False)
+        allowed.start()
+        self.addCleanup(allowed.stop)
         # These pre-existing tests prove strict canonical Production behavior.
         # Preview has its own exact-host/Origin tests and no wildcard fallback.
         scope = patch.dict(os.environ, {

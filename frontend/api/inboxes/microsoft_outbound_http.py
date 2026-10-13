@@ -14,6 +14,7 @@ from api.auth.http import (
     snapshot_request_headers,
 )
 from api.inboxes.microsoft_preview_origin import require_microsoft_request_origin
+from api.inboxes.microsoft_production_pilot import production_pilot_writes_blocked
 from api.inboxes.microsoft_graph import MicrosoftGraphError
 from api.inboxes import microsoft_outbound_service
 from api.inboxes import microsoft_outbound_ledger
@@ -26,6 +27,7 @@ _ERROR_DESCRIPTIONS = {
     "invalid_request": "Invalid Microsoft message request.",
     "request_too_large": "Message request exceeds the allowed size.",
     "method_not_allowed": "Use POST to send Microsoft messages.",
+    "microsoft_pilot_read_only": "Microsoft mail sending is disabled during the read-only pilot.",
     "microsoft_unauthorized": "Please sign in again.",
     "microsoft_mailbox_not_found": "Microsoft mailbox not found.",
     "microsoft_reconnect_required": "Reconnect the Microsoft mailbox to continue.",
@@ -94,6 +96,10 @@ def _read_body(request, headers: tuple) -> dict:
 def microsoft_send_response(request):
     if getattr(request, "command", "") != "POST":
         return _error(405, "method_not_allowed")
+    if production_pilot_writes_blocked():
+        # MUST precede headers, parsing, owner/token lookups, ledger creation,
+        # Graph draft/send, and any other business-side effects.
+        return _error(403, "microsoft_pilot_read_only")
     try:
         headers = snapshot_request_headers(request)
         # Sending is state changing; byte-exact canonical Origin/Host are

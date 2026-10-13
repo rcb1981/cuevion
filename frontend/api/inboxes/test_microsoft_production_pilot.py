@@ -1,0 +1,120 @@
+"""Production pilot safety proof: no Microsoft mail writes, least privileges.
+
+All real Production write endpoints must deny before parsing a request or
+accessing any owner, token, attempt ledger, or Microsoft Graph mutation.
+"""
+from __future__ import annotations
+
+import json
+import os
+import unittest
+from unittest.mock import patch
+
+from api.inboxes import microsoft_production_pilot as policy
+from api.inboxes import microsoft_outbound_http as outbound
+from api.inboxes import microsoft_outbound_service as send_service
+from api.inboxes import microsoft_http as inbox
+from api.inboxes import microsoft_mailbox_access as access
+from api.inboxes.test_microsoft_outbound_http import request as send_request
+from api.inboxes.test_microsoft_http import (
+    _request as inbox_request, GRAPH_LIST, MAILBOX, MESSAGE_ID,
+)
+
+
+def error_code(response):
+    return json.loads(response.body.decode("utf-8"))["error"]["code"]
+
+
+class MicrosoftReadOnlyProductionPilotTests(unittest.TestCase):
+    def test_production_mutation_gate_is_unconditional_and_not_configurable(self):
+        for options in (
+            {},
+            {"MICROSOFT_PRODUCTION_PILOT_WRITES_ENABLED": "1"},
+            {"MICROSOFT_READ_ONLY": "false"},
+            {"MICROSOFT_OAUTH_SCOPES": "https://graph.microsoft.com/Mail.Send"},
+            {"CUEVION_MICROSOFT_PREVIEW_ORIGIN": "https://mail-preview.cuevion.com"},
+        ):
+            with self.subTest(options=options), patch.dict(
+                os.environ, {"VERCEL_ENV": "production", **options}, clear=True,
+            ):
+                self.assertTrue(policy.production_pilot_writes_blocked())
+
+    def test_send_denied_before_input_read_or_any_service(self):
+        with patch.dict(os.environ, {"VERCEL_ENV": "production"}, clear=True):
+            for req in (
+                send_request(),
+                send_request(raw=b"invalid-json"),
+                send_request(headers=(("X-Forwarded-Host", "evil.example"),)),
+            ):
+                with self.subTest(headers=str(req.headers)), patch.object(
+                    outbound, "_read_body",
+                    side_effect=AssertionError("No Production request should be read"),
+                ) as parse, patch.object(
+                    send_service, "send_owned_microsoft_message",
+                ) as send:
+                    response = outbound.microsoft_send_response(req)
+                    self.assertEqual(response.status, 403)
+                    self.assertEqual(error_code(response), "microsoft_pilot_read_only")
+                    self.assertIn(("Cache-Control", "no-store"), response.headers)
+                    parse.assert_not_called()
+                    send.assert_not_called()
+
+    def test_read_unread_mutation_denied_before_input_parse_or_service(self):
+        with patch.dict(os.environ, {"VERCEL_ENV": "production"}, clear=True):
+            for unread in (True, False):
+                with self.subTest(unread=unread), patch.object(
+                    inbox, "_parse_body",
+                    side_effect=AssertionError("No Production request should be read"),
+                ) as parse, patch.object(
+                    access, "mark_owned_microsoft_inbox_read",
+                ) as mutate:
+                    request = inbox_request({
+                        "mailboxId": MAILBOX, "providerMessageId": MESSAGE_ID,
+                        "unread": unread,
+                    })
+                    response = inbox.microsoft_inbox_response(request, mode="flag")
+                    self.assertEqual(response.status, 403)
+                    self.assertEqual(error_code(response), "microsoft_pilot_read_only")
+                    self.assertIn(("Cache-Control", "no-store"), response.headers)
+                    parse.assert_not_called()
+                    mutate.assert_not_called()
+
+    def test_production_pilot_still_allows_owner_bound_inbox_read(self):
+        with patch.dict(os.environ, {"VERCEL_ENV": "production"}, clear=True):
+            with patch.object(
+                access, "list_owned_microsoft_inbox", return_value=GRAPH_LIST,
+            ) as read, patch.object(
+                access, "mark_owned_microsoft_inbox_read",
+            ) as change, patch.object(
+                send_service, "send_owned_microsoft_message",
+            ) as send:
+                response = inbox.microsoft_inbox_response(
+                    inbox_request({"mailboxId": MAILBOX, "limit": 5}), mode="list",
+                )
+                self.assertEqual(response.status, 200)
+                self.assertTrue(json.loads(response.body.decode())["ok"])
+                read.assert_called_once()
+                change.assert_not_called()
+                send.assert_not_called()
+
+    def test_unsupported_methods_remain_method_not_allowed(self):
+        with patch.dict(os.environ, {"VERCEL_ENV": "production"}, clear=True):
+            self.assertEqual(outbound.microsoft_send_response(
+                send_request(method="GET"),
+            ).status, 405)
+            get_request = inbox_request({"mailboxId": MAILBOX})
+            get_request.command = "GET"
+            self.assertEqual(inbox.microsoft_inbox_response(
+                get_request, mode="flag",
+            ).status, 405)
+
+    def test_preview_and_production_boundaries_remain_separate(self):
+        for value in ("preview", "development", ""):
+            with self.subTest(value=value), patch.dict(
+                os.environ, {"VERCEL_ENV": value}, clear=True,
+            ):
+                self.assertFalse(policy.production_pilot_writes_blocked())
+
+
+if __name__ == "__main__":
+    unittest.main()

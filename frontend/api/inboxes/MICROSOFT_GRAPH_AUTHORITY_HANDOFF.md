@@ -364,3 +364,28 @@ was performed in this local Sent-copy confirmation step.
 - Before testing: add custom Web callback to Entra, update branch-scoped
   Vercel values, then deploy the feature branch with user approval.
 - See MICROSOFT_PREVIEW_ACCEPTANCE.md for the complete procedure.
+
+## Production read-only Microsoft pilot - local preparation
+
+- 2026-10-13: Following the approved local-only Production release audit,
+  Microsoft Read-only pilot code and tests were prepared on
+  feature/microsoft-graph-runtime without push, merge or Vercel deployment.
+- Production-only guards deny outbound messages/replies and read/unread
+  changes before parsing or Graph/ledger side effects. No env override
+  can permit Production writes in this code revision.
+- Production OAuth scopes are pinned to OIDC, offline_access,
+  User.Read and Mail.Read; Mail.ReadWrite and Mail.Send cannot be requested
+  even by a Production override. Microsoft UI hides write controls and
+  explicitly labels the pilot read-only. Preview host restrictions persist.
+- Regression coverage: 327 Microsoft backend tests, 39 Gmail OAuth tests,
+  100 core Auth0 tests; Microsoft frontend tests, build and Trash/Team tests
+  pass. Broader Gmail ownership 87 failing cases match prior baseline
+  exactly, and the broad npm test stops at the same legacy Gmail-client
+  assertion as baseline main.
+- No schema migrations or changes to Auth0, Gmail/IMAP routes or Out of
+  Office. Baseline Production READY deployment and main SHA retained.
+- Entra Production callback and Production-only Vercel Microsoft credentials
+  are NOT yet configured. A separate explicit user approval is required
+  before any push/Production merge/deployment.
+- See MICROSOFT_PRODUCTION_READ_ONLY_PILOT.md for exact preflight,
+  least-privilege consent, testing and rollback instructions.

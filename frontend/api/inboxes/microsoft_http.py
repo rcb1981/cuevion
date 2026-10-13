@@ -15,6 +15,7 @@ from api.auth.http import (
     snapshot_request_headers,
 )
 from api.inboxes import microsoft_mailbox_access as owned
+from api.inboxes.microsoft_production_pilot import production_pilot_writes_blocked
 from api.inboxes.microsoft_graph import MicrosoftGraphError
 from api.inboxes.microsoft_inbox_projection import (project_inbox, project_message, project_sent, project_sent_message)
 
@@ -27,6 +28,7 @@ def _error(status: int, code: str):
         "invalid_request": "Invalid Microsoft Inbox request.",
         "request_too_large": "Microsoft Inbox request is too large.",
         "method_not_allowed": "Use POST for Microsoft Inbox requests.",
+        "microsoft_pilot_read_only": "Microsoft mailbox changes are disabled during the read-only pilot.",
         "microsoft_unauthorized": "Please sign in again.",
         "microsoft_mailbox_not_found": "Microsoft mailbox not found.",
         "microsoft_reconnect_required": "Reconnect the Microsoft mailbox to continue.",
@@ -119,6 +121,10 @@ def microsoft_inbox_response(request, *, mode: str):
     method = getattr(request, "command", "")
     if method != "POST":
         return _error(405, "method_not_allowed")
+    if mode == "flag" and production_pilot_writes_blocked():
+        # Explicitly deny read/unread changes before parsing, owner/token
+        # resolution, Graph PATCH, and any other mailbox-side effects.
+        return _error(403, "microsoft_pilot_read_only")
 
     try:
         headers = snapshot_request_headers(request)

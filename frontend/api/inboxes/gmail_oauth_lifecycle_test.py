@@ -1021,8 +1021,28 @@ class MicrosoftSignedReconnectStateTests(unittest.TestCase):
 
 
 class MicrosoftIdentityBoundaryTests(unittest.TestCase):
+    def test_production_pilot_requests_only_read_scopes_even_with_override(self):
+        expected = [
+            "openid", "email", "profile", "offline_access",
+            "https://graph.microsoft.com/User.Read",
+            "https://graph.microsoft.com/Mail.Read",
+        ]
+        for override in (
+            "", "Mail.Send",
+            "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send",
+            "Custom.Scope User.Read",
+        ):
+            with self.subTest(override=override), patch.dict(os.environ, {
+                "VERCEL_ENV": "production",
+                "MICROSOFT_OAUTH_SCOPES": override,
+            }):
+                self.assertEqual(connect_oauth.resolve_microsoft_scopes(), expected)
+
     def test_default_scopes_include_graph_profile_permission(self):
-        with patch.dict(os.environ, {"MICROSOFT_OAUTH_SCOPES": ""}):
+        # This is a future writable Preview contract, NOT production consent.
+        with patch.dict(os.environ, {
+            "VERCEL_ENV": "preview", "MICROSOFT_OAUTH_SCOPES": "",
+        }):
             scopes = connect_oauth.resolve_microsoft_scopes()
         self.assertIn("https://graph.microsoft.com/User.Read", scopes)
         self.assertIn("https://graph.microsoft.com/Mail.Read", scopes)
@@ -1031,7 +1051,9 @@ class MicrosoftIdentityBoundaryTests(unittest.TestCase):
         self.assertIn("offline_access", scopes)
 
     def test_custom_scopes_cannot_omit_graph_identity_or_inbox_read(self):
-        with patch.dict(os.environ, {"MICROSOFT_OAUTH_SCOPES": "offline_access Custom.Scope"}):
+        with patch.dict(os.environ, {
+            "VERCEL_ENV": "preview", "MICROSOFT_OAUTH_SCOPES": "offline_access Custom.Scope",
+        }):
             scopes = connect_oauth.resolve_microsoft_scopes()
         self.assertIn("https://graph.microsoft.com/User.Read", scopes)
         self.assertIn("https://graph.microsoft.com/Mail.Read", scopes)

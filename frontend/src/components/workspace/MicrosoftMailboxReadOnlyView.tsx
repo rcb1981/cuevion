@@ -15,6 +15,9 @@ import {
 import { applyConfirmedMicrosoftUnread } from "./microsoftReadState";
 import { MicrosoftComposePanel } from "./MicrosoftComposePanel";
 
+// UI convenience only. Real production write prevention is enforced before
+// any Graph mutation at the server boundary in microsoft_production_pilot.py.
+const MICROSOFT_READ_ONLY_PILOT = true;
 const MICROSOFT_POLL_INTERVAL_MS = 120_000;
 const MICROSOFT_INBOX_LIMIT = 25;
 
@@ -212,7 +215,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   }, [connected, composer]);
 
   const openComposer = useCallback((mode: "new" | "reply") => {
-    if (!connected || composer !== null || mutationInFlight.current) return;
+    if (MICROSOFT_READ_ONLY_PILOT || !connected || composer !== null || mutationInFlight.current) return;
     const source = mode === "reply" && folderRef.current === "Inbox"
       ? selectedMessage
       : null;
@@ -304,6 +307,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const changeReadState = useCallback(async (nextUnread: boolean) => {
     const targetId = selectedMessage?.providerMessageId;
     if (
+      MICROSOFT_READ_ONLY_PILOT ||
       !connected ||
       folderRef.current !== "Inbox" ||
       mutationInFlight.current ||
@@ -403,14 +407,19 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           <span className="rounded-full border border-[var(--workspace-border-soft)] px-3 py-1 text-[0.7rem] font-medium text-[var(--workspace-text-muted)]">
             Microsoft 365 · Mail
           </span>
-          <button
-            type="button"
-            disabled={!connected || composer !== null || mutationBusy}
-            onClick={() => openComposer("new")}
-            className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-semibold disabled:opacity-50"
-          >
-            New message
-          </button>
+          <span role="status" className="rounded-full border border-[var(--workspace-border-soft)] px-3 py-1 text-[0.7rem] font-medium text-[var(--workspace-text-muted)]">
+            Read-only pilot
+          </span>
+          {!MICROSOFT_READ_ONLY_PILOT && (
+            <button
+              type="button"
+              disabled={!connected || composer !== null || mutationBusy}
+              onClick={() => openComposer("new")}
+              className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-semibold disabled:opacity-50"
+            >
+              New message
+            </button>
+          )}
           <button
             type="button"
             aria-pressed={folder === "Inbox"}
@@ -450,7 +459,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
             Connection settings
           </button>
         </div>
-      ) : composer !== null ? (
+      ) : !MICROSOFT_READ_ONLY_PILOT && composer !== null ? (
         <MicrosoftComposePanel
           key={mailbox.id + "-" + composer.mode + "-" + (composer.sourceProviderMessageId ?? "new")}
           mailboxId={mailbox.id}
@@ -533,22 +542,26 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                 {folder === "Inbox" && (
                   <>
                 <div className="mt-4 flex flex-wrap items-center gap-3">
-                  <button
-                    type="button"
-                    disabled={mutationBusy}
-                    onClick={() => openComposer("reply")}
-                    className="rounded-xl border border-[var(--workspace-border)] px-4 py-2 text-xs font-semibold disabled:opacity-50"
-                  >
-                    Reply
-                  </button>
-                  <button
-                    type="button"
-                    disabled={mutationBusy}
-                    onClick={() => void changeReadState(!selectedMessage.unread)}
-                    className="rounded-xl border border-[var(--workspace-border)] px-4 py-2 text-xs font-semibold disabled:opacity-50 focus-visible:outline focus-visible:outline-2"
-                  >
-                    {mutationBusy ? "Updating…" : selectedMessage.unread ? "Mark as read" : "Mark as unread"}
-                  </button>
+                  {!MICROSOFT_READ_ONLY_PILOT && (
+                    <>
+                      <button
+                        type="button"
+                        disabled={mutationBusy}
+                        onClick={() => openComposer("reply")}
+                        className="rounded-xl border border-[var(--workspace-border)] px-4 py-2 text-xs font-semibold disabled:opacity-50"
+                      >
+                        Reply
+                      </button>
+                      <button
+                        type="button"
+                        disabled={mutationBusy}
+                        onClick={() => void changeReadState(!selectedMessage.unread)}
+                        className="rounded-xl border border-[var(--workspace-border)] px-4 py-2 text-xs font-semibold disabled:opacity-50 focus-visible:outline focus-visible:outline-2"
+                      >
+                        {mutationBusy ? "Updating…" : selectedMessage.unread ? "Mark as read" : "Mark as unread"}
+                      </button>
+                    </>
+                  )}
                   <span className="text-xs text-[var(--workspace-text-muted)]">
                     Opening a message does not change its read status.
                   </span>

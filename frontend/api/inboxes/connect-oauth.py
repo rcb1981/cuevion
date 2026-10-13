@@ -29,6 +29,7 @@ from user_config_store import (  # noqa: E402
     write_user_config_record_if_unchanged,
 )
 from api.auth.email_address import normalize_auth_email  # noqa: E402
+from api.inboxes.microsoft_production_pilot import production_pilot_writes_blocked
 from api.inboxes.microsoft_activation import (
     MicrosoftActivationError,
     reserve_authoritative_microsoft_reconnect,
@@ -51,6 +52,12 @@ DEFAULT_GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
 ]
+PRODUCTION_MICROSOFT_READ_ONLY_SCOPES = [
+    "openid", "email", "profile", "offline_access",
+    "https://graph.microsoft.com/User.Read",
+    "https://graph.microsoft.com/Mail.Read",
+]
+
 DEFAULT_MICROSOFT_SCOPES = [
     "openid",
     "email",
@@ -376,6 +383,11 @@ def resolve_google_scopes() -> list[str]:
 
 
 def resolve_microsoft_scopes() -> list[str]:
+    if production_pilot_writes_blocked():
+        # Pin the exact least-privilege consent set for the first production
+        # pilot. In particular, runtime scope overrides cannot restore
+        # Mail.ReadWrite, Mail.Send, or other additional permissions.
+        return list(PRODUCTION_MICROSOFT_READ_ONLY_SCOPES)
     configured_scopes = os.getenv("MICROSOFT_OAUTH_SCOPES", "").strip()
     if not configured_scopes:
         return list(DEFAULT_MICROSOFT_SCOPES)
