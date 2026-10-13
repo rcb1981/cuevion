@@ -393,7 +393,15 @@ if str(CURRENT_DIR) not in sys.path:
 if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
-from oauth_token_store import persist_microsoft_token_record
+from api.inboxes.microsoft_graph import (
+    MicrosoftGraphError,
+    verify_microsoft_identity_for_hint,
+)
+from api.inboxes.microsoft_activation import (
+    MicrosoftActivationError,
+    activate_initial_microsoft_mailbox,
+    activate_reconnected_microsoft_mailbox,
+)
 from api import user_config_store
 from api.auth import http, runtime
 from api.auth.email_address import normalize_auth_email
@@ -609,7 +617,7 @@ def verify_signed_state(
 
     if mode == "reconnect":
         if (
-            payload.get("provider") != "google"
+            payload.get("provider") not in {"google", "microsoft"}
             or not isinstance(mailbox_id, str)
             or OAUTH_MAILBOX_ID_PATTERN.fullmatch(mailbox_id) is None
             or not isinstance(expected_email, str)
@@ -1643,6 +1651,25 @@ def _resolve_current_gmail_callback_member(
         member_workspace_id=member.workspace_id,
     ):
         return None, "owner_binding_invalid"
+    return member, None
+
+
+def _resolve_current_microsoft_callback_owner(
+    request: BaseHTTPRequestHandler,
+    *,
+    state_payload: dict,
+    state_signing_secret: str,
+) -> tuple[runtime.AuthenticatedMemberContext | None, str | None]:
+    """Reverify the exact current Auth0 owner before Microsoft activation."""
+    member, error = _resolve_current_gmail_callback_member(
+        request,
+        state_payload=state_payload,
+        state_signing_secret=state_signing_secret,
+    )
+    if error or member is None:
+        return None, error or "member_authority_unavailable"
+    if member.membership_role != "owner":
+        return None, "microsoft_owner_required"
     return member, None
 
 
@@ -2695,6 +2722,16 @@ def _build_callback_payload(
     }
     if display_name:
         payload["displayName"] = display_name
+    if (
+        provider == "microsoft"
+        and connected is True
+        and connection_status == "connected"
+        and isinstance(mailbox_id, str)
+        and OAUTH_MAILBOX_ID_PATTERN.fullmatch(mailbox_id) is not None
+    ):
+        # The mailbox selector is returned only after durable activation; it
+        # cannot be supplied to grant mailbox ownership.
+        payload["mailboxId"] = mailbox_id
 
     return payload
 
@@ -2858,6 +2895,19 @@ def _fetch_verified_google_identity(access_token: str) -> tuple[dict | None, dic
         "email": email.strip().lower(),
         "display_name": name.strip() if isinstance(name, str) and name.strip() else None,
     }, None
+
+
+def _fetch_verified_microsoft_identity(
+    access_token: str,
+    email_hint: str,
+) -> tuple[dict | None, dict | None]:
+    # A signed OAuth state carries an *intent* to link an address. Only
+    # Graph /me identifies the account which actually consented.
+    try:
+        identity = verify_microsoft_identity_for_hint(access_token, email_hint)
+    except MicrosoftGraphError as error:
+        return None, {"code": error.code}
+    return identity, None
 
 
 def _exchange_microsoft_code(
@@ -3138,6 +3188,22 @@ class handler(BaseHTTPRequestHandler):
             )
             return
         state_owner_email = normalize_auth_email(member.email)
+        # Microsoft token authority is intentionally owner-scoped. Other
+        # workspace roles must never begin a token exchange on this path.
+        if provider == "microsoft" and member.membership_role != "owner":
+            _send_gmail_callback_failure(
+                self,
+                _build_callback_payload(
+                    provider="microsoft",
+                    email="",
+                    connection_status="connection_failed",
+                    message="Microsoft mailbox authorization requires the workspace owner.",
+                    connected=False,
+                ),
+                failure_code="microsoft_owner_required",
+                inbox_position=inbox_position,
+            )
+            return
 
         public_app_origin = resolve_public_app_origin(self.headers)
         if not public_app_origin:
@@ -3155,6 +3221,41 @@ class handler(BaseHTTPRequestHandler):
             )
             return
         self._callback_app_redirect_url = f"{public_app_origin}/"
+        if provider == "microsoft":
+            from api.auth.http import HttpBoundaryError, snapshot_request_headers
+            from api.inboxes.microsoft_preview_origin import require_microsoft_oauth_redirect
+            try:
+                verified_microsoft_redirect_uri = require_microsoft_oauth_redirect(
+                    snapshot_request_headers(self), callback=True,
+                )
+            except HttpBoundaryError:
+                _send_gmail_callback_failure(
+                    self,
+                    _build_callback_payload(
+                        provider="microsoft",
+                        email="",
+                        connection_status="connection_failed",
+                        message="The Microsoft OAuth callback origin is not configured safely.",
+                        connected=False,
+                    ),
+                    failure_code="microsoft_preview_origin_invalid",
+                    inbox_position=inbox_position,
+                )
+                return
+            if verified_microsoft_redirect_uri != public_app_origin + OAUTH_CALLBACK_PATH:
+                _send_gmail_callback_failure(
+                    self,
+                    _build_callback_payload(
+                        provider="microsoft",
+                        email="",
+                        connection_status="connection_failed",
+                        message="The Microsoft OAuth callback origin does not match the application.",
+                        connected=False,
+                    ),
+                    failure_code="microsoft_preview_origin_invalid",
+                    inbox_position=inbox_position,
+                )
+                return
 
         if oauth_error:
             _send_gmail_callback_failure(
@@ -3290,7 +3391,7 @@ class handler(BaseHTTPRequestHandler):
         else:
             microsoft_client_id = os.getenv("MICROSOFT_CLIENT_ID", "").strip()
             microsoft_client_secret = os.getenv("MICROSOFT_CLIENT_SECRET", "").strip()
-            microsoft_redirect_uri = os.getenv("MICROSOFT_OAUTH_REDIRECT_URI", "").strip()
+            microsoft_redirect_uri = verified_microsoft_redirect_uri
             microsoft_tenant = os.getenv("MICROSOFT_OAUTH_TENANT", "").strip() or "common"
 
             if (
@@ -3386,7 +3487,59 @@ class handler(BaseHTTPRequestHandler):
                 )
                 return
         else:
-            oauth_identity = {"email": email.strip().lower(), "display_name": None}
+            current_owner, current_owner_error = (
+                _resolve_current_microsoft_callback_owner(
+                    self,
+                    state_payload=state_payload,
+                    state_signing_secret=state_signing_secret,
+                )
+            )
+            if current_owner_error or current_owner is None:
+                _send_gmail_callback_failure(
+                    self,
+                    _build_callback_payload(
+                        provider="microsoft",
+                        email="",
+                        connection_status="connection_failed",
+                        message="The Microsoft mailbox authorization session changed.",
+                        connected=False,
+                    ),
+                    failure_code=current_owner_error or "member_authority_unavailable",
+                    inbox_position=inbox_position,
+                )
+                return
+            oauth_identity, identity_error = _fetch_verified_microsoft_identity(
+                str(token_payload["access_token"]),
+                email,
+            )
+            if identity_error or not oauth_identity:
+                identity_code = (
+                    identity_error.get("code")
+                    if isinstance(identity_error, dict)
+                    else "microsoft_identity_invalid"
+                )
+                if identity_code not in {
+                    "microsoft_identity_invalid",
+                    "microsoft_identity_mismatch",
+                    "microsoft_reconnect_required",
+                    "microsoft_graph_unavailable",
+                    "microsoft_graph_invalid_response",
+                    "microsoft_graph_rate_limited",
+                }:
+                    identity_code = "microsoft_identity_invalid"
+                _send_gmail_callback_failure(
+                    self,
+                    _build_callback_payload(
+                        provider=provider,
+                        email="",
+                        connection_status="connection_failed",
+                        message="The selected Microsoft account could not be verified. Please try again.",
+                        connected=False,
+                    ),
+                    failure_code=identity_code,
+                    inbox_position=inbox_position,
+                )
+                return
         mailbox_email = oauth_identity["email"]
         display_name = oauth_identity.get("display_name")
 
@@ -3504,10 +3657,78 @@ class handler(BaseHTTPRequestHandler):
                 credential_generation=credential_generation,
             )
         else:
-            persisted_record, persistence_error = persist_microsoft_token_record(
-                email=mailbox_email,
-                token_payload=token_payload,
+            # Graph identity and current Auth0 owner have both been verified.
+            # The initial Microsoft flow stages a *disconnected* owned mailbox,
+            # saves its generation-bound token by CAS, then activates by CAS
+            # only after exact user-config and token readback.
+            try:
+                if mode == "reconnect":
+                    activated_mailbox = activate_reconnected_microsoft_mailbox(
+                        current_owner,
+                        oauth_identity,
+                        credential_generation,
+                        token_payload,
+                        mailbox_id=mailbox_id,
+                        expected_email=expected_email,
+                    )
+                else:
+                    activated_mailbox = activate_initial_microsoft_mailbox(
+                        current_owner,
+                        oauth_identity,
+                        credential_generation,
+                        token_payload,
+                        authorization_issued_at=state_payload["issued_at"],
+                        authorization_nonce=state_payload["nonce"],
+                    )
+            except MicrosoftActivationError as error:
+                _send_gmail_callback_failure(
+                    self,
+                    _build_callback_payload(
+                        provider="microsoft",
+                        email=mailbox_email,
+                        connection_status="authenticated_pending_activation",
+                        message=(
+                            "Microsoft mailbox activation could not be verified. "
+                            "The mailbox was not enabled."
+                        ),
+                        connected=False,
+                    ),
+                    failure_code=error.code,
+                    inbox_position=inbox_position,
+                )
+                return
+            if (
+                not isinstance(activated_mailbox, dict)
+                or activated_mailbox.get("connected") is not True
+                or activated_mailbox.get("provider") != "microsoft"
+                or activated_mailbox.get("email") != mailbox_email
+                or not isinstance(activated_mailbox.get("id"), str)
+            ):
+                _send_gmail_callback_failure(
+                    self,
+                    _build_callback_payload(
+                        provider="microsoft",
+                        email=mailbox_email,
+                        connection_status="authenticated_pending_activation",
+                        message="Microsoft mailbox activation could not be verified.",
+                        connected=False,
+                    ),
+                    failure_code="microsoft_activation_unverified",
+                    inbox_position=inbox_position,
+                )
+                return
+            self._send_callback_page(
+                _build_callback_payload(
+                    provider="microsoft",
+                    email=mailbox_email,
+                    connection_status="connected",
+                    message="Microsoft account connected. Secure mailbox ownership verified.",
+                    connected=True,
+                    display_name=display_name,
+                    mailbox_id=activated_mailbox["id"],
+                )
             )
+            return
 
         if persistence_error:
             persistence_failure_code = _resolve_gmail_callback_failure_code(

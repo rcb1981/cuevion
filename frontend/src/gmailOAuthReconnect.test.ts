@@ -90,8 +90,45 @@ async function run() {
       mode: "reconnect",
       mailboxId: "microsoft-owner",
     }),
-    { provider: "microsoft", email: "owner@example.com" },
-    "the Microsoft OAuth request contract must remain unchanged",
+    {
+      provider: "microsoft",
+      email: "owner@example.com",
+      mode: "reconnect",
+      mailboxId: "microsoft-owner",
+    },
+    "Microsoft reconnect must carry its exact stable mailbox ID",
+  );
+  assert.deepEqual(
+    buildOAuthInboxRequest({
+      provider: "microsoft",
+      email: " owner@example.com ",
+      mode: "initial",
+      inboxPosition: "main",
+      mailboxId: "ignored-on-initial",
+    }),
+    {
+      provider: "microsoft",
+      email: "owner@example.com",
+      mode: "initial",
+    },
+    "initial Microsoft OAuth must never claim an existing mailbox ID or onboarding position",
+  );
+  assert.throws(
+    () => buildOAuthInboxRequest({
+      provider: "microsoft",
+      email: "owner@example.com",
+      mode: "reconnect",
+      mailboxId: "",
+    }),
+    /exact mailbox ID is required/i,
+  );
+  assert.throws(
+    () => buildOAuthInboxRequest({
+      provider: "microsoft",
+      email: " ",
+      mode: "initial",
+    }),
+    /mailbox email is required/i,
   );
 
   const originalFetch = globalThis.fetch;

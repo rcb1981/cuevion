@@ -981,5 +981,220 @@ class ExactTargetRegistrationTests(unittest.TestCase):
             self.assertNotIn(secret_name, json.dumps(payload))
 
 
+class MicrosoftSignedReconnectStateTests(unittest.TestCase):
+    def test_microsoft_reconnect_state_round_trips_with_exact_mailbox(self):
+        encoded, verifier = connect_oauth.build_signed_state(
+            "microsoft",
+            MAILBOX_EMAIL,
+            OWNER_EMAIL,
+            STATE_SECRET,
+            member_user_id="member-1",
+            member_workspace_id="workspace-1",
+            mode="reconnect",
+            mailbox_id="microsoft-exact-owned",
+            expected_email=MAILBOX_EMAIL,
+            credential_generation=NEW_GENERATION,
+        )
+        payload, error = oauth_callback.verify_signed_state(encoded, STATE_SECRET, expected_provider="microsoft")
+        self.assertIsNone(error)
+        self.assertEqual(payload["provider"], "microsoft")
+        self.assertEqual(payload["mode"], "reconnect")
+        self.assertEqual(payload["mailboxId"], "microsoft-exact-owned")
+        self.assertEqual(payload["expected_email"], MAILBOX_EMAIL)
+        self.assertEqual(payload["credential_generation"], NEW_GENERATION)
+        self.assertEqual(payload["code_verifier"], verifier)
+        self.assertIsInstance(payload["issued_at"], int)
+        self.assertIsInstance(payload["nonce"], str)
+        self.assertTrue(oauth_callback.verify_owner_binding(
+            payload, OWNER_EMAIL, STATE_SECRET,
+            member_user_id="member-1",
+            member_workspace_id="workspace-1",
+        ))
+
+    def test_microsoft_callback_uses_signed_recency_for_initial_recovery(self):
+        source = inspect.getsource(oauth_callback.handler._handle_get)
+        self.assertIn('authorization_issued_at=state_payload["issued_at"]', source)
+        self.assertIn('authorization_nonce=state_payload["nonce"]', source)
+        self.assertIn("activate_reconnected_microsoft_mailbox(", source)
+        start_source = inspect.getsource(connect_oauth.handler.do_POST)
+        self.assertIn("reserve_authoritative_microsoft_reconnect(", start_source)
+
+
+class MicrosoftIdentityBoundaryTests(unittest.TestCase):
+    def test_production_pilot_requests_only_read_scopes_even_with_override(self):
+        expected = [
+            "openid", "email", "profile", "offline_access",
+            "https://graph.microsoft.com/User.Read",
+            "https://graph.microsoft.com/Mail.Read",
+        ]
+        for override in (
+            "", "Mail.Send",
+            "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send",
+            "Custom.Scope User.Read",
+        ):
+            with self.subTest(override=override), patch.dict(os.environ, {
+                "VERCEL_ENV": "production",
+                "MICROSOFT_OAUTH_SCOPES": override,
+            }):
+                self.assertEqual(connect_oauth.resolve_microsoft_scopes(), expected)
+
+    def test_default_scopes_include_graph_profile_permission(self):
+        # This is a future writable Preview contract, NOT production consent.
+        with patch.dict(os.environ, {
+            "VERCEL_ENV": "preview", "MICROSOFT_OAUTH_SCOPES": "",
+        }):
+            scopes = connect_oauth.resolve_microsoft_scopes()
+        self.assertIn("https://graph.microsoft.com/User.Read", scopes)
+        self.assertIn("https://graph.microsoft.com/Mail.Read", scopes)
+        self.assertIn("https://graph.microsoft.com/Mail.ReadWrite", scopes)
+        self.assertIn("https://graph.microsoft.com/Mail.Send", scopes)
+        self.assertIn("offline_access", scopes)
+
+    def test_custom_scopes_cannot_omit_graph_identity_or_inbox_read(self):
+        with patch.dict(os.environ, {
+            "VERCEL_ENV": "preview", "MICROSOFT_OAUTH_SCOPES": "offline_access Custom.Scope",
+        }):
+            scopes = connect_oauth.resolve_microsoft_scopes()
+        self.assertIn("https://graph.microsoft.com/User.Read", scopes)
+        self.assertIn("https://graph.microsoft.com/Mail.Read", scopes)
+        self.assertIn("https://graph.microsoft.com/Mail.ReadWrite", scopes)
+        self.assertIn("https://graph.microsoft.com/Mail.Send", scopes)
+        self.assertIn("offline_access", scopes)
+        self.assertEqual(scopes.count("offline_access"), 1)
+        self.assertIn("Custom.Scope", scopes)
+
+    def test_callback_uses_verified_graph_identity(self):
+        identity = {
+            "id": "user-id",
+            "email": "verified@example.com",
+            "verifiedEmails": ("verified@example.com",),
+            "display_name": "Verified User",
+        }
+        with patch.object(
+            oauth_callback,
+            "verify_microsoft_identity_for_hint",
+            return_value=identity,
+        ) as validator:
+            result, error = oauth_callback._fetch_verified_microsoft_identity(
+                "opaque-microsoft-token", "verified@example.com"
+            )
+        self.assertIsNone(error)
+        self.assertEqual(result, identity)
+        validator.assert_called_once_with("opaque-microsoft-token", "verified@example.com")
+
+    def test_identity_mismatch_is_not_silently_accepted(self):
+        from api.inboxes.microsoft_graph import MicrosoftGraphError
+        with patch.object(
+            oauth_callback,
+            "verify_microsoft_identity_for_hint",
+            side_effect=MicrosoftGraphError("microsoft_identity_mismatch"),
+        ):
+            identity, error = oauth_callback._fetch_verified_microsoft_identity(
+                "opaque-microsoft-token", "other@example.com"
+            )
+        self.assertIsNone(identity)
+        self.assertEqual(error, {"code": "microsoft_identity_mismatch"})
+
+    def test_current_microsoft_callback_owner_is_reverified(self):
+        owner = SimpleNamespace(
+            user_id="auth0|owner", email="owner@example.com",
+            name="Owner", workspace_id="workspace-1", membership_role="owner",
+        )
+        request = object()
+        signed = {"provider": "microsoft", "owner_email": "owner@example.com"}
+        with patch.object(
+            oauth_callback, "_resolve_current_gmail_callback_member",
+            return_value=(owner, None),
+        ) as recheck:
+            member, error = oauth_callback._resolve_current_microsoft_callback_owner(
+                request, state_payload=signed, state_signing_secret="test-secret",
+            )
+        self.assertIs(member, owner)
+        self.assertIsNone(error)
+        recheck.assert_called_once_with(
+            request, state_payload=signed, state_signing_secret="test-secret",
+        )
+
+    def test_non_owner_microsoft_session_is_denied(self):
+        for role in ("admin", "member"):
+            member = SimpleNamespace(
+                user_id="auth0|tester", email="tester@example.com",
+                name="Tester", workspace_id="workspace-1", membership_role=role,
+            )
+            with self.subTest(role=role), patch.object(
+                oauth_callback, "_resolve_current_gmail_callback_member",
+                return_value=(member, None),
+            ):
+                current, error = oauth_callback._resolve_current_microsoft_callback_owner(
+                    object(), state_payload={}, state_signing_secret="test-secret",
+                )
+                self.assertIsNone(current)
+                self.assertEqual(error, "microsoft_owner_required")
+
+    def test_invalid_current_member_or_owner_binding_fails_closed(self):
+        for failure_code in ("owner_binding_invalid", "member_unauthenticated", "member_authority_unavailable"):
+            with self.subTest(failure_code=failure_code), patch.object(
+                oauth_callback, "_resolve_current_gmail_callback_member",
+                return_value=(None, failure_code),
+            ):
+                member, error = oauth_callback._resolve_current_microsoft_callback_owner(
+                    object(), state_payload={}, state_signing_secret="test-secret",
+                )
+                self.assertIsNone(member)
+                self.assertEqual(error, failure_code)
+
+    def test_callback_checks_microsoft_owner_before_token_exchange(self):
+        source = inspect.getsource(oauth_callback.handler._handle_get)
+        self.assertIn('if provider == "microsoft" and member.membership_role != "owner":', source)
+        self.assertIn("_resolve_current_microsoft_callback_owner(", source)
+        self.assertIn('failure_code="microsoft_owner_required"', source)
+        self.assertIn("activate_initial_microsoft_mailbox(", source)
+
+
+    def test_microsoft_callback_payload_requires_confirmed_connection_for_mailbox_id(self):
+        args = {
+            "provider": "microsoft",
+            "email": "artist@example.com",
+            "message": "test",
+            "mailbox_id": "microsoft-valid123",
+        }
+        success = oauth_callback._build_callback_payload(
+            **args, connection_status="connected", connected=True,
+        )
+        self.assertEqual(success["mailboxId"], "microsoft-valid123")
+        self.assertTrue(success["connected"])
+        for status, connected in (
+            ("authenticated_pending_activation", False),
+            ("connection_failed", False),
+            ("connected", False),
+        ):
+            payload = oauth_callback._build_callback_payload(
+                **args, connection_status=status, connected=connected,
+            )
+            self.assertNotIn("mailboxId", payload)
+
+    def test_microsoft_callback_does_not_expose_mailbox_token_values(self):
+        payload = oauth_callback._build_callback_payload(
+            provider="microsoft", email="artist@example.com",
+            message="Microsoft account connected.",
+            mailbox_id="microsoft-valid123",
+            connection_status="connected", connected=True,
+        )
+        self.assertEqual(payload["mailboxId"], "microsoft-valid123")
+        for key in ("access_token", "refresh_token", "scope", "credential_generation"):
+            self.assertNotIn(key, payload)
+
+    def test_microsoft_callback_activates_only_after_exact_two_phase_verification(self):
+        source = inspect.getsource(oauth_callback.handler._handle_get)
+        self.assertIn("_fetch_verified_microsoft_identity(", source)
+        self.assertIn("activate_initial_microsoft_mailbox(", source)
+        self.assertIn('connection_status="authenticated_pending_activation"', source)
+        self.assertIn('failure_code="microsoft_activation_unverified"', source)
+        self.assertIn('activated_mailbox.get("connected") is not True', source)
+        self.assertIn("connected=False", source)
+        self.assertIn("activate_initial_microsoft_mailbox(", source)
+        self.assertNotIn("persist_microsoft_token_record(", source)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

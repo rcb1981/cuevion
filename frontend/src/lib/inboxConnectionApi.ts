@@ -246,6 +246,7 @@ export type ConnectInboxResponse = {
   messages?: LiveInboxMessageSnapshot[];
   inboxUidSet?: string[] | null;
   uidValidity?: string | null;
+  hasMore?: boolean;
   prioritySemanticNewInboundMode?: PrioritySemanticNewInboundMode;
   gmailBootstrapContinuationPending?: boolean;
   gmailPriorityMaintenancePending?: boolean;
@@ -298,8 +299,17 @@ export type OAuthInboxRequest =
     }
   | {
       provider: "microsoft";
-      email?: string;
-      inboxPosition?: string;
+      email: string;
+      inboxPosition?: never;
+      mode: "initial";
+      mailboxId?: never;
+    }
+  | {
+      provider: "microsoft";
+      email: string;
+      inboxPosition?: never;
+      mode: "reconnect";
+      mailboxId: string;
     };
 
 export type OAuthInboxResponse = {
@@ -748,10 +758,28 @@ export function buildOAuthInboxRequest(options: {
     };
   }
 
+  if (!email) {
+    throw new Error("A Microsoft mailbox email is required for OAuth.");
+  }
+  const mode = options.mode ?? "initial";
+  if (mode === "reconnect") {
+    if (!mailboxId) {
+      throw new Error("An exact mailbox ID is required to reconnect Microsoft.");
+    }
+    return {
+      provider: "microsoft",
+      email,
+      mode,
+      mailboxId,
+    };
+  }
+
+  // Microsoft OAuth never accepts an onboarding position or mailbox ID as
+  // an initial ownership claim; the server resolves the actual member.
   return {
     provider: "microsoft",
-    ...(email ? { email } : {}),
-    ...(inboxPosition ? { inboxPosition } : {}),
+    email,
+    mode,
   };
 }
 
@@ -4431,6 +4459,733 @@ export async function fetchGmailThread(
           error instanceof Error
             ? error.message
             : "Could not fetch this Gmail conversation.",
+      },
+    };
+  }
+}
+
+
+export type FetchMicrosoftInboxRequest = {
+  mailboxId: string;
+  limit?: number;
+};
+
+export type FetchMicrosoftMessageResponse = {
+  ok: boolean;
+  message?: LiveInboxMessageSnapshot;
+  error?: { code?: string; message?: string };
+};
+
+const MICROSOFT_FETCH_MAX_MESSAGES = 25;
+const MICROSOFT_INBOX_RESPONSE_CODE = "microsoft_inbox_unavailable";
+const MICROSOFT_INBOX_MESSAGE_FIELDS = new Set([
+  "id", "providerMessageId", "providerThreadId", "serverMailboxId",
+  "providerFolder", "labelIds", "sender", "subject", "snippet", "from",
+  "to", "cc", "timestamp", "createdAt", "body", "unread", "flagged",
+  "attachments",
+]);
+
+const MICROSOFT_INBOX_SAFE_ERRORS: Record<string, string> = {
+  invalid_request: "Invalid Microsoft Inbox request.",
+  request_too_large: "Microsoft Inbox request is too large.",
+  microsoft_unauthorized: "Please sign in again.",
+  microsoft_mailbox_not_found: "Microsoft mailbox not found.",
+  microsoft_reconnect_required: "Reconnect the Microsoft mailbox to continue.",
+  microsoft_graph_rate_limited: "Microsoft mailbox is temporarily rate limited.",
+  microsoft_graph_invalid_response: "Microsoft mailbox returned invalid data.",
+  microsoft_graph_unavailable: "Microsoft mailbox is temporarily unavailable.",
+  microsoft_mailbox_unavailable: "Microsoft mailbox is temporarily unavailable.",
+  microsoft_write_permission_required: "Reconnect Microsoft to approve message changes.",
+  microsoft_mutation_in_progress: "Another mailbox change is still in progress.",
+  microsoft_mutation_conflict: "Microsoft message changed. Refresh Inbox and try again.",
+  microsoft_mutation_unconfirmed: "The message change could not be confirmed. Refresh Inbox.",
+  microsoft_message_not_found: "The message is no longer in this Inbox.",
+};
+
+function safeMicrosoftFetchError(payload: unknown): { code: string; message: string } {
+  if (
+    payload !== null &&
+    typeof payload === "object" &&
+    !Array.isArray(payload) &&
+    "error" in payload &&
+    payload.error !== null &&
+    typeof payload.error === "object" &&
+    !Array.isArray(payload.error)
+  ) {
+    const record = payload.error as Record<string, unknown>;
+    const code = record.code;
+    if (
+      typeof code === "string" &&
+      Object.prototype.hasOwnProperty.call(MICROSOFT_INBOX_SAFE_ERRORS, code)
+    ) {
+      return {
+        code,
+        message: MICROSOFT_INBOX_SAFE_ERRORS[code],
+      };
+    }
+  }
+  return {
+    code: MICROSOFT_INBOX_RESPONSE_CODE,
+    message: "Microsoft mailbox could not be loaded.",
+  };
+}
+
+function isTrustedMicrosoftInboxMessage(
+  value: unknown,
+  mailboxId: string,
+  options: { exact: boolean },
+): value is LiveInboxMessageSnapshot {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const message = value as Record<string, unknown>;
+  const id = message.id;
+  if (
+    typeof id !== "string" ||
+    !id ||
+    message.providerMessageId !== id ||
+    message.serverMailboxId !== mailboxId ||
+    message.providerFolder !== "INBOX" ||
+    !Array.isArray(message.labelIds) ||
+    !message.labelIds.includes("INBOX") ||
+    typeof message.sender !== "string" ||
+    typeof message.subject !== "string" ||
+    typeof message.snippet !== "string" ||
+    typeof message.createdAt !== "string" ||
+    Number.isNaN(Date.parse(message.createdAt)) ||
+    typeof message.unread !== "boolean" ||
+    !Object.keys(message).every((field) => MICROSOFT_INBOX_MESSAGE_FIELDS.has(field)) ||
+    !Array.isArray(message.attachments) ||
+    message.attachments.length !== 0 ||
+    (message.providerThreadId !== undefined && typeof message.providerThreadId !== "string") ||
+    !Array.isArray(message.body) ||
+    !message.body.every((item) => typeof item === "string") ||
+    (options.exact && message.body.length === 0) ||
+    (!options.exact && message.body.length !== 0) ||
+    "bodyHtml" in message
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export async function fetchMicrosoftInbox(
+  request: FetchMicrosoftInboxRequest,
+): Promise<ConnectInboxResponse> {
+  const mailboxId = request.mailboxId;
+  const limit = request.limit ?? 20;
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(mailboxId) ||
+    !Number.isInteger(limit) ||
+    limit < 1 ||
+    limit > MICROSOFT_FETCH_MAX_MESSAGES
+  ) {
+    return {
+      ok: false,
+      error: { code: "invalid_request", message: "Invalid Microsoft Inbox request." },
+    };
+  }
+  try {
+    const response = await fetchProtectedApi("/api/inboxes/fetch-microsoft", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mailboxId, limit }),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      return { ok: false, error: safeMicrosoftFetchError(payload) };
+    }
+    if (
+      !payload ||
+      typeof payload !== "object" ||
+      Array.isArray(payload) ||
+      !("ok" in payload) ||
+      payload.ok !== true
+    ) {
+      throw new Error("invalid_microsoft_response");
+    }
+    const data = payload as Record<string, unknown>;
+    if (
+      !Array.isArray(data.messages) ||
+      data.messages.length > limit ||
+      !data.messages.every((m) => isTrustedMicrosoftInboxMessage(m, mailboxId, { exact: false })) ||
+      !Array.isArray(data.inboxUidSet) ||
+      data.inboxUidSet.length !== data.messages.length ||
+      data.inboxUidSet.some(
+        (id, i) => id !== (data.messages as LiveInboxMessageSnapshot[])[i].providerMessageId,
+      ) ||
+      data.uidValidity !== "microsoft-graph-immutable" ||
+      typeof data.hasMore !== "boolean"
+    ) {
+      throw new Error("invalid_microsoft_response");
+    }
+    return {
+      ok: true,
+      messages: data.messages as LiveInboxMessageSnapshot[],
+      inboxUidSet: data.inboxUidSet as string[],
+      uidValidity: data.uidValidity,
+      hasMore: data.hasMore as boolean,
+    };
+  } catch {
+    return {
+      ok: false,
+      error: safeMicrosoftFetchError(null),
+    };
+  }
+}
+
+export async function fetchMicrosoftMessage(
+  request: { mailboxId: string; providerMessageId: string },
+): Promise<FetchMicrosoftMessageResponse> {
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
+    typeof request.providerMessageId !== "string" ||
+    !request.providerMessageId ||
+    request.providerMessageId.length > 512 ||
+    /[\s?#]/.test(request.providerMessageId) ||
+    request.providerMessageId.includes("..")
+  ) {
+    return {
+      ok: false,
+      error: { code: "invalid_request", message: "Invalid Microsoft message request." },
+    };
+  }
+  try {
+    const response = await fetchProtectedApi("/api/inboxes/fetch-microsoft-message", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      return { ok: false, error: safeMicrosoftFetchError(payload) };
+    }
+    if (
+      !payload ||
+      typeof payload !== "object" ||
+      Array.isArray(payload) ||
+      !("ok" in payload) ||
+      payload.ok !== true ||
+      !("message" in payload) ||
+      !isTrustedMicrosoftInboxMessage(payload.message, request.mailboxId, { exact: true }) ||
+      payload.message.providerMessageId !== request.providerMessageId
+    ) {
+      throw new Error("invalid_microsoft_response");
+    }
+    return { ok: true, message: payload.message };
+  } catch {
+    return {
+      ok: false,
+      error: safeMicrosoftFetchError(null),
+    };
+  }
+}
+
+
+export type MicrosoftReadFlagRequest = {
+  mailboxId: string;
+  providerMessageId: string;
+  unread: boolean;
+};
+
+export type MicrosoftReadFlagResponse =
+  | {
+      ok: true;
+      providerMessageId: string;
+      unread: boolean;
+      changed: boolean;
+    }
+  | {
+      ok: false;
+      error: { code: string; message: string };
+    };
+
+export async function setMicrosoftMessageUnread(
+  request: MicrosoftReadFlagRequest,
+): Promise<MicrosoftReadFlagResponse> {
+  if (
+    typeof request?.mailboxId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
+    typeof request.providerMessageId !== "string" ||
+    !/^[^\x00-\x20\x7f-\x9f?#]{1,512}$/.test(request.providerMessageId) ||
+    new TextEncoder().encode(request.providerMessageId).byteLength > 512 ||
+    request.providerMessageId === "." ||
+    request.providerMessageId.includes("..") ||
+    typeof request.unread !== "boolean"
+  ) {
+    return {
+      ok: false,
+      error: {
+        code: "invalid_request",
+        message: "Invalid Microsoft message status request.",
+      },
+    };
+  }
+
+  try {
+    // A read/unread PATCH can have an indeterminate outcome. Never retry
+    // automatically if the POST or response was interrupted.
+    const response = await fetchProtectedApi("/api/inboxes/mark-microsoft-read", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mailboxId: request.mailboxId,
+        providerMessageId: request.providerMessageId,
+        unread: request.unread,
+      }),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: safeMicrosoftFetchError(payload),
+      };
+    }
+    if (
+      !payload ||
+      typeof payload !== "object" ||
+      Array.isArray(payload)
+    ) {
+      throw new Error("invalid_response");
+    }
+    const data = payload as Record<string, unknown>;
+    if (
+      data.ok !== true ||
+      data.providerMessageId !== request.providerMessageId ||
+      data.unread !== request.unread ||
+      typeof data.changed !== "boolean"
+    ) {
+      throw new Error("invalid_response");
+    }
+    return {
+      ok: true,
+      providerMessageId: request.providerMessageId,
+      unread: request.unread,
+      changed: data.changed,
+    };
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: "microsoft_mutation_unconfirmed",
+        message: "Microsoft did not confirm the message change. Refresh Inbox.",
+      },
+    };
+  }
+}
+
+
+/** Sent Items intentionally has a separate schema and never uses Inbox IDs. */
+export type FetchMicrosoftSentResponse = {
+  ok: boolean;
+  messages?: LiveInboxMessageSnapshot[];
+  hasMore?: boolean;
+  error?: { code?: string; message?: string };
+};
+
+function isTrustedMicrosoftSentMessage(
+  candidate: unknown,
+  mailboxId: string,
+  options: { exact: boolean },
+): candidate is LiveInboxMessageSnapshot {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+    return false;
+  }
+  const item = candidate as Record<string, unknown>;
+  return (
+    typeof item.id === "string" &&
+    /^[^\x00-\x20\x7f-\x9f?#]{1,512}$/.test(item.id) &&
+    new TextEncoder().encode(item.id).byteLength <= 512 &&
+    item.id !== "." &&
+    !item.id.includes("..") &&
+    item.providerMessageId === item.id &&
+    item.serverMailboxId === mailboxId &&
+    item.providerFolder === "SENT" &&
+    Array.isArray(item.labelIds) &&
+    item.labelIds.length === 1 &&
+    item.labelIds[0] === "SENT" &&
+    item.unread === false &&
+    item.flagged === false &&
+    typeof item.sender === "string" &&
+    item.sender.startsWith("To: ") &&
+    typeof item.to === "string" &&
+    item.to.length > 0 &&
+    typeof item.from === "string" &&
+    typeof item.subject === "string" &&
+    typeof item.snippet === "string" &&
+    typeof item.createdAt === "string" &&
+    !Number.isNaN(Date.parse(item.createdAt)) &&
+    Array.isArray(item.body) &&
+    item.body.every((line) => typeof line === "string") &&
+    (options.exact ? item.body.length > 0 : item.body.length === 0) &&
+    Array.isArray(item.attachments) &&
+    item.attachments.length === 0 &&
+    Object.keys(item).every((field) => MICROSOFT_INBOX_MESSAGE_FIELDS.has(field))
+  );
+}
+
+export async function fetchMicrosoftSent(
+  request: FetchMicrosoftInboxRequest,
+): Promise<FetchMicrosoftSentResponse> {
+  const mailboxId = request?.mailboxId;
+  const limit = request?.limit ?? 20;
+  if (
+    typeof mailboxId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(mailboxId) ||
+    !Number.isInteger(limit) ||
+    limit < 1 ||
+    limit > MICROSOFT_FETCH_MAX_MESSAGES
+  ) {
+    return {
+      ok: false,
+      error: { code: "invalid_request", message: "Invalid Microsoft Sent Items request." },
+    };
+  }
+  try {
+    const response = await fetchProtectedApi("/api/inboxes/fetch-microsoft-sent", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mailboxId, limit }),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      return { ok: false, error: safeMicrosoftFetchError(payload) };
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error("invalid_sent_response");
+    }
+    const data = payload as Record<string, unknown>;
+    if (
+      data.ok !== true ||
+      !Array.isArray(data.messages) ||
+      data.messages.length > limit ||
+      !data.messages.every((entry) => isTrustedMicrosoftSentMessage(entry, mailboxId, {exact: false})) ||
+      !Array.isArray(data.sentMessageIds) ||
+      data.sentMessageIds.length !== data.messages.length ||
+      data.sentMessageIds.some((id, index) =>
+        id !== (data.messages as LiveInboxMessageSnapshot[])[index].providerMessageId
+      ) ||
+      new Set(data.sentMessageIds).size !== data.sentMessageIds.length ||
+      typeof data.hasMore !== "boolean"
+    ) {
+      throw new Error("invalid_sent_response");
+    }
+    return {
+      ok: true,
+      messages: data.messages as LiveInboxMessageSnapshot[],
+      hasMore: data.hasMore,
+    };
+  } catch {
+    return {
+      ok: false,
+      error: safeMicrosoftFetchError(null),
+    };
+  }
+}
+
+export async function fetchMicrosoftSentMessage(
+  request: { mailboxId: string; providerMessageId: string },
+): Promise<FetchMicrosoftMessageResponse> {
+  if (
+    !request ||
+    typeof request.mailboxId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
+    typeof request.providerMessageId !== "string" ||
+    !/^[^\x00-\x20\x7f-\x9f?#]{1,512}$/.test(request.providerMessageId) ||
+    new TextEncoder().encode(request.providerMessageId).byteLength > 512 ||
+    request.providerMessageId === "." ||
+    request.providerMessageId.includes("..")
+  ) {
+    return {
+      ok: false,
+      error: { code: "invalid_request", message: "Invalid Microsoft Sent message request." },
+    };
+  }
+  try {
+    const response = await fetchProtectedApi("/api/inboxes/fetch-microsoft-sent-message", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      return { ok: false, error: safeMicrosoftFetchError(payload) };
+    }
+    if (
+      !payload ||
+      typeof payload !== "object" ||
+      Array.isArray(payload) ||
+      !("ok" in payload) ||
+      payload.ok !== true ||
+      !("message" in payload) ||
+      !isTrustedMicrosoftSentMessage(payload.message, request.mailboxId, { exact: true }) ||
+      payload.message.providerMessageId !== request.providerMessageId
+    ) {
+      throw new Error("invalid_sent_response");
+    }
+    return { ok: true, message: payload.message };
+  } catch {
+    return { ok: false, error: safeMicrosoftFetchError(null) };
+  }
+}
+
+
+export type MicrosoftOutboundCompose =
+  | { mode: "new"; to: string[]; cc?: string[]; subject: string; body: string }
+  | { mode: "reply" | "reply_all"; sourceProviderMessageId: string; body: string };
+
+export type MicrosoftSendRequest = {
+  mailboxId: string;
+  attemptId: string;
+  compose: MicrosoftOutboundCompose;
+};
+
+export type MicrosoftSendResponse =
+  | {
+      ok: true;
+      attemptId: string;
+      status: "accepted_by_microsoft";
+      deliveryConfirmed: false;
+      sentCopyConfirmed: false;
+      replayed: boolean;
+    }
+  | { ok: false; error: { code: string; message: string } };
+
+const MICROSOFT_SEND_SAFE_ERRORS: Record<string, string> = {
+  invalid_request: "Check the message, recipients and subject.",
+  request_too_large: "The message exceeds the allowed size.",
+  microsoft_unauthorized: "Your Cuevion session has expired.",
+  microsoft_mailbox_not_found: "The Microsoft mailbox is no longer available.",
+  microsoft_reconnect_required: "Reconnect the Microsoft mailbox.",
+  microsoft_write_permission_required: "Reconnect Microsoft to authorize draft creation.",
+  microsoft_send_permission_required: "Reconnect Microsoft to authorize sending.",
+  microsoft_mutation_in_progress: "Another mailbox operation is in progress.",
+  microsoft_send_attempt_already_started: "This message was already submitted. Check Sent before trying again.",
+  microsoft_send_attempt_conflict: "This sending request cannot be reused.",
+  microsoft_send_store_unavailable: "Secure send tracking is temporarily unavailable.",
+  microsoft_graph_rate_limited: "Microsoft is limiting requests. Wait before trying again.",
+  microsoft_draft_unconfirmed: "Draft status is uncertain. Review Drafts before trying again.",
+  microsoft_send_unconfirmed: "Send status is uncertain. Check Sent before trying again.",
+  microsoft_draft_conflict: "The Microsoft draft changed. Review the mailbox.",
+  microsoft_reply_source_invalid: "The original message cannot be verified.",
+  microsoft_mailbox_unavailable: "The Microsoft mailbox is temporarily unavailable.",
+};
+
+export function createMicrosoftSendAttemptId(): string {
+  // 32 CSPRNG bytes -> 43-character URL-safe identifier, no timestamps/PII.
+  const bytes = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(bytes);
+  let binary = "";
+  bytes.forEach((value) => { binary += String.fromCharCode(value); });
+  const encoded = globalThis.btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  if (!/^[A-Za-z0-9_-]{43}$/.test(encoded)) {
+    throw new Error("microsoft_send_attempt_unavailable");
+  }
+  return encoded;
+}
+
+function validMicrosoftCompose(value: MicrosoftOutboundCompose): boolean {
+  if (!value || typeof value !== "object") return false;
+  const body = value.body;
+  if (
+    typeof body !== "string" ||
+    !body.trim() ||
+    body.length > 64_000 ||
+    body.includes("\0")
+  ) return false;
+  if (value.mode === "new") {
+    if (
+      !Array.isArray(value.to) || value.to.length < 1 ||
+      !Array.isArray(value.cc ?? []) || value.to.length + (value.cc ?? []).length > 20 ||
+      typeof value.subject !== "string" ||
+      !value.subject.trim() || value.subject.length > 250 ||
+      /[\r\n\x00-\x1f\x7f]/.test(value.subject)
+    ) return false;
+    const all = [...value.to, ...(value.cc ?? [])];
+    return all.every(address =>
+      typeof address === "string" &&
+      /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(address) &&
+      address === address.toLowerCase()
+    ) && new Set(all).size === all.length;
+  }
+  if (value.mode === "reply" || value.mode === "reply_all") {
+    return (
+      typeof value.sourceProviderMessageId === "string" &&
+      /^[^\x00-\x20\x7f-\x9f?#]{1,512}$/.test(value.sourceProviderMessageId) &&
+      value.sourceProviderMessageId !== "." &&
+      !value.sourceProviderMessageId.includes("..")
+    );
+  }
+  return false;
+}
+
+export async function sendMicrosoftMessage(
+  request: MicrosoftSendRequest,
+): Promise<MicrosoftSendResponse> {
+  if (
+    !request ||
+    typeof request.mailboxId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
+    typeof request.attemptId !== "string" ||
+    !/^[A-Za-z0-9_-]{43}$/.test(request.attemptId) ||
+    !validMicrosoftCompose(request.compose)
+  ) {
+    return { ok: false, error: {
+      code: "invalid_request", message: "Invalid Microsoft message request.",
+    }};
+  }
+  try {
+    // Never automatically retransmit a POST, even after a timeout. An
+    // in-flight or uncertain attempt must be inspected, not resubmitted.
+    const response = await fetchProtectedApi("/api/inboxes/send-microsoft", {
+      method: "POST",
+      credentials: "include",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        mailboxId: request.mailboxId,
+        attemptId: request.attemptId,
+        compose: request.compose,
+      }),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      const code = (
+        typeof payload === "object" && payload !== null && !Array.isArray(payload) &&
+        "error" in payload && typeof payload.error === "object" &&
+        payload.error !== null && !Array.isArray(payload.error) &&
+        "code" in payload.error && typeof payload.error.code === "string"
+      ) ? payload.error.code : "microsoft_send_unconfirmed";
+      const selected = Object.prototype.hasOwnProperty.call(MICROSOFT_SEND_SAFE_ERRORS, code)
+        ? code : "microsoft_send_unconfirmed";
+      return { ok: false, error: {code:selected, message:MICROSOFT_SEND_SAFE_ERRORS[selected]}};
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw Error("invalid_send_response");
+    }
+    const proof = payload as Record<string, unknown>;
+    if (
+      response.status !== 202 ||
+      proof.ok !== true ||
+      proof.attemptId !== request.attemptId ||
+      proof.status !== "accepted_by_microsoft" ||
+      proof.deliveryConfirmed !== false ||
+      proof.sentCopyConfirmed !== false ||
+      typeof proof.replayed !== "boolean"
+    ) {
+      throw Error("invalid_send_response");
+    }
+    return {
+      ok:true, attemptId:request.attemptId, status:"accepted_by_microsoft",
+      deliveryConfirmed:false, sentCopyConfirmed:false,
+      replayed:proof.replayed,
+    };
+  } catch {
+    return {ok:false,error:{
+      code:"microsoft_send_unconfirmed",
+      message:MICROSOFT_SEND_SAFE_ERRORS.microsoft_send_unconfirmed,
+    }};
+  }
+}
+
+
+export type MicrosoftSentCopyStatus =
+  | "send_not_started"
+  | "sent_copy_pending"
+  | "sent_copy_confirmed";
+
+export type MicrosoftSentStatusResponse =
+  | {
+      ok: true;
+      attemptId: string;
+      status: MicrosoftSentCopyStatus;
+      sentCopyConfirmed: boolean;
+      deliveryConfirmed: false;
+    }
+  | { ok: false; error: { code: string; message: string } };
+
+const MICROSOFT_SENT_STATUS_SAFE_ERRORS: Record<string, string> = {
+  invalid_request: "Invalid Microsoft send-status request.",
+  microsoft_unauthorized: "Your Cuevion session has expired.",
+  microsoft_mailbox_not_found: "The Microsoft mailbox is no longer available.",
+  microsoft_reconnect_required: "Reconnect the Microsoft mailbox to continue.",
+  microsoft_send_attempt_not_found: "This send request could not be found.",
+  microsoft_send_attempt_conflict: "This send request cannot be verified.",
+  microsoft_send_store_unavailable: "Secure send tracking is temporarily unavailable.",
+  microsoft_graph_rate_limited: "Microsoft is temporarily limiting requests.",
+  microsoft_sent_copy_unavailable: "Sent Items could not be checked right now.",
+  microsoft_mailbox_unavailable: "Microsoft mailbox status is temporarily unavailable.",
+};
+
+export async function checkMicrosoftSentStatus(request: {
+  mailboxId: string;
+  attemptId: string;
+}): Promise<MicrosoftSentStatusResponse> {
+  if (
+    !request ||
+    typeof request.mailboxId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
+    typeof request.attemptId !== "string" ||
+    !/^[A-Za-z0-9_-]{43}$/.test(request.attemptId)
+  ) {
+    return {
+      ok: false,
+      error: { code: "invalid_request", message: "Invalid Microsoft send-status request." },
+    };
+  }
+  try {
+    const response = await fetchProtectedApi("/api/inboxes/check-microsoft-sent-status", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const body: unknown = await response.json();
+    if (!response.ok) {
+      const remote = (
+        body !== null && typeof body === "object" && !Array.isArray(body) &&
+        "error" in body && body.error !== null && typeof body.error === "object" &&
+        !Array.isArray(body.error) && "code" in body.error &&
+        typeof body.error.code === "string"
+      ) ? body.error.code : "microsoft_sent_copy_unavailable";
+      const code = Object.prototype.hasOwnProperty.call(MICROSOFT_SENT_STATUS_SAFE_ERRORS, remote)
+        ? remote : "microsoft_sent_copy_unavailable";
+      return { ok: false, error: {code, message:MICROSOFT_SENT_STATUS_SAFE_ERRORS[code]} };
+    }
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      throw Error("invalid_sent_status");
+    }
+    const result = body as Record<string, unknown>;
+    const status = result.status;
+    if (
+      result.ok !== true ||
+      result.attemptId !== request.attemptId ||
+      !["send_not_started", "sent_copy_pending", "sent_copy_confirmed"].includes(
+        status as string,
+      ) ||
+      typeof result.sentCopyConfirmed !== "boolean" ||
+      result.sentCopyConfirmed !== (status === "sent_copy_confirmed") ||
+      result.deliveryConfirmed !== false
+    ) {
+      throw Error("invalid_sent_status");
+    }
+    return {
+      ok: true,
+      attemptId: request.attemptId,
+      status: status as MicrosoftSentCopyStatus,
+      sentCopyConfirmed: result.sentCopyConfirmed,
+      deliveryConfirmed: false,
+    };
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: "microsoft_sent_copy_unavailable",
+        message: "Sent Items could not be checked right now.",
       },
     };
   }

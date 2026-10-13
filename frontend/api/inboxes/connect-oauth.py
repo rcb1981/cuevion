@@ -29,6 +29,11 @@ from user_config_store import (  # noqa: E402
     write_user_config_record_if_unchanged,
 )
 from api.auth.email_address import normalize_auth_email  # noqa: E402
+from api.inboxes.microsoft_production_pilot import production_pilot_writes_blocked
+from api.inboxes.microsoft_activation import (
+    MicrosoftActivationError,
+    reserve_authoritative_microsoft_reconnect,
+)
 from api.user.config import _classify_stored_onboarding_session  # noqa: E402
 
 GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -47,12 +52,21 @@ DEFAULT_GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
 ]
+PRODUCTION_MICROSOFT_READ_ONLY_SCOPES = [
+    "openid", "email", "profile", "offline_access",
+    "https://graph.microsoft.com/User.Read",
+    "https://graph.microsoft.com/Mail.Read",
+]
+
 DEFAULT_MICROSOFT_SCOPES = [
     "openid",
     "email",
     "profile",
     "offline_access",
+    "https://graph.microsoft.com/User.Read",
     "https://graph.microsoft.com/Mail.Read",
+    "https://graph.microsoft.com/Mail.ReadWrite",
+    "https://graph.microsoft.com/Mail.Send",
 ]
 MAX_REQUEST_BODY_BYTES = 16 * 1024
 OAUTH_STATE_VERSION = 3
@@ -288,7 +302,7 @@ def build_signed_state(
         raise ValueError("OAuth connection mode is invalid.")
     if mode == "reconnect":
         if (
-            provider != "google"
+            provider not in {"google", "microsoft"}
             or not isinstance(mailbox_id, str)
             or OAUTH_MAILBOX_ID_PATTERN.fullmatch(mailbox_id) is None
             or not isinstance(expected_email, str)
@@ -369,11 +383,20 @@ def resolve_google_scopes() -> list[str]:
 
 
 def resolve_microsoft_scopes() -> list[str]:
+    if production_pilot_writes_blocked():
+        # Pin the exact least-privilege consent set for the first production
+        # pilot. In particular, runtime scope overrides cannot restore
+        # Mail.ReadWrite, Mail.Send, or other additional permissions.
+        return list(PRODUCTION_MICROSOFT_READ_ONLY_SCOPES)
     configured_scopes = os.getenv("MICROSOFT_OAUTH_SCOPES", "").strip()
     if not configured_scopes:
-        return DEFAULT_MICROSOFT_SCOPES
+        return list(DEFAULT_MICROSOFT_SCOPES)
 
-    return [scope for scope in configured_scopes.split() if scope]
+    # User.Read is required to verify the actual signed-in account at /me;
+    # Mail.Read and offline_access are required for the intended mailbox path.
+    # Custom scopes may add consent, but must not silently remove these guards.
+    configured = [scope for scope in configured_scopes.split() if scope]
+    return list(dict.fromkeys([*DEFAULT_MICROSOFT_SCOPES, *configured]))
 
 
 def resolve_authoritative_onboarding_position(
@@ -716,6 +739,49 @@ class handler(BaseHTTPRequestHandler):
                 )
                 return
 
+            # Exact Preview OAuth host and redirect pinning must happen BEFORE
+            # reconnect reservations, callback state creation or token exchange.
+            # Gmail and IMAP retain their original independent origin policy.
+            microsoft_redirect_uri_verified = None
+            if provider == "microsoft":
+                # Lazy provider-specific import also keeps pure Gmail OAuth
+                # regression helpers independent of the Microsoft HTTP gate.
+                from api.auth.http import HttpBoundaryError, snapshot_request_headers
+                from api.inboxes.microsoft_preview_origin import require_microsoft_oauth_redirect
+                try:
+                    microsoft_redirect_uri_verified = require_microsoft_oauth_redirect(
+                        snapshot_request_headers(self),
+                    )
+                except HttpBoundaryError as error:
+                    self._send_json(
+                        error.status,
+                        {"ok": False, "error": {
+                            "code": "microsoft_preview_origin_invalid",
+                            "message": "Microsoft OAuth origin is not configured safely.",
+                        }},
+                    )
+                    return
+
+            if provider == "microsoft" and session_member.membership_role != "owner":
+                self._send_json(
+                    403,
+                    {"ok": False, "error": {
+                        "code": "microsoft_owner_required",
+                        "message": "Only the workspace owner can connect Microsoft mailboxes.",
+                    }},
+                )
+                return
+
+            if provider == "microsoft" and not email:
+                self._send_json(
+                    400,
+                    {"ok": False, "error": {
+                        "code": "microsoft_email_required",
+                        "message": "Select the Microsoft mailbox email before connecting.",
+                    }},
+                )
+                return
+
             if mode not in {"initial", "reconnect"}:
                 self._send_json(
                     400,
@@ -731,7 +797,7 @@ class handler(BaseHTTPRequestHandler):
 
             if mode == "reconnect":
                 if (
-                    provider != "google"
+                    provider not in ("google", "microsoft")
                     or not isinstance(mailbox_id, str)
                     or OAUTH_MAILBOX_ID_PATTERN.fullmatch(mailbox_id) is None
                     or has_inbox_position
@@ -742,7 +808,7 @@ class handler(BaseHTTPRequestHandler):
                             "ok": False,
                             "error": {
                                 "code": "invalid_request",
-                                "message": "Google reconnect requires one exact mailbox target.",
+                                "message": "OAuth reconnect requires one exact mailbox target.",
                             },
                         },
                     )
@@ -830,7 +896,7 @@ class handler(BaseHTTPRequestHandler):
             else:
                 client_id = os.getenv("MICROSOFT_CLIENT_ID", "").strip()
                 client_secret = os.getenv("MICROSOFT_CLIENT_SECRET", "").strip()
-                redirect_uri = os.getenv("MICROSOFT_OAUTH_REDIRECT_URI", "").strip()
+                redirect_uri = microsoft_redirect_uri_verified
                 oauth_state_secret = (
                     os.getenv("CUEVION_OAUTH_STATE_SECRET", "").strip()
                     or client_secret
@@ -931,13 +997,44 @@ class handler(BaseHTTPRequestHandler):
                         expected_email,
                         reconnect_error_status,
                         reconnect_error_payload,
-                    ) = reserve_authoritative_google_reconnect(
-                        self.headers,
-                        session_member,
-                        mailbox_id,
-                        email,
-                        credential_generation,
-                    )
+                    ) = (None, None, None)
+                    if provider == "google":
+                        (
+                            expected_email,
+                            reconnect_error_status,
+                            reconnect_error_payload,
+                        ) = reserve_authoritative_google_reconnect(
+                            self.headers,
+                            session_member,
+                            mailbox_id,
+                            email,
+                            credential_generation,
+                        )
+                    else:
+                        try:
+                            expected_email = reserve_authoritative_microsoft_reconnect(
+                                self.headers,
+                                session_member,
+                                mailbox_id,
+                                email,
+                                credential_generation,
+                            )
+                        except MicrosoftActivationError as error:
+                            code = error.code
+                            reconnect_error_status = (
+                                403 if code == "microsoft_owner_required"
+                                else 401 if code == "microsoft_unauthorized"
+                                else 404 if code == "microsoft_mailbox_not_found"
+                                else 503 if code.endswith("_unavailable")
+                                else 409
+                            )
+                            reconnect_error_payload = {
+                                "ok": False,
+                                "error": {
+                                    "code": code,
+                                    "message": "The selected Microsoft mailbox could not be reserved safely.",
+                                },
+                            }
                 finally:
                     release_mailbox_mutation_lease(
                         session_member.email,

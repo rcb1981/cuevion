@@ -20,6 +20,7 @@ import {
 } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { ServerNotifications, type ServerNotificationsProps } from "./ServerNotifications";
+import { MicrosoftMailboxReadOnlyView } from "./MicrosoftMailboxReadOnlyView";
 import { useWorkspaceNotifications } from "../../lib/useWorkspaceNotifications";
 import { notificationScopeKey, type ServerNotification } from "../../lib/notificationsApi";
 import { buildExactNotificationMessageIndex, exactNotificationSourceKey, createNotificationNavigator, type NotificationDisplayRequest, type NotificationNavigationPorts, type ExactNotificationTarget } from "../../lib/notificationNavigation";
@@ -56580,6 +56581,13 @@ export function WorkspaceShell({
     );
   }
 
+  const activeMicrosoftReadMailbox =
+    !isDemoWorkspace && hasAuthenticatedMemberAuthority && activeMailbox
+      ? savedManagedInboxes.find(
+          (item) => item.id === activeMailbox.id && item.provider === "microsoft",
+        ) ?? null
+      : null;
+
   return (
     <main
       className={`box-border h-dvh overflow-hidden animate-fade-in ${workspaceOuterShellClass}`}
@@ -56646,6 +56654,28 @@ export function WorkspaceShell({
 	              )
 	            ) : activeMailbox ? (
               <div className="h-0 min-h-0 flex-1 overflow-hidden">
+                {activeMicrosoftReadMailbox ? (
+                  <MicrosoftMailboxReadOnlyView
+                    key={
+                      activeMailbox.id + "-" + mailboxResetToken + "-" +
+                      activeMicrosoftReadMailbox.connectionStatus + "-" +
+                      String(activeMicrosoftReadMailbox.connected)
+                    }
+                    mailbox={{
+                      id: activeMailbox.id,
+                      title: activeMailbox.title,
+                      email: activeMicrosoftReadMailbox.email,
+                    }}
+                    connected={
+                      activeMicrosoftReadMailbox.connected === true &&
+                      activeMicrosoftReadMailbox.connectionStatus === "connected"
+                    }
+                    onBack={handleReturnFromMailbox}
+                    onOpenConnectionSettings={() =>
+                      openMailboxConnectionSettings(activeMailbox.id)
+                    }
+                  />
+                ) : (
 	                <MailboxView
                       collaborationSummaryScopeKey={collaborationSummaries.scopeKey}
                       getCollaborationSummary={getCollaborationSummary}
@@ -56821,6 +56851,7 @@ export function WorkspaceShell({
                     hasAuthenticatedMemberAuthority
                   }
                 />
+                )}
               </div>
             ) : activeSection === "Dashboard" ? (
               <div className="min-h-0 flex-1 overflow-y-auto pr-1">
