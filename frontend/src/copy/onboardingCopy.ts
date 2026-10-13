@@ -252,6 +252,7 @@ export const onboardingCopy = {
       ssl: "SSL",
       providers: [
         { id: "google", label: "Gmail / Google Workspace" },
+        { id: "microsoft", label: "Microsoft 365 / Outlook" },
         { id: "custom_imap", label: "Custom IMAP" },
       ],
     },

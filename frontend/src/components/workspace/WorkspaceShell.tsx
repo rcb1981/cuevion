@@ -107,6 +107,13 @@ import {
   usesEmailAsImapUsername,
 } from "../../lib/inboxProviderDefaults";
 import {
+  getNewInboxProviderChoice,
+  getNewInboxProviderSelection,
+  newInboxProviderChoices,
+  updateNewICloudPresetEmail,
+  type NewInboxProviderChoiceId,
+} from "../../lib/newInboxProviderFlow";
+import {
   hydrateLiveInboxSnapshot,
   readLiveInboxSnapshots,
   removeAndPersistCustomImapInboxMessageFromSnapshot,
@@ -34266,7 +34273,11 @@ function normalizeManagedWorkspaceInbox(
       : mailbox.connectionStatus ?? getDefaultConnectionStatus(mailbox.provider),
     connectionMessage:
       mailbox.connectionMessage ??
-      (isGoogleOAuthMailbox ? onboardingText.connect.googleOAuthPending : null),
+      (isGoogleOAuthMailbox
+        ? mailbox.provider === "microsoft"
+          ? "Microsoft OAuth is required to read Inbox and Sent."
+          : onboardingText.connect.googleOAuthPending
+        : null),
     oauthAuthorizationUrl: mailbox.oauthAuthorizationUrl ?? null,
     customImap: isGoogleOAuthMailbox
       ? createManagedCustomImapSettings()
@@ -34850,7 +34861,7 @@ function isManagedInboxReady(
 }
 
 function isPrivateBetaSupportedProvider(provider: ProviderId | null) {
-  return provider === "google" || provider === "custom_imap";
+  return provider === "google" || provider === "microsoft" || provider === "custom_imap";
 }
 
 function getUnsupportedProviderLabel(provider: ProviderId | null) {
@@ -34891,6 +34902,12 @@ function getMailboxSyncUnavailableMessage(mailbox: ManagedWorkspaceInbox | null)
   }
 
   if (isOAuthConnectionProvider(mailbox.provider)) {
+    if (mailbox.provider === "microsoft") {
+      return mailbox.connectionStatus === "connected"
+        ? "Use the Microsoft read-only Inbox/Sent viewer to refresh messages."
+        : "Finish Microsoft OAuth before opening this inbox.";
+    }
+
     if (mailbox.connectionStatus === "waiting_for_authentication") {
       return "Google authentication is still pending. Finish OAuth before syncing.";
     }
@@ -34900,9 +34917,7 @@ function getMailboxSyncUnavailableMessage(mailbox: ManagedWorkspaceInbox | null)
     }
 
     if (mailbox.connectionStatus === "connected") {
-      return mailbox.provider === "google"
-        ? null
-        : "OAuth sync is not available for this inbox provider in the current runtime.";
+      return null;
     }
 
     return "Google OAuth is required before this inbox can sync.";
@@ -35443,7 +35458,7 @@ function isCredentialAwareSelectablePrimaryManagedInbox(
   );
 }
 
-type ManagedInboxEditorTab = "Details" | "Receiving" | "Sending";
+type ManagedInboxEditorTab = "Provider" | "Details" | "Receiving" | "Sending";
 
 const managedInboxEditorTabs: ManagedInboxEditorTab[] = [
   "Details",
@@ -35711,6 +35726,7 @@ function ManagedInboxEditor({
   onCancelAction,
   onReconnectAction,
   onTabChange,
+  onChooseProvider,
   onChange,
   onSmtpChange,
 }: {
@@ -35738,6 +35754,7 @@ function ManagedInboxEditor({
   onCancelAction?: () => void;
   onReconnectAction?: () => void;
   onTabChange: (tab: ManagedInboxEditorTab) => void;
+  onChooseProvider: (inboxId: string, choice: NewInboxProviderChoiceId) => void;
   onChange: (
     inboxId: string,
     field: "title" | "email" | "provider" | keyof CustomImapSettings,
@@ -35809,10 +35826,27 @@ function ManagedInboxEditor({
       gmailOAuthReconnectRequired
     );
   const unsupportedProviderLabel = getUnsupportedProviderLabel(mailbox.provider);
-  const providerLabel =
-    onboardingText.connect.providers.find((provider) => provider.id === mailbox.provider)
-      ?.label ??
-    (mailbox.provider ? unsupportedProviderLabel : "No provider selected");
+  const selectedNewProvider = getNewInboxProviderChoice(
+    mailbox.provider,
+    mailbox.customImap,
+    mailbox.customSmtp,
+  );
+  const isICloudPreset = selectedNewProvider === "icloud";
+  const providerLabel = isICloudPreset
+    ? "iCloud Mail"
+    : onboardingText.connect.providers.find((provider) => provider.id === mailbox.provider)
+        ?.label ??
+      (mailbox.provider ? unsupportedProviderLabel : "No provider selected");
+  const editorTabs: ManagedInboxEditorTab[] = isExisting
+    ? managedInboxEditorTabs.filter(
+        (tab) => tab !== "Sending" || mailbox.provider !== "microsoft",
+      )
+    : [
+        "Provider",
+        "Receiving",
+        "Details",
+        ...(mailbox.provider === "microsoft" ? [] : (["Sending"] as const)),
+      ];
   const readOnlyValueClass =
     "rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]";
   const readOnlyNestedValueClass =
@@ -35865,7 +35899,9 @@ function ManagedInboxEditor({
             ) : null}
           </div>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-[var(--workspace-text-muted)]">
-            Select a tab to edit identity, receiving, or sending settings for this inbox.
+            {isExisting
+              ? "Select a tab to edit identity, receiving, or sending settings for this inbox."
+              : "Choose a provider first, then connect the account and set its inbox name."}
           </p>
         </div>
         <span
@@ -35881,12 +35917,13 @@ function ManagedInboxEditor({
           aria-label="Inbox settings"
           className="inline-flex min-w-max items-center gap-1 rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-1"
         >
-          {managedInboxEditorTabs.map((tab) => (
+          {editorTabs.map((tab) => (
             <button
               key={`managed-inbox-tab-${tab}`}
               type="button"
               role="tab"
               aria-selected={activeTab === tab}
+              disabled={!isExisting && tab !== "Provider" && !selectedNewProvider}
               onClick={() => onTabChange(tab)}
               className={`inline-flex h-9 items-center justify-center rounded-full px-4 text-[0.8125rem] font-medium tracking-normal transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] ${
                 activeTab === tab
@@ -35899,6 +35936,40 @@ function ManagedInboxEditor({
           ))}
         </div>
       </div>
+
+      {activeTab === "Provider" && !isExisting ? (
+        <div className="space-y-5">
+          <div>
+            <h4 className="text-lg font-semibold text-[var(--workspace-text)]">
+              Choose your email provider
+            </h4>
+            <p className="mt-2 text-sm leading-6 text-[var(--workspace-text-muted)]">
+              Select the account you want to connect. You can configure its details in the next step.
+            </p>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            {newInboxProviderChoices.map((choice) => (
+              <button
+                key={choice.id}
+                type="button"
+                disabled={!editable}
+                aria-pressed={selectedNewProvider === choice.id}
+                onClick={() => onChooseProvider(mailbox.id, choice.id)}
+                className={
+                  selectedNewProvider === choice.id
+                    ? "min-h-[104px] rounded-[22px] border border-[var(--workspace-provider-selected-border)] bg-[var(--workspace-provider-selected-surface)] px-4 py-4 text-left text-[var(--workspace-provider-selected-text)] focus-visible:outline-none focus-visible:ring-2"
+                    : "min-h-[104px] rounded-[22px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-4 text-left text-[var(--workspace-text)] transition hover:border-[var(--workspace-border-hover)] focus-visible:outline-none focus-visible:ring-2"
+                }
+              >
+                <span className="block text-sm font-semibold">{choice.label}</span>
+                <span className="mt-2 block text-sm leading-6 text-[var(--workspace-text-muted)]">
+                  {choice.description}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       {activeTab === "Details" ? (
         <div className="space-y-5">
@@ -35987,7 +36058,8 @@ function ManagedInboxEditor({
 
       {activeTab === "Receiving" ? (
         <div className="space-y-5">
-          <div className="grid gap-3 md:grid-cols-2">
+          {isExisting ? (
+            <div className="grid gap-3 md:grid-cols-2">
             {onboardingText.connect.providers.map((provider) => {
               const selected = mailbox.provider === provider.id;
 
@@ -36010,7 +36082,21 @@ function ManagedInboxEditor({
                 </button>
               );
             })}
-          </div>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3">
+              <span className="text-sm font-medium text-[var(--workspace-text)]">
+                Provider: {providerLabel}
+              </span>
+              <button
+                type="button"
+                onClick={() => onTabChange("Provider")}
+                className="text-sm font-medium text-[var(--workspace-text-muted)] underline-offset-4 hover:underline"
+              >
+                Change provider
+              </button>
+            </div>
+          )}
 
           <div>
             <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
@@ -36041,13 +36127,25 @@ function ManagedInboxEditor({
             ) : null}
           </div>
 
+          {isICloudPreset ? (
+            <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-4">
+              <p className="text-sm font-semibold text-[var(--workspace-text)]">
+                iCloud Mail
+              </p>
+              <p className="mt-2 text-sm leading-6 text-[var(--workspace-text-muted)]">
+                Apple IMAP and SMTP server settings are filled in. Use an app-specific
+                password from your Apple Account, never your regular Apple password.
+              </p>
+            </div>
+          ) : null}
+
           {isUnsupportedProvider ? (
             <div className="space-y-3 rounded-[24px] border border-[color:rgba(184,163,120,0.24)] bg-[color:rgba(184,163,120,0.1)] p-5">
               <p className="text-sm font-semibold text-[var(--workspace-text)]">
                 {unsupportedProviderLabel} is not available in this beta
               </p>
               <p className="text-sm leading-6 text-[var(--workspace-text-muted)]">
-                Gmail / Google Workspace and Custom IMAP are supported for private beta testing.
+                Gmail, Microsoft 365 / Outlook, and Custom IMAP (including iCloud Mail) are supported.
                 Switch this inbox to Custom IMAP if this provider offers IMAP access.
               </p>
             </div>
@@ -36206,10 +36304,14 @@ function ManagedInboxEditor({
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="space-y-1">
                   <p className="text-sm font-semibold text-[var(--workspace-text)]">
-                    {onboardingText.connect.googleOAuthTitle}
+                    {mailbox.provider === "microsoft"
+                      ? "Microsoft Graph — read-only pilot"
+                      : onboardingText.connect.googleOAuthTitle}
                   </p>
                   <p className="text-sm text-[var(--workspace-text-muted)]">
-                    {onboardingText.connect.googleOAuthDescription}
+                    {mailbox.provider === "microsoft"
+                      ? "Connect securely through Microsoft to read Inbox and Sent. Sending, replying, and marking messages are disabled in this pilot."
+                      : onboardingText.connect.googleOAuthDescription}
                   </p>
                 </div>
                 {gmailOAuthReconnectRequired ? (
@@ -36232,7 +36334,9 @@ function ManagedInboxEditor({
                 {mailbox.connectionMessage?.trim() ||
                   (mailbox.connectionStatus === "authenticated_pending_activation"
                     ? onboardingText.connect.googleOAuthActivationPending
-                    : onboardingText.connect.googleOAuthPending)}
+                    : mailbox.provider === "microsoft"
+                      ? "Continue through Microsoft OAuth to connect this inbox."
+                      : onboardingText.connect.googleOAuthPending)}
               </div>
             </div>
           ) : (
@@ -36253,7 +36357,11 @@ function ManagedInboxEditor({
 
       {activeTab === "Sending" ? (
         <div className="space-y-5">
-          {mailbox.provider === "custom_imap" ? (
+          {mailbox.provider === "microsoft" ? (
+            <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-5 text-sm leading-6 text-[var(--workspace-text-muted)]">
+              Microsoft is read-only during this pilot. Sending, replying, and drafts are disabled.
+            </div>
+          ) : mailbox.provider === "custom_imap" ? (
             <div className="space-y-4 rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-5">
               <div>
                 <div className="flex flex-wrap items-center justify-between gap-3">
@@ -36455,7 +36563,7 @@ function ManagedInboxEditor({
             </DesktopActionButton>
             <DesktopActionButton
               onClick={onApplyAction}
-              disabled={isApplying}
+              disabled={isApplying || (!isExisting && !selectedNewProvider)}
               variant="primary"
               className="w-[7.5rem]"
             >
@@ -37049,13 +37157,17 @@ const ManageInboxesView = memo(function ManageInboxesView({
             : null;
 
         if (authorizationUrl) {
-          onBeginMailboxHealthCheck(mailboxForStorage.id, "google", {
-            actionRequiredRecovery: true,
-          });
-          savePendingOAuthManagedInbox(
-            mailboxForStorage,
-            inboxId.startsWith("draft-") ? "initial" : "reconnect",
-          );
+          // Google keeps its existing pending-inbox and health-check flow.
+          // Microsoft activation is server-owned and must not enter Gmail state.
+          if (mailboxForStorage.provider === "google") {
+            onBeginMailboxHealthCheck(mailboxForStorage.id, "google", {
+              actionRequiredRecovery: true,
+            });
+            savePendingOAuthManagedInbox(
+              mailboxForStorage,
+              inboxId.startsWith("draft-") ? "initial" : "reconnect",
+            );
+          }
           window.location.assign(authorizationUrl);
           return true;
         }
@@ -37190,6 +37302,32 @@ const ManageInboxesView = memo(function ManageInboxesView({
     }
   };
 
+  const chooseDraftInboxProvider = (
+    inboxId: string,
+    choice: NewInboxProviderChoiceId,
+  ) => {
+    if (!inboxId.startsWith("draft-")) {
+      return;
+    }
+
+    clearConnectionError(inboxId);
+    setValidationErrorInboxId((current) => (current === inboxId ? null : current));
+    setDraftManagedInboxes((current) =>
+      current.map((mailbox) =>
+        mailbox.id === inboxId
+          ? {
+              ...mailbox,
+              ...getNewInboxProviderSelection(choice, mailbox.email),
+              connected: false,
+              connectionMessage: null,
+              oauthAuthorizationUrl: null,
+            }
+          : mailbox,
+      ),
+    );
+    setActiveInboxEditorTab("Receiving");
+  };
+
   const updateDraftInbox = (
     inboxId: string,
     field: "title" | "email" | "provider" | keyof CustomImapSettings,
@@ -37279,13 +37417,17 @@ const ManageInboxesView = memo(function ManageInboxesView({
             connectionStatus: getDefaultConnectionStatus(mailbox.provider),
             connectionMessage: null,
             oauthAuthorizationUrl: null,
-            customImap:
-              usesEmailAsImapUsername(mailbox.provider)
-                ? {
-                    ...mailbox.customImap,
-                    username: String(value).trim(),
-                  }
-                : mailbox.customImap,
+            customImap: usesEmailAsImapUsername(mailbox.provider)
+              ? {
+                  ...mailbox.customImap,
+                  username: String(value).trim(),
+                }
+              : updateNewICloudPresetEmail(
+                  mailbox.provider,
+                  mailbox.customImap,
+                  mailbox.customSmtp,
+                  String(value),
+                ),
           };
         }
 
@@ -37404,7 +37546,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
       },
     ]);
     setSelectedInboxId(nextId);
-    setActiveInboxEditorTab("Details");
+    setActiveInboxEditorTab("Provider");
     setEditingInboxId(nextId);
   };
 
@@ -37547,7 +37689,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
                 No connected inboxes yet
               </div>
               <p className="mx-auto mt-2 max-w-xl text-[0.92rem] leading-7 text-[var(--workspace-text-muted)]">
-                Add a Gmail / Google Workspace inbox or configure Custom IMAP to start testing live inbox behavior.
+                Add Gmail, Microsoft 365 / Outlook, iCloud Mail, or a Custom IMAP inbox to get started.
               </p>
               <DesktopActionButton
                 onClick={handleStartAddInbox}
@@ -37597,7 +37739,13 @@ const ManageInboxesView = memo(function ManageInboxesView({
                         type="button"
                         onClick={() => {
                           setSelectedInboxId(mailbox.id);
-                          setActiveInboxEditorTab("Details");
+                          setActiveInboxEditorTab(
+                            mailbox.id.startsWith("draft-")
+                              ? mailbox.provider
+                                ? "Receiving"
+                                : "Provider"
+                              : "Details",
+                          );
                         }}
                         aria-pressed={isSelected}
                         className={`w-full rounded-[18px] border px-3 py-3 text-left transition-[background-color,border-color,box-shadow] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] ${
@@ -37686,6 +37834,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
                   onCancelAction={() => handleCancelInbox(selectedInbox.id)}
                   onReconnectAction={() => handleReconnectInbox(selectedInbox.id)}
                   onTabChange={setActiveInboxEditorTab}
+                  onChooseProvider={chooseDraftInboxProvider}
                   onChange={(inboxId, field, value) => {
                     if (
                       field === "title" &&
