@@ -211,6 +211,13 @@ def microsoft_inbox_response(request, *, mode: str):
         if error.code == "microsoft_reconnect_required":
             return _error(409, "microsoft_reconnect_required")
         if error.code == "microsoft_graph_invalid_response":
+            if mode == "list":
+                stage = getattr(error, "safe_stage", None)
+                if stage not in {"transport", "collection", "message", "pagination"}:
+                    stage = "projection"
+                # No mailbox identity, OAuth credential, Graph URL, message
+                # metadata, or body ever enters these operational logs.
+                print("microsoft_inbox_invalid_response_stage=" + stage, flush=True)
             return _error(502, "microsoft_graph_invalid_response")
         if error.code == "microsoft_message_not_found":
             return _error(404, error.code)
