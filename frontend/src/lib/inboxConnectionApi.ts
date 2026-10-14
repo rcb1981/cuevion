@@ -4536,7 +4536,7 @@ function safeMicrosoftFetchError(payload: unknown): { code: string; message: str
 function isTrustedMicrosoftInboxMessage(
   value: unknown,
   mailboxId: string,
-  options: { exact: boolean },
+  options: { exact: boolean; folder?: "INBOX" | "ARCHIVE" },
 ): value is LiveInboxMessageSnapshot {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return false;
@@ -4548,9 +4548,9 @@ function isTrustedMicrosoftInboxMessage(
     !id ||
     message.providerMessageId !== id ||
     message.serverMailboxId !== mailboxId ||
-    message.providerFolder !== "INBOX" ||
+    message.providerFolder !== (options.folder ?? "INBOX") ||
     !Array.isArray(message.labelIds) ||
-    !message.labelIds.includes("INBOX") ||
+    !message.labelIds.includes(options.folder ?? "INBOX") ||
     typeof message.sender !== "string" ||
     typeof message.subject !== "string" ||
     typeof message.snippet !== "string" ||
@@ -5243,13 +5243,13 @@ function trustedMicrosoftAttachment(value: unknown): value is MicrosoftAttachmen
 export async function fetchMicrosoftAttachments(request: {
   mailboxId: string;
   providerMessageId: string;
-  folder: "Inbox" | "Sent";
+  folder: "Inbox" | "Sent" | "Archive";
 }): Promise<MicrosoftAttachmentListResponse> {
   if (
     !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
     !/^[^\s?#]{1,512}$/.test(request.providerMessageId) ||
     request.providerMessageId.includes("..") ||
-    !["Inbox", "Sent"].includes(request.folder)
+    !["Inbox", "Sent", "Archive"].includes(request.folder)
   ) {
     return { ok: false, error: { code: "invalid_request", message: "Invalid Microsoft request." } };
   }
@@ -5307,7 +5307,7 @@ export async function downloadMicrosoftAttachmentFile(request: {
   mailboxId: string;
   providerMessageId: string;
   attachmentId: string;
-  folder: "Inbox" | "Sent";
+  folder: "Inbox" | "Sent" | "Archive";
 }): Promise<MicrosoftAttachmentFileResponse> {
   const validGraphId = (id: unknown) =>
     typeof id === "string" && id.length <= 512 &&
@@ -5317,7 +5317,7 @@ export async function downloadMicrosoftAttachmentFile(request: {
     !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
     !validGraphId(request.providerMessageId) ||
     !validGraphId(request.attachmentId) ||
-    (request.folder !== "Inbox" && request.folder !== "Sent")
+    (request.folder !== "Inbox" && request.folder !== "Sent" && request.folder !== "Archive")
   ) {
     return { ok: false, error: { code: "invalid_request", message: "Invalid Microsoft attachment request." } };
   }
@@ -5372,5 +5372,105 @@ export async function downloadMicrosoftAttachmentFile(request: {
       code: "microsoft_attachment_download_failed",
       message: "The attachment could not be downloaded.",
     } };
+  }
+}
+
+/** Read-only Archive is a separate Graph folder, never the Inbox projection. */
+export async function fetchMicrosoftArchive(
+  request: FetchMicrosoftInboxRequest,
+): Promise<ConnectInboxResponse> {
+  const mailboxId = request?.mailboxId;
+  const limit = request?.limit ?? 20;
+  const page = request?.page ?? 1;
+  if (
+    typeof mailboxId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(mailboxId) ||
+    !Number.isInteger(limit) || limit < 1 || limit > 25 ||
+    !Number.isInteger(page) || page < 1 || page > 4
+  ) {
+    return { ok: false, error: { code: "invalid_request", message: "Invalid Microsoft Archive request." } };
+  }
+  try {
+    const response = await fetchProtectedApi("/api/inboxes/fetch-microsoft-archive", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mailboxId, limit, ...(page > 1 ? { page } : {}) }),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) return { ok: false, error: safeMicrosoftFetchError(payload) };
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error("invalid_microsoft_archive");
+    }
+    const data = payload as Record<string, unknown>;
+    if (
+      data.ok !== true ||
+      !Object.keys(data).every((field) =>
+        ["ok", "messages", "archiveMessageIds", "hasMore"].includes(field)
+      ) ||
+      !Array.isArray(data.messages) || data.messages.length > limit ||
+      !data.messages.every((item) =>
+        isTrustedMicrosoftInboxMessage(item, mailboxId, { exact: false, folder: "ARCHIVE" })
+      ) ||
+      !Array.isArray(data.archiveMessageIds) ||
+      data.archiveMessageIds.length !== data.messages.length ||
+      data.archiveMessageIds.some((id, i) =>
+        id !== (data.messages as LiveInboxMessageSnapshot[])[i].providerMessageId
+      ) ||
+      new Set(data.archiveMessageIds).size !== data.archiveMessageIds.length ||
+      typeof data.hasMore !== "boolean"
+    ) throw new Error("invalid_microsoft_archive");
+    return {
+      ok: true,
+      messages: data.messages as LiveInboxMessageSnapshot[],
+      hasMore: data.hasMore,
+    };
+  } catch {
+    return {
+      ok: false, error: { code: "microsoft_graph_invalid_response",
+        message: "Microsoft Archive could not be loaded." },
+    };
+  }
+}
+
+export async function fetchMicrosoftArchiveMessage(
+  request: { mailboxId: string; providerMessageId: string },
+): Promise<FetchMicrosoftMessageResponse> {
+  if (
+    typeof request?.mailboxId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
+    typeof request.providerMessageId !== "string" ||
+    !/^[^\x00-\x20\x7f-\x9f?#]{1,512}$/.test(request.providerMessageId) ||
+    request.providerMessageId.includes("..") ||
+    new TextEncoder().encode(request.providerMessageId).byteLength > 512
+  ) {
+    return { ok: false, error: { code: "invalid_request", message: "Invalid Archive message request." } };
+  }
+  try {
+    const response = await fetchProtectedApi("/api/inboxes/fetch-microsoft-archive-message", {
+      method: "POST", credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) return { ok: false, error: safeMicrosoftFetchError(payload) };
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error("invalid_microsoft_archive");
+    }
+    const data = payload as Record<string, unknown>;
+    if (
+      data.ok !== true ||
+      !Object.keys(data).every((field) => ["ok", "message"].includes(field)) ||
+      !isTrustedMicrosoftInboxMessage(data.message, request.mailboxId, {
+        exact: true, folder: "ARCHIVE",
+      }) ||
+      data.message.providerMessageId !== request.providerMessageId
+    ) throw new Error("invalid_microsoft_archive");
+    return { ok: true, message: data.message };
+  } catch {
+    return {
+      ok: false, error: { code: "microsoft_graph_invalid_response",
+        message: "The archived message could not be loaded." },
+    };
   }
 }

@@ -98,7 +98,7 @@ class AttachmentBoundaryTests(unittest.TestCase):
             (MAILBOX, {"providerMessageId": MSG, "folder": "Inbox"}),
         )
         for altered in (
-            {**valid, "folder": "Archive"},
+            {**valid, "folder": "Drafts"},
             {**valid, "folder": "INBOX"},
             {**valid, "page": 2},
             {**valid, "nextLink": "arbitrary"},

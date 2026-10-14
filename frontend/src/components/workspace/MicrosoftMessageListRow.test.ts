@@ -26,7 +26,7 @@ const base = {
 
 function row(
   overrides: Partial<typeof base> = {},
-  folder: "Inbox" | "Sent" = "Inbox",
+  folder: "Inbox" | "Sent" | "Archive" = "Inbox",
   selected = false,
 ) {
   return renderToStaticMarkup(createElement(MicrosoftMessageListRow, {
@@ -102,3 +102,9 @@ assert.doesNotMatch(rowSource, /fetch\(|setMicrosoftMessageUnread/);
 assert.match(viewerSource, /<MicrosoftMessageListRow/);
 
 console.log("Microsoft read/unread row visual and no-mutation tests: PASS");
+
+
+const archivedUnread = row({ unread: true }, "Archive");
+assert.match(archivedUnread, /data-read-state="unread"/);
+assert.match(archivedUnread, /Unread message\./);
+assert.match(row({ unread: false }, "Archive"), /data-read-state="read"/);

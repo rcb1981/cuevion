@@ -315,7 +315,7 @@ def list_owned_microsoft_attachments(
     headers, mailbox_id: object, message_id: str, *, folder: str,
 ) -> dict:
     """Read attached file names only after owner, folder, and token checks."""
-    if folder not in {"Inbox", "Sent"}:
+    if folder not in {"Inbox", "Sent", "Archive"}:
         raise MicrosoftMailboxAccessError("microsoft_mailbox_unavailable")
     from api.inboxes import microsoft_attachments_graph
     token, authority = _owned_token(headers, mailbox_id)
@@ -331,7 +331,7 @@ def download_owned_microsoft_attachment(
     *, folder: str,
 ) -> dict:
     """Owner-scoped read-only file fetch with post-network authority recheck."""
-    if folder not in {"Inbox", "Sent"}:
+    if folder not in {"Inbox", "Sent", "Archive"}:
         raise MicrosoftMailboxAccessError("microsoft_mailbox_unavailable")
     from api.inboxes import microsoft_attachment_download
 
@@ -341,3 +341,29 @@ def download_owned_microsoft_attachment(
     )
     _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
     return result
+
+
+def list_owned_microsoft_archive(
+    headers, mailbox_id: object, *, page_size: int = 20, page: int = 1,
+) -> dict:
+    """Owner-scoped, bounded Archive read with authority checked after all pages."""
+    from api.inboxes import microsoft_graph
+    if type(page_size) is not int or not 1 <= page_size <= 25:
+        raise MicrosoftMailboxAccessError("microsoft_page_size_invalid")
+    if type(page) is not int or not 1 <= page <= microsoft_graph.MAX_UI_PAGES:
+        raise MicrosoftMailboxAccessError("microsoft_page_invalid")
+    token, captured = _owned_token(headers, mailbox_id)
+    snapshot = microsoft_graph.list_microsoft_archive(
+        token, page_size=page_size, **({"page": page} if page != 1 else {}),
+    )
+    _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+    return snapshot
+
+
+def read_owned_microsoft_archive_message(headers, mailbox_id: object, message_id: str) -> dict:
+    """Only Archive contents may be returned to the authenticated owner."""
+    from api.inboxes import microsoft_graph
+    token, captured = _owned_token(headers, mailbox_id)
+    message = microsoft_graph.get_microsoft_archive_message(token, message_id)
+    _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+    return message

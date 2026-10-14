@@ -69,3 +69,11 @@ assert.equal(rows[0].unread, true);
 assert.equal(rows[1].unread, false);
 assert.deepEqual(rows.map(({ id }) => id), ["id-1", "id-2", "id-3"], "Filtering never reorders the authoritative snapshot");
 console.log("Microsoft loaded-message search, unread filter and stable sort tests: PASS");
+
+
+assert.deepEqual(
+  filterMicrosoftLoadedMessages(rows, { ...defaults, folder: "Archive", unreadOnly: true })
+    .map((message) => message.id),
+  ["id-3", "id-1"],
+  "Archive unread filter should operate on archived read state only",
+);

@@ -87,7 +87,9 @@ def _timestamp(value: object) -> tuple[str, str]:
     return parsed.isoformat(), parsed.strftime("%B %-d at %H:%M")
 
 
-def project_message(message: object, mailbox_id: str, *, exact_body: bool = False) -> dict:
+def project_message(message: object, mailbox_id: str, *, exact_body: bool = False, folder: str = "INBOX") -> dict:
+    if folder not in {"INBOX", "ARCHIVE"}:
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
     if not isinstance(message, dict):
         raise MicrosoftGraphError("microsoft_graph_invalid_response")
     required = (
@@ -111,8 +113,8 @@ def project_message(message: object, mailbox_id: str, *, exact_body: bool = Fals
         "id": mid,
         "providerMessageId": mid,
         "serverMailboxId": mailbox_id,
-        "providerFolder": "INBOX",
-        "labelIds": ["INBOX", *(["UNREAD"] if message["unread"] else [])],
+        "providerFolder": folder,
+        "labelIds": [folder, *(["UNREAD"] if message["unread"] else [])],
         "sender": name or sender,
         "subject": subject,
         "snippet": snippet[:220],
@@ -176,6 +178,26 @@ def project_inbox(snapshot: object, mailbox_id: str) -> dict:
         "hasMore": snapshot["hasMore"],
     }
 
+
+
+def project_archive(snapshot: object, mailbox_id: str) -> dict:
+    """Bounded Archive listing; never report archived mail as Inbox content."""
+    if (
+        type(snapshot) is not dict
+        or type(snapshot.get("messages")) is not list
+        or type(snapshot.get("hasMore")) is not bool
+        or len(snapshot["messages"]) > 25
+    ):
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    projected = [project_message(message, mailbox_id, folder="ARCHIVE")
+                 for message in snapshot["messages"]]
+    identifiers = [entry["providerMessageId"] for entry in projected]
+    if len(identifiers) != len(set(identifiers)):
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    return {
+        "ok": True, "messages": projected,
+        "archiveMessageIds": identifiers, "hasMore": snapshot["hasMore"],
+    }
 
 
 def project_sent_message(message: object, mailbox_id: str, *, exact_body: bool = False) -> dict:

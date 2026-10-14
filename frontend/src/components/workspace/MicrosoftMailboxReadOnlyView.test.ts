@@ -35,6 +35,7 @@ assert.match(ready, /Older messages/);
 assert.match(ready, /Refresh/);
 assert.match(ready, /aria-pressed="true"[^>]*>Inbox<\/button>/);
 assert.match(ready, /aria-pressed="false"[^>]*>Sent<\/button>/);
+assert.match(ready, /aria-pressed="false"[^>]*>Archive<\/button>/);
 assert.match(ready, /Back to workspace/);
 assert.doesNotMatch(ready, /Send message|Reply all|Compose|Trash/);
 
@@ -42,6 +43,10 @@ const microsoftSource = readFileSync(
   resolve(__dirname, "MicrosoftMailboxReadOnlyView.tsx"), "utf8",
 );
 assert.match(microsoftSource, /fetchMicrosoftAttachments/);
+assert.match(microsoftSource, /fetchMicrosoftArchive/);
+assert.match(microsoftSource, /fetchMicrosoftArchiveMessage/);
+assert.match(microsoftSource, /nextFolder: MicrosoftFolder/);
+assert.match(microsoftSource, /attachmentDownloadTicket\.current \+= 1/);
 assert.match(microsoftSource, /attachmentRequest !== attachmentTicket.current/);
 assert.match(microsoftSource, /selectedIdRef.current !== providerMessageId/);
 assert.match(microsoftSource, /downloadMicrosoftAttachmentFile/);

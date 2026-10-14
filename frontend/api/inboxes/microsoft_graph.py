@@ -98,6 +98,8 @@ def _get_json(
     elif not path.startswith("/me") or not (
         path == "/me?$select=id,displayName,mail,userPrincipalName"
         or path.startswith("/me/mailFolders/inbox/messages?")
+        or path.startswith("/me/mailFolders/archive/messages?")
+        or path.startswith("/me/mailFolders/archive/messages/")
         or path.startswith("/me/mailFolders/inbox/messages/")
         or path.startswith("/me/messages/")
         or path.startswith("/me/mailFolders/sentitems/messages?")
@@ -247,14 +249,16 @@ def _message_summary(item: object) -> dict:
     }
 
 
-def list_microsoft_inbox(
-    access_token: str, *, page_size: int = 20, page: int = 1, opener=urlopen,
+def _list_microsoft_mail_folder(
+    access_token: str, *, folder: str, page_size: int = 20, page: int = 1, opener=urlopen,
 ) -> dict:
     """Read one bounded Inbox page; replay earlier pages server-side only.
 
     No Graph paging URL, token, mailbox selector, or folder path is accepted
     from or returned to the browser. At most four provider requests may occur.
     """
+    if folder not in {"inbox", "archive"}:
+        raise MicrosoftGraphError("microsoft_graph_path_invalid")
     if type(page_size) is not int or not 1 <= page_size <= MAX_MESSAGES_PER_PAGE:
         raise MicrosoftGraphError("microsoft_page_size_invalid")
     if type(page) is not int or not 1 <= page <= MAX_UI_PAGES:
@@ -264,12 +268,12 @@ def list_microsoft_inbox(
         "$orderby": "receivedDateTime desc",
         "$select": _MESSAGE_SELECT,
     })
-    path = "/me/mailFolders/inbox/messages?" + query
+    path = f"/me/mailFolders/{folder}/messages?" + query
     for page_index in range(page):
         try:
             payload = _get_json(
                 path, access_token, maximum_bytes=MAX_GRAPH_JSON_BYTES,
-                opener=opener, internal_paging=page_index > 0, paging_folder="inbox",
+                opener=opener, internal_paging=page_index > 0, paging_folder=folder,
             )
         except MicrosoftGraphError as error:
             if error.code == "microsoft_graph_invalid_response":
@@ -289,7 +293,7 @@ def list_microsoft_inbox(
         if next_link is not None:
             try:
                 next_path = validated_microsoft_continuation_path(
-                    next_link, expected_folder="inbox"
+                    next_link, expected_folder=folder
                 )
             except InvalidMicrosoftContinuation:
                 raise MicrosoftGraphError("microsoft_graph_invalid_response", safe_stage="pagination") from None
@@ -301,12 +305,47 @@ def list_microsoft_inbox(
     raise MicrosoftGraphError("microsoft_graph_invalid_response")
 
 
+def list_microsoft_inbox(
+    access_token: str, *, page_size: int = 20, page: int = 1, opener=urlopen,
+) -> dict:
+    return _list_microsoft_mail_folder(
+        access_token, folder="inbox", page_size=page_size, page=page, opener=opener,
+    )
+
+
+def list_microsoft_archive(
+    access_token: str, *, page_size: int = 20, page: int = 1, opener=urlopen,
+) -> dict:
+    """Read the fixed Archive folder without any client-supplied Graph paths."""
+    return _list_microsoft_mail_folder(
+        access_token, folder="archive", page_size=page_size, page=page, opener=opener,
+    )
+
+
 def get_microsoft_message(access_token: str, message_id: str, *, opener=urlopen) -> dict:
-    """Read a single exact message ID without requesting arbitrary URLs."""
+    """Read an exact message with the existing Inbox behavior."""
+    return _read_microsoft_mail_message(
+        access_token, message_id, path_prefix="/me/messages/", opener=opener,
+    )
+
+
+def get_microsoft_archive_message(access_token: str, message_id: str, *, opener=urlopen) -> dict:
+    """Read one exact message in Archive, never any other folder."""
+    return _read_microsoft_mail_message(
+        access_token, message_id,
+        path_prefix="/me/mailFolders/archive/messages/", opener=opener,
+    )
+
+
+def _read_microsoft_mail_message(
+    access_token: str, message_id: str, *, path_prefix: str, opener=urlopen,
+) -> dict:
+    if path_prefix not in {"/me/messages/", "/me/mailFolders/archive/messages/"}:
+        raise MicrosoftGraphError("microsoft_graph_path_invalid")
     encoded_id = quote(_required_message_id(message_id), safe="")
     query = urlencode({"$select": _MESSAGE_SELECT + ",body"})
     payload = _get_json(
-        "/me/messages/" + encoded_id + "?" + query,
+        path_prefix + encoded_id + "?" + query,
         access_token,
         maximum_bytes=MAX_GRAPH_JSON_BYTES,
         opener=opener,

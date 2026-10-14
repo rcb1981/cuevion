@@ -8,6 +8,8 @@ import React, {
 import {
   fetchMicrosoftInbox,
   fetchMicrosoftMessage,
+  fetchMicrosoftArchive,
+  fetchMicrosoftArchiveMessage,
   fetchMicrosoftSent,
   fetchMicrosoftSentMessage,
   fetchMicrosoftAttachments,
@@ -28,6 +30,7 @@ const MICROSOFT_READ_ONLY_PILOT = true;
 const MICROSOFT_POLL_INTERVAL_MS = 120_000;
 const MICROSOFT_INBOX_LIMIT = 25;
 const MICROSOFT_MAX_PAGES = 4;
+type MicrosoftFolder = "Inbox" | "Sent" | "Archive";
 
 type MicrosoftReadOnlyMailbox = {
   id: string;
@@ -83,8 +86,8 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const attachmentTicket = React.useRef(0);
   const attachmentDownloadTicket = React.useRef(0);
   const selectedIdRef = React.useRef<string | null>(null);
-  const folderRef = React.useRef<"Inbox" | "Sent">("Inbox");
-  const [folder, setFolder] = useState<"Inbox" | "Sent">("Inbox");
+  const folderRef = React.useRef<MicrosoftFolder>("Inbox");
+  const [folder, setFolder] = useState<MicrosoftFolder>("Inbox");
   const [page, setPage] = useState(1);
   const [composer, setComposer] = useState<{
     mode: "new" | "reply";
@@ -123,7 +126,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     }),
     [rows, folder, searchQuery, unreadOnly, sortOrder],
   );
-  const hasActiveListFilter = Boolean(searchQuery.trim()) || (folder === "Inbox" && unreadOnly);
+  const hasActiveListFilter = Boolean(searchQuery.trim()) || (folder !== "Sent" && unreadOnly);
 
   const refresh = useCallback(async () => {
     if (!connected || mutationInFlight.current || composer !== null) {
@@ -136,15 +139,15 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       const requestedFolder = folder;
       const response = requestedFolder === "Sent"
         ? await fetchMicrosoftSent({
-            mailboxId: mailbox.id,
-            limit: MICROSOFT_INBOX_LIMIT,
-            page,
+            mailboxId: mailbox.id, limit: MICROSOFT_INBOX_LIMIT, page,
           })
-        : await fetchMicrosoftInbox({
-            mailboxId: mailbox.id,
-            limit: MICROSOFT_INBOX_LIMIT,
-            page,
-          });
+        : requestedFolder === "Archive"
+          ? await fetchMicrosoftArchive({
+              mailboxId: mailbox.id, limit: MICROSOFT_INBOX_LIMIT, page,
+            })
+          : await fetchMicrosoftInbox({
+              mailboxId: mailbox.id, limit: MICROSOFT_INBOX_LIMIT, page,
+            });
       if (
         ticket !== inboxTicket.current ||
         folderRef.current !== requestedFolder
@@ -209,12 +212,14 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       inboxTicket.current += 1;
       messageTicket.current += 1;
       mutationTicket.current += 1;
+      attachmentTicket.current += 1;
+      attachmentDownloadTicket.current += 1;
       mutationInFlight.current = false;
     };
   }, [connected, refresh]);
 
   const selectFolder = useCallback((
-    nextFolder: "Inbox" | "Sent",
+    nextFolder: MicrosoftFolder,
     allowComposer = false,
   ) => {
     if (
@@ -226,12 +231,20 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       return;
     }
     // Synchronously revoke all responses for the previous folder before
-    // React schedules the next render. Never reuse Inbox or Sent body state.
+    // React schedules the next render. Never reuse Inbox, Sent, or Archive bodies.
     folderRef.current = nextFolder;
     inboxTicket.current += 1;
     messageTicket.current += 1;
     mutationTicket.current += 1;
+    attachmentTicket.current += 1;
+    attachmentDownloadTicket.current += 1;
     selectedIdRef.current = null;
+    setAttachmentRows([]);
+    setAttachmentBusy(false);
+    setAttachmentError(null);
+    setAttachmentHasMore(false);
+    setAttachmentDownloadBusy(null);
+    setAttachmentDownloadError(null);
     setRows([]);
     setSelectedId(null);
     setSelectedMessage(null);
@@ -261,9 +274,17 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     // Invalidate pending list/detail requests before React switches pages.
     inboxTicket.current += 1;
     messageTicket.current += 1;
+    attachmentTicket.current += 1;
+    attachmentDownloadTicket.current += 1;
     selectedIdRef.current = null;
     setSelectedId(null);
     setSelectedMessage(null);
+    setAttachmentRows([]);
+    setAttachmentBusy(false);
+    setAttachmentError(null);
+    setAttachmentHasMore(false);
+    setAttachmentDownloadBusy(null);
+    setAttachmentDownloadError(null);
     setRows([]);
     setHasMore(false);
     setLastUpdated(null);
@@ -320,13 +341,15 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       const requestedFolder = folderRef.current;
       const response = requestedFolder === "Sent"
         ? await fetchMicrosoftSentMessage({
-            mailboxId: mailbox.id,
-            providerMessageId,
+            mailboxId: mailbox.id, providerMessageId,
           })
-        : await fetchMicrosoftMessage({
-            mailboxId: mailbox.id,
-            providerMessageId,
-          });
+        : requestedFolder === "Archive"
+          ? await fetchMicrosoftArchiveMessage({
+              mailboxId: mailbox.id, providerMessageId,
+            })
+          : await fetchMicrosoftMessage({
+              mailboxId: mailbox.id, providerMessageId,
+            });
       if (
         ticket !== messageTicket.current ||
         folderRef.current !== requestedFolder ||
@@ -611,6 +634,15 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           </button>
           <button
             type="button"
+            aria-pressed={folder === "Archive"}
+            disabled={!connected || composer !== null || mutationBusy}
+            onClick={() => selectFolder("Archive")}
+            className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium aria-pressed:bg-[var(--workspace-card-subtle)] disabled:opacity-50"
+          >
+            Archive
+          </button>
+          <button
+            type="button"
             onClick={() => void refresh()}
             disabled={!connected || composer !== null || listBusy || mutationBusy}
             className="rounded-xl border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium disabled:opacity-50"
@@ -649,7 +681,9 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
             <div className="flex shrink-0 items-center justify-between border-b border-[var(--workspace-border-soft)] px-4 py-3">
               <h2 className="text-sm font-semibold">
                 {folder} <span className="font-normal text-[var(--workspace-text-muted)]">
-                  ({rows.length}{folder === "Inbox" ? ", " + rows.filter((row) => row.unread).length + " unread shown" : " sent shown"})
+                  ({rows.length}{folder === "Sent"
+                    ? " sent shown"
+                    : ", " + rows.filter((row) => row.unread).length + " unread shown"})
                 </span>
               </h2>
               {lastUpdated && <span className="text-[0.7rem] text-[var(--workspace-text-faint)]">Updated {readableTime(lastUpdated)}</span>}
@@ -670,7 +704,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                 className="w-full rounded-xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-2 text-sm text-[var(--workspace-text)] placeholder:text-[var(--workspace-text-faint)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]"
               />
               <div className="flex flex-wrap items-center justify-between gap-2">
-                {folder === "Inbox" ? (
+                {folder !== "Sent" ? (
                   <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-[var(--workspace-text-muted)]">
                     <input
                       type="checkbox"
@@ -866,7 +900,9 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                 <p className="mt-8 text-xs text-[var(--workspace-text-faint)]">
                   {folder === "Sent"
                     ? "Sent Items are read-only. Sending and replies are not enabled yet."
-                    : "Replies and other mailbox changes are not enabled yet."}
+                    : folder === "Archive"
+                      ? "Archive is read-only. Replying and changing mailbox folders are not enabled yet."
+                      : "Replies and other mailbox changes are not enabled yet."}
                 </p>
               </article>
             )}
