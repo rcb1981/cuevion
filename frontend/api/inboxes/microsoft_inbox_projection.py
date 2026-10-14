@@ -7,11 +7,28 @@ from __future__ import annotations
 
 from datetime import datetime
 from html.parser import HTMLParser
+from urllib.parse import urlsplit
 
 from api.inboxes.microsoft_graph import MicrosoftGraphError
 
 _MAX_BODY_CHARACTERS = 262_144
 _IGNORED_HTML = frozenset(("script", "style", "noscript", "template", "svg"))
+
+
+def _safe_message_href(value: object) -> str | None:
+    if not isinstance(value, str) or not 1 <= len(value) <= 2048:
+        return None
+    if value != value.strip() or any(ord(c) < 33 for c in value):
+        return None
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme.lower() not in ("http", "https"):
+            return None
+        if not parsed.hostname or parsed.username or parsed.password:
+            return None
+    except ValueError:
+        return None
+    return value
 
 
 class _PlainTextHTML(HTMLParser):
@@ -20,16 +37,29 @@ class _PlainTextHTML(HTMLParser):
         self.fragments: list[str] = []
         self.ignore_depth = 0
         self.emitted = 0
+        self.anchors: list[tuple[int, str | None]] = []
+        self.link_count = 0
 
-    def handle_starttag(self, tag: str, _attrs: list) -> None:
+    def handle_starttag(self, tag: str, attrs: list) -> None:
         if tag in _IGNORED_HTML:
             self.ignore_depth += 1
+        elif not self.ignore_depth and tag == "a":
+            raw_href = next((v for k, v in attrs if k == "href"), None)
+            href = _safe_message_href(raw_href) if self.link_count < 128 else None
+            self.anchors.append((len(self.fragments), href))
+            self.link_count += 1
         elif not self.ignore_depth and tag in {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4"}:
             self.fragments.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
         if tag in _IGNORED_HTML and self.ignore_depth:
             self.ignore_depth -= 1
+        elif not self.ignore_depth and tag == "a" and self.anchors:
+            start, href = self.anchors.pop()
+            label = "".join(self.fragments[start:]).strip()
+            if href and href not in label and self.emitted + len(href) + 3 < _MAX_BODY_CHARACTERS:
+                self.fragments.append((" " if label else "") + "(" + href + ")")
+                self.emitted += len(href) + 3
         elif not self.ignore_depth and tag in {"p", "div", "li", "tr"}:
             self.fragments.append("\n")
 

@@ -16,6 +16,7 @@ import {
 import { applyConfirmedMicrosoftUnread } from "./microsoftReadState";
 import { MicrosoftComposePanel } from "./MicrosoftComposePanel";
 import { MicrosoftMessageListRow } from "./MicrosoftMessageListRow";
+import { MicrosoftLinkifiedText } from "./MicrosoftLinkifiedText";
 import { filterMicrosoftLoadedMessages, type MicrosoftMessageSortOrder } from "./microsoftMailboxListFilters";
 
 // UI convenience only. Real production write prevention is enforced before
@@ -700,7 +701,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                   </>
                 )}
                 <div className="mt-6 space-y-4 whitespace-pre-wrap break-words text-sm leading-7">
-                  {selectedMessage.body.map((part, index) => <p key={index}>{part}</p>)}
+                  {selectedMessage.body.map((part, index) => <p key={index}><MicrosoftLinkifiedText text={part} /></p>)}
                 </div>
                 <p className="mt-8 text-xs text-[var(--workspace-text-faint)]">
                   {folder === "Sent"
