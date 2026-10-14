@@ -38,6 +38,15 @@ assert.match(ready, /aria-pressed="false"[^>]*>Sent<\/button>/);
 assert.match(ready, /Back to workspace/);
 assert.doesNotMatch(ready, /Send message|Reply all|Compose|Trash/);
 
+const microsoftSource = readFileSync(
+  resolve(__dirname, "MicrosoftMailboxReadOnlyView.tsx"), "utf8",
+);
+assert.match(microsoftSource, /fetchMicrosoftAttachments/);
+assert.match(microsoftSource, /attachmentRequest !== attachmentTicket.current/);
+assert.match(microsoftSource, /selectedIdRef.current !== providerMessageId/);
+assert.match(microsoftSource, /File downloads are not available yet/);
+assert.doesNotMatch(ready, /Download file|Download attachment/);
+
 const disconnected = renderToStaticMarkup(createElement(MicrosoftMailboxReadOnlyView, {
   mailbox,
   connected: false,

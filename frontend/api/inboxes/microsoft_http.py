@@ -79,6 +79,7 @@ def _parse_body(request, headers: tuple) -> dict:
 def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dict]:
     expected = (
         {"mailboxId", "limit", "page"} if mode in {"list", "sent"}
+        else {"mailboxId", "providerMessageId", "folder"} if mode == "attachments"
         else {"mailboxId", "providerMessageId", "unread"} if mode == "flag"
         else {"mailboxId", "providerMessageId"}
     )
@@ -95,7 +96,7 @@ def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dic
         if type(page) is not int or not 1 <= page <= 4:
             raise ValueError("invalid")
         return mailbox, limit if page == 1 else {"limit": limit, "page": page}
-    if mode in {"exact", "sent_exact"}:
+    if mode in {"exact", "sent_exact", "attachments"}:
         message_id = payload.get("providerMessageId")
         if (
             type(message_id) is not str
@@ -105,6 +106,11 @@ def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dic
             or ".." in message_id
         ):
             raise ValueError("invalid")
+        if mode == "attachments":
+            folder = payload.get("folder")
+            if type(folder) is not str or folder not in {"Inbox", "Sent"}:
+                raise ValueError("invalid")
+            return mailbox, {"providerMessageId": message_id, "folder": folder}
         return mailbox, message_id
     if mode == "flag":
         # Reuse Graph's immutable opaque-ID validation, not a browser path.
@@ -163,6 +169,19 @@ def microsoft_inbox_response(request, *, mode: str):
                     headers, mailbox_id, page_size=selector,
                 )
             return json_response(200, project_sent(snapshot, mailbox_id))
+        if mode == "attachments":
+            assert type(selector) is dict
+            snapshot = owned.list_owned_microsoft_attachments(
+                headers, mailbox_id, selector["providerMessageId"],
+                folder=selector["folder"],
+            )
+            if (
+                type(snapshot) is not dict
+                or type(snapshot.get("attachments")) is not list
+                or type(snapshot.get("hasMore")) is not bool
+            ):
+                raise MicrosoftGraphError("microsoft_graph_invalid_response")
+            return json_response(200, {"ok": True, **snapshot})
         if mode == "sent_exact":
             assert type(selector) is str
             message = owned.read_owned_microsoft_sent_message(

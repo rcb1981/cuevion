@@ -5203,3 +5203,92 @@ export async function checkMicrosoftSentStatus(request: {
     };
   }
 }
+
+export type MicrosoftAttachmentMetadata = {
+  id: string;
+  name: string;
+  size: number;
+  contentType: string;
+  isInline: boolean;
+  kind: "file" | "item" | "reference" | "other";
+};
+
+export type MicrosoftAttachmentListResponse = {
+  ok: boolean;
+  attachments?: MicrosoftAttachmentMetadata[];
+  hasMore?: boolean;
+  error?: { code?: string; message?: string };
+};
+
+function trustedMicrosoftAttachment(value: unknown): value is MicrosoftAttachmentMetadata {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const a = value as Record<string, unknown>;
+  return (
+    Object.keys(a).every((key) =>
+      ["id", "name", "size", "contentType", "isInline", "kind"].includes(key)
+    ) &&
+    typeof a.id === "string" &&
+    /^[^\s?#]+$/.test(a.id) &&
+    a.id.length <= 512 &&
+    !a.id.includes("..") &&
+    typeof a.name === "string" && a.name.length > 0 && a.name.length <= 256 &&
+    typeof a.size === "number" && Number.isSafeInteger(a.size) &&
+    a.size >= 0 && a.size <= 1024 ** 4 &&
+    typeof a.contentType === "string" && a.contentType.length <= 128 &&
+    typeof a.isInline === "boolean" &&
+    ["file", "item", "reference", "other"].includes(String(a.kind))
+  );
+}
+
+export async function fetchMicrosoftAttachments(request: {
+  mailboxId: string;
+  providerMessageId: string;
+  folder: "Inbox" | "Sent";
+}): Promise<MicrosoftAttachmentListResponse> {
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
+    !/^[^\s?#]{1,512}$/.test(request.providerMessageId) ||
+    request.providerMessageId.includes("..") ||
+    !["Inbox", "Sent"].includes(request.folder)
+  ) {
+    return { ok: false, error: { code: "invalid_request", message: "Invalid Microsoft request." } };
+  }
+  try {
+    const response = await fetchProtectedApi("/api/inboxes/fetch-microsoft-attachments", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      return { ok: false, error: safeMicrosoftFetchError(payload) };
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error("invalid_response");
+    }
+    const data = payload as Record<string, unknown>;
+    if (
+      data.ok !== true ||
+      !Array.isArray(data.attachments) ||
+      data.attachments.length > 25 ||
+      !data.attachments.every(trustedMicrosoftAttachment) ||
+      new Set(data.attachments.map((item: MicrosoftAttachmentMetadata) => item.id)).size
+        !== data.attachments.length ||
+      typeof data.hasMore !== "boolean" ||
+      !Object.keys(data).every((key) => ["ok", "attachments", "hasMore"].includes(key))
+    ) {
+      throw new Error("invalid_response");
+    }
+    return {
+      ok: true,
+      attachments: data.attachments as MicrosoftAttachmentMetadata[],
+      hasMore: data.hasMore,
+    };
+  } catch {
+    return {
+      ok: false,
+      error: { code: "microsoft_graph_invalid_response", message: "Attachments could not be loaded." },
+    };
+  }
+}

@@ -10,8 +10,10 @@ import {
   fetchMicrosoftMessage,
   fetchMicrosoftSent,
   fetchMicrosoftSentMessage,
+  fetchMicrosoftAttachments,
   setMicrosoftMessageUnread,
   type LiveInboxMessageSnapshot,
+  type MicrosoftAttachmentMetadata,
 } from "../../lib/inboxConnectionApi";
 import { applyConfirmedMicrosoftUnread } from "./microsoftReadState";
 import { MicrosoftComposePanel } from "./MicrosoftComposePanel";
@@ -77,6 +79,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
 }: MicrosoftMailboxReadOnlyViewProps) {
   const inboxTicket = React.useRef(0);
   const messageTicket = React.useRef(0);
+  const attachmentTicket = React.useRef(0);
   const selectedIdRef = React.useRef<string | null>(null);
   const folderRef = React.useRef<"Inbox" | "Sent">("Inbox");
   const [folder, setFolder] = useState<"Inbox" | "Sent">("Inbox");
@@ -96,6 +99,10 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const [selectedMessage, setSelectedMessage] = useState<LiveInboxMessageSnapshot | null>(null);
   const [listBusy, setListBusy] = useState(false);
   const [messageBusy, setMessageBusy] = useState(false);
+  const [attachmentRows, setAttachmentRows] = useState<MicrosoftAttachmentMetadata[]>([]);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [attachmentHasMore, setAttachmentHasMore] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [messageError, setMessageError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
@@ -290,9 +297,14 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       return;
     }
     const ticket = ++messageTicket.current;
+    const attachmentRequest = ++attachmentTicket.current;
     selectedIdRef.current = providerMessageId;
     setSelectedId(providerMessageId);
     setSelectedMessage(null);
+    setAttachmentRows([]);
+    setAttachmentBusy(false);
+    setAttachmentError(null);
+    setAttachmentHasMore(false);
     setMessageBusy(true);
     setMessageError(null);
     setMutationError(null);
@@ -342,6 +354,35 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
         return;
       }
       setSelectedMessage(response.message);
+      if (response.message.hasAttachments === true) {
+        setAttachmentBusy(true);
+        void fetchMicrosoftAttachments({
+          mailboxId: mailbox.id,
+          providerMessageId,
+          folder: requestedFolder,
+        }).then((result) => {
+          if (
+            ticket !== messageTicket.current ||
+            attachmentRequest !== attachmentTicket.current ||
+            folderRef.current !== requestedFolder ||
+            selectedIdRef.current !== providerMessageId
+          ) return;
+          if (!result.ok || !Array.isArray(result.attachments)) {
+            setAttachmentError("Attachment details could not be loaded.");
+            return;
+          }
+          setAttachmentRows(result.attachments);
+          setAttachmentHasMore(result.hasMore === true);
+        }).catch(() => {
+          if (ticket === messageTicket.current) {
+            setAttachmentError("Attachment details could not be loaded.");
+          }
+        }).finally(() => {
+          if (ticket === messageTicket.current && attachmentRequest === attachmentTicket.current) {
+            setAttachmentBusy(false);
+          }
+        });
+      }
     } catch {
       if (ticket === messageTicket.current) {
         setMessageError("The selected Microsoft message could not be opened.");
@@ -701,9 +742,22 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                   </>
                 )}
                 {selectedMessage.hasAttachments && (
-                  <div role="note" className="mt-4 rounded-xl border border-[var(--workspace-border-soft)] p-3 text-xs text-[var(--workspace-text-muted)]">
-                    This message includes an attachment. File access is not yet available in the Microsoft read-only pilot.
-                  </div>
+                  <section aria-label="Microsoft message attachments" className="mt-4 rounded-xl border border-[var(--workspace-border-soft)] p-4 text-xs text-[var(--workspace-text-muted)]">
+                    <h3 className="mb-2 text-sm font-semibold text-[var(--workspace-text)]">Attachments</h3>
+                    {attachmentBusy && <p role="status">Loading attachment details…</p>}
+                    {attachmentError && <p role="alert">{attachmentError}</p>}
+                    {!attachmentBusy && !attachmentError && attachmentRows.map((item) => (
+                      <div key={item.id} className="flex justify-between gap-3 border-t border-[var(--workspace-border-soft)] py-2">
+                        <span className="min-w-0 break-words">{item.name}</span>
+                        <span className="shrink-0">{item.size.toLocaleString()} bytes</span>
+                      </div>
+                    ))}
+                    {!attachmentBusy && !attachmentError && attachmentRows.length === 0 && (
+                      <p>No attachment details returned.</p>
+                    )}
+                    {attachmentHasMore && <p>Only the first 25 attachments are shown.</p>}
+                    <p className="mt-2">File downloads are not available yet.</p>
+                  </section>
                 )}
                 <div className="mt-6 space-y-4 whitespace-pre-wrap break-words text-sm leading-7">
                   {selectedMessage.body.map((part, index) => <p key={index}><MicrosoftLinkifiedText text={part} /></p>)}

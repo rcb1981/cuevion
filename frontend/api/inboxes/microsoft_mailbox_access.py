@@ -309,3 +309,18 @@ def read_owned_microsoft_sent_message(
     message = microsoft_sent_graph.get_microsoft_sent_message(token, message_id)
     _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
     return message
+
+
+def list_owned_microsoft_attachments(
+    headers, mailbox_id: object, message_id: str, *, folder: str,
+) -> dict:
+    """Read attached file names only after owner, folder, and token checks."""
+    if folder not in {"Inbox", "Sent"}:
+        raise MicrosoftMailboxAccessError("microsoft_mailbox_unavailable")
+    from api.inboxes import microsoft_attachments_graph
+    token, authority = _owned_token(headers, mailbox_id)
+    result = microsoft_attachments_graph.list_microsoft_attachments(
+        token, message_id, folder=folder,
+    )
+    _verify_unchanged_owned_mailbox(headers, mailbox_id, authority)
+    return result
