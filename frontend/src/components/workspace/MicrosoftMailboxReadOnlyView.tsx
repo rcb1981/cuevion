@@ -2,6 +2,7 @@ import React, {
   memo,
   useCallback,
   useEffect,
+  useMemo,
   useState,
 } from "react";
 import {
@@ -14,6 +15,8 @@ import {
 } from "../../lib/inboxConnectionApi";
 import { applyConfirmedMicrosoftUnread } from "./microsoftReadState";
 import { MicrosoftComposePanel } from "./MicrosoftComposePanel";
+import { MicrosoftMessageListRow } from "./MicrosoftMessageListRow";
+import { filterMicrosoftLoadedMessages, type MicrosoftMessageSortOrder } from "./microsoftMailboxListFilters";
 
 // UI convenience only. Real production write prevention is enforced before
 // any Graph mutation at the server boundary in microsoft_production_pilot.py.
@@ -94,6 +97,19 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const [messageError, setMessageError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [unreadOnly, setUnreadOnly] = useState(false);
+  const [sortOrder, setSortOrder] = useState<MicrosoftMessageSortOrder>("newest");
+  const visibleRows = useMemo(
+    () => filterMicrosoftLoadedMessages(rows, {
+      folder,
+      search: searchQuery,
+      unreadOnly,
+      sortOrder,
+    }),
+    [rows, folder, searchQuery, unreadOnly, sortOrder],
+  );
+  const hasActiveListFilter = Boolean(searchQuery.trim()) || (folder === "Inbox" && unreadOnly);
 
   const refresh = useCallback(async () => {
     if (!connected || mutationInFlight.current || composer !== null) {
@@ -211,6 +227,8 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     setMutationConfirmation(null);
     setHasMore(false);
     setLastUpdated(null);
+    setSearchQuery("");
+    setUnreadOnly(false);
     setFolder(nextFolder);
   }, [connected, composer]);
 
@@ -483,6 +501,55 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
               </h2>
               {lastUpdated && <span className="text-[0.7rem] text-[var(--workspace-text-faint)]">Updated {readableTime(lastUpdated)}</span>}
             </div>
+            <div className="shrink-0 space-y-2 border-b border-[var(--workspace-border-soft)] px-3 py-3">
+              <label htmlFor={"microsoft-list-search-" + mailbox.id} className="sr-only">
+                Search loaded Microsoft messages
+              </label>
+              <input
+                id={"microsoft-list-search-" + mailbox.id}
+                type="search"
+                autoComplete="off"
+                value={searchQuery}
+                maxLength={160}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder={"Search loaded " + folder.toLowerCase() + " messages"}
+                aria-label="Search loaded Microsoft messages"
+                className="w-full rounded-xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-2 text-sm text-[var(--workspace-text)] placeholder:text-[var(--workspace-text-faint)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]"
+              />
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                {folder === "Inbox" ? (
+                  <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-[var(--workspace-text-muted)]">
+                    <input
+                      type="checkbox"
+                      checked={unreadOnly}
+                      onChange={(event) => setUnreadOnly(event.target.checked)}
+                      className="accent-[var(--workspace-accent-primary)]"
+                    />
+                    Unread only
+                  </label>
+                ) : (
+                  <span className="text-xs text-[var(--workspace-text-faint)]">Sent Items</span>
+                )}
+                <label className="inline-flex items-center gap-2 text-xs text-[var(--workspace-text-muted)]">
+                  <span className="sr-only">Sort loaded Microsoft messages</span>
+                  <select
+                    aria-label="Sort loaded Microsoft messages"
+                    value={sortOrder}
+                    onChange={(event) => setSortOrder(event.target.value as MicrosoftMessageSortOrder)}
+                    className="rounded-lg border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-2 py-1.5 text-xs text-[var(--workspace-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]"
+                  >
+                    <option value="newest">Newest first</option>
+                    <option value="oldest">Oldest first</option>
+                  </select>
+                </label>
+              </div>
+              {hasActiveListFilter ? (
+                <p className="text-xs text-[var(--workspace-text-faint)]" aria-live="polite">
+                  {visibleRows.length} of {rows.length} loaded messages match.
+                  {" "}Search and filters apply only to loaded messages.
+                </p>
+              ) : null}
+            </div>
             <div className="min-h-0 flex-1 overflow-y-auto" aria-busy={listBusy}>
               {listError && (
                 <div role="alert" className="m-3 rounded-lg border border-[var(--workspace-border)] p-3 text-sm">
@@ -495,30 +562,23 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                   {listBusy ? "Loading Microsoft " + folder + "…" : listError ? "No messages available." : "Your Microsoft " + folder + " is empty."}
                 </p>
               )}
-              {rows.map((message) => {
-                const id = message.providerMessageId;
-                if (!id) return null;
-                const selected = selectedId === id;
-                return (
-                  <button
-                    key={id}
-                    type="button"
-                    aria-pressed={selected}
-                    disabled={mutationBusy}
-                    onClick={() => void openMessage(id)}
-                    className={"block w-full border-b border-[var(--workspace-border-soft)] px-4 py-4 text-left transition-colors hover:bg-[var(--workspace-card-subtle)] focus-visible:outline focus-visible:outline-2 " +
-                      (selected ? "bg-[var(--workspace-card)] " : "")}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className={"min-w-0 truncate text-sm " + (message.unread ? "font-semibold" : "font-medium")}>{message.sender}</span>
-                      <span className="shrink-0 text-[0.7rem] text-[var(--workspace-text-faint)]">{readableTime(message.createdAt)}</span>
-                    </div>
-                    <div className={"mt-1 truncate text-sm " + (message.unread ? "font-semibold" : "font-normal")}>{message.subject || "(No subject)"}</div>
-                    <p className="mt-1 truncate text-xs text-[var(--workspace-text-muted)]">{message.snippet || "No preview available"}</p>
-                  </button>
-                );
-              })}
-              {hasMore && <p className="p-4 text-xs text-[var(--workspace-text-muted)]">Showing the 25 most recent messages. Older-message navigation will follow.</p>}
+              {rows.length > 0 && visibleRows.length === 0 && (
+                <p className="p-5 text-sm text-[var(--workspace-text-muted)]" role="status">
+                  No matching messages in this loaded set. Clear the search or unread filter.
+                </p>
+              )}
+              {visibleRows.map((message) => (
+                <MicrosoftMessageListRow
+                  key={message.providerMessageId ?? message.id}
+                  message={message}
+                  folder={folder}
+                  selected={selectedId === message.providerMessageId}
+                  disabled={mutationBusy}
+                  dateLabel={readableTime(message.createdAt)}
+                  onOpenMessage={(providerMessageId) => void openMessage(providerMessageId)}
+                />
+              ))}
+              {hasMore && <p className="p-4 text-xs text-[var(--workspace-text-muted)]">Showing the {rows.length} most recent loaded messages. Search does not include older messages yet.</p>}
             </div>
           </section>
           <section aria-label="Selected Microsoft message" className="min-h-0 overflow-y-auto p-5 sm:p-7">
