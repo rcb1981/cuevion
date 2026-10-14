@@ -3,7 +3,7 @@ import type { LiveInboxMessageSnapshot } from "../../lib/inboxConnectionApi";
 
 type MicrosoftMessageListRowProps = {
   message: LiveInboxMessageSnapshot;
-  folder: "Inbox" | "Sent" | "Archive" | "Drafts";
+  folder: "Inbox" | "Sent" | "Archive" | "Drafts" | "Deleted";
   selected: boolean;
   disabled: boolean;
   dateLabel: string;
@@ -27,7 +27,7 @@ export function MicrosoftMessageListRow({
     return null;
   }
 
-  const unread = (folder === "Inbox" || folder === "Archive") && message.unread === true;
+  const unread = (folder === "Inbox" || folder === "Archive" || folder === "Deleted") && message.unread === true;
   const readState = folder === "Sent" ? "sent" : folder === "Drafts" ? "draft" : unread ? "unread" : "read";
 
   return (
@@ -62,7 +62,7 @@ export function MicrosoftMessageListRow({
                   : "font-medium text-[var(--workspace-text-muted)]")
               }
             >
-              {folder === "Inbox" || folder === "Archive" ? (
+              {folder === "Inbox" || folder === "Archive" || folder === "Deleted" ? (
                 <span className="sr-only">
                   {unread ? "Unread message. " : "Read message. "}
                 </span>

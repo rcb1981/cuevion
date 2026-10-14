@@ -268,6 +268,89 @@ def project_drafts(snapshot: object, mailbox_id: str) -> dict:
     }
 
 
+def project_deleted_message(
+    message: object, mailbox_id: str, *, exact_body: bool = False,
+) -> dict:
+    """Deleted Items DTO; it is never presented as an active Inbox or Sent message."""
+    if type(message) is not dict or type(mailbox_id) is not str or not mailbox_id:
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    fields = (
+        "id", "subject", "preview", "modifiedAt", "fromDisplay",
+        "toDisplay", "unread", "isDraft", "hasAttachments",
+    )
+    if any(field not in message for field in fields):
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    mid = message["id"]
+    subject, preview = message["subject"], message["preview"]
+    sender, recipient = message["fromDisplay"], message["toDisplay"]
+    if (
+        type(mid) is not str or not mid or len(mid) > 512 or ".." in mid
+        or any(type(v) is not str for v in (subject, preview, sender, recipient))
+        or len(subject) > 998 or len(preview) > 16384
+        or len(sender) > 2048 or len(recipient) > 2048
+        or type(message["unread"]) is not bool
+        or type(message["isDraft"]) is not bool
+        or type(message["hasAttachments"]) is not bool
+        or (message["isDraft"] and message["unread"])
+    ):
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    date, display_time = _timestamp(message["modifiedAt"])
+    address_label = sender or ("To: " + recipient if recipient else "(Unknown sender)")
+    result = {
+        "id": mid, "providerMessageId": mid, "serverMailboxId": mailbox_id,
+        "providerFolder": "DELETED",
+        "labelIds": ["DELETED", *(["UNREAD"] if message["unread"] else [])],
+        "sender": address_label, "subject": subject, "snippet": preview[:220],
+        "from": sender, "to": recipient, "cc": "",
+        "timestamp": display_time, "createdAt": date, "body": [],
+        "unread": message["unread"], "flagged": False, "attachments": [],
+        "hasAttachments": message["hasAttachments"],
+    }
+    conversation_id = message.get("conversationId")
+    if conversation_id is not None:
+        if type(conversation_id) is not str or not conversation_id:
+            raise MicrosoftGraphError("microsoft_graph_invalid_response")
+        result["providerThreadId"] = conversation_id
+    if not exact_body:
+        return result
+    body = message.get("body")
+    if type(body) is not dict:
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    kind, content = body.get("contentType"), body.get("content")
+    if kind not in {"text", "html"} or type(content) is not str:
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    if kind == "html":
+        parser = _PlainTextHTML()
+        try:
+            parser.feed(content[:_MAX_BODY_CHARACTERS])
+            parser.close()
+            text = parser.result()
+        except (ValueError, AssertionError):
+            raise MicrosoftGraphError("microsoft_graph_invalid_response") from None
+    else:
+        text = content[:_MAX_BODY_CHARACTERS]
+    result["body"] = [section for section in text.split("\n\n") if section] or [""]
+    return result
+
+
+def project_deleted(snapshot: object, mailbox_id: str) -> dict:
+    if (
+        type(snapshot) is not dict
+        or type(snapshot.get("messages")) is not list
+        or type(snapshot.get("hasMore")) is not bool
+        or len(snapshot["messages"]) > 25
+    ):
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    projected = [project_deleted_message(item, mailbox_id) for item in snapshot["messages"]]
+    ids = [item["providerMessageId"] for item in projected]
+    if len(set(ids)) != len(ids):
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    return {
+        "ok": True, "messages": projected,
+        "deletedMessageIds": ids, "hasMore": snapshot["hasMore"],
+    }
+
+
 def project_sent_message(message: object, mailbox_id: str, *, exact_body: bool = False) -> dict:
     """Project a Graph SentItems record without inventing Inbox membership."""
     if type(message) is not dict or type(mailbox_id) is not str or not mailbox_id:

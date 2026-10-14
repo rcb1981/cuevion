@@ -26,7 +26,7 @@ const base = {
 
 function row(
   overrides: Partial<typeof base> = {},
-  folder: "Inbox" | "Sent" | "Archive" | "Drafts" = "Inbox",
+  folder: "Inbox" | "Sent" | "Archive" | "Drafts" | "Deleted" = "Inbox",
   selected = false,
 ) {
   return renderToStaticMarkup(createElement(MicrosoftMessageListRow, {
@@ -114,3 +114,9 @@ const draft = row({ unread: true }, "Drafts");
 assert.match(draft, /data-read-state="draft"/);
 assert.doesNotMatch(draft, /Unread message\./);
 assert.doesNotMatch(draft, /Read message\./);
+
+
+const deletedUnread = row({ unread: true }, "Deleted");
+assert.match(deletedUnread, /data-read-state="unread"/);
+assert.match(deletedUnread, /Unread message\./);
+assert.match(row({ unread: false }, "Deleted"), /data-read-state="read"/);

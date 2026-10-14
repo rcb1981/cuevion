@@ -12,6 +12,8 @@ import {
   fetchMicrosoftArchiveMessage,
   fetchMicrosoftDrafts,
   fetchMicrosoftDraftMessage,
+  fetchMicrosoftDeleted,
+  fetchMicrosoftDeletedMessage,
   fetchMicrosoftSent,
   fetchMicrosoftSentMessage,
   fetchMicrosoftAttachments,
@@ -32,7 +34,7 @@ const MICROSOFT_READ_ONLY_PILOT = true;
 const MICROSOFT_POLL_INTERVAL_MS = 120_000;
 const MICROSOFT_INBOX_LIMIT = 25;
 const MICROSOFT_MAX_PAGES = 4;
-type MicrosoftFolder = "Inbox" | "Sent" | "Archive" | "Drafts";
+type MicrosoftFolder = "Inbox" | "Sent" | "Archive" | "Drafts" | "Deleted";
 
 type MicrosoftReadOnlyMailbox = {
   id: string;
@@ -128,7 +130,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     }),
     [rows, folder, searchQuery, unreadOnly, sortOrder],
   );
-  const hasActiveListFilter = Boolean(searchQuery.trim()) || ((folder === "Inbox" || folder === "Archive") && unreadOnly);
+  const hasActiveListFilter = Boolean(searchQuery.trim()) || ((folder === "Inbox" || folder === "Archive" || folder === "Deleted") && unreadOnly);
 
   const refresh = useCallback(async () => {
     if (!connected || mutationInFlight.current || composer !== null) {
@@ -151,7 +153,11 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
             ? await fetchMicrosoftDrafts({
                 mailboxId: mailbox.id, limit: MICROSOFT_INBOX_LIMIT, page,
               })
-            : await fetchMicrosoftInbox({
+            : requestedFolder === "Deleted"
+              ? await fetchMicrosoftDeleted({
+                  mailboxId: mailbox.id, limit: MICROSOFT_INBOX_LIMIT, page,
+                })
+              : await fetchMicrosoftInbox({
               mailboxId: mailbox.id, limit: MICROSOFT_INBOX_LIMIT, page,
             });
       if (
@@ -357,7 +363,11 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
             ? await fetchMicrosoftDraftMessage({
                 mailboxId: mailbox.id, providerMessageId,
               })
-            : await fetchMicrosoftMessage({
+            : requestedFolder === "Deleted"
+              ? await fetchMicrosoftDeletedMessage({
+                  mailboxId: mailbox.id, providerMessageId,
+                })
+              : await fetchMicrosoftMessage({
               mailboxId: mailbox.id, providerMessageId,
             });
       if (
@@ -607,7 +617,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
             <p className="truncate text-xs text-[var(--workspace-text-muted)]">{mailbox.email}</p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="rounded-full border border-[var(--workspace-border-soft)] px-3 py-1 text-[0.7rem] font-medium text-[var(--workspace-text-muted)]">
             Microsoft 365 · Mail
           </span>
@@ -662,6 +672,15 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           </button>
           <button
             type="button"
+            aria-pressed={folder === "Deleted"}
+            disabled={!connected || composer !== null || mutationBusy}
+            onClick={() => selectFolder("Deleted")}
+            className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium aria-pressed:bg-[var(--workspace-card-subtle)] disabled:opacity-50"
+          >
+            Deleted Items
+          </button>
+          <button
+            type="button"
             onClick={() => void refresh()}
             disabled={!connected || composer !== null || listBusy || mutationBusy}
             className="rounded-xl border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium disabled:opacity-50"
@@ -704,7 +723,9 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                     ? " sent shown"
                     : folder === "Drafts"
                       ? " drafts shown"
-                      : ", " + rows.filter((row) => row.unread).length + " unread shown"})
+                      : folder === "Deleted"
+                        ? " deleted items shown"
+                        : ", " + rows.filter((row) => row.unread).length + " unread shown"})
                 </span>
               </h2>
               {lastUpdated && <span className="text-[0.7rem] text-[var(--workspace-text-faint)]">Updated {readableTime(lastUpdated)}</span>}
@@ -725,7 +746,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                 className="w-full rounded-xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-2 text-sm text-[var(--workspace-text)] placeholder:text-[var(--workspace-text-faint)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]"
               />
               <div className="flex flex-wrap items-center justify-between gap-2">
-                {folder === "Inbox" || folder === "Archive" ? (
+                {folder === "Inbox" || folder === "Archive" || folder === "Deleted" ? (
                   <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-[var(--workspace-text-muted)]">
                     <input
                       type="checkbox"
@@ -826,14 +847,19 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                 <div className="mt-4 border-b border-[var(--workspace-border-soft)] pb-4 text-sm">
                   <p className="font-medium">
                     {folder === "Sent" || folder === "Drafts"
-                      ? "To: " + selectedMessage.to : selectedMessage.from}
+                      ? "To: " + selectedMessage.to
+                      : folder === "Deleted"
+                        ? (selectedMessage.from || selectedMessage.sender)
+                        : selectedMessage.from}
                   </p>
                   {folder === "Sent" && (
                     <p className="mt-1 text-xs text-[var(--workspace-text-muted)]">
                       From: {selectedMessage.from}
                     </p>
                   )}
-                  <p className="mt-1 text-xs text-[var(--workspace-text-muted)]">{readableTime(selectedMessage.createdAt)}</p>
+                  <p className="mt-1 text-xs text-[var(--workspace-text-muted)]">
+                    {folder === "Deleted" ? "Last changed: " : ""}{readableTime(selectedMessage.createdAt)}
+                  </p>
                 </div>
                 {folder === "Inbox" && (
                   <>
@@ -928,7 +954,9 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                       ? "Archive is read-only. Replying and changing mailbox folders are not enabled yet."
                       : folder === "Drafts"
                         ? "Drafts are read-only. Editing, sending, and deleting drafts are disabled."
-                        : "Replies and other mailbox changes are not enabled yet."}
+                        : folder === "Deleted"
+                          ? "Deleted Items are read-only. Restoring and permanently deleting messages are disabled."
+                          : "Replies and other mailbox changes are not enabled yet."}
                 </p>
               </article>
             )}

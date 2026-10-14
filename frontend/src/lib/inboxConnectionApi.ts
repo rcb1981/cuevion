@@ -4536,7 +4536,7 @@ function safeMicrosoftFetchError(payload: unknown): { code: string; message: str
 function isTrustedMicrosoftInboxMessage(
   value: unknown,
   mailboxId: string,
-  options: { exact: boolean; folder?: "INBOX" | "ARCHIVE" | "DRAFTS" },
+  options: { exact: boolean; folder?: "INBOX" | "ARCHIVE" | "DRAFTS" | "DELETED" },
 ): value is LiveInboxMessageSnapshot {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return false;
@@ -5243,13 +5243,13 @@ function trustedMicrosoftAttachment(value: unknown): value is MicrosoftAttachmen
 export async function fetchMicrosoftAttachments(request: {
   mailboxId: string;
   providerMessageId: string;
-  folder: "Inbox" | "Sent" | "Archive" | "Drafts";
+  folder: "Inbox" | "Sent" | "Archive" | "Drafts" | "Deleted";
 }): Promise<MicrosoftAttachmentListResponse> {
   if (
     !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
     !/^[^\s?#]{1,512}$/.test(request.providerMessageId) ||
     request.providerMessageId.includes("..") ||
-    !["Inbox", "Sent", "Archive", "Drafts"].includes(request.folder)
+    !["Inbox", "Sent", "Archive", "Drafts", "Deleted"].includes(request.folder)
   ) {
     return { ok: false, error: { code: "invalid_request", message: "Invalid Microsoft request." } };
   }
@@ -5307,7 +5307,7 @@ export async function downloadMicrosoftAttachmentFile(request: {
   mailboxId: string;
   providerMessageId: string;
   attachmentId: string;
-  folder: "Inbox" | "Sent" | "Archive" | "Drafts";
+  folder: "Inbox" | "Sent" | "Archive" | "Drafts" | "Deleted";
 }): Promise<MicrosoftAttachmentFileResponse> {
   const validGraphId = (id: unknown) =>
     typeof id === "string" && id.length <= 512 &&
@@ -5317,7 +5317,7 @@ export async function downloadMicrosoftAttachmentFile(request: {
     !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
     !validGraphId(request.providerMessageId) ||
     !validGraphId(request.attachmentId) ||
-    (request.folder !== "Inbox" && request.folder !== "Sent" && request.folder !== "Archive" && request.folder !== "Drafts")
+    (request.folder !== "Inbox" && request.folder !== "Sent" && request.folder !== "Archive" && request.folder !== "Drafts" && request.folder !== "Deleted")
   ) {
     return { ok: false, error: { code: "invalid_request", message: "Invalid Microsoft attachment request." } };
   }
@@ -5590,5 +5590,134 @@ export async function fetchMicrosoftDraftMessage(
       code: "microsoft_graph_invalid_response",
       message: "The selected Microsoft Draft could not be opened.",
     }};
+  }
+}
+
+function isTrustedMicrosoftDeleted(
+  value: unknown, mailboxId: string, exact: boolean,
+): value is LiveInboxMessageSnapshot {
+  if (!isTrustedMicrosoftInboxMessage(value, mailboxId, {exact, folder: "DELETED"})) {
+    return false;
+  }
+  return (
+    value.labelIds?.length === (value.unread ? 2 : 1) &&
+    value.labelIds[0] === "DELETED" &&
+    (!value.unread || value.labelIds[1] === "UNREAD") &&
+    value.flagged === false &&
+    typeof value.from === "string" &&
+    typeof value.to === "string" &&
+    Boolean(value.sender) &&
+    (value.from !== "" || value.sender === (
+      value.to ? "To: " + value.to : "(Unknown sender)"
+    ))
+  );
+}
+
+/** Read-only, owner-authorized Deleted Items pages; no restore/delete operation. */
+export async function fetchMicrosoftDeleted(
+  request: FetchMicrosoftInboxRequest,
+): Promise<ConnectInboxResponse> {
+  const mailboxId = request?.mailboxId;
+  const limit = request?.limit ?? 20;
+  const page = request?.page ?? 1;
+  if (
+    typeof mailboxId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(mailboxId) ||
+    !Number.isInteger(limit) || limit < 1 || limit > 25 ||
+    !Number.isInteger(page) || page < 1 || page > 4
+  ) {
+    return {
+      ok: false, error: {
+        code: "invalid_request", message: "Invalid Microsoft Deleted Items request.",
+      },
+    };
+  }
+  try {
+    const response = await fetchProtectedApi("/api/inboxes/fetch-microsoft-deleted", {
+      method: "POST", credentials: "include",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({mailboxId, limit, ...(page > 1 ? {page} : {})}),
+    });
+    const data: unknown = await response.json();
+    if (!response.ok) return {ok: false, error: safeMicrosoftFetchError(data)};
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw new Error("invalid_microsoft_deleted");
+    }
+    const result = data as Record<string, unknown>;
+    if (
+      result.ok !== true ||
+      !Object.keys(result).every((field) =>
+        ["ok", "messages", "deletedMessageIds", "hasMore"].includes(field)
+      ) ||
+      !Array.isArray(result.messages) ||
+      result.messages.length > limit ||
+      !result.messages.every((item) => isTrustedMicrosoftDeleted(item, mailboxId, false)) ||
+      !Array.isArray(result.deletedMessageIds) ||
+      result.deletedMessageIds.length !== result.messages.length ||
+      result.deletedMessageIds.some((id, i) =>
+        id !== (result.messages as LiveInboxMessageSnapshot[])[i].providerMessageId
+      ) ||
+      new Set(result.deletedMessageIds).size !== result.deletedMessageIds.length ||
+      typeof result.hasMore !== "boolean"
+    ) throw new Error("invalid_microsoft_deleted");
+    return {
+      ok: true,
+      messages: result.messages as LiveInboxMessageSnapshot[],
+      hasMore: result.hasMore,
+    };
+  } catch {
+    return {
+      ok: false, error: {
+        code: "microsoft_graph_invalid_response",
+        message: "Microsoft Deleted Items could not be loaded.",
+      },
+    };
+  }
+}
+
+export async function fetchMicrosoftDeletedMessage(
+  request: {mailboxId: string; providerMessageId: string},
+): Promise<FetchMicrosoftMessageResponse> {
+  if (
+    typeof request?.mailboxId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
+    typeof request.providerMessageId !== "string" ||
+    !/^[^\x00-\x20\x7f-\x9f?#]{1,512}$/.test(request.providerMessageId) ||
+    request.providerMessageId === "." ||
+    request.providerMessageId.includes("..") ||
+    new TextEncoder().encode(request.providerMessageId).byteLength > 512
+  ) {
+    return {
+      ok: false, error: {
+        code: "invalid_request", message: "Invalid Microsoft Deleted Item request.",
+      },
+    };
+  }
+  try {
+    const response = await fetchProtectedApi("/api/inboxes/fetch-microsoft-deleted-message", {
+      method: "POST", credentials: "include",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(request),
+    });
+    const data: unknown = await response.json();
+    if (!response.ok) return {ok: false, error: safeMicrosoftFetchError(data)};
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw new Error("invalid_microsoft_deleted");
+    }
+    const result = data as Record<string, unknown>;
+    if (
+      result.ok !== true ||
+      !Object.keys(result).every((field) => ["ok", "message"].includes(field)) ||
+      !isTrustedMicrosoftDeleted(result.message, request.mailboxId, true) ||
+      result.message.providerMessageId !== request.providerMessageId
+    ) throw new Error("invalid_microsoft_deleted");
+    return {ok: true, message: result.message};
+  } catch {
+    return {
+      ok: false, error: {
+        code: "microsoft_graph_invalid_response",
+        message: "The selected Deleted Item could not be opened.",
+      },
+    };
   }
 }

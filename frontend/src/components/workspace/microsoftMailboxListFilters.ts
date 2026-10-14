@@ -3,7 +3,7 @@ import type { LiveInboxMessageSnapshot } from "../../lib/inboxConnectionApi";
 export type MicrosoftMessageSortOrder = "newest" | "oldest";
 
 export type MicrosoftMessageListOptions = {
-  folder: "Inbox" | "Sent" | "Archive" | "Drafts";
+  folder: "Inbox" | "Sent" | "Archive" | "Drafts" | "Deleted";
   search: string;
   unreadOnly: boolean;
   sortOrder: MicrosoftMessageSortOrder;
@@ -22,7 +22,7 @@ export function filterMicrosoftLoadedMessages(
   const items = rows
     .map((message, index) => ({ message, index }))
     .filter(({ message }) => {
-      if ((options.folder === "Inbox" || options.folder === "Archive") && options.unreadOnly && message.unread !== true) {
+      if ((options.folder === "Inbox" || options.folder === "Archive" || options.folder === "Deleted") && options.unreadOnly && message.unread !== true) {
         return false;
       }
       if (!normalizedSearch) {

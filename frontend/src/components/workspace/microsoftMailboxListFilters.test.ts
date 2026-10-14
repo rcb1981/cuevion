@@ -85,3 +85,11 @@ assert.deepEqual(
   ["id-2", "id-3", "id-1"],
   "Drafts have no unread filter or read/unread semantics",
 );
+
+
+assert.deepEqual(
+  filterMicrosoftLoadedMessages(rows, { ...defaults, folder: "Deleted", unreadOnly: true })
+    .map((message) => message.id),
+  ["id-3", "id-1"],
+  "Read status in Deleted Items is only a local visual filter",
+);

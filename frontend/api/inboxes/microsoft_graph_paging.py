@@ -32,7 +32,7 @@ def validated_microsoft_continuation_path(value: object, *, expected_folder: str
     A user path, cross-folder route, custom host, userinfo, or encoded path
     traversal must fail closed. A continuation marker is mandatory.
     """
-    if expected_folder not in {"inbox", "sentitems", "archive", "drafts"}:
+    if expected_folder not in {"inbox", "sentitems", "archive", "drafts", "deleteditems"}:
         raise InvalidMicrosoftContinuation
     if not isinstance(value, str) or not 1 <= len(value) <= 8192:
         raise InvalidMicrosoftContinuation
