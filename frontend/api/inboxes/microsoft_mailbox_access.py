@@ -189,13 +189,19 @@ def _verify_unchanged_owned_mailbox(
         raise MicrosoftMailboxAccessError("microsoft_reconnect_required")
 
 
-def list_owned_microsoft_inbox(headers, mailbox_id: object, *, page_size: int = 20) -> dict:
-    """Owner-scoped Graph read; exact authority must survive network I/O."""
+def list_owned_microsoft_inbox(
+    headers, mailbox_id: object, *, page_size: int = 20, page: int = 1,
+) -> dict:
+    """Owner-scoped bounded Graph read; exact authority survives all page reads."""
+    from api.inboxes import microsoft_graph
     if type(page_size) is not int or not 1 <= page_size <= 25:
         raise MicrosoftMailboxAccessError("microsoft_page_size_invalid")
-    from api.inboxes import microsoft_graph
+    if type(page) is not int or not 1 <= page <= microsoft_graph.MAX_UI_PAGES:
+        raise MicrosoftMailboxAccessError("microsoft_page_invalid")
     token, captured = _owned_token(headers, mailbox_id)
-    snapshot = microsoft_graph.list_microsoft_inbox(token, page_size=page_size)
+    snapshot = microsoft_graph.list_microsoft_inbox(
+        token, page_size=page_size, **({"page": page} if page != 1 else {}),
+    )
     _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
     return snapshot
 
@@ -278,14 +284,18 @@ def mark_owned_microsoft_inbox_read(
 
 
 def list_owned_microsoft_sent(
-    headers, mailbox_id: object, *, page_size: int = 20,
+    headers, mailbox_id: object, *, page_size: int = 20, page: int = 1,
 ) -> dict:
-    """Read the exact owned Sent Items folder with post-Graph authority proof."""
+    """Read one bounded Sent Items page with post-Graph authority proof."""
+    from api.inboxes import microsoft_sent_graph, microsoft_graph
     if type(page_size) is not int or not 1 <= page_size <= 25:
         raise MicrosoftMailboxAccessError("microsoft_page_size_invalid")
-    from api.inboxes import microsoft_sent_graph
+    if type(page) is not int or not 1 <= page <= microsoft_graph.MAX_UI_PAGES:
+        raise MicrosoftMailboxAccessError("microsoft_page_invalid")
     token, captured = _owned_token(headers, mailbox_id)
-    snapshot = microsoft_sent_graph.list_microsoft_sent(token, page_size=page_size)
+    snapshot = microsoft_sent_graph.list_microsoft_sent(
+        token, page_size=page_size, **({"page": page} if page != 1 else {}),
+    )
     _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
     return snapshot
 

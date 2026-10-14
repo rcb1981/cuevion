@@ -28,6 +28,10 @@ assert.match(ready, /Microsoft 365 · Mail/);
 assert.match(ready, /Read-only pilot/);
 assert.doesNotMatch(ready, />New message<|>Reply<|>Mark as read<|>Mark as unread</);
 assert.match(ready, /Select a message to read it/);
+assert.match(ready, /Page 1 of up to 4/);
+assert.match(ready, /Newer messages/);
+assert.match(ready, /Older messages/);
+
 assert.match(ready, /Refresh/);
 assert.match(ready, /aria-pressed="true"[^>]*>Inbox<\/button>/);
 assert.match(ready, /aria-pressed="false"[^>]*>Sent<\/button>/);

@@ -4468,6 +4468,8 @@ export async function fetchGmailThread(
 export type FetchMicrosoftInboxRequest = {
   mailboxId: string;
   limit?: number;
+  /** Server-owned Graph continuation, bounded to four pages. Never a URL. */
+  page?: number;
 };
 
 export type FetchMicrosoftMessageResponse = {
@@ -4574,11 +4576,15 @@ export async function fetchMicrosoftInbox(
 ): Promise<ConnectInboxResponse> {
   const mailboxId = request.mailboxId;
   const limit = request.limit ?? 20;
+  const page = request?.page ?? 1;
   if (
     !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(mailboxId) ||
     !Number.isInteger(limit) ||
     limit < 1 ||
-    limit > MICROSOFT_FETCH_MAX_MESSAGES
+    limit > MICROSOFT_FETCH_MAX_MESSAGES ||
+    !Number.isInteger(page) ||
+    page < 1 ||
+    page > 4
   ) {
     return {
       ok: false,
@@ -4590,7 +4596,7 @@ export async function fetchMicrosoftInbox(
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mailboxId, limit }),
+      body: JSON.stringify({ mailboxId, limit, ...(page > 1 ? { page } : {}) }),
     });
     const payload: unknown = await response.json();
     if (!response.ok) {
@@ -4832,12 +4838,16 @@ export async function fetchMicrosoftSent(
 ): Promise<FetchMicrosoftSentResponse> {
   const mailboxId = request?.mailboxId;
   const limit = request?.limit ?? 20;
+  const page = request?.page ?? 1;
   if (
     typeof mailboxId !== "string" ||
     !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(mailboxId) ||
     !Number.isInteger(limit) ||
     limit < 1 ||
-    limit > MICROSOFT_FETCH_MAX_MESSAGES
+    limit > MICROSOFT_FETCH_MAX_MESSAGES ||
+    !Number.isInteger(page) ||
+    page < 1 ||
+    page > 4
   ) {
     return {
       ok: false,
@@ -4849,7 +4859,7 @@ export async function fetchMicrosoftSent(
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mailboxId, limit }),
+      body: JSON.stringify({ mailboxId, limit, ...(page > 1 ? { page } : {}) }),
     });
     const payload: unknown = await response.json();
     if (!response.ok) {

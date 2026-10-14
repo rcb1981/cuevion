@@ -23,6 +23,7 @@ import { filterMicrosoftLoadedMessages, type MicrosoftMessageSortOrder } from ".
 const MICROSOFT_READ_ONLY_PILOT = true;
 const MICROSOFT_POLL_INTERVAL_MS = 120_000;
 const MICROSOFT_INBOX_LIMIT = 25;
+const MICROSOFT_MAX_PAGES = 4;
 
 type MicrosoftReadOnlyMailbox = {
   id: string;
@@ -78,6 +79,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const selectedIdRef = React.useRef<string | null>(null);
   const folderRef = React.useRef<"Inbox" | "Sent">("Inbox");
   const [folder, setFolder] = useState<"Inbox" | "Sent">("Inbox");
+  const [page, setPage] = useState(1);
   const [composer, setComposer] = useState<{
     mode: "new" | "reply";
     sourceProviderMessageId?: string;
@@ -124,10 +126,12 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
         ? await fetchMicrosoftSent({
             mailboxId: mailbox.id,
             limit: MICROSOFT_INBOX_LIMIT,
+            page,
           })
         : await fetchMicrosoftInbox({
             mailboxId: mailbox.id,
             limit: MICROSOFT_INBOX_LIMIT,
+            page,
           });
       if (
         ticket !== inboxTicket.current ||
@@ -178,7 +182,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
         setListBusy(false);
       }
     }
-  }, [connected, mailbox.id, folder, composer]);
+  }, [connected, mailbox.id, folder, composer, page]);
 
   useEffect(() => {
     if (!connected) {
@@ -229,8 +233,34 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     setLastUpdated(null);
     setSearchQuery("");
     setUnreadOnly(false);
+    setPage(1);
     setFolder(nextFolder);
   }, [connected, composer]);
+
+  const goToPage = useCallback((nextPage: number) => {
+    if (
+      !connected || composer !== null || mutationInFlight.current ||
+      listBusy || !Number.isInteger(nextPage) ||
+      nextPage < 1 || nextPage > MICROSOFT_MAX_PAGES ||
+      nextPage === page || (nextPage > page && !hasMore)
+    ) {
+      return;
+    }
+    // Invalidate pending list/detail requests before React switches pages.
+    inboxTicket.current += 1;
+    messageTicket.current += 1;
+    selectedIdRef.current = null;
+    setSelectedId(null);
+    setSelectedMessage(null);
+    setRows([]);
+    setHasMore(false);
+    setLastUpdated(null);
+    setListError(null);
+    setMessageError(null);
+    setSearchQuery("");
+    setUnreadOnly(false);
+    setPage(nextPage);
+  }, [connected, composer, listBusy, page, hasMore]);
 
   const openComposer = useCallback((mode: "new" | "reply") => {
     if (MICROSOFT_READ_ONLY_PILOT || !connected || composer !== null || mutationInFlight.current) return;
@@ -546,7 +576,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
               {hasActiveListFilter ? (
                 <p className="text-xs text-[var(--workspace-text-faint)]" aria-live="polite">
                   {visibleRows.length} of {rows.length} loaded messages match.
-                  {" "}Search and filters apply only to loaded messages.
+                  {" "}Search and filters apply only to the current page.
                 </p>
               ) : null}
             </div>
@@ -578,7 +608,32 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                   onOpenMessage={(providerMessageId) => void openMessage(providerMessageId)}
                 />
               ))}
-              {hasMore && <p className="p-4 text-xs text-[var(--workspace-text-muted)]">Showing the {rows.length} most recent loaded messages. Search does not include older messages yet.</p>}
+              <nav aria-label={"Microsoft " + folder + " pages"} className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--workspace-border-soft)] p-3">
+                <button
+                  type="button"
+                  onClick={() => goToPage(page - 1)}
+                  disabled={!connected || listBusy || page === 1 || mutationBusy}
+                  className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Newer messages
+                </button>
+                <span className="text-xs text-[var(--workspace-text-muted)]" aria-live="polite">
+                  Page {page} of up to {MICROSOFT_MAX_PAGES}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => goToPage(page + 1)}
+                  disabled={!connected || listBusy || !hasMore || page >= MICROSOFT_MAX_PAGES || mutationBusy}
+                  className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Older messages
+                </button>
+              </nav>
+              {hasMore && page >= MICROSOFT_MAX_PAGES && (
+                <p className="px-4 pb-3 text-xs text-[var(--workspace-text-muted)]">
+                  This read-only pilot currently limits history to {MICROSOFT_MAX_PAGES * MICROSOFT_INBOX_LIMIT} messages per folder.
+                </p>
+              )}
             </div>
           </section>
           <section aria-label="Selected Microsoft message" className="min-h-0 overflow-y-auto p-5 sm:p-7">

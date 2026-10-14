@@ -12,14 +12,27 @@ from datetime import datetime
 from http.client import IncompleteRead
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from api.auth.email_address import is_valid_auth_email, normalize_auth_email
+from api.inboxes.microsoft_graph_paging import (
+    InvalidMicrosoftContinuation,
+    validated_microsoft_continuation_path,
+)
 
+class _NoGraphRedirects(HTTPRedirectHandler):
+    """Never forward an OAuth bearer token to a redirect destination."""
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+_GRAPH_OPENER = build_opener(_NoGraphRedirects())
 GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
 MAX_GRAPH_JSON_BYTES = 1024 * 1024
 MAX_IDENTITY_JSON_BYTES = 64 * 1024
 MAX_MESSAGES_PER_PAGE = 25
+MAX_UI_PAGES = 4
 GRAPH_TIMEOUT_SECONDS = 20
 MAX_MESSAGE_ID_LENGTH = 512
 _GRAPH_MESSAGE_ID = re.compile(r"^[^\x00-\x20\x7f-\x9f?#]{1,512}$")
@@ -70,8 +83,19 @@ def _response_payload(response, *, maximum_bytes: int) -> dict:
     return payload
 
 
-def _get_json(path: str, access_token: str, *, maximum_bytes: int, opener=urlopen) -> dict:
-    if not path.startswith("/me") or not (
+def _get_json(
+    path: str, access_token: str, *, maximum_bytes: int,
+    opener=urlopen, internal_paging: bool = False, paging_folder: str | None = None,
+) -> dict:
+    if internal_paging:
+        try:
+            if validated_microsoft_continuation_path(
+                GRAPH_ROOT + path, expected_folder=paging_folder or ""
+            ) != path:
+                raise InvalidMicrosoftContinuation
+        except InvalidMicrosoftContinuation:
+            raise MicrosoftGraphError("microsoft_graph_path_invalid") from None
+    elif not path.startswith("/me") or not (
         path == "/me?$select=id,displayName,mail,userPrincipalName"
         or path.startswith("/me/mailFolders/inbox/messages?")
         or path.startswith("/me/messages/")
@@ -90,7 +114,9 @@ def _get_json(path: str, access_token: str, *, maximum_bytes: int, opener=urlope
         method="GET",
     )
     try:
-        with opener(request, timeout=GRAPH_TIMEOUT_SECONDS) as response:
+        with (
+            _GRAPH_OPENER.open if opener is urlopen else opener
+        )(request, timeout=GRAPH_TIMEOUT_SECONDS) as response:
             return _response_payload(response, maximum_bytes=maximum_bytes)
     except HTTPError as error:
         status = error.code
@@ -220,54 +246,58 @@ def _message_summary(item: object) -> dict:
     }
 
 
-def list_microsoft_inbox(access_token: str, *, page_size: int = 20, opener=urlopen) -> dict:
-    """Fetch bounded current INBOX page; no arbitrary nextLink following."""
+def list_microsoft_inbox(
+    access_token: str, *, page_size: int = 20, page: int = 1, opener=urlopen,
+) -> dict:
+    """Read one bounded Inbox page; replay earlier pages server-side only.
+
+    No Graph paging URL, token, mailbox selector, or folder path is accepted
+    from or returned to the browser. At most four provider requests may occur.
+    """
     if type(page_size) is not int or not 1 <= page_size <= MAX_MESSAGES_PER_PAGE:
         raise MicrosoftGraphError("microsoft_page_size_invalid")
+    if type(page) is not int or not 1 <= page <= MAX_UI_PAGES:
+        raise MicrosoftGraphError("microsoft_page_invalid")
     query = urlencode({
         "$top": str(page_size),
         "$orderby": "receivedDateTime desc",
         "$select": _MESSAGE_SELECT,
     })
-    try:
-        payload = _get_json(
-            "/me/mailFolders/inbox/messages?" + query,
-            access_token,
-            maximum_bytes=MAX_GRAPH_JSON_BYTES,
-            opener=opener,
-        )
-    except MicrosoftGraphError as error:
-        if error.code == "microsoft_graph_invalid_response":
-            raise MicrosoftGraphError(error.code, safe_stage="transport") from None
-        raise
-    values = payload.get("value")
-    if not isinstance(values, list) or len(values) > page_size:
-        raise MicrosoftGraphError("microsoft_graph_invalid_response", safe_stage="collection")
-    try:
-        items = [_message_summary(item) for item in values]
-    except MicrosoftGraphError as error:
-        if error.code == "microsoft_graph_invalid_response":
-            raise MicrosoftGraphError(error.code, safe_stage="message") from None
-        raise
-    next_link = payload.get("@odata.nextLink")
-    if next_link is not None:
-        next_link_path = (
-            next_link.split("?", 1)[0].lower() if isinstance(next_link, str) else ""
-        )
-        if (
-            not isinstance(next_link, str)
-            or not next_link.startswith(GRAPH_ROOT + "/")
-            or len(next_link) > 8192
-            or "?" not in next_link
-            or "#" in next_link
-            or "/mailfolders" not in next_link_path
-            or not next_link_path.endswith("/messages")
-        ):
-            raise MicrosoftGraphError("microsoft_graph_invalid_response", safe_stage="pagination")
-    # Treat the Microsoft-controlled paging URL as an opaque has-more marker.
-    # It may canonicalize a well-known folder to an internal folder ID. The
-    # nextLink is never followed, stored, reflected, or accepted from clients.
-    return {"messages": items, "hasMore": bool(next_link)}
+    path = "/me/mailFolders/inbox/messages?" + query
+    for page_index in range(page):
+        try:
+            payload = _get_json(
+                path, access_token, maximum_bytes=MAX_GRAPH_JSON_BYTES,
+                opener=opener, internal_paging=page_index > 0, paging_folder="inbox",
+            )
+        except MicrosoftGraphError as error:
+            if error.code == "microsoft_graph_invalid_response":
+                raise MicrosoftGraphError(error.code, safe_stage="transport") from None
+            raise
+        values = payload.get("value")
+        if not isinstance(values, list) or len(values) > page_size:
+            raise MicrosoftGraphError("microsoft_graph_invalid_response", safe_stage="collection")
+        try:
+            items = [_message_summary(item) for item in values]
+        except MicrosoftGraphError as error:
+            if error.code == "microsoft_graph_invalid_response":
+                raise MicrosoftGraphError(error.code, safe_stage="message") from None
+            raise
+        next_link = payload.get("@odata.nextLink")
+        next_path = None
+        if next_link is not None:
+            try:
+                next_path = validated_microsoft_continuation_path(
+                    next_link, expected_folder="inbox"
+                )
+            except InvalidMicrosoftContinuation:
+                raise MicrosoftGraphError("microsoft_graph_invalid_response", safe_stage="pagination") from None
+        if page_index + 1 == page:
+            return {"messages": items, "hasMore": bool(next_path)}
+        if next_path is None:
+            return {"messages": [], "hasMore": False}
+        path = next_path
+    raise MicrosoftGraphError("microsoft_graph_invalid_response")
 
 
 def get_microsoft_message(access_token: str, message_id: str, *, opener=urlopen) -> dict:

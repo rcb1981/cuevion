@@ -66,6 +66,19 @@ async function run() {
     assert.equal(calls[0].init?.method, "POST");
     assert.deepEqual(JSON.parse(String(calls[0].init?.body)), {mailboxId: BOX, limit: 5});
 
+    setFetch(LIST);
+    const secondPage = await fetchMicrosoftInbox({mailboxId: BOX, limit: 5, page: 2});
+    assert.equal(secondPage.ok, true);
+    assert.deepEqual(JSON.parse(String(calls[0].init?.body)), {
+      mailboxId: BOX, limit: 5, page: 2,
+    });
+    for (const page of [0, -1, 5, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      setFetch(LIST);
+      const rejected = await fetchMicrosoftInbox({mailboxId: BOX, limit: 5, page});
+      assert.equal(rejected.ok, false);
+      assert.equal(calls.length, 0);
+    }
+
     setFetch(EXACT);
     const exact = await fetchMicrosoftMessage({mailboxId: BOX, providerMessageId: ID});
     assert.equal(exact.ok, true);

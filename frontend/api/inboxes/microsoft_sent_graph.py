@@ -10,10 +10,14 @@ from __future__ import annotations
 from datetime import datetime
 from urllib.parse import quote, urlencode
 
+from api.inboxes.microsoft_graph_paging import (
+    InvalidMicrosoftContinuation, validated_microsoft_continuation_path,
+)
 from api.inboxes.microsoft_graph import (
     GRAPH_ROOT,
     MAX_GRAPH_JSON_BYTES,
     MAX_MESSAGES_PER_PAGE,
+    MAX_UI_PAGES,
     MicrosoftGraphError,
     _get_json,
     _required_message_id,
@@ -116,36 +120,47 @@ def list_microsoft_sent(
     access_token: str,
     *,
     page_size: int = 20,
+    page: int = 1,
     opener=urlopen,
 ) -> dict:
+    """Read one bounded Sent Items page without exposing Graph continuation."""
     if type(page_size) is not int or not 1 <= page_size <= MAX_MESSAGES_PER_PAGE:
         raise MicrosoftGraphError("microsoft_page_size_invalid")
+    if type(page) is not int or not 1 <= page <= MAX_UI_PAGES:
+        raise MicrosoftGraphError("microsoft_page_invalid")
     query = urlencode({
         "$top": str(page_size),
         "$orderby": "sentDateTime desc",
         "$select": SENT_MESSAGE_SELECT,
     })
-    payload = _get_json(
-        SENT_FOLDER_PATH + "?" + query,
-        access_token,
-        maximum_bytes=MAX_GRAPH_JSON_BYTES,
-        opener=opener,
-    )
-    raw = payload.get("value")
-    if type(raw) is not list or len(raw) > page_size:
-        raise MicrosoftGraphError("microsoft_graph_invalid_response")
-    values = [_normalized_sent_message(item) for item in raw]
-    message_ids = [entry["id"] for entry in values]
-    if len(set(message_ids)) != len(message_ids):
-        raise MicrosoftGraphError("microsoft_graph_invalid_response")
-    next_link = payload.get("@odata.nextLink")
-    if next_link is not None and (
-        type(next_link) is not str
-        or not next_link.startswith(GRAPH_ROOT + SENT_FOLDER_PATH + "?")
-        or len(next_link) > 8192
-    ):
-        raise MicrosoftGraphError("microsoft_graph_invalid_response")
-    return {"messages": values, "hasMore": bool(next_link)}
+    path = SENT_FOLDER_PATH + "?" + query
+    for page_index in range(page):
+        payload = _get_json(
+            path, access_token, maximum_bytes=MAX_GRAPH_JSON_BYTES,
+            opener=opener, internal_paging=page_index > 0, paging_folder="sentitems",
+        )
+        raw = payload.get("value")
+        if type(raw) is not list or len(raw) > page_size:
+            raise MicrosoftGraphError("microsoft_graph_invalid_response")
+        values = [_normalized_sent_message(item) for item in raw]
+        message_ids = [entry["id"] for entry in values]
+        if len(set(message_ids)) != len(message_ids):
+            raise MicrosoftGraphError("microsoft_graph_invalid_response")
+        next_link = payload.get("@odata.nextLink")
+        next_path = None
+        if next_link is not None:
+            try:
+                next_path = validated_microsoft_continuation_path(
+                    next_link, expected_folder="sentitems"
+                )
+            except InvalidMicrosoftContinuation:
+                raise MicrosoftGraphError("microsoft_graph_invalid_response") from None
+        if page_index + 1 == page:
+            return {"messages": values, "hasMore": bool(next_path)}
+        if next_path is None:
+            return {"messages": [], "hasMore": False}
+        path = next_path
+    raise MicrosoftGraphError("microsoft_graph_invalid_response")
 
 
 def get_microsoft_sent_message(

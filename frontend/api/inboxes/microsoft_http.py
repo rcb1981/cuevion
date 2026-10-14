@@ -78,7 +78,7 @@ def _parse_body(request, headers: tuple) -> dict:
 
 def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dict]:
     expected = (
-        {"mailboxId", "limit"} if mode in {"list", "sent"}
+        {"mailboxId", "limit", "page"} if mode in {"list", "sent"}
         else {"mailboxId", "providerMessageId", "unread"} if mode == "flag"
         else {"mailboxId", "providerMessageId"}
     )
@@ -89,9 +89,12 @@ def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dic
         raise ValueError("invalid")
     if mode in {"list", "sent"}:
         limit = payload.get("limit", 20)
+        page = payload.get("page", 1)
         if type(limit) is not int or not 1 <= limit <= 25:
             raise ValueError("invalid")
-        return mailbox, limit
+        if type(page) is not int or not 1 <= page <= 4:
+            raise ValueError("invalid")
+        return mailbox, limit if page == 1 else {"limit": limit, "page": page}
     if mode in {"exact", "sent_exact"}:
         message_id = payload.get("providerMessageId")
         if (
@@ -139,16 +142,26 @@ def microsoft_inbox_response(request, *, mode: str):
 
     try:
         if mode == "list":
-            assert type(selector) is int
-            snapshot = owned.list_owned_microsoft_inbox(
-                headers, mailbox_id, page_size=selector,
-            )
+            assert type(selector) is int or type(selector) is dict
+            if type(selector) is dict:
+                snapshot = owned.list_owned_microsoft_inbox(
+                    headers, mailbox_id, page_size=selector["limit"], page=selector["page"],
+                )
+            else:
+                snapshot = owned.list_owned_microsoft_inbox(
+                    headers, mailbox_id, page_size=selector,
+                )
             return json_response(200, project_inbox(snapshot, mailbox_id))
         if mode == "sent":
-            assert type(selector) is int
-            snapshot = owned.list_owned_microsoft_sent(
-                headers, mailbox_id, page_size=selector,
-            )
+            assert type(selector) is int or type(selector) is dict
+            if type(selector) is dict:
+                snapshot = owned.list_owned_microsoft_sent(
+                    headers, mailbox_id, page_size=selector["limit"], page=selector["page"],
+                )
+            else:
+                snapshot = owned.list_owned_microsoft_sent(
+                    headers, mailbox_id, page_size=selector,
+                )
             return json_response(200, project_sent(snapshot, mailbox_id))
         if mode == "sent_exact":
             assert type(selector) is str
