@@ -59,7 +59,7 @@ async function test() {
     assert.equal(tooLarge.error?.code, "microsoft_attachment_too_large");
 
     for (const invalid of [
-      {...request, folder: "Drafts" as "Inbox"},
+      {...request, folder: "Junk" as "Inbox"},
       {...request, attachmentId: "bad?#"},
       {...request, providerMessageId: "../other"},
       {...request, mailboxId: "other mailbox"},

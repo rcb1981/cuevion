@@ -16,7 +16,7 @@ from api.inboxes.microsoft_graph import MicrosoftGraphError, _get_json, _require
 
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_GRAPH_DOWNLOAD_RESPONSE_BYTES = 3 * 1024 * 1024
-_FILE_FOLDERS = {"Inbox": "inbox", "Sent": "sentitems", "Archive": "archive"}
+_FILE_FOLDERS = {"Inbox": "inbox", "Sent": "sentitems", "Archive": "archive", "Drafts": "drafts"}
 
 
 def _download_filename(value: object) -> str:

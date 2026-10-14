@@ -315,7 +315,7 @@ def list_owned_microsoft_attachments(
     headers, mailbox_id: object, message_id: str, *, folder: str,
 ) -> dict:
     """Read attached file names only after owner, folder, and token checks."""
-    if folder not in {"Inbox", "Sent", "Archive"}:
+    if folder not in {"Inbox", "Sent", "Archive", "Drafts"}:
         raise MicrosoftMailboxAccessError("microsoft_mailbox_unavailable")
     from api.inboxes import microsoft_attachments_graph
     token, authority = _owned_token(headers, mailbox_id)
@@ -331,7 +331,7 @@ def download_owned_microsoft_attachment(
     *, folder: str,
 ) -> dict:
     """Owner-scoped read-only file fetch with post-network authority recheck."""
-    if folder not in {"Inbox", "Sent", "Archive"}:
+    if folder not in {"Inbox", "Sent", "Archive", "Drafts"}:
         raise MicrosoftMailboxAccessError("microsoft_mailbox_unavailable")
     from api.inboxes import microsoft_attachment_download
 
@@ -367,3 +367,29 @@ def read_owned_microsoft_archive_message(headers, mailbox_id: object, message_id
     message = microsoft_graph.get_microsoft_archive_message(token, message_id)
     _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
     return message
+
+
+def list_owned_microsoft_drafts(
+    headers, mailbox_id: object, *, page_size: int = 20, page: int = 1,
+) -> dict:
+    """Owner-scoped read-only drafts with a post-Graph authority recheck."""
+    from api.inboxes import microsoft_drafts_graph, microsoft_graph
+    if type(page_size) is not int or not 1 <= page_size <= 25:
+        raise MicrosoftMailboxAccessError("microsoft_page_size_invalid")
+    if type(page) is not int or not 1 <= page <= microsoft_graph.MAX_UI_PAGES:
+        raise MicrosoftMailboxAccessError("microsoft_page_invalid")
+    token, captured = _owned_token(headers, mailbox_id)
+    result = microsoft_drafts_graph.list_microsoft_drafts(
+        token, page_size=page_size, **({"page": page} if page != 1 else {}),
+    )
+    _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+    return result
+
+
+def read_owned_microsoft_draft(headers, mailbox_id: object, message_id: str) -> dict:
+    """Read one exact draft, never a message from another folder."""
+    from api.inboxes import microsoft_drafts_graph
+    token, captured = _owned_token(headers, mailbox_id)
+    item = microsoft_drafts_graph.get_microsoft_draft(token, message_id)
+    _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+    return item

@@ -200,6 +200,74 @@ def project_archive(snapshot: object, mailbox_id: str) -> dict:
     }
 
 
+def project_draft_message(message: object, mailbox_id: str, *, exact_body: bool = False) -> dict:
+    """An unsent Draft is never represented as Inbox or Sent, and cannot be edited."""
+    if type(message) is not dict or type(mailbox_id) is not str or not mailbox_id:
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    required = ("id", "subject", "preview", "modifiedAt", "toDisplay", "hasAttachments")
+    if any(field not in message for field in required):
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    mid, subject, preview, to = (
+        message["id"], message["subject"], message["preview"], message["toDisplay"]
+    )
+    if (
+        any(type(v) is not str for v in (mid, subject, preview, to))
+        or not mid or len(mid) > 512 or ".." in mid or len(subject) > 998
+        or len(preview) > 16384 or not to or len(to) > 2048
+        or type(message["hasAttachments"]) is not bool
+    ):
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    created_at, display_time = _timestamp(message["modifiedAt"])
+    projected = {
+        "id": mid, "providerMessageId": mid, "serverMailboxId": mailbox_id,
+        "providerFolder": "DRAFTS", "labelIds": ["DRAFTS"],
+        "sender": "To: " + to, "subject": subject, "snippet": preview[:220],
+        "from": "", "to": to, "cc": "",
+        "timestamp": display_time, "createdAt": created_at,
+        "body": [], "unread": False, "flagged": False, "attachments": [],
+        "hasAttachments": message["hasAttachments"],
+    }
+    thread = message.get("conversationId")
+    if type(thread) is str and thread:
+        projected["providerThreadId"] = thread
+    if not exact_body:
+        return projected
+    body = message.get("body")
+    if type(body) is not dict:
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    kind, content = body.get("contentType"), body.get("content")
+    if kind not in ("text", "html") or type(content) is not str:
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    if kind == "html":
+        parser = _PlainTextHTML()
+        try:
+            parser.feed(content[:_MAX_BODY_CHARACTERS])
+            parser.close()
+            body_text = parser.result()
+        except (ValueError, AssertionError):
+            raise MicrosoftGraphError("microsoft_graph_invalid_response") from None
+    else:
+        body_text = content[:_MAX_BODY_CHARACTERS]
+    projected["body"] = [segment for segment in body_text.split("\n\n") if segment] or [""]
+    return projected
+
+
+def project_drafts(snapshot: object, mailbox_id: str) -> dict:
+    if (
+        type(snapshot) is not dict or type(snapshot.get("messages")) is not list
+        or type(snapshot.get("hasMore")) is not bool or len(snapshot["messages"]) > 25
+    ):
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    messages = [project_draft_message(item, mailbox_id) for item in snapshot["messages"]]
+    ids = [item["providerMessageId"] for item in messages]
+    if len(ids) != len(set(ids)):
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    return {
+        "ok": True, "messages": messages, "draftMessageIds": ids,
+        "hasMore": snapshot["hasMore"],
+    }
+
+
 def project_sent_message(message: object, mailbox_id: str, *, exact_body: bool = False) -> dict:
     """Project a Graph SentItems record without inventing Inbox membership."""
     if type(message) is not dict or type(mailbox_id) is not str or not mailbox_id:

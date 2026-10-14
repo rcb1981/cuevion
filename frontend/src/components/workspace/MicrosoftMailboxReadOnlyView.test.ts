@@ -36,6 +36,7 @@ assert.match(ready, /Refresh/);
 assert.match(ready, /aria-pressed="true"[^>]*>Inbox<\/button>/);
 assert.match(ready, /aria-pressed="false"[^>]*>Sent<\/button>/);
 assert.match(ready, /aria-pressed="false"[^>]*>Archive<\/button>/);
+assert.match(ready, /aria-pressed="false"[^>]*>Drafts<\/button>/);
 assert.match(ready, /Back to workspace/);
 assert.doesNotMatch(ready, /Send message|Reply all|Compose|Trash/);
 
@@ -45,6 +46,10 @@ const microsoftSource = readFileSync(
 assert.match(microsoftSource, /fetchMicrosoftAttachments/);
 assert.match(microsoftSource, /fetchMicrosoftArchive/);
 assert.match(microsoftSource, /fetchMicrosoftArchiveMessage/);
+assert.match(microsoftSource, /fetchMicrosoftDrafts/);
+assert.match(microsoftSource, /fetchMicrosoftDraftMessage/);
+assert.match(microsoftSource, /folder === "Drafts"/);
+assert.match(microsoftSource, /Drafts are read-only/);
 assert.match(microsoftSource, /nextFolder: MicrosoftFolder/);
 assert.match(microsoftSource, /attachmentDownloadTicket\.current \+= 1/);
 assert.match(microsoftSource, /attachmentRequest !== attachmentTicket.current/);
@@ -94,7 +99,7 @@ assert.match(viewSource, /folderRef\.current = nextFolder/);
 assert.match(viewSource, /folderRef\.current !== requestedFolder/);
 assert.match(viewSource, /folderRef\.current !== "Inbox"/);
 assert.match(viewSource, /folder === "Inbox" && \(/);
-assert.match(viewSource, /folder === "Sent" \? "To: " \+ selectedMessage\.to/);
+assert.match(viewSource, /folder === "Sent" \|\| folder === "Drafts"/);
 assert.match(viewSource, /setMicrosoftMessageUnread\(/);
 assert.match(viewSource, /onClick=\{\(\) => void changeReadState\(!selectedMessage\.unread\)\}/);
 assert.match(viewSource, /mutationInFlight\.current/);

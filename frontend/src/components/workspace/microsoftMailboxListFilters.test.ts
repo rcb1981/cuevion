@@ -77,3 +77,11 @@ assert.deepEqual(
   ["id-3", "id-1"],
   "Archive unread filter should operate on archived read state only",
 );
+
+
+assert.deepEqual(
+  filterMicrosoftLoadedMessages(rows, { ...defaults, folder: "Drafts", unreadOnly: true })
+    .map((message) => message.id),
+  ["id-2", "id-3", "id-1"],
+  "Drafts have no unread filter or read/unread semantics",
+);

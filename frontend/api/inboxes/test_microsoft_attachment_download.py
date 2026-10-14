@@ -55,7 +55,7 @@ class GraphDownloadTests(unittest.TestCase):
 
     def test_no_arbitrary_folders_or_untrusted_provider_ids(self):
         opener = FakeOpener(payload())
-        for folder in ("Drafts", "archive", "INBOX", "../Sent", "", None):
+        for folder in ("Junk", "archive", "INBOX", "../Sent", "", None):
             with self.subTest(folder=folder), self.assertRaises(microsoft_graph.MicrosoftGraphError):
                 download.read_microsoft_file_attachment(
                     TOKEN, MESSAGE, ATTACHMENT, folder=folder, opener=opener,
@@ -117,7 +117,7 @@ class AttachmentDownloadBoundaryTests(unittest.TestCase):
             }),
         )
         invalid = (
-            {**valid, "folder": "Drafts"},
+            {**valid, "folder": "Junk"},
             {**valid, "attachmentId": "bad?#"},
             {**valid, "attachmentId": True},
             {**valid, "providerMessageId": "../evil"},

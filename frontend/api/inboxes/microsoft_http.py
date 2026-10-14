@@ -17,7 +17,10 @@ from api.auth.http import (
 from api.inboxes import microsoft_mailbox_access as owned
 from api.inboxes.microsoft_production_pilot import production_pilot_writes_blocked
 from api.inboxes.microsoft_graph import MicrosoftGraphError
-from api.inboxes.microsoft_inbox_projection import (project_inbox, project_message, project_sent, project_sent_message, project_archive)
+from api.inboxes.microsoft_inbox_projection import (
+    project_inbox, project_message, project_sent, project_sent_message,
+    project_archive, project_drafts, project_draft_message,
+)
 
 MAX_REQUEST_BYTES = 4096
 _MAX_MAILBOX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$")
@@ -79,7 +82,7 @@ def _parse_body(request, headers: tuple) -> dict:
 
 def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dict]:
     expected = (
-        {"mailboxId", "limit", "page"} if mode in {"list", "sent", "archive"}
+        {"mailboxId", "limit", "page"} if mode in {"list", "sent", "archive", "drafts"}
         else {"mailboxId", "providerMessageId", "folder"} if mode == "attachments"
         else {"mailboxId", "providerMessageId", "attachmentId", "folder"} if mode == "download"
         else {"mailboxId", "providerMessageId", "unread"} if mode == "flag"
@@ -90,7 +93,7 @@ def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dic
     mailbox = payload.get("mailboxId")
     if type(mailbox) is not str or _MAX_MAILBOX.fullmatch(mailbox) is None:
         raise ValueError("invalid")
-    if mode in {"list", "sent", "archive"}:
+    if mode in {"list", "sent", "archive", "drafts"}:
         limit = payload.get("limit", 20)
         page = payload.get("page", 1)
         if type(limit) is not int or not 1 <= limit <= 25:
@@ -98,7 +101,7 @@ def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dic
         if type(page) is not int or not 1 <= page <= 4:
             raise ValueError("invalid")
         return mailbox, limit if page == 1 else {"limit": limit, "page": page}
-    if mode in {"exact", "sent_exact", "archive_exact", "attachments", "download"}:
+    if mode in {"exact", "sent_exact", "archive_exact", "draft_exact", "attachments", "download"}:
         message_id = payload.get("providerMessageId")
         if (
             type(message_id) is not str
@@ -110,7 +113,7 @@ def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dic
             raise ValueError("invalid")
         if mode in {"attachments", "download"}:
             folder = payload.get("folder")
-            if type(folder) is not str or folder not in {"Inbox", "Sent", "Archive"}:
+            if type(folder) is not str or folder not in {"Inbox", "Sent", "Archive", "Drafts"}:
                 raise ValueError("invalid")
             if mode == "download":
                 from api.inboxes.microsoft_graph import _required_message_id
@@ -220,6 +223,27 @@ def microsoft_inbox_response(request, *, mode: str):
                 "size": record["size"],
                 "base64": record["base64"],
             })
+        if mode == "drafts":
+            assert type(selector) is int or type(selector) is dict
+            if type(selector) is dict:
+                snapshot = owned.list_owned_microsoft_drafts(
+                    headers, mailbox_id, page_size=selector["limit"], page=selector["page"],
+                )
+            else:
+                snapshot = owned.list_owned_microsoft_drafts(
+                    headers, mailbox_id, page_size=selector,
+                )
+            return json_response(200, project_drafts(snapshot, mailbox_id))
+        if mode == "draft_exact":
+            assert type(selector) is str
+            draft = owned.read_owned_microsoft_draft(headers, mailbox_id, selector)
+            if type(draft) is not dict or draft.get("id") != selector:
+                raise MicrosoftGraphError("microsoft_graph_invalid_response")
+            return json_response(
+                200, {"ok": True, "message": project_draft_message(
+                    draft, mailbox_id, exact_body=True,
+                )},
+            )
         if mode == "archive":
             assert type(selector) is int or type(selector) is dict
             if type(selector) is dict:

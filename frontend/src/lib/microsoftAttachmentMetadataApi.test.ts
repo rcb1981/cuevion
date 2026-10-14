@@ -45,7 +45,7 @@ async function run() {
 
     mock({ok: true, attachments: [attachment] , hasMore: false});
     assert.equal((await fetchMicrosoftAttachments({
-      mailboxId, providerMessageId, folder: "Drafts" as "Inbox",
+      mailboxId, providerMessageId, folder: "Junk" as "Inbox",
     })).ok, false);
     assert.equal(calls.length, 0);
   } finally {

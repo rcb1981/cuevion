@@ -98,6 +98,8 @@ def _get_json(
     elif not path.startswith("/me") or not (
         path == "/me?$select=id,displayName,mail,userPrincipalName"
         or path.startswith("/me/mailFolders/inbox/messages?")
+        or path.startswith("/me/mailFolders/drafts/messages?")
+        or path.startswith("/me/mailFolders/drafts/messages/")
         or path.startswith("/me/mailFolders/archive/messages?")
         or path.startswith("/me/mailFolders/archive/messages/")
         or path.startswith("/me/mailFolders/inbox/messages/")
