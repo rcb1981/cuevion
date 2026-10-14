@@ -5292,3 +5292,85 @@ export async function fetchMicrosoftAttachments(request: {
     };
   }
 }
+
+export type MicrosoftAttachmentFileResponse = {
+  ok: boolean;
+  attachmentId?: string;
+  fileName?: string;
+  size?: number;
+  base64?: string;
+  error?: { code?: string; message?: string };
+};
+
+/** File bytes remain ephemeral and bounded; only the exact mailbox owner can read. */
+export async function downloadMicrosoftAttachmentFile(request: {
+  mailboxId: string;
+  providerMessageId: string;
+  attachmentId: string;
+  folder: "Inbox" | "Sent";
+}): Promise<MicrosoftAttachmentFileResponse> {
+  const validGraphId = (id: unknown) =>
+    typeof id === "string" && id.length <= 512 &&
+    /^[^\x00-\x20\x7f-\x9f?#]+$/.test(id) && id !== "." &&
+    !id.includes("..") && new TextEncoder().encode(id).byteLength <= 512;
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
+    !validGraphId(request.providerMessageId) ||
+    !validGraphId(request.attachmentId) ||
+    (request.folder !== "Inbox" && request.folder !== "Sent")
+  ) {
+    return { ok: false, error: { code: "invalid_request", message: "Invalid Microsoft attachment request." } };
+  }
+  try {
+    const response = await fetchProtectedApi("/api/inboxes/download-microsoft-attachment", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      if (response.status === 413) {
+        return { ok: false, error: {
+          code: "microsoft_attachment_too_large",
+          message: "This file exceeds the 2 MB download limit.",
+        } };
+      }
+      return { ok: false, error: safeMicrosoftFetchError(payload) };
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error("invalid_attachment");
+    }
+    const data = payload as Record<string, unknown>;
+    if (
+      data.ok !== true ||
+      !Object.keys(data).every((key) =>
+        ["ok", "attachmentId", "fileName", "size", "base64"].includes(key)
+      ) ||
+      data.attachmentId !== request.attachmentId ||
+      typeof data.fileName !== "string" ||
+      !data.fileName || data.fileName.length > 128 ||
+      /[\\/\x00-\x1f\x7f]/.test(data.fileName) ||
+      data.fileName === "." || data.fileName === ".." ||
+      typeof data.size !== "number" || !Number.isSafeInteger(data.size) ||
+      data.size < 0 || data.size > 2 * 1024 * 1024 ||
+      typeof data.base64 !== "string" ||
+      data.base64.length !== 4 * Math.ceil(data.size / 3) ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data.base64)
+    ) {
+      throw new Error("invalid_attachment");
+    }
+    return {
+      ok: true,
+      attachmentId: data.attachmentId as string,
+      fileName: data.fileName,
+      size: data.size,
+      base64: data.base64,
+    };
+  } catch {
+    return { ok: false, error: {
+      code: "microsoft_attachment_download_failed",
+      message: "The attachment could not be downloaded.",
+    } };
+  }
+}

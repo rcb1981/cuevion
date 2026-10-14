@@ -38,6 +38,7 @@ def _error(status: int, code: str):
         "microsoft_mutation_conflict": "Microsoft message changed. Refresh the Inbox and try again.",
         "microsoft_mutation_unconfirmed": "The message change could not be confirmed. Refresh Inbox.",
         "microsoft_message_not_found": "The message is no longer in this Inbox.",
+        "microsoft_attachment_too_large": "This attachment exceeds the 2 MB read-only download limit.",
     }
     return json_response(
         status,
@@ -80,6 +81,7 @@ def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dic
     expected = (
         {"mailboxId", "limit", "page"} if mode in {"list", "sent"}
         else {"mailboxId", "providerMessageId", "folder"} if mode == "attachments"
+        else {"mailboxId", "providerMessageId", "attachmentId", "folder"} if mode == "download"
         else {"mailboxId", "providerMessageId", "unread"} if mode == "flag"
         else {"mailboxId", "providerMessageId"}
     )
@@ -96,7 +98,7 @@ def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dic
         if type(page) is not int or not 1 <= page <= 4:
             raise ValueError("invalid")
         return mailbox, limit if page == 1 else {"limit": limit, "page": page}
-    if mode in {"exact", "sent_exact", "attachments"}:
+    if mode in {"exact", "sent_exact", "attachments", "download"}:
         message_id = payload.get("providerMessageId")
         if (
             type(message_id) is not str
@@ -106,10 +108,21 @@ def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dic
             or ".." in message_id
         ):
             raise ValueError("invalid")
-        if mode == "attachments":
+        if mode in {"attachments", "download"}:
             folder = payload.get("folder")
             if type(folder) is not str or folder not in {"Inbox", "Sent"}:
                 raise ValueError("invalid")
+            if mode == "download":
+                from api.inboxes.microsoft_graph import _required_message_id
+                try:
+                    attachment_id = _required_message_id(payload.get("attachmentId"))
+                except MicrosoftGraphError:
+                    raise ValueError("invalid") from None
+                return mailbox, {
+                    "providerMessageId": message_id,
+                    "attachmentId": attachment_id,
+                    "folder": folder,
+                }
             return mailbox, {"providerMessageId": message_id, "folder": folder}
         return mailbox, message_id
     if mode == "flag":
@@ -182,6 +195,31 @@ def microsoft_inbox_response(request, *, mode: str):
             ):
                 raise MicrosoftGraphError("microsoft_graph_invalid_response")
             return json_response(200, {"ok": True, **snapshot})
+        if mode == "download":
+            assert type(selector) is dict
+            record = owned.download_owned_microsoft_attachment(
+                headers,
+                mailbox_id,
+                selector["providerMessageId"],
+                selector["attachmentId"],
+                folder=selector["folder"],
+            )
+            if (
+                type(record) is not dict
+                or record.get("attachmentId") != selector["attachmentId"]
+                or type(record.get("base64")) is not str
+                or type(record.get("fileName")) is not str
+                or type(record.get("size")) is not int
+            ):
+                raise MicrosoftGraphError("microsoft_graph_invalid_response")
+            # Explicit output projection: never pass Graph JSON or tokens through.
+            return json_response(200, {
+                "ok": True,
+                "attachmentId": record["attachmentId"],
+                "fileName": record["fileName"],
+                "size": record["size"],
+                "base64": record["base64"],
+            })
         if mode == "sent_exact":
             assert type(selector) is str
             message = owned.read_owned_microsoft_sent_message(
@@ -238,6 +276,8 @@ def microsoft_inbox_response(request, *, mode: str):
             return _error(503, code)
         return _error(503, "microsoft_mailbox_unavailable")
     except MicrosoftGraphError as error:
+        if error.code == "microsoft_attachment_too_large":
+            return _error(413, error.code)
         if error.code == "microsoft_graph_rate_limited":
             return _error(429, error.code)
         if error.code == "microsoft_reconnect_required":

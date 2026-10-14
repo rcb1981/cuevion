@@ -11,6 +11,7 @@ import {
   fetchMicrosoftSent,
   fetchMicrosoftSentMessage,
   fetchMicrosoftAttachments,
+  downloadMicrosoftAttachmentFile,
   setMicrosoftMessageUnread,
   type LiveInboxMessageSnapshot,
   type MicrosoftAttachmentMetadata,
@@ -80,6 +81,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const inboxTicket = React.useRef(0);
   const messageTicket = React.useRef(0);
   const attachmentTicket = React.useRef(0);
+  const attachmentDownloadTicket = React.useRef(0);
   const selectedIdRef = React.useRef<string | null>(null);
   const folderRef = React.useRef<"Inbox" | "Sent">("Inbox");
   const [folder, setFolder] = useState<"Inbox" | "Sent">("Inbox");
@@ -103,6 +105,8 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [attachmentHasMore, setAttachmentHasMore] = useState(false);
+  const [attachmentDownloadBusy, setAttachmentDownloadBusy] = useState<string | null>(null);
+  const [attachmentDownloadError, setAttachmentDownloadError] = useState<string | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [messageError, setMessageError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
@@ -305,6 +309,9 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     setAttachmentBusy(false);
     setAttachmentError(null);
     setAttachmentHasMore(false);
+    attachmentDownloadTicket.current += 1;
+    setAttachmentDownloadBusy(null);
+    setAttachmentDownloadError(null);
     setMessageBusy(true);
     setMessageError(null);
     setMutationError(null);
@@ -393,6 +400,80 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       }
     }
   }, [connected, mailbox.id, rows, composer]);
+
+  const downloadAttachment = useCallback(async (item: MicrosoftAttachmentMetadata) => {
+    const messageId = selectedMessage?.providerMessageId;
+    if (
+      !connected ||
+      !messageId ||
+      selectedIdRef.current !== messageId ||
+      item.kind !== "file" ||
+      item.size > 2 * 1024 * 1024 ||
+      !attachmentRows.some((entry) => entry.id === item.id) ||
+      attachmentDownloadBusy !== null
+    ) {
+      return;
+    }
+    const currentFolder = folderRef.current;
+    const currentMessageTicket = messageTicket.current;
+    const ticket = ++attachmentDownloadTicket.current;
+    setAttachmentDownloadBusy(item.id);
+    setAttachmentDownloadError(null);
+    try {
+      const result = await downloadMicrosoftAttachmentFile({
+        mailboxId: mailbox.id,
+        providerMessageId: messageId,
+        attachmentId: item.id,
+        folder: currentFolder,
+      });
+      if (
+        ticket !== attachmentDownloadTicket.current ||
+        currentMessageTicket !== messageTicket.current ||
+        selectedIdRef.current !== messageId ||
+        folderRef.current !== currentFolder
+      ) return;
+      if (!result.ok || result.attachmentId !== item.id ||
+          typeof result.size !== "number" || result.size !== item.size ||
+          typeof result.base64 !== "string" || !result.fileName) {
+        setAttachmentDownloadError(
+          result.error?.code === "microsoft_attachment_too_large"
+            ? "This attachment exceeds the 2 MB download limit."
+            : "This attachment could not be downloaded. Please try again.",
+        );
+        return;
+      }
+      // Keep provider bytes transient. Never render potentially unsafe files inline.
+      const binary = atob(result.base64);
+      if (binary.length !== result.size) throw new Error("invalid_download");
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      const blob = new Blob([bytes], { type: "application/octet-stream" });
+      const blobUrl = URL.createObjectURL(blob);
+      try {
+        const link = document.createElement("a");
+        link.href = blobUrl;
+        link.download = result.fileName;
+        link.style.display = "none";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      } finally {
+        window.setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+      }
+    } catch {
+      if (ticket === attachmentDownloadTicket.current &&
+          currentMessageTicket === messageTicket.current) {
+        setAttachmentDownloadError("This attachment could not be downloaded.");
+      }
+    } finally {
+      if (ticket === attachmentDownloadTicket.current &&
+          currentMessageTicket === messageTicket.current) {
+        setAttachmentDownloadBusy(null);
+      }
+    }
+  }, [attachmentDownloadBusy, attachmentRows, connected, mailbox.id, selectedMessage]);
 
   const changeReadState = useCallback(async (nextUnread: boolean) => {
     const targetId = selectedMessage?.providerMessageId;
@@ -747,16 +828,36 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                     {attachmentBusy && <p role="status">Loading attachment details…</p>}
                     {attachmentError && <p role="alert">{attachmentError}</p>}
                     {!attachmentBusy && !attachmentError && attachmentRows.map((item) => (
-                      <div key={item.id} className="flex justify-between gap-3 border-t border-[var(--workspace-border-soft)] py-2">
-                        <span className="min-w-0 break-words">{item.name}</span>
-                        <span className="shrink-0">{item.size.toLocaleString()} bytes</span>
+                      <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--workspace-border-soft)] py-2">
+                        <span className="min-w-0 break-words">
+                          {item.name}
+                          <span className="ml-2 text-[var(--workspace-text-faint)]">
+                            {item.size.toLocaleString()} bytes
+                          </span>
+                        </span>
+                        {item.kind === "file" && item.size <= 2 * 1024 * 1024 ? (
+                          <button type="button"
+                            disabled={attachmentDownloadBusy !== null}
+                            onClick={() => void downloadAttachment(item)}
+                            className="rounded-lg border border-[var(--workspace-border)] px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+                            aria-label={"Download " + item.name}>
+                            {attachmentDownloadBusy === item.id ? "Downloading…" : "Download"}
+                          </button>
+                        ) : (
+                          <span className="text-[var(--workspace-text-faint)]">
+                            {item.size > 2 * 1024 * 1024
+                              ? "Over 2 MB limit"
+                              : "Download not supported for this attachment type"}
+                          </span>
+                        )}
                       </div>
                     ))}
                     {!attachmentBusy && !attachmentError && attachmentRows.length === 0 && (
                       <p>No attachment details returned.</p>
                     )}
                     {attachmentHasMore && <p>Only the first 25 attachments are shown.</p>}
-                    <p className="mt-2">File downloads are not available yet.</p>
+                    {attachmentDownloadError && <p role="alert" className="mt-2">{attachmentDownloadError}</p>}
+                    <p className="mt-2">Read-only downloads of file attachments up to 2 MB. No messages are changed.</p>
                   </section>
                 )}
                 <div className="mt-6 space-y-4 whitespace-pre-wrap break-words text-sm leading-7">
@@ -764,8 +865,8 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                 </div>
                 <p className="mt-8 text-xs text-[var(--workspace-text-faint)]">
                   {folder === "Sent"
-                    ? "Sent Items are read-only. Sending, replies and attachments are not enabled yet."
-                    : "Replies, attachments and other message actions are not enabled yet."}
+                    ? "Sent Items are read-only. Sending and replies are not enabled yet."
+                    : "Replies and other mailbox changes are not enabled yet."}
                 </p>
               </article>
             )}

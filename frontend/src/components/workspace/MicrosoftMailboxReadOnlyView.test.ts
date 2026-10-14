@@ -44,7 +44,13 @@ const microsoftSource = readFileSync(
 assert.match(microsoftSource, /fetchMicrosoftAttachments/);
 assert.match(microsoftSource, /attachmentRequest !== attachmentTicket.current/);
 assert.match(microsoftSource, /selectedIdRef.current !== providerMessageId/);
-assert.match(microsoftSource, /File downloads are not available yet/);
+assert.match(microsoftSource, /downloadMicrosoftAttachmentFile/);
+assert.match(microsoftSource, /item\.kind === "file"/);
+assert.match(microsoftSource, /item\.size <= 2 \* 1024 \* 1024/);
+assert.match(microsoftSource, /application\/octet-stream/);
+assert.match(microsoftSource, /link\.download = result\.fileName/);
+assert.match(microsoftSource, /currentMessageTicket !== messageTicket\.current/);
+assert.match(microsoftSource, /Read-only downloads of file attachments up to 2 MB/);
 assert.doesNotMatch(ready, /Download file|Download attachment/);
 
 const disconnected = renderToStaticMarkup(createElement(MicrosoftMailboxReadOnlyView, {

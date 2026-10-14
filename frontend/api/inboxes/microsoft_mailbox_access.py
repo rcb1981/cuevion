@@ -324,3 +324,20 @@ def list_owned_microsoft_attachments(
     )
     _verify_unchanged_owned_mailbox(headers, mailbox_id, authority)
     return result
+
+
+def download_owned_microsoft_attachment(
+    headers, mailbox_id: object, message_id: str, attachment_id: str,
+    *, folder: str,
+) -> dict:
+    """Owner-scoped read-only file fetch with post-network authority recheck."""
+    if folder not in {"Inbox", "Sent"}:
+        raise MicrosoftMailboxAccessError("microsoft_mailbox_unavailable")
+    from api.inboxes import microsoft_attachment_download
+
+    token, captured = _owned_token(headers, mailbox_id)
+    result = microsoft_attachment_download.read_microsoft_file_attachment(
+        token, message_id, attachment_id, folder=folder,
+    )
+    _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+    return result
