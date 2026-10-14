@@ -88,7 +88,7 @@ def _timestamp(value: object) -> tuple[str, str]:
 
 
 def project_message(message: object, mailbox_id: str, *, exact_body: bool = False, folder: str = "INBOX") -> dict:
-    if folder not in {"INBOX", "ARCHIVE"}:
+    if folder not in {"INBOX", "ARCHIVE", "JUNK"}:
         raise MicrosoftGraphError("microsoft_graph_invalid_response")
     if not isinstance(message, dict):
         raise MicrosoftGraphError("microsoft_graph_invalid_response")
@@ -348,6 +348,28 @@ def project_deleted(snapshot: object, mailbox_id: str) -> dict:
     return {
         "ok": True, "messages": projected,
         "deletedMessageIds": ids, "hasMore": snapshot["hasMore"],
+    }
+
+
+def project_junk(snapshot: object, mailbox_id: str) -> dict:
+    """Junk Email messages never receive INBOX labels or Inbox membership."""
+    if (
+        type(snapshot) is not dict
+        or type(snapshot.get("messages")) is not list
+        or type(snapshot.get("hasMore")) is not bool
+        or len(snapshot["messages"]) > 25
+    ):
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    projected = [
+        project_message(item, mailbox_id, folder="JUNK")
+        for item in snapshot["messages"]
+    ]
+    ids = [item["providerMessageId"] for item in projected]
+    if len(set(ids)) != len(ids):
+        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    return {
+        "ok": True, "messages": projected,
+        "junkMessageIds": ids, "hasMore": snapshot["hasMore"],
     }
 
 

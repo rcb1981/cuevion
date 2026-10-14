@@ -315,7 +315,7 @@ def list_owned_microsoft_attachments(
     headers, mailbox_id: object, message_id: str, *, folder: str,
 ) -> dict:
     """Read attached file names only after owner, folder, and token checks."""
-    if folder not in {"Inbox", "Sent", "Archive", "Drafts", "Deleted"}:
+    if folder not in {"Inbox", "Sent", "Archive", "Drafts", "Deleted", "Junk"}:
         raise MicrosoftMailboxAccessError("microsoft_mailbox_unavailable")
     from api.inboxes import microsoft_attachments_graph
     token, authority = _owned_token(headers, mailbox_id)
@@ -419,3 +419,31 @@ def read_owned_microsoft_deleted(headers, mailbox_id: object, message_id: str) -
     item = microsoft_deleted_graph.get_microsoft_deleted_message(token, message_id)
     _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
     return item
+
+
+def list_owned_microsoft_junk(
+    headers, mailbox_id: object, *, page_size: int = 20, page: int = 1,
+) -> dict:
+    """Owner-scoped Junk Email listing; recheck authority after all Graph calls."""
+    from api.inboxes import microsoft_graph
+    if type(page_size) is not int or not 1 <= page_size <= 25:
+        raise MicrosoftMailboxAccessError("microsoft_page_size_invalid")
+    if type(page) is not int or not 1 <= page <= microsoft_graph.MAX_UI_PAGES:
+        raise MicrosoftMailboxAccessError("microsoft_page_invalid")
+    token, captured = _owned_token(headers, mailbox_id)
+    snapshot = microsoft_graph.list_microsoft_junk(
+        token, page_size=page_size, **({"page": page} if page != 1 else {}),
+    )
+    _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+    return snapshot
+
+
+def read_owned_microsoft_junk_message(
+    headers, mailbox_id: object, message_id: str,
+) -> dict:
+    """Only messages from Junk Email may be returned for the selected owner."""
+    from api.inboxes import microsoft_graph
+    token, captured = _owned_token(headers, mailbox_id)
+    message = microsoft_graph.get_microsoft_junk_message(token, message_id)
+    _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+    return message

@@ -53,7 +53,7 @@ class AttachmentGraphTests(unittest.TestCase):
 
     def test_bad_folder_and_id_do_not_reach_graph(self):
         opener = FakeOpener({"value": []})
-        for folder in ("Junk", "Trash", "inbox", "../inbox", ""):
+        for folder in ("Outbox", "Trash", "inbox", "../inbox", ""):
             with self.subTest(folder=folder), self.assertRaises(microsoft_graph.MicrosoftGraphError):
                 attachments.list_microsoft_attachments(TOKEN, MSG, folder=folder, opener=opener)
         self.assertEqual(len(opener.calls), 0)
@@ -98,7 +98,7 @@ class AttachmentBoundaryTests(unittest.TestCase):
             (MAILBOX, {"providerMessageId": MSG, "folder": "Inbox"}),
         )
         for altered in (
-            {**valid, "folder": "Junk"},
+            {**valid, "folder": "Outbox"},
             {**valid, "folder": "INBOX"},
             {**valid, "page": 2},
             {**valid, "nextLink": "arbitrary"},
@@ -156,7 +156,7 @@ class AttachmentBoundaryTests(unittest.TestCase):
             )
             self.assertEqual(
                 microsoft_http.microsoft_inbox_response(
-                    _request({**payload, "folder": "Junk"}), mode="attachments",
+                    _request({**payload, "folder": "Outbox"}), mode="attachments",
                 ).status,
                 400,
             )

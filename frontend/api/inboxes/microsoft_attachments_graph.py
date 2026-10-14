@@ -11,7 +11,7 @@ from api.inboxes.microsoft_graph import (
 MAX_ATTACHMENT_ROWS = 25
 MAX_ATTACHMENT_BYTES = 256 * 1024
 _ATTACHMENT_SELECT = "id,name,size,contentType,isInline"
-_FOLDER_PATHS = {"Inbox": "inbox", "Sent": "sentitems", "Archive": "archive", "Drafts": "drafts", "Deleted": "deleteditems"}
+_FOLDER_PATHS = {"Inbox": "inbox", "Sent": "sentitems", "Archive": "archive", "Drafts": "drafts", "Deleted": "deleteditems", "Junk": "junkemail"}
 
 
 def _attachment_summary(value: object) -> dict:

@@ -102,6 +102,8 @@ def _get_json(
         or path.startswith("/me/mailFolders/deleteditems/messages/")
         or path.startswith("/me/mailFolders/drafts/messages?")
         or path.startswith("/me/mailFolders/drafts/messages/")
+        or path.startswith("/me/mailFolders/junkemail/messages?")
+        or path.startswith("/me/mailFolders/junkemail/messages/")
         or path.startswith("/me/mailFolders/archive/messages?")
         or path.startswith("/me/mailFolders/archive/messages/")
         or path.startswith("/me/mailFolders/inbox/messages/")
@@ -261,7 +263,7 @@ def _list_microsoft_mail_folder(
     No Graph paging URL, token, mailbox selector, or folder path is accepted
     from or returned to the browser. At most four provider requests may occur.
     """
-    if folder not in {"inbox", "archive"}:
+    if folder not in {"inbox", "archive", "junkemail"}:
         raise MicrosoftGraphError("microsoft_graph_path_invalid")
     if type(page_size) is not int or not 1 <= page_size <= MAX_MESSAGES_PER_PAGE:
         raise MicrosoftGraphError("microsoft_page_size_invalid")
@@ -326,6 +328,25 @@ def list_microsoft_archive(
     )
 
 
+def list_microsoft_junk(
+    access_token: str, *, page_size: int = 20, page: int = 1, opener=urlopen,
+) -> dict:
+    """Bounded read from the fixed Junk Email folder; no client-supplied Graph paths."""
+    return _list_microsoft_mail_folder(
+        access_token, folder="junkemail", page_size=page_size, page=page, opener=opener,
+    )
+
+
+def get_microsoft_junk_message(
+    access_token: str, message_id: str, *, opener=urlopen,
+) -> dict:
+    """Read one immutable message ID only from Junk Email."""
+    return _read_microsoft_mail_message(
+        access_token, message_id,
+        path_prefix="/me/mailFolders/junkemail/messages/", opener=opener,
+    )
+
+
 def get_microsoft_message(access_token: str, message_id: str, *, opener=urlopen) -> dict:
     """Read an exact message with the existing Inbox behavior."""
     return _read_microsoft_mail_message(
@@ -344,7 +365,7 @@ def get_microsoft_archive_message(access_token: str, message_id: str, *, opener=
 def _read_microsoft_mail_message(
     access_token: str, message_id: str, *, path_prefix: str, opener=urlopen,
 ) -> dict:
-    if path_prefix not in {"/me/messages/", "/me/mailFolders/archive/messages/"}:
+    if path_prefix not in {"/me/messages/", "/me/mailFolders/archive/messages/", "/me/mailFolders/junkemail/messages/"}:
         raise MicrosoftGraphError("microsoft_graph_path_invalid")
     encoded_id = quote(_required_message_id(message_id), safe="")
     query = urlencode({"$select": _MESSAGE_SELECT + ",body"})

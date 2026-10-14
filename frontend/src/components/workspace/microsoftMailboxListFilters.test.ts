@@ -93,3 +93,11 @@ assert.deepEqual(
   ["id-3", "id-1"],
   "Read status in Deleted Items is only a local visual filter",
 );
+
+
+assert.deepEqual(
+  filterMicrosoftLoadedMessages(rows, {...defaults, folder: "Junk", unreadOnly: true})
+    .map((item) => item.id),
+  ["id-3", "id-1"],
+  "Junk Email unread-only works on the current page without mutating Graph",
+);

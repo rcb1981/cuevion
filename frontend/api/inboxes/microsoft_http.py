@@ -20,7 +20,7 @@ from api.inboxes.microsoft_graph import MicrosoftGraphError
 from api.inboxes.microsoft_inbox_projection import (
     project_inbox, project_message, project_sent, project_sent_message,
     project_archive, project_drafts, project_draft_message,
-    project_deleted, project_deleted_message,
+    project_deleted, project_deleted_message, project_junk,
 )
 
 MAX_REQUEST_BYTES = 4096
@@ -83,7 +83,7 @@ def _parse_body(request, headers: tuple) -> dict:
 
 def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dict]:
     expected = (
-        {"mailboxId", "limit", "page"} if mode in {"list", "sent", "archive", "drafts", "deleted"}
+        {"mailboxId", "limit", "page"} if mode in {"list", "sent", "archive", "drafts", "deleted", "junk"}
         else {"mailboxId", "providerMessageId", "folder"} if mode == "attachments"
         else {"mailboxId", "providerMessageId", "attachmentId", "folder"} if mode == "download"
         else {"mailboxId", "providerMessageId", "unread"} if mode == "flag"
@@ -94,7 +94,7 @@ def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dic
     mailbox = payload.get("mailboxId")
     if type(mailbox) is not str or _MAX_MAILBOX.fullmatch(mailbox) is None:
         raise ValueError("invalid")
-    if mode in {"list", "sent", "archive", "drafts", "deleted"}:
+    if mode in {"list", "sent", "archive", "drafts", "deleted", "junk"}:
         limit = payload.get("limit", 20)
         page = payload.get("page", 1)
         if type(limit) is not int or not 1 <= limit <= 25:
@@ -102,7 +102,7 @@ def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dic
         if type(page) is not int or not 1 <= page <= 4:
             raise ValueError("invalid")
         return mailbox, limit if page == 1 else {"limit": limit, "page": page}
-    if mode in {"exact", "sent_exact", "archive_exact", "draft_exact", "deleted_exact", "attachments", "download"}:
+    if mode in {"exact", "sent_exact", "archive_exact", "draft_exact", "deleted_exact", "junk_exact", "attachments", "download"}:
         message_id = payload.get("providerMessageId")
         if (
             type(message_id) is not str
@@ -114,7 +114,9 @@ def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dic
             raise ValueError("invalid")
         if mode in {"attachments", "download"}:
             folder = payload.get("folder")
-            if type(folder) is not str or folder not in {"Inbox", "Sent", "Archive", "Drafts", "Deleted"}:
+            if type(folder) is not str or folder not in {"Inbox", "Sent", "Archive", "Drafts", "Deleted", "Junk"}:
+                raise ValueError("invalid")
+            if mode == "download" and folder == "Junk":
                 raise ValueError("invalid")
             if mode == "download":
                 from api.inboxes.microsoft_graph import _required_message_id
@@ -223,6 +225,29 @@ def microsoft_inbox_response(request, *, mode: str):
                 "fileName": record["fileName"],
                 "size": record["size"],
                 "base64": record["base64"],
+            })
+        if mode == "junk":
+            assert type(selector) is int or type(selector) is dict
+            if type(selector) is dict:
+                snapshot = owned.list_owned_microsoft_junk(
+                    headers, mailbox_id, page_size=selector["limit"], page=selector["page"],
+                )
+            else:
+                snapshot = owned.list_owned_microsoft_junk(
+                    headers, mailbox_id, page_size=selector,
+                )
+            return json_response(200, project_junk(snapshot, mailbox_id))
+        if mode == "junk_exact":
+            assert type(selector) is str
+            message = owned.read_owned_microsoft_junk_message(
+                headers, mailbox_id, selector,
+            )
+            if type(message) is not dict or message.get("id") != selector:
+                raise MicrosoftGraphError("microsoft_graph_invalid_response")
+            return json_response(200, {
+                "ok": True, "message": project_message(
+                    message, mailbox_id, exact_body=True, folder="JUNK",
+                ),
             })
         if mode == "deleted":
             assert type(selector) is int or type(selector) is dict

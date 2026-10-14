@@ -14,6 +14,8 @@ import {
   fetchMicrosoftDraftMessage,
   fetchMicrosoftDeleted,
   fetchMicrosoftDeletedMessage,
+  fetchMicrosoftJunk,
+  fetchMicrosoftJunkMessage,
   fetchMicrosoftSent,
   fetchMicrosoftSentMessage,
   fetchMicrosoftAttachments,
@@ -34,7 +36,7 @@ const MICROSOFT_READ_ONLY_PILOT = true;
 const MICROSOFT_POLL_INTERVAL_MS = 120_000;
 const MICROSOFT_INBOX_LIMIT = 25;
 const MICROSOFT_MAX_PAGES = 4;
-type MicrosoftFolder = "Inbox" | "Sent" | "Archive" | "Drafts" | "Deleted";
+type MicrosoftFolder = "Inbox" | "Sent" | "Archive" | "Drafts" | "Deleted" | "Junk";
 
 type MicrosoftReadOnlyMailbox = {
   id: string;
@@ -130,7 +132,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     }),
     [rows, folder, searchQuery, unreadOnly, sortOrder],
   );
-  const hasActiveListFilter = Boolean(searchQuery.trim()) || ((folder === "Inbox" || folder === "Archive" || folder === "Deleted") && unreadOnly);
+  const hasActiveListFilter = Boolean(searchQuery.trim()) || ((folder === "Inbox" || folder === "Archive" || folder === "Deleted" || folder === "Junk") && unreadOnly);
 
   const refresh = useCallback(async () => {
     if (!connected || mutationInFlight.current || composer !== null) {
@@ -157,7 +159,11 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
               ? await fetchMicrosoftDeleted({
                   mailboxId: mailbox.id, limit: MICROSOFT_INBOX_LIMIT, page,
                 })
-              : await fetchMicrosoftInbox({
+              : requestedFolder === "Junk"
+                ? await fetchMicrosoftJunk({
+                    mailboxId: mailbox.id, limit: MICROSOFT_INBOX_LIMIT, page,
+                  })
+                : await fetchMicrosoftInbox({
               mailboxId: mailbox.id, limit: MICROSOFT_INBOX_LIMIT, page,
             });
       if (
@@ -367,7 +373,11 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
               ? await fetchMicrosoftDeletedMessage({
                   mailboxId: mailbox.id, providerMessageId,
                 })
-              : await fetchMicrosoftMessage({
+              : requestedFolder === "Junk"
+                ? await fetchMicrosoftJunkMessage({
+                    mailboxId: mailbox.id, providerMessageId,
+                  })
+                : await fetchMicrosoftMessage({
               mailboxId: mailbox.id, providerMessageId,
             });
       if (
@@ -451,6 +461,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       !messageId ||
       selectedIdRef.current !== messageId ||
       item.kind !== "file" ||
+      folderRef.current === "Junk" ||
       item.size > 2 * 1024 * 1024 ||
       !attachmentRows.some((entry) => entry.id === item.id) ||
       attachmentDownloadBusy !== null
@@ -681,6 +692,15 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           </button>
           <button
             type="button"
+            aria-pressed={folder === "Junk"}
+            disabled={!connected || composer !== null || mutationBusy}
+            onClick={() => selectFolder("Junk")}
+            className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium aria-pressed:bg-[var(--workspace-card-subtle)] disabled:opacity-50"
+          >
+            Junk Email
+          </button>
+          <button
+            type="button"
             onClick={() => void refresh()}
             disabled={!connected || composer !== null || listBusy || mutationBusy}
             className="rounded-xl border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium disabled:opacity-50"
@@ -725,7 +745,9 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                       ? " drafts shown"
                       : folder === "Deleted"
                         ? " deleted items shown"
-                        : ", " + rows.filter((row) => row.unread).length + " unread shown"})
+                        : folder === "Junk"
+                          ? " junk messages shown"
+                          : ", " + rows.filter((row) => row.unread).length + " unread shown"})
                 </span>
               </h2>
               {lastUpdated && <span className="text-[0.7rem] text-[var(--workspace-text-faint)]">Updated {readableTime(lastUpdated)}</span>}
@@ -746,7 +768,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                 className="w-full rounded-xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-2 text-sm text-[var(--workspace-text)] placeholder:text-[var(--workspace-text-faint)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]"
               />
               <div className="flex flex-wrap items-center justify-between gap-2">
-                {folder === "Inbox" || folder === "Archive" || folder === "Deleted" ? (
+                {folder === "Inbox" || folder === "Archive" || folder === "Deleted" || folder === "Junk" ? (
                   <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-[var(--workspace-text-muted)]">
                     <input
                       type="checkbox"
@@ -919,7 +941,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                             {item.size.toLocaleString()} bytes
                           </span>
                         </span>
-                        {item.kind === "file" && item.size <= 2 * 1024 * 1024 ? (
+                        {folder !== "Junk" && item.kind === "file" && item.size <= 2 * 1024 * 1024 ? (
                           <button type="button"
                             disabled={attachmentDownloadBusy !== null}
                             onClick={() => void downloadAttachment(item)}
@@ -929,9 +951,11 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                           </button>
                         ) : (
                           <span className="text-[var(--workspace-text-faint)]">
-                            {item.size > 2 * 1024 * 1024
-                              ? "Over 2 MB limit"
-                              : "Download not supported for this attachment type"}
+                            {folder === "Junk"
+                              ? "Download disabled for junk mail"
+                              : item.size > 2 * 1024 * 1024
+                                ? "Over 2 MB limit"
+                                : "Download not supported for this attachment type"}
                           </span>
                         )}
                       </div>
@@ -941,11 +965,24 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                     )}
                     {attachmentHasMore && <p>Only the first 25 attachments are shown.</p>}
                     {attachmentDownloadError && <p role="alert" className="mt-2">{attachmentDownloadError}</p>}
-                    <p className="mt-2">Read-only downloads of file attachments up to 2 MB. No messages are changed.</p>
+                    <p className="mt-2">
+                      {folder === "Junk"
+                        ? "Attachments are listed for reference. Downloads are disabled for safety."
+                        : "Read-only downloads of file attachments up to 2 MB. No messages are changed."}
+                    </p>
                   </section>
                 )}
+                {folder === "Junk" && (
+                  <p role="note" className="mt-4 text-xs text-[var(--workspace-text-muted)]">
+                    Links in junk mail are displayed as plain text and cannot be clicked here.
+                  </p>
+                )}
                 <div className="mt-6 space-y-4 whitespace-pre-wrap break-words text-sm leading-7">
-                  {selectedMessage.body.map((part, index) => <p key={index}><MicrosoftLinkifiedText text={part} /></p>)}
+                  {selectedMessage.body.map((part, index) => (
+                    <p key={index}>
+                      {folder === "Junk" ? part : <MicrosoftLinkifiedText text={part} />}
+                    </p>
+                  ))}
                 </div>
                 <p className="mt-8 text-xs text-[var(--workspace-text-faint)]">
                   {folder === "Sent"
@@ -956,7 +993,9 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                         ? "Drafts are read-only. Editing, sending, and deleting drafts are disabled."
                         : folder === "Deleted"
                           ? "Deleted Items are read-only. Restoring and permanently deleting messages are disabled."
-                          : "Replies and other mailbox changes are not enabled yet."}
+                          : folder === "Junk"
+                            ? "Junk Email is read-only. Spam reporting, moving, and deleting are disabled."
+                            : "Replies and other mailbox changes are not enabled yet."}
                 </p>
               </article>
             )}
