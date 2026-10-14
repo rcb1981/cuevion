@@ -182,6 +182,39 @@ class MicrosoftGraphInboxTests(unittest.TestCase):
         self.assertIn("%24orderby=receivedDateTime+desc", request.full_url)
         self.assertNotIn("access_token", request.full_url)
 
+    def test_graph_owned_nextlink_folder_variants_are_opaque(self):
+        # Graph may return a canonical folder ID instead of the original
+        # well-known "inbox" path. Cuevion never dereferences a nextLink.
+        for next_link in (
+            GRAPH_ROOT + "/me/mailFolders('AAMkFolder')/messages?$skip=1",
+            GRAPH_ROOT + "/users('account-id')/mailFolders/AAMkFolder/messages?$skiptoken=more",
+            GRAPH_ROOT + "/me/mailfolders/inbox/messages?$skip=1",
+        ):
+            with self.subTest(link=next_link):
+                opener = FakeOpener({
+                    "value": [graph_message()],
+                    "@odata.nextLink": next_link,
+                })
+                result = list_microsoft_inbox(TOKEN, page_size=1, opener=opener)
+                self.assertTrue(result["hasMore"])
+                self.assertEqual(len(result["messages"]), 1)
+                self.assertEqual(len(opener.calls), 1)
+
+    def test_invalid_response_stages_reveal_no_message_or_token_content(self):
+        for payload, stage in (
+            ({"value": [graph_message(**{"from": None})]}, "message"),
+            ({"value": "not-a-list"}, "collection"),
+            ({"value": [graph_message()], "@odata.nextLink": "https://evil.example/attack"}, "pagination"),
+            (b"<html>untrusted graph response</html>", "transport"),
+        ):
+            with self.subTest(stage=stage):
+                with self.assertRaises(MicrosoftGraphError) as error:
+                    list_microsoft_inbox(TOKEN, page_size=1, opener=FakeOpener(payload))
+                self.assertEqual(error.exception.code, "microsoft_graph_invalid_response")
+                self.assertEqual(error.exception.safe_stage, stage)
+                self.assertNotIn("sender@example.net", str(error.exception))
+                self.assertNotIn(TOKEN, str(error.exception))
+
     def test_page_size_is_strictly_limited(self):
         for bad in (-1, 0, 26, "10", True, 1.5):
             with self.subTest(size=bad):

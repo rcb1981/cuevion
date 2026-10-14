@@ -320,6 +320,22 @@ class MicrosoftHTTPTests(unittest.TestCase):
                 response = microsoft_http.microsoft_inbox_response(_request(), mode="list")
                 self.assertEqual(response.status, status)
 
+    def test_inbox_invalid_shape_logs_only_fixed_safe_stage(self):
+        with patch.object(
+            access, "list_owned_microsoft_inbox",
+            side_effect=MicrosoftGraphError(
+                "microsoft_graph_invalid_response", safe_stage="message",
+            ),
+        ), patch("builtins.print") as safe_log:
+            response = microsoft_http.microsoft_inbox_response(_request(), mode="list")
+
+        self.assertEqual(response.status, 502)
+        self.assertEqual(_body(response)["error"]["code"], "microsoft_graph_invalid_response")
+        self.assertNotIn("safe_stage", response.body.decode())
+        safe_log.assert_called_once_with(
+            "microsoft_inbox_invalid_response_stage=message", flush=True,
+        )
+
     def test_unknown_provider_exception_is_not_exposed(self):
         with patch.object(
             access, "list_owned_microsoft_inbox",

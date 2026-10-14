@@ -35,9 +35,12 @@ _MESSAGE_SELECT = (
 class MicrosoftGraphError(Exception):
     """Generic codes only. Never include access tokens or Graph response bodies."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, safe_stage: str | None = None):
         super().__init__(code)
         self.code = code
+        # Fixed, content-free diagnostic label for operational troubleshooting.
+        # Never attach raw Graph payloads, URLs, message IDs, or mailbox identity.
+        self.safe_stage = safe_stage
 
 
 def _required_access_token(value: object) -> str:
@@ -226,23 +229,44 @@ def list_microsoft_inbox(access_token: str, *, page_size: int = 20, opener=urlop
         "$orderby": "receivedDateTime desc",
         "$select": _MESSAGE_SELECT,
     })
-    payload = _get_json(
-        "/me/mailFolders/inbox/messages?" + query,
-        access_token,
-        maximum_bytes=MAX_GRAPH_JSON_BYTES,
-        opener=opener,
-    )
+    try:
+        payload = _get_json(
+            "/me/mailFolders/inbox/messages?" + query,
+            access_token,
+            maximum_bytes=MAX_GRAPH_JSON_BYTES,
+            opener=opener,
+        )
+    except MicrosoftGraphError as error:
+        if error.code == "microsoft_graph_invalid_response":
+            raise MicrosoftGraphError(error.code, safe_stage="transport") from None
+        raise
     values = payload.get("value")
     if not isinstance(values, list) or len(values) > page_size:
-        raise MicrosoftGraphError("microsoft_graph_invalid_response")
-    items = [_message_summary(item) for item in values]
+        raise MicrosoftGraphError("microsoft_graph_invalid_response", safe_stage="collection")
+    try:
+        items = [_message_summary(item) for item in values]
+    except MicrosoftGraphError as error:
+        if error.code == "microsoft_graph_invalid_response":
+            raise MicrosoftGraphError(error.code, safe_stage="message") from None
+        raise
     next_link = payload.get("@odata.nextLink")
-    if next_link is not None and (
-        not isinstance(next_link, str)
-        or not next_link.startswith(GRAPH_ROOT + "/me/mailFolders/inbox/messages?")
-        or len(next_link) > 8192
-    ):
-        raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    if next_link is not None:
+        next_link_path = (
+            next_link.split("?", 1)[0].lower() if isinstance(next_link, str) else ""
+        )
+        if (
+            not isinstance(next_link, str)
+            or not next_link.startswith(GRAPH_ROOT + "/")
+            or len(next_link) > 8192
+            or "?" not in next_link
+            or "#" in next_link
+            or "/mailfolders" not in next_link_path
+            or not next_link_path.endswith("/messages")
+        ):
+            raise MicrosoftGraphError("microsoft_graph_invalid_response", safe_stage="pagination")
+    # Treat the Microsoft-controlled paging URL as an opaque has-more marker.
+    # It may canonicalize a well-known folder to an internal folder ID. The
+    # nextLink is never followed, stored, reflected, or accepted from clients.
     return {"messages": items, "hasMore": bool(next_link)}
 
 
