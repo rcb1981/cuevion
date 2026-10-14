@@ -93,6 +93,11 @@ export function MicrosoftMessageListRow({
           <p className="mt-1 truncate text-xs text-[var(--workspace-text-muted)]">
             {message.snippet || "No preview available"}
           </p>
+          {message.hasAttachments === true && (
+            <span aria-label="Has attachments" className="mt-1 inline-flex text-[0.68rem] text-[var(--workspace-text-muted)]">
+              Attachment
+            </span>
+          )}
         </div>
       </div>
     </button>

@@ -700,6 +700,11 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                 )}
                   </>
                 )}
+                {selectedMessage.hasAttachments && (
+                  <div role="note" className="mt-4 rounded-xl border border-[var(--workspace-border-soft)] p-3 text-xs text-[var(--workspace-text-muted)]">
+                    This message includes an attachment. File access is not yet available in the Microsoft read-only pilot.
+                  </div>
+                )}
                 <div className="mt-6 space-y-4 whitespace-pre-wrap break-words text-sm leading-7">
                   {selectedMessage.body.map((part, index) => <p key={index}><MicrosoftLinkifiedText text={part} /></p>)}
                 </div>

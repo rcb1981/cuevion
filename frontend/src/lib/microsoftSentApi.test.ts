@@ -22,6 +22,7 @@ const ROW = {
   unread: false,
   flagged: false,
   attachments: [],
+  hasAttachments: true,
 };
 const LIST = {
   ok: true, messages: [ROW],
@@ -71,6 +72,9 @@ async function run() {
       assert.equal(rejected.ok, false);
       assert.equal(calls.length, 0);
     }
+
+    fake({ ...LIST, messages: [{ ...ROW, hasAttachments: "yes" }] });
+    assert.equal((await fetchMicrosoftSent({mailboxId: BOX})).ok, false);
 
     fake(EXACT);
     const exact = await fetchMicrosoftSentMessage({ mailboxId: BOX, providerMessageId: ID });

@@ -25,6 +25,7 @@ const ENTRY = {
   unread: true,
   flagged: false,
   attachments: [],
+  hasAttachments: true,
 };
 const LIST = {
   ok: true,
@@ -78,6 +79,9 @@ async function run() {
       assert.equal(rejected.ok, false);
       assert.equal(calls.length, 0);
     }
+
+    setFetch({ ...LIST, messages: [{ ...ENTRY, hasAttachments: "yes" }] });
+    assert.equal((await fetchMicrosoftInbox({mailboxId: BOX})).ok, false);
 
     setFetch(EXACT);
     const exact = await fetchMicrosoftMessage({mailboxId: BOX, providerMessageId: ID});

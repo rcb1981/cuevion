@@ -21,6 +21,7 @@ const base = {
   timestamp: "October 14",
   body: [],
   unread: true,
+  hasAttachments: false,
 };
 
 function row(
@@ -46,6 +47,11 @@ assert.match(unread, /bg-moss/);
 assert.match(unread, /font-semibold/);
 assert.match(unread, /Demo Sender/);
 assert.match(unread, /Oct 14, 12:00/);
+
+const withAttachment = row({ hasAttachments: true });
+assert.match(withAttachment, /Has attachments/);
+assert.match(withAttachment, />Attachment</);
+assert.doesNotMatch(row({ hasAttachments: false }), /Has attachments/);
 
 const read = row({ unread: false });
 assert.match(read, /data-read-state="read"/);

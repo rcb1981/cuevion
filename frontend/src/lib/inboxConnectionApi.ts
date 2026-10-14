@@ -82,6 +82,7 @@ export type LiveInboxMessageSnapshot = {
   body: string[];
   bodyHtml?: string;
   attachments?: LiveInboxAttachmentSnapshot[];
+  hasAttachments?: boolean;
   unread?: boolean;
   flagged?: boolean;
   category?: string;
@@ -4484,7 +4485,7 @@ const MICROSOFT_INBOX_MESSAGE_FIELDS = new Set([
   "id", "providerMessageId", "providerThreadId", "serverMailboxId",
   "providerFolder", "labelIds", "sender", "subject", "snippet", "from",
   "to", "cc", "timestamp", "createdAt", "body", "unread", "flagged",
-  "attachments",
+  "attachments", "hasAttachments",
 ]);
 
 const MICROSOFT_INBOX_SAFE_ERRORS: Record<string, string> = {
@@ -4559,6 +4560,7 @@ function isTrustedMicrosoftInboxMessage(
     !Object.keys(message).every((field) => MICROSOFT_INBOX_MESSAGE_FIELDS.has(field)) ||
     !Array.isArray(message.attachments) ||
     message.attachments.length !== 0 ||
+    (message.hasAttachments !== undefined && typeof message.hasAttachments !== "boolean") ||
     (message.providerThreadId !== undefined && typeof message.providerThreadId !== "string") ||
     !Array.isArray(message.body) ||
     !message.body.every((item) => typeof item === "string") ||
@@ -4829,6 +4831,7 @@ function isTrustedMicrosoftSentMessage(
     (options.exact ? item.body.length > 0 : item.body.length === 0) &&
     Array.isArray(item.attachments) &&
     item.attachments.length === 0 &&
+    (item.hasAttachments === undefined || typeof item.hasAttachments === "boolean") &&
     Object.keys(item).every((field) => MICROSOFT_INBOX_MESSAGE_FIELDS.has(field))
   );
 }

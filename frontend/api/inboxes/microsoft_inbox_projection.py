@@ -125,6 +125,7 @@ def project_message(message: object, mailbox_id: str, *, exact_body: bool = Fals
         "unread": message["unread"],
         "flagged": False,
         "attachments": [],
+        "hasAttachments": message["hasAttachments"],
     }
     thread_id = message.get("conversationId")
     if type(thread_id) is str and thread_id:
@@ -211,6 +212,7 @@ def project_sent_message(message: object, mailbox_id: str, *, exact_body: bool =
         "unread": False,
         "flagged": False,
         "attachments": [],
+        "hasAttachments": message["hasAttachments"],
     }
     conversation_id = message.get("conversationId")
     if type(conversation_id) is str and conversation_id:
