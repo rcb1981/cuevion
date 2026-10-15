@@ -1038,6 +1038,28 @@ class MicrosoftIdentityBoundaryTests(unittest.TestCase):
             }):
                 self.assertEqual(connect_oauth.resolve_microsoft_scopes(), expected)
 
+    def test_staged_production_read_flag_scopes_require_explicit_code_release(self):
+        from api.inboxes import microsoft_production_pilot as pilot
+        assert connect_oauth.PRODUCTION_MICROSOFT_READ_FLAG_SCOPES == [
+            *connect_oauth.PRODUCTION_MICROSOFT_READ_ONLY_SCOPES,
+            "https://graph.microsoft.com/Mail.ReadWrite",
+        ]
+        for override in (
+            "", "https://graph.microsoft.com/Mail.Send",
+            "Mail.Send https://graph.microsoft.com/Mail.ReadWrite",
+            "malicious.scope offline_access",
+        ):
+            with self.subTest(override=override), patch.dict(os.environ, {
+                "VERCEL_ENV": "production",
+                "MICROSOFT_OAUTH_SCOPES": override,
+            }, clear=True), patch.object(pilot, "_PRODUCTION_READ_FLAGS_RELEASED", True):
+                scopes = connect_oauth.resolve_microsoft_scopes()
+                self.assertEqual(
+                    scopes, connect_oauth.PRODUCTION_MICROSOFT_READ_FLAG_SCOPES,
+                )
+                self.assertNotIn("https://graph.microsoft.com/Mail.Send", scopes)
+                self.assertNotIn("Mail.Send", scopes)
+
     def test_default_scopes_include_graph_profile_permission(self):
         # This is a future writable Preview contract, NOT production consent.
         with patch.dict(os.environ, {

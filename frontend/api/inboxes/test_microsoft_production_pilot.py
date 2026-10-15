@@ -79,6 +79,91 @@ class MicrosoftReadOnlyProductionPilotTests(unittest.TestCase):
                     parse.assert_not_called()
                     mutate.assert_not_called()
 
+    def test_read_flag_release_is_source_only_and_off_by_default(self):
+        self.assertFalse(policy._PRODUCTION_READ_FLAGS_RELEASED)
+        for options in (
+            {},
+            {"MICROSOFT_PRODUCTION_PILOT_WRITES_ENABLED": "1"},
+            {"MICROSOFT_AUTO_MARK_READ_RELEASED": "true"},
+            {"MICROSOFT_READ_ONLY": "false"},
+            {"MICROSOFT_OAUTH_SCOPES": "Mail.ReadWrite Mail.Send"},
+        ):
+            with self.subTest(options=options), patch.dict(
+                os.environ, {"VERCEL_ENV": "production", **options}, clear=True,
+            ):
+                self.assertTrue(policy.production_pilot_read_flags_blocked())
+                self.assertTrue(policy.production_pilot_writes_blocked())
+
+    def test_future_flag_only_source_release_never_enables_mail_send(self):
+        with patch.dict(os.environ, {"VERCEL_ENV": "production"}, clear=True), patch.object(
+            policy, "_PRODUCTION_READ_FLAGS_RELEASED", True,
+        ):
+            self.assertFalse(policy.production_pilot_read_flags_blocked())
+            self.assertTrue(policy.production_pilot_writes_blocked())
+            with patch.object(access, "mark_owned_microsoft_inbox_read",
+                              return_value={
+                                  "providerMessageId": MESSAGE_ID,
+                                  "unread": False, "changed": True,
+                              }) as mark_read, patch.object(
+                send_service, "send_owned_microsoft_message",
+            ) as send:
+                allowed = inbox.microsoft_inbox_response(
+                    inbox_request({
+                        "mailboxId": MAILBOX,
+                        "providerMessageId": MESSAGE_ID,
+                        "unread": False,
+                    }, header_pairs=(
+                        ("Origin", "https://app.cuevion.com"),
+                    )), mode="flag",
+                )
+                self.assertEqual(allowed.status, 200)
+                self.assertTrue(json.loads(allowed.body)["ok"])
+                mark_read.assert_called_once()
+                self.assertEqual(mark_read.call_args.kwargs, {"unread": False})
+                self.assertEqual(inbox.microsoft_inbox_response(
+                    inbox_request({
+                        "mailboxId": MAILBOX,
+                        "providerMessageId": MESSAGE_ID,
+                        "unread": True,
+                    }, header_pairs=(
+                        ("Origin", "https://app.cuevion.com"),
+                    )), mode="flag",
+                ).status, 403)
+                mark_read.assert_called_once()
+                denied = outbound.microsoft_send_response(send_request())
+                self.assertEqual(denied.status, 403)
+                self.assertEqual(error_code(denied), "microsoft_pilot_read_only")
+                send.assert_not_called()
+
+    def test_future_production_flag_release_requires_canonical_origin(self):
+        payload = {
+            "mailboxId": MAILBOX,
+            "providerMessageId": MESSAGE_ID,
+            "unread": False,
+        }
+        with patch.dict(os.environ, {"VERCEL_ENV": "production"}, clear=True), patch.object(
+            policy, "_PRODUCTION_READ_FLAGS_RELEASED", True,
+        ), patch.object(
+            access, "mark_owned_microsoft_inbox_read",
+        ) as mutate:
+            for header_pairs, expected_status in (
+                ((), 400),  # No Origin
+                ((("Origin", "https://evil.example"),), 403),
+                ((("Origin", "https://app.cuevion.com"), (
+                    "X-Forwarded-Host", "evil.example",
+                )), 403),
+                ((("Origin", "https://app.cuevion.com"), (
+                    "Origin", "https://app.cuevion.com",
+                )), 400),  # Ambiguous Origin
+            ):
+                with self.subTest(headers=header_pairs):
+                    response = inbox.microsoft_inbox_response(
+                        inbox_request(payload, header_pairs=header_pairs),
+                        mode="flag",
+                    )
+                    self.assertEqual(response.status, expected_status)
+                    mutate.assert_not_called()
+
     def test_production_pilot_still_allows_owner_bound_inbox_read(self):
         with patch.dict(os.environ, {"VERCEL_ENV": "production"}, clear=True):
             with patch.object(

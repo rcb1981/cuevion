@@ -37,7 +37,7 @@ const view = readFileSync(
 assert.match(view, /MICROSOFT_READ_ONLY_PILOT && \(/);
 assert.match(view, /<MicrosoftPlannedMessageActions unread=/);
 assert.match(view, /shouldAutoMarkMicrosoftOpenedMessageRead\(/);
-assert.match(view, /readWriteEnabled: !MICROSOFT_READ_ONLY_PILOT/);
+assert.match(view, /readWriteEnabled: MICROSOFT_AUTO_MARK_READ_RELEASED/);
 assert.match(view, /flagTicket !== mutationTicket\.current/);
 assert.match(view, /selectedIdRef\.current !== providerMessageId/);
 assert.match(view, /applyConfirmedMicrosoftUnread\(item, providerMessageId, false\)/);

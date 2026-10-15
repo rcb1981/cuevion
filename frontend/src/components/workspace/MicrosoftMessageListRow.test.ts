@@ -113,7 +113,7 @@ const openMessageCode = viewerSource.slice(openMessageStart, openMessageEnd);
 // Row selection itself never mutates. The future open-to-read request is
 // separately guarded by read-only policy, exact Inbox identity and proof.
 assert.match(openMessageCode, /shouldAutoMarkMicrosoftOpenedMessageRead\(\{/);
-assert.match(openMessageCode, /readWriteEnabled: !MICROSOFT_READ_ONLY_PILOT/);
+assert.match(openMessageCode, /readWriteEnabled: MICROSOFT_AUTO_MARK_READ_RELEASED/);
 assert.match(viewerSource, /const MICROSOFT_READ_ONLY_PILOT = true/);
 assert.match(openMessageCode, /setMicrosoftMessageUnread\(\{/);
 assert.match(openMessageCode, /flagTicket !== mutationTicket\.current/);

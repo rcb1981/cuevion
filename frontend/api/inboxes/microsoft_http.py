@@ -13,9 +13,15 @@ from api.auth.http import (
     get_unique_header,
     json_response,
     snapshot_request_headers,
+    require_canonical_host,
+    require_same_origin,
 )
 from api.inboxes import microsoft_mailbox_access as owned
-from api.inboxes.microsoft_production_pilot import production_pilot_writes_blocked
+from api.inboxes.microsoft_production_pilot import (
+    production_pilot_read_flags_blocked,
+    production_pilot_mark_unread_blocked,
+    production_pilot_writes_blocked,
+)
 from api.inboxes.microsoft_graph import MicrosoftGraphError
 from api.inboxes.microsoft_inbox_projection import (
     project_inbox, project_message, project_sent, project_sent_message,
@@ -149,15 +155,27 @@ def microsoft_inbox_response(request, *, mode: str):
     method = getattr(request, "command", "")
     if method != "POST":
         return _error(405, "method_not_allowed")
-    if mode == "flag" and production_pilot_writes_blocked():
+    if mode == "flag" and production_pilot_read_flags_blocked():
         # Explicitly deny read/unread changes before parsing, owner/token
         # resolution, Graph PATCH, and any other mailbox-side effects.
         return _error(403, "microsoft_pilot_read_only")
 
     try:
         headers = snapshot_request_headers(request)
+        if mode == "flag" and production_pilot_writes_blocked():
+            # This future Production mutation requires exact canonical host
+            # and same-origin POST, even for an already owned mailbox.
+            require_canonical_host(headers)
+            require_same_origin(headers)
         payload = _parse_body(request, headers)
         mailbox_id, selector = _validate_payload(payload, mode=mode)
+        if (
+            mode == "flag"
+            and production_pilot_mark_unread_blocked()
+            and type(selector) is dict
+            and selector["unread"] is True
+        ):
+            return _error(403, "microsoft_pilot_read_only")
     except HttpBoundaryError as error:
         return _error(error.status, "invalid_request")
     except OverflowError:

@@ -13,6 +13,24 @@ from __future__ import annotations
 
 import os
 
+# Release switch is intentionally SOURCE-CODE-ONLY and starts disabled.
+# Separate approval, code review and Production deployment are needed to
+# activate Microsoft Inbox mark-read. This never authorizes sending.
+_PRODUCTION_READ_FLAGS_RELEASED = False
+
+
+def production_pilot_read_flags_blocked() -> bool:
+    """A separate fail-closed gate for Microsoft Inbox read-state changes."""
+    return (
+        os.getenv("VERCEL_ENV", "").strip().lower() == "production"
+        and not _PRODUCTION_READ_FLAGS_RELEASED
+    )
+
+
+def production_pilot_mark_unread_blocked() -> bool:
+    """Even a later mark-read release never permits setting unread=True."""
+    return os.getenv("VERCEL_ENV", "").strip().lower() == "production"
+
 
 def production_pilot_writes_blocked() -> bool:
     """Fail closed for Microsoft mail mutations in Vercel Production."""

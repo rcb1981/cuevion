@@ -34,6 +34,9 @@ import { filterMicrosoftLoadedMessages, type MicrosoftMessageSortOrder } from ".
 // UI convenience only. Real production write prevention is enforced before
 // any Graph mutation at the server boundary in microsoft_production_pilot.py.
 const MICROSOFT_READ_ONLY_PILOT = true;
+// Deliberately separate from composer/send; only a subsequent approved
+// Production release may set this to true after Mail.ReadWrite consent.
+const MICROSOFT_AUTO_MARK_READ_RELEASED = false;
 const MICROSOFT_POLL_INTERVAL_MS = 120_000;
 const MICROSOFT_INBOX_LIMIT = 25;
 const MICROSOFT_MAX_PAGES = 4;
@@ -417,7 +420,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       setSelectedMessage(response.message);
       if (
         shouldAutoMarkMicrosoftOpenedMessageRead({
-          readWriteEnabled: !MICROSOFT_READ_ONLY_PILOT,
+          readWriteEnabled: MICROSOFT_AUTO_MARK_READ_RELEASED,
           folder: requestedFolder,
           selectedMessageId: selectedIdRef.current,
           message: response.message,
