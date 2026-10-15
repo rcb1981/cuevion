@@ -110,7 +110,14 @@ const openMessageStart = viewerSource.indexOf("const openMessage = useCallback")
 const openMessageEnd = viewerSource.indexOf("const changeReadState = useCallback");
 assert.ok(openMessageStart >= 0 && openMessageEnd > openMessageStart);
 const openMessageCode = viewerSource.slice(openMessageStart, openMessageEnd);
-assert.doesNotMatch(openMessageCode, /setMicrosoftMessageUnread|applyConfirmedMicrosoftUnread/);
+// Row selection itself never mutates. The future open-to-read request is
+// separately guarded by read-only policy, exact Inbox identity and proof.
+assert.match(openMessageCode, /shouldAutoMarkMicrosoftOpenedMessageRead\(\{/);
+assert.match(openMessageCode, /readWriteEnabled: !MICROSOFT_READ_ONLY_PILOT/);
+assert.match(viewerSource, /const MICROSOFT_READ_ONLY_PILOT = true/);
+assert.match(openMessageCode, /setMicrosoftMessageUnread\(\{/);
+assert.match(openMessageCode, /flagTicket !== mutationTicket\.current/);
+assert.match(openMessageCode, /applyConfirmedMicrosoftUnread\(item, providerMessageId, false\)/);
 assert.match(rowSource, /onClick=\{\(\) => onOpenMessage\(id\)\}/);
 assert.doesNotMatch(rowSource, /fetch\(|setMicrosoftMessageUnread/);
 assert.match(viewerSource, /<MicrosoftMessageListRow/);

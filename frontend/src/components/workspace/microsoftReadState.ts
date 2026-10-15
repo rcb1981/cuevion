@@ -23,3 +23,24 @@ export function applyConfirmedMicrosoftUnread(
     labelIds: unread ? ["INBOX", "UNREAD"] : ["INBOX"],
   };
 }
+
+/**
+ * Only open-and-read a newly displayed, exact Inbox message after consent.
+ * This predicate contains NO side effects; preview and Production pilot
+ * both leave readWriteEnabled=false until separately released.
+ */
+export function shouldAutoMarkMicrosoftOpenedMessageRead(input: {
+  readWriteEnabled: boolean;
+  folder: string;
+  selectedMessageId: string | null;
+  message: LiveInboxMessageSnapshot | null;
+}): boolean {
+  const { readWriteEnabled, folder, selectedMessageId, message } = input;
+  return readWriteEnabled === true &&
+    folder === "Inbox" &&
+    typeof selectedMessageId === "string" && selectedMessageId.length > 0 &&
+    message?.providerFolder === "INBOX" &&
+    message.providerMessageId === selectedMessageId &&
+    message.unread === true &&
+    Array.isArray(message.body) && message.body.length > 0;
+}

@@ -65,8 +65,9 @@ DEFAULT_MICROSOFT_SCOPES = [
     "offline_access",
     "https://graph.microsoft.com/User.Read",
     "https://graph.microsoft.com/Mail.Read",
+    # Staged permission for explicit mark-as-read only. Mail.Send remains
+    # unrequested until sending receives a separate approval.
     "https://graph.microsoft.com/Mail.ReadWrite",
-    "https://graph.microsoft.com/Mail.Send",
 ]
 MAX_REQUEST_BODY_BYTES = 16 * 1024
 OAUTH_STATE_VERSION = 3
@@ -395,7 +396,13 @@ def resolve_microsoft_scopes() -> list[str]:
     # User.Read is required to verify the actual signed-in account at /me;
     # Mail.Read and offline_access are required for the intended mailbox path.
     # Custom scopes may add consent, but must not silently remove these guards.
-    configured = [scope for scope in configured_scopes.split() if scope]
+    # This staged upgrade is explicitly limited to read status. Never
+    # accidentally regain sending through the older custom scopes setting.
+    send_scopes = {"Mail.Send", "https://graph.microsoft.com/Mail.Send"}
+    configured = [
+        scope for scope in configured_scopes.split()
+        if scope not in send_scopes
+    ]
     return list(dict.fromkeys([*DEFAULT_MICROSOFT_SCOPES, *configured]))
 
 

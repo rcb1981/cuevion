@@ -24,9 +24,10 @@ import {
   type LiveInboxMessageSnapshot,
   type MicrosoftAttachmentMetadata,
 } from "../../lib/inboxConnectionApi";
-import { applyConfirmedMicrosoftUnread } from "./microsoftReadState";
+import { applyConfirmedMicrosoftUnread, shouldAutoMarkMicrosoftOpenedMessageRead } from "./microsoftReadState";
 import { MicrosoftComposePanel } from "./MicrosoftComposePanel";
 import { MicrosoftMessageListRow } from "./MicrosoftMessageListRow";
+import { MicrosoftPlannedMessageActions } from "./MicrosoftPlannedMessageActions";
 import { MicrosoftLinkifiedText } from "./MicrosoftLinkifiedText";
 import { filterMicrosoftLoadedMessages, type MicrosoftMessageSortOrder } from "./microsoftMailboxListFilters";
 
@@ -414,6 +415,64 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
         return;
       }
       setSelectedMessage(response.message);
+      if (
+        shouldAutoMarkMicrosoftOpenedMessageRead({
+          readWriteEnabled: !MICROSOFT_READ_ONLY_PILOT,
+          folder: requestedFolder,
+          selectedMessageId: selectedIdRef.current,
+          message: response.message,
+        }) &&
+        !mutationInFlight.current
+      ) {
+        // Stage automatic open-to-read with the existing exact-ID, owned and
+        // server-confirmed Graph flag mutation. This is unreachable while
+        // the Microsoft Production/Preview read-only pilot remains enabled.
+        const flagTicket = ++mutationTicket.current;
+        mutationInFlight.current = true;
+        inboxTicket.current += 1; // discard any older inbox polling result
+        setListBusy(false);
+        setMutationBusy(true);
+        setMutationError(null);
+        void setMicrosoftMessageUnread({
+          mailboxId: mailbox.id,
+          providerMessageId,
+          unread: false,
+        }).then((flag) => {
+          if (
+            flagTicket !== mutationTicket.current ||
+            ticket !== messageTicket.current ||
+            folderRef.current !== "Inbox" ||
+            selectedIdRef.current !== providerMessageId
+          ) return;
+          if (
+            !flag.ok ||
+            flag.providerMessageId !== providerMessageId ||
+            flag.unread !== false
+          ) {
+            setMutationError(
+              !flag.ok && flag.error?.code === "microsoft_write_permission_required"
+                ? "Reconnect Microsoft to grant permission for marking messages as read."
+                : "Read status could not be confirmed. Refresh Inbox to check.",
+            );
+            return;
+          }
+          setRows((current) => current.map((item) =>
+            applyConfirmedMicrosoftUnread(item, providerMessageId, false),
+          ));
+          setSelectedMessage((current) =>
+            current ? applyConfirmedMicrosoftUnread(current, providerMessageId, false) : null,
+          );
+          setMutationConfirmation("Marked as read.");
+        }).catch(() => {
+          if (flagTicket === mutationTicket.current &&
+              ticket === messageTicket.current) {
+            setMutationError("Read status could not be confirmed. Refresh Inbox to check.");
+          }
+        }).finally(() => {
+          mutationInFlight.current = false;
+          if (flagTicket === mutationTicket.current) setMutationBusy(false);
+        });
+      }
       if (response.message.hasAttachments === true) {
         setAttachmentBusy(true);
         void fetchMicrosoftAttachments({
@@ -885,6 +944,9 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                 </div>
                 {folder === "Inbox" && (
                   <>
+                {MICROSOFT_READ_ONLY_PILOT && (
+                  <MicrosoftPlannedMessageActions unread={selectedMessage.unread === true} />
+                )}
                 <div className="mt-4 flex flex-wrap items-center gap-3">
                   {!MICROSOFT_READ_ONLY_PILOT && (
                     <>
@@ -907,7 +969,9 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                     </>
                   )}
                   <span className="text-xs text-[var(--workspace-text-muted)]">
-                    Opening a message does not change its read status.
+                    {MICROSOFT_READ_ONLY_PILOT
+                      ? "Opening a message does not change its read status."
+                      : "Opening an unread Inbox message marks it as read once Microsoft confirms."}
                   </span>
                 </div>
                 {mutationError && (
