@@ -1,8 +1,9 @@
 # Microsoft auto-mark-read: controlled release checklist
 
-Status: prepared and tested on a feature branch. **NOT released.**
-No Production merge, OAuth change, Microsoft account reconnect, or mailbox
-write is authorized by this checklist alone.
+Status: explicitly approved for Production release on 2026-10-15.
+Code gates are enabled only in the reviewed release candidate; Microsoft
+reconnection and live mailbox smoke testing are still user-controlled.
+No sending, archiving, deletion, or mark-unread is approved.
 
 ## Scope and safety boundaries
 
@@ -14,10 +15,10 @@ write is authorized by this checklist alone.
   and authority recheck remain the sole server write path. No retries after
   ambiguous provider results. UI indicators change only on confirmation.
 - Source-only Production code gate:
-  `_PRODUCTION_READ_FLAGS_RELEASED = False` in
+  `_PRODUCTION_READ_FLAGS_RELEASED = True` in
   `microsoft_production_pilot.py`. Environment variables cannot enable it.
 - Independent UI code gate:
-  `MICROSOFT_AUTO_MARK_READ_RELEASED = false` in
+  `MICROSOFT_AUTO_MARK_READ_RELEASED = true` in
   `MicrosoftMailboxReadOnlyView.tsx`. Keep the general
   `MICROSOFT_READ_ONLY_PILOT = true` so Reply, New Message and other mail
   mutations do not become available.
@@ -39,8 +40,8 @@ write is authorized by this checklist alone.
    incremental OAuth consent. Do not infer approval from Preview signoff.
 2. Review tests for the production source-only gate, canonical Origin/Host,
    owner scope and lease, no Mark Unread, no send, and unchanged Gmail/IMAP.
-3. Set only `_PRODUCTION_READ_FLAGS_RELEASED = True` and
-   `MICROSOFT_AUTO_MARK_READ_RELEASED = true` in the reviewed release commit.
+3. Verify only `_PRODUCTION_READ_FLAGS_RELEASED = True` and
+   `MICROSOFT_AUTO_MARK_READ_RELEASED = true` are enabled.
    Never disable `MICROSOFT_READ_ONLY_PILOT`.
 4. Run scoped backend/frontend/OAuth tests and Vite build; verify Git tree,
    merge by fast-forward after comparing `main`, deploy only after approval.

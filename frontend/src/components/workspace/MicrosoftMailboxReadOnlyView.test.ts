@@ -25,7 +25,8 @@ const ready = renderToStaticMarkup(createElement(MicrosoftMailboxReadOnlyView, {
 assert.match(ready, /Microsoft Work/);
 assert.match(ready, /owner@example\.com/);
 assert.match(ready, /Microsoft 365 · Mail/);
-assert.match(ready, /Read-only pilot/);
+assert.match(ready, /Auto-read enabled · other actions disabled/);
+assert.doesNotMatch(ready, />Read-only pilot</);
 assert.doesNotMatch(ready, />New message<|>Reply<|>Mark as read<|>Mark as unread</);
 assert.match(ready, /Select a message to read it/);
 assert.match(ready, /Page 1 of up to 4/);
@@ -95,6 +96,7 @@ assert.match(shellSource, /\{activeMicrosoftReadMailbox \? \([\s\S]*?<MicrosoftM
 
 const viewSource = readFileSync(resolve(__dirname, "MicrosoftMailboxReadOnlyView.tsx"), "utf8");
 assert.match(viewSource, /const MICROSOFT_READ_ONLY_PILOT = true/);
+assert.match(viewSource, /const MICROSOFT_AUTO_MARK_READ_RELEASED = true/);
 assert.match(viewSource, /MICROSOFT_READ_ONLY_PILOT \|\| !connected/);
 assert.match(viewSource, /!MICROSOFT_READ_ONLY_PILOT && composer !== null/);
 assert.match(viewSource, /!MICROSOFT_READ_ONLY_PILOT && \(/);

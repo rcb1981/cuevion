@@ -1,9 +1,9 @@
-"""Microsoft Graph production pilot policy: mail content is read-only.
+"""Microsoft Production policy: only confirmed Inbox mark-as-read is allowed.
 
-Production cannot send, reply, create drafts, or change read flags in this
-release. The guard is deliberately NOT overridable through an environment
-variable or a browser-provided field. Enabling writes later requires a
-separately reviewed code change and a new deployment.
+Production cannot send, reply, create drafts, move, delete, or mark unread.
+The authorized exception is one owner-scoped Inbox unread-to-read change.
+This source-only permission is NOT overridable through an environment
+variable or browser input. Any broader mutation needs another review.
 
 This policy affects only Microsoft message mutations, not OAuth token/config
 persistence required to connect and read a mailbox; it never affects Gmail,
@@ -13,10 +13,9 @@ from __future__ import annotations
 
 import os
 
-# Release switch is intentionally SOURCE-CODE-ONLY and starts disabled.
-# Separate approval, code review and Production deployment are needed to
-# activate Microsoft Inbox mark-read. This never authorizes sending.
-_PRODUCTION_READ_FLAGS_RELEASED = False
+# Source-only exception approved for Inbox mark-as-read.
+# This never authorizes sending or any other Microsoft mutation.
+_PRODUCTION_READ_FLAGS_RELEASED = True
 
 
 def production_pilot_read_flags_blocked() -> bool:

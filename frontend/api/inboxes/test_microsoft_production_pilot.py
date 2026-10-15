@@ -59,39 +59,36 @@ class MicrosoftReadOnlyProductionPilotTests(unittest.TestCase):
                     parse.assert_not_called()
                     send.assert_not_called()
 
-    def test_read_unread_mutation_denied_before_input_parse_or_service(self):
-        with patch.dict(os.environ, {"VERCEL_ENV": "production"}, clear=True):
-            for unread in (True, False):
-                with self.subTest(unread=unread), patch.object(
-                    inbox, "_parse_body",
-                    side_effect=AssertionError("No Production request should be read"),
-                ) as parse, patch.object(
-                    access, "mark_owned_microsoft_inbox_read",
-                ) as mutate:
-                    request = inbox_request({
-                        "mailboxId": MAILBOX, "providerMessageId": MESSAGE_ID,
-                        "unread": unread,
-                    })
-                    response = inbox.microsoft_inbox_response(request, mode="flag")
-                    self.assertEqual(response.status, 403)
-                    self.assertEqual(error_code(response), "microsoft_pilot_read_only")
-                    self.assertIn(("Cache-Control", "no-store"), response.headers)
-                    parse.assert_not_called()
-                    mutate.assert_not_called()
+    def test_production_mark_unread_stays_denied_after_release(self):
+        with patch.dict(os.environ, {"VERCEL_ENV": "production"}, clear=True), patch.object(
+            access, "mark_owned_microsoft_inbox_read",
+        ) as mutate:
+            response = inbox.microsoft_inbox_response(
+                inbox_request({
+                    "mailboxId": MAILBOX, "providerMessageId": MESSAGE_ID,
+                    "unread": True,
+                }, header_pairs=(("Origin", "https://app.cuevion.com"),)),
+                mode="flag",
+            )
+            self.assertEqual(response.status, 403)
+            self.assertEqual(error_code(response), "microsoft_pilot_read_only")
+            self.assertIn(("Cache-Control", "no-store"), response.headers)
+            mutate.assert_not_called()
 
-    def test_read_flag_release_is_source_only_and_off_by_default(self):
-        self.assertFalse(policy._PRODUCTION_READ_FLAGS_RELEASED)
+    def test_read_flag_release_is_source_only_and_not_env_configurable(self):
+        self.assertTrue(policy._PRODUCTION_READ_FLAGS_RELEASED)
         for options in (
             {},
-            {"MICROSOFT_PRODUCTION_PILOT_WRITES_ENABLED": "1"},
-            {"MICROSOFT_AUTO_MARK_READ_RELEASED": "true"},
-            {"MICROSOFT_READ_ONLY": "false"},
+            {"MICROSOFT_PRODUCTION_PILOT_WRITES_ENABLED": "0"},
+            {"MICROSOFT_AUTO_MARK_READ_RELEASED": "false"},
+            {"MICROSOFT_READ_ONLY": "true"},
             {"MICROSOFT_OAUTH_SCOPES": "Mail.ReadWrite Mail.Send"},
         ):
             with self.subTest(options=options), patch.dict(
                 os.environ, {"VERCEL_ENV": "production", **options}, clear=True,
             ):
-                self.assertTrue(policy.production_pilot_read_flags_blocked())
+                self.assertFalse(policy.production_pilot_read_flags_blocked())
+                self.assertTrue(policy.production_pilot_mark_unread_blocked())
                 self.assertTrue(policy.production_pilot_writes_blocked())
 
     def test_future_flag_only_source_release_never_enables_mail_send(self):

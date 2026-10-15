@@ -34,9 +34,9 @@ import { filterMicrosoftLoadedMessages, type MicrosoftMessageSortOrder } from ".
 // UI convenience only. Real production write prevention is enforced before
 // any Graph mutation at the server boundary in microsoft_production_pilot.py.
 const MICROSOFT_READ_ONLY_PILOT = true;
-// Deliberately separate from composer/send; only a subsequent approved
-// Production release may set this to true after Mail.ReadWrite consent.
-const MICROSOFT_AUTO_MARK_READ_RELEASED = false;
+// Separately approved, source-gated Inbox unread-to-read operation.
+// Reply, Forward, Archive, Delete, and Mail.Send remain disabled.
+const MICROSOFT_AUTO_MARK_READ_RELEASED = true;
 const MICROSOFT_POLL_INTERVAL_MS = 120_000;
 const MICROSOFT_INBOX_LIMIT = 25;
 const MICROSOFT_MAX_PAGES = 4;
@@ -695,7 +695,9 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
             Microsoft 365 · Mail
           </span>
           <span role="status" className="rounded-full border border-[var(--workspace-border-soft)] px-3 py-1 text-[0.7rem] font-medium text-[var(--workspace-text-muted)]">
-            Read-only pilot
+            {MICROSOFT_AUTO_MARK_READ_RELEASED
+              ? "Auto-read enabled · other actions disabled"
+              : "Read-only pilot"}
           </span>
           {!MICROSOFT_READ_ONLY_PILOT && (
             <button
@@ -972,9 +974,9 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                     </>
                   )}
                   <span className="text-xs text-[var(--workspace-text-muted)]">
-                    {MICROSOFT_READ_ONLY_PILOT
-                      ? "Opening a message does not change its read status."
-                      : "Opening an unread Inbox message marks it as read once Microsoft confirms."}
+                    {MICROSOFT_AUTO_MARK_READ_RELEASED
+                      ? "Opening an unread Inbox message marks it as read after Microsoft confirms."
+                      : "Opening a message does not change its read status."}
                   </span>
                 </div>
                 {mutationError && (

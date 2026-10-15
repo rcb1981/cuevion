@@ -1021,11 +1021,12 @@ class MicrosoftSignedReconnectStateTests(unittest.TestCase):
 
 
 class MicrosoftIdentityBoundaryTests(unittest.TestCase):
-    def test_production_pilot_requests_only_read_scopes_even_with_override(self):
+    def test_production_auto_read_requests_only_approved_scopes_even_with_override(self):
         expected = [
             "openid", "email", "profile", "offline_access",
             "https://graph.microsoft.com/User.Read",
             "https://graph.microsoft.com/Mail.Read",
+            "https://graph.microsoft.com/Mail.ReadWrite",
         ]
         for override in (
             "", "Mail.Send",
@@ -1036,7 +1037,10 @@ class MicrosoftIdentityBoundaryTests(unittest.TestCase):
                 "VERCEL_ENV": "production",
                 "MICROSOFT_OAUTH_SCOPES": override,
             }):
-                self.assertEqual(connect_oauth.resolve_microsoft_scopes(), expected)
+                scopes = connect_oauth.resolve_microsoft_scopes()
+                self.assertEqual(scopes, expected)
+                self.assertNotIn("https://graph.microsoft.com/Mail.Send", scopes)
+                self.assertNotIn("Mail.Send", scopes)
 
     def test_staged_production_read_flag_scopes_require_explicit_code_release(self):
         from api.inboxes import microsoft_production_pilot as pilot
