@@ -558,6 +558,29 @@ class MicrosoftActivationTests(unittest.TestCase):
             ["connect", "reconnect"],
         )
 
+    def test_interrupted_oauth_reconnect_can_recover_same_mailbox(self):
+        # A failed callback leaves the exact owned mailbox reserved/pending.
+        # Its subsequent recovery must reuse the same ID, not add an inbox.
+        active = self.activate()
+        mailbox_id = active["id"]
+        self.reserve_reconnect(generation="r"*43)
+        pending = self.store.current["managedInboxes"][0]
+        self.assertFalse(pending["connected"])
+        self.assertEqual(pending["oauthReconnectGeneration"], "r"*43)
+
+        # A new consent starts a new generation, invalidating the old flow.
+        self.assertEqual(self.reserve_reconnect(generation="s"*43), EMAIL)
+        with self.assertRaises(activation.MicrosoftActivationError):
+            self.finish_reconnect(generation="r"*43)
+
+        restored = self.finish_reconnect(generation="s"*43)
+        self.assertTrue(restored["connected"])
+        self.assertEqual(restored["id"], mailbox_id)
+        self.assertEqual(restored["oauthCredentialGeneration"], "s"*43)
+        self.assertNotIn("oauthReconnectGeneration", restored)
+        self.assertEqual(len(self.store.current["managedInboxes"]), 1)
+        self.assertEqual(self.tokens.record["credential_generation"], "s"*43)
+
     def test_reconnect_preserves_other_mailbox_and_ui_preferences(self):
         other = {"id": "gmail-stays", "email": "other@example.com", "provider": "google"}
         self.store.current = {

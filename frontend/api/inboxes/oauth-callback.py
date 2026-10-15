@@ -3302,7 +3302,7 @@ class handler(BaseHTTPRequestHandler):
                 _send_gmail_callback_failure(
                     self,
                     _build_callback_payload(
-                        provider="google",
+                        provider=provider,
                         email=expected_email,
                         connection_status="connection_failed",
                         message=(
@@ -3325,41 +3325,47 @@ class handler(BaseHTTPRequestHandler):
             self._oauth_callback_lease_owner = state_owner_email
             self._oauth_callback_lease_mailbox_id = mailbox_id
 
-            reconnect_preflight, reconnect_preflight_error = (
-                _prepare_gmail_reconnect_target(
-                    member,
-                    mailbox_id=mailbox_id,
-                    expected_email=expected_email,
-                    credential_generation=credential_generation,
-                )
-            )
-            if reconnect_preflight_error or not reconnect_preflight:
-                reconnect_failure_code = _resolve_gmail_callback_failure_code(
-                    reconnect_preflight_error,
-                    default="oauth_reconnect_target_invalid",
-                )
-                _send_gmail_callback_failure(
-                    self,
-                    _build_callback_payload(
-                        provider="google",
-                        email=expected_email,
-                        connection_status="connection_failed",
-                        message=(
-                            reconnect_preflight_error.get("message")
-                            if isinstance(reconnect_preflight_error, dict)
-                            and isinstance(
-                                reconnect_preflight_error.get("message"),
-                                str,
-                            )
-                            else "The selected Google mailbox cannot be reconnected safely."
-                        ),
-                        connected=False,
+            # Gmail's reconnect preflight is provider-specific. A Microsoft
+            # reconnect was already owner/reservation checked at OAuth start;
+            # its exact account and generation are independently verified by
+            # activate_reconnected_microsoft_mailbox after Graph identity.
+            # Never run Gmail's provider check on a Microsoft mailbox.
+            if provider == "google":
+                reconnect_preflight, reconnect_preflight_error = (
+                    _prepare_gmail_reconnect_target(
+                        member,
                         mailbox_id=mailbox_id,
-                        mode=mode,
-                    ),
-                    failure_code=reconnect_failure_code,
+                        expected_email=expected_email,
+                        credential_generation=credential_generation,
+                    )
                 )
-                return
+                if reconnect_preflight_error or not reconnect_preflight:
+                    reconnect_failure_code = _resolve_gmail_callback_failure_code(
+                        reconnect_preflight_error,
+                        default="oauth_reconnect_target_invalid",
+                    )
+                    _send_gmail_callback_failure(
+                        self,
+                        _build_callback_payload(
+                            provider="google",
+                            email=expected_email,
+                            connection_status="connection_failed",
+                            message=(
+                                reconnect_preflight_error.get("message")
+                                if isinstance(reconnect_preflight_error, dict)
+                                and isinstance(
+                                    reconnect_preflight_error.get("message"),
+                                    str,
+                                )
+                                else "The selected Google mailbox cannot be reconnected safely."
+                            ),
+                            connected=False,
+                            mailbox_id=mailbox_id,
+                            mode=mode,
+                        ),
+                        failure_code=reconnect_failure_code,
+                    )
+                    return
 
         if provider == "google":
             google_client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()

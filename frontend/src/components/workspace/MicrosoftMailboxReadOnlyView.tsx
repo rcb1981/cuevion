@@ -700,9 +700,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
               ? "Auto-read enabled · other actions disabled"
               : "Read-only pilot"}
           </span>
-          {connected && (
-            <MicrosoftReconnectConsentButton mailboxId={mailbox.id} email={mailbox.email} />
-          )}
+          <MicrosoftReconnectConsentButton mailboxId={mailbox.id} email={mailbox.email} />
           {!MICROSOFT_READ_ONLY_PILOT && (
             <button
               type="button"

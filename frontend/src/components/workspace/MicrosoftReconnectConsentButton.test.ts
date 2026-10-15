@@ -74,7 +74,8 @@ const view = readFileSync(
   resolve(process.cwd(), "src/components/workspace/MicrosoftMailboxReadOnlyView.tsx"),
   "utf8",
 );
-assert.match(view, /\{connected && \(\s*<MicrosoftReconnectConsentButton mailboxId=\{mailbox\.id\} email=\{mailbox\.email\}/);
+assert.match(view, /<MicrosoftReconnectConsentButton mailboxId=\{mailbox\.id\} email=\{mailbox\.email\}/);
+assert.doesNotMatch(view, /\{connected && \(\s*<MicrosoftReconnectConsentButton/);
 assert.match(view, /const MICROSOFT_READ_ONLY_PILOT = true/);
 assert.match(view, /const MICROSOFT_AUTO_MARK_READ_RELEASED = true/);
 
