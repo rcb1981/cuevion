@@ -43,7 +43,18 @@ const unread = row();
 assert.match(unread, /data-read-state="unread"/);
 assert.match(unread, /aria-pressed="false"/);
 assert.match(unread, /Unread message\./);
-assert.match(unread, /bg-moss/);
+// Keep Microsoft's unread dot identical to the established Gmail/IMAP
+// WorkspaceShell indicator; it must not drift to a different theme color.
+const workspaceSource = readFileSync(
+  resolve(process.cwd(), "src/components/workspace/WorkspaceShell.tsx"),
+  "utf8",
+);
+const standardDot = /const unreadAttentionDotClass =\s*"([^"]+)";/.exec(workspaceSource)?.[1];
+assert.ok(standardDot, "The shared Gmail/IMAP unread dot class must exist");
+const standardDotVisual = standardDot.slice(standardDot.indexOf("bg-"));
+assert.ok(standardDotVisual.startsWith("bg-[#8B3DFF]"));
+assert.ok(unread.includes(standardDotVisual), "Microsoft unread dot must match Gmail/IMAP");
+assert.doesNotMatch(unread, /bg-moss/);
 assert.match(unread, /font-semibold/);
 assert.match(unread, /Demo Sender/);
 assert.match(unread, /Oct 14, 12:00/);
@@ -58,6 +69,7 @@ assert.match(read, /data-read-state="read"/);
 assert.match(read, /Read message\./);
 assert.doesNotMatch(read, /Unread message\./);
 assert.match(read, /bg-transparent/);
+assert.doesNotMatch(read, /bg-\[#8B3DFF\]/);
 assert.match(read, /border-l-transparent/);
 assert.match(read, /font-normal/);
 
@@ -65,13 +77,15 @@ const selectedUnread = row({}, "Inbox", true);
 assert.match(selectedUnread, /aria-pressed="true"/);
 assert.match(selectedUnread, /data-read-state="unread"/);
 assert.match(selectedUnread, /border-l-moss/);
-assert.match(selectedUnread, /bg-moss/);
+assert.ok(selectedUnread.includes(standardDotVisual));
+assert.match(selectedUnread, /bg-\[#8B3DFF\]/);
 
 const selectedRead = row({ unread: false }, "Inbox", true);
 assert.match(selectedRead, /aria-pressed="true"/);
 assert.match(selectedRead, /data-read-state="read"/);
 assert.match(selectedRead, /border-l-moss/);
 assert.doesNotMatch(selectedRead, /Unread message\./);
+assert.doesNotMatch(selectedRead, /bg-\[#8B3DFF\]/);
 
 const sent = row({ unread: true }, "Sent", true);
 assert.match(sent, /data-read-state="sent"/);

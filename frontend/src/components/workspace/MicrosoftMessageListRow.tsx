@@ -49,7 +49,9 @@ export function MicrosoftMessageListRow({
           aria-hidden="true"
           className={
             "mt-1.5 h-2 w-2 shrink-0 rounded-full " +
-            (unread ? "bg-moss" : "bg-transparent")
+            (unread
+              ? "bg-[#8B3DFF] shadow-[0_0_0_2px_rgba(139,61,255,0.18),0_0_10px_rgba(139,61,255,0.42)]"
+              : "bg-transparent")
           }
         />
         <div className="min-w-0 flex-1">
