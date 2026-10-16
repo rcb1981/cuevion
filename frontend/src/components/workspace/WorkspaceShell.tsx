@@ -21,6 +21,8 @@ import {
 import { createPortal, flushSync } from "react-dom";
 import { ServerNotifications, type ServerNotificationsProps } from "./ServerNotifications";
 import { MicrosoftMailboxReadOnlyView } from "./MicrosoftMailboxReadOnlyView";
+import { MicrosoftReconnectConsentButton } from "./MicrosoftReconnectConsentButton";
+import { getPersistedMicrosoftReconnectTarget, type PersistedMicrosoftReconnectTarget } from "./microsoftReconnectSettings";
 import { useWorkspaceNotifications } from "../../lib/useWorkspaceNotifications";
 import { notificationScopeKey, type ServerNotification } from "../../lib/notificationsApi";
 import { buildExactNotificationMessageIndex, exactNotificationSourceKey, createNotificationNavigator, type NotificationDisplayRequest, type NotificationNavigationPorts, type ExactNotificationTarget } from "../../lib/notificationNavigation";
@@ -35725,6 +35727,7 @@ function ManagedInboxEditor({
   onApplyAction,
   onCancelAction,
   onReconnectAction,
+  microsoftReconnectTarget = null,
   onTabChange,
   onChooseProvider,
   onChange,
@@ -35753,6 +35756,7 @@ function ManagedInboxEditor({
   onApplyAction?: () => void;
   onCancelAction?: () => void;
   onReconnectAction?: () => void;
+  microsoftReconnectTarget?: PersistedMicrosoftReconnectTarget | null;
   onTabChange: (tab: ManagedInboxEditorTab) => void;
   onChooseProvider: (inboxId: string, choice: NewInboxProviderChoiceId) => void;
   onChange: (
@@ -35817,6 +35821,10 @@ function ManagedInboxEditor({
   const customImapActionRequired =
     mailbox.provider === "custom_imap" &&
     managedInboxStatus.healthStatus === "action_required";
+  const canReconnectMicrosoft =
+    isExisting && !editable && mailbox.provider === "microsoft" &&
+    microsoftReconnectTarget?.id === mailbox.id &&
+    microsoftReconnectTarget.email.trim().toLowerCase() === mailbox.email.trim().toLowerCase();
   const canReconnectGmail =
     isExisting &&
     mailbox.provider === "google" &&
@@ -36305,12 +36313,12 @@ function ManagedInboxEditor({
                 <div className="space-y-1">
                   <p className="text-sm font-semibold text-[var(--workspace-text)]">
                     {mailbox.provider === "microsoft"
-                      ? "Microsoft Graph — read-only pilot"
+                      ? "Microsoft Graph — mailbox connection"
                       : onboardingText.connect.googleOAuthTitle}
                   </p>
                   <p className="text-sm text-[var(--workspace-text-muted)]">
                     {mailbox.provider === "microsoft"
-                      ? "Connect securely through Microsoft to read Inbox and Sent. Sending, replying, and marking messages are disabled in this pilot."
+                      ? "Microsoft OAuth provides mailbox access. Automatic mark-as-read is enabled; sending, replying and moving messages remain disabled."
                       : onboardingText.connect.googleOAuthDescription}
                   </p>
                 </div>
@@ -36328,6 +36336,12 @@ function ManagedInboxEditor({
                   >
                     {isApplying ? "Opening..." : "Reconnect Gmail"}
                   </DesktopActionButton>
+                ) : null}
+                {canReconnectMicrosoft && microsoftReconnectTarget ? (
+                  <MicrosoftReconnectConsentButton
+                    mailboxId={microsoftReconnectTarget.id}
+                    email={microsoftReconnectTarget.email}
+                  />
                 ) : null}
               </div>
               <div className={readOnlyNestedValueClass}>
@@ -37833,6 +37847,10 @@ const ManageInboxesView = memo(function ManageInboxesView({
                   onApplyAction={() => handleApplyInbox(selectedInbox.id)}
                   onCancelAction={() => handleCancelInbox(selectedInbox.id)}
                   onReconnectAction={() => handleReconnectInbox(selectedInbox.id)}
+                  microsoftReconnectTarget={getPersistedMicrosoftReconnectTarget(
+                    savedManagedInboxes,
+                    selectedInbox,
+                  )}
                   onTabChange={setActiveInboxEditorTab}
                   onChooseProvider={chooseDraftInboxProvider}
                   onChange={(inboxId, field, value) => {

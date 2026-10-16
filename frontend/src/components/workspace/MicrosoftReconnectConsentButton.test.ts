@@ -74,9 +74,22 @@ const view = readFileSync(
   resolve(process.cwd(), "src/components/workspace/MicrosoftMailboxReadOnlyView.tsx"),
   "utf8",
 );
-assert.match(view, /<MicrosoftReconnectConsentButton mailboxId=\{mailbox\.id\} email=\{mailbox\.email\}/);
-assert.doesNotMatch(view, /\{connected && \(\s*<MicrosoftReconnectConsentButton/);
+assert.doesNotMatch(view, /<MicrosoftReconnectConsentButton/,
+  "Microsoft reconnect must not appear in the mailbox header");
+assert.match(view, /onClick=\{onOpenConnectionSettings\}/,
+  "Disconnected Microsoft mailboxes must retain the route to Settings");
+const settingsSource = readFileSync(
+  resolve(process.cwd(), "src/components/workspace/WorkspaceShell.tsx"),
+  "utf8",
+);
+assert.match(settingsSource, /import \{ MicrosoftReconnectConsentButton \}/);
+assert.match(settingsSource, /<MicrosoftReconnectConsentButton\s+mailboxId=\{microsoftReconnectTarget\.id\}\s+email=\{microsoftReconnectTarget\.email\}/);
+assert.match(settingsSource, /getPersistedMicrosoftReconnectTarget\(\s*savedManagedInboxes,\s*selectedInbox/);
+assert.match(settingsSource, /isExisting && !editable && mailbox\.provider === "microsoft"/,
+  "Unsaved or editable Microsoft mailbox drafts must not expose reconnect");
+assert.match(settingsSource, /canReconnectGmail && onReconnectAction/,
+  "Gmail's existing reconnect action must remain intact");
 assert.match(view, /const MICROSOFT_READ_ONLY_PILOT = true/);
 assert.match(view, /const MICROSOFT_AUTO_MARK_READ_RELEASED = true/);
 
-console.log("Microsoft exact-owner incremental OAuth consent in Inbox header: PASS");
+console.log("Microsoft exact-owner OAuth reconnection in Settings: PASS");

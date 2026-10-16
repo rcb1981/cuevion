@@ -30,7 +30,6 @@ import { MicrosoftComposeDesignPreview } from "./MicrosoftComposeDesignPreview";
 import { MicrosoftMessageListRow } from "./MicrosoftMessageListRow";
 import { MicrosoftPlannedMessageActions } from "./MicrosoftPlannedMessageActions";
 import { MicrosoftMailboxFolderRail } from "./MicrosoftMailboxFolderRail";
-import { MicrosoftReconnectConsentButton } from "./MicrosoftReconnectConsentButton";
 import { MicrosoftLinkifiedText } from "./MicrosoftLinkifiedText";
 import { filterMicrosoftLoadedMessages, type MicrosoftMessageSortOrder } from "./microsoftMailboxListFilters";
 import {
@@ -756,7 +755,6 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
               ? "Auto-read enabled · other actions disabled"
               : "Read-only pilot"}
           </span>
-          <MicrosoftReconnectConsentButton mailboxId={mailbox.id} email={mailbox.email} />
         </div>
       </header>
       <div className="relative z-20 flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--workspace-border-soft)] px-4 py-3 sm:px-6">
