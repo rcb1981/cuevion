@@ -1025,9 +1025,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                     {folder === "Deleted" ? "Last changed: " : ""}{readableTime(selectedMessage.createdAt)}
                   </p>
                 </div>
-                {folder === "Inbox" && (
-                  <>
-                {MICROSOFT_READ_ONLY_PILOT && (
+                {folder === "Inbox" && MICROSOFT_READ_ONLY_PILOT && (
                   <MicrosoftPlannedMessageActions unread={selectedMessage.unread === true} />
                 )}
                 {(folder === "Inbox" || folder === "Filtered") && (
@@ -1041,6 +1039,8 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                     onChange={changeSenderPlacement}
                   />
                 )}
+                {folder === "Inbox" && (
+                  <>
                 <div className="mt-4 flex flex-wrap items-center gap-3">
                   {!MICROSOFT_READ_ONLY_PILOT && (
                     <>

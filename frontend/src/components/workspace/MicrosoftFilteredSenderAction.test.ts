@@ -38,6 +38,36 @@ assert.match(view, /fetchMicrosoftInbox\(/);
 assert.match(view, /folder: requestedFolder === "Filtered" \? "Inbox" : requestedFolder/);
 assert.match(view, /folder: currentFolder === "Filtered" \? "Inbox" : currentFolder/);
 assert.match(view, /<MicrosoftFilteredSenderAction/);
+
+// Integration guard: the return-to-Inbox action must not be nested inside
+// an Inbox-only JSX guard. The component's own test cannot catch this.
+const ts = require("typescript") as typeof import("typescript");
+const parsedView = ts.createSourceFile(
+  "MicrosoftMailboxReadOnlyView.tsx", view, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX,
+);
+const senderActionNodes: import("typescript").Node[] = [];
+function findSenderActions(node: import("typescript").Node): void {
+  if (ts.isJsxSelfClosingElement(node) &&
+      node.tagName.getText(parsedView) === "MicrosoftFilteredSenderAction") {
+    senderActionNodes.push(node);
+  }
+  ts.forEachChild(node, findSenderActions);
+}
+findSenderActions(parsedView);
+assert.equal(senderActionNodes.length, 1);
+let parent: import("typescript").Node | undefined = senderActionNodes[0].parent;
+while (parent) {
+  if (ts.isJsxExpression(parent) && parent.expression &&
+      ts.isBinaryExpression(parent.expression) &&
+      parent.expression.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
+    assert.notEqual(
+      parent.expression.left.getText(parsedView).trim(),
+      'folder === "Inbox"',
+      "Keep this sender in Inbox must remain reachable from the Filtered folder",
+    );
+  }
+  parent = parent.parent;
+}
 assert.match(view, /microsoftFiltering\.savePlacement\(message\.from, placement\)/);
 assert.match(view, /setPlacementNotice\(/);
 
