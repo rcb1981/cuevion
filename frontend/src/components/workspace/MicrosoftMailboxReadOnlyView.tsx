@@ -26,6 +26,7 @@ import {
 } from "../../lib/inboxConnectionApi";
 import { applyConfirmedMicrosoftUnread, isMicrosoftInboxProjection, shouldAutoMarkMicrosoftOpenedMessageRead } from "./microsoftReadState";
 import { MicrosoftComposePanel } from "./MicrosoftComposePanel";
+import { MicrosoftComposeDesignPreview } from "./MicrosoftComposeDesignPreview";
 import { MicrosoftMessageListRow } from "./MicrosoftMessageListRow";
 import { MicrosoftPlannedMessageActions } from "./MicrosoftPlannedMessageActions";
 import { MicrosoftReconnectConsentButton } from "./MicrosoftReconnectConsentButton";
@@ -105,6 +106,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const selectedIdRef = React.useRef<string | null>(null);
   const folderRef = React.useRef<MicrosoftFolder>("Inbox");
   const [folder, setFolder] = useState<MicrosoftFolder>("Inbox");
+  const [composeDesignPreviewOpen, setComposeDesignPreviewOpen] = useState(false);
   const [page, setPage] = useState(1);
   const [composer, setComposer] = useState<{
     mode: "new" | "reply";
@@ -135,6 +137,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [sortOrder, setSortOrder] = useState<MicrosoftMessageSortOrder>("newest");
   const [placementNotice, setPlacementNotice] = useState<string | null>(null);
+  useEffect(() => { setComposeDesignPreviewOpen(false); }, [mailbox.id, connected]);
   const microsoftFiltering = useMicrosoftFilteredLearning(mailbox.id, connected);
   const folderRows = useMemo(
     () => microsoftVisibleFolderRows(
@@ -752,16 +755,26 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
               : "Read-only pilot"}
           </span>
           <MicrosoftReconnectConsentButton mailboxId={mailbox.id} email={mailbox.email} />
-          {!MICROSOFT_READ_ONLY_PILOT && (
-            <button
-              type="button"
-              disabled={!connected || composer !== null || mutationBusy}
-              onClick={() => openComposer("new")}
-              className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-semibold disabled:opacity-50"
-            >
-              New message
-            </button>
-          )}
+          <button
+            type="button"
+            aria-haspopup={MICROSOFT_READ_ONLY_PILOT ? "dialog" : undefined}
+            aria-label={MICROSOFT_READ_ONLY_PILOT ? "Compose message (design preview only)" : "Compose message"}
+            title={MICROSOFT_READ_ONLY_PILOT ? "Explore the new-message design. Nothing can be sent or saved." : "Compose new message"}
+            disabled={!connected || composer !== null || mutationBusy || composeDesignPreviewOpen}
+            onClick={() => {
+              if (MICROSOFT_READ_ONLY_PILOT) {
+                setComposeDesignPreviewOpen(true);
+              } else {
+                openComposer("new");
+              }
+            }}
+            className="inline-flex h-8 items-center justify-center gap-2 rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] px-3.5 text-[0.68rem] font-semibold uppercase tracking-[0.13em] text-[var(--workspace-accent-text)] transition hover:brightness-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <svg aria-hidden="true" viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M8 3v10M3 8h10" />
+            </svg>
+            Compose
+          </button>
           <button
             type="button"
             aria-pressed={folder === "Inbox"}
@@ -1159,6 +1172,12 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
             )}
           </section>
         </div>
+      )}
+      {MICROSOFT_READ_ONLY_PILOT && connected && composeDesignPreviewOpen && (
+        <MicrosoftComposeDesignPreview
+          mailboxEmail={mailbox.email}
+          onClose={() => setComposeDesignPreviewOpen(false)}
+        />
       )}
     </div>
   );

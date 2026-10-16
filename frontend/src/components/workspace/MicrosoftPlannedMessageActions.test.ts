@@ -28,6 +28,7 @@ const source = readFileSync(
 );
 assert.match(source, /setMoreOpen\(!moreOpen\)/);
 assert.match(source, /"Archive", "Delete", unread \? "Mark as read" : "Mark as unread"/);
+assert.match(source, /<ActionGlyph name=\{action === "Archive" \? "archive" : action === "Delete" \? "delete" : "mail"\} \/>/);
 assert.match(source, /type="button"\s+disabled/);
 assert.doesNotMatch(source, /fetch\(|sendMicrosoft|setMicrosoftMessageUnread\(/);
 

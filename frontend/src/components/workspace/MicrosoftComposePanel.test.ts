@@ -57,7 +57,7 @@ assert.doesNotMatch(source, /setInterval\(|setTimeout\(/);
 assert.doesNotMatch(source, /dangerouslySetInnerHTML/);
 const view = readFileSync(resolve(__dirname,"MicrosoftMailboxReadOnlyView.tsx"),"utf8");
 assert.match(view, /<MicrosoftComposePanel/);
-assert.match(view, /onClick=\{\(\) => openComposer\("new"\)\}/);
+assert.match(view, /if \(MICROSOFT_READ_ONLY_PILOT\) \{\s*setComposeDesignPreviewOpen\(true\);\s*\} else \{\s*openComposer\("new"\);/);
 assert.match(view, /onClick=\{\(\) => openComposer\("reply"\)\}/);
 assert.match(view, /sourceProviderMessageId=\{composer\.sourceProviderMessageId\}/);
 assert.match(view, /folder === "Inbox" &&/);

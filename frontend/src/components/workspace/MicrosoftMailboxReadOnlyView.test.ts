@@ -41,7 +41,9 @@ assert.match(ready, /aria-pressed="false"[^>]*>Drafts<\/button>/);
 assert.match(ready, /aria-pressed="false"[^>]*>Deleted Items<\/button>/);
 assert.match(ready, /aria-pressed="false"[^>]*>Junk Email<\/button>/);
 assert.match(ready, /Back to workspace/);
-assert.doesNotMatch(ready, /Send message|Reply all|Compose|Trash/);
+assert.match(ready, /Compose/);
+assert.match(ready, /Compose message \(design preview only\)/);
+assert.doesNotMatch(ready, /Send message|Reply all|Trash/);
 
 const microsoftSource = readFileSync(
   resolve(__dirname, "MicrosoftMailboxReadOnlyView.tsx"), "utf8",
@@ -98,6 +100,8 @@ const viewSource = readFileSync(resolve(__dirname, "MicrosoftMailboxReadOnlyView
 assert.match(viewSource, /const MICROSOFT_READ_ONLY_PILOT = true/);
 assert.match(viewSource, /const MICROSOFT_AUTO_MARK_READ_RELEASED = true/);
 assert.match(viewSource, /MICROSOFT_READ_ONLY_PILOT \|\| !connected/);
+assert.match(viewSource, /<MicrosoftComposeDesignPreview/);
+assert.match(viewSource, /setComposeDesignPreviewOpen\(true\)/);
 assert.match(viewSource, /!MICROSOFT_READ_ONLY_PILOT && composer !== null/);
 assert.match(viewSource, /!MICROSOFT_READ_ONLY_PILOT && \(/);
 assert.match(viewSource, /fetchMicrosoftInbox\(/);

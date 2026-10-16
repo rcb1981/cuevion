@@ -5,7 +5,7 @@ import React, { useId, useState } from "react";
  * No mailbox command is wired to these buttons. A future feature must
  * separately add ownership, provider scopes, confirmation, and send safety.
  */
-function ActionGlyph({name}: {name: "reply" | "reply-all" | "forward" | "more"}) {
+function ActionGlyph({name}: {name: "reply" | "reply-all" | "forward" | "more" | "archive" | "delete" | "mail"}) {
   return (
     <svg
       aria-hidden="true"
@@ -42,6 +42,23 @@ function ActionGlyph({name}: {name: "reply" | "reply-all" | "forward" | "more"})
           <circle cx="3.5" cy="8" r="1.1" stroke="none" />
           <circle cx="8" cy="8" r="1.1" stroke="none" />
           <circle cx="12.5" cy="8" r="1.1" stroke="none" />
+        </>
+      )}
+      {name === "archive" && (
+        <>
+          <rect x="2.4" y="3" width="11.2" height="3" rx="0.7" />
+          <path d="M3.4 6v7h9.2V6M6 9h4" />
+        </>
+      )}
+      {name === "delete" && (
+        <>
+          <path d="M3.5 5.2h9M6 3.5h4M5 5.2l.5 7.5h5l.5-7.5M7 7.5v3M9 7.5v3" />
+        </>
+      )}
+      {name === "mail" && (
+        <>
+          <rect x="2.2" y="4.2" width="11.6" height="8.2" rx="1" />
+          <path d="m2.5 5 5.5 4 5.5-4" />
         </>
       )}
     </svg>
@@ -95,8 +112,9 @@ export function MicrosoftPlannedMessageActions({unread}: {unread: boolean}) {
                   disabled
                   key={action}
                   title="Planned action; not yet enabled for Microsoft"
-                  className="flex w-full cursor-not-allowed items-center rounded-[14px] px-3 py-2.5 text-left text-[0.82rem] text-[var(--workspace-text-soft)] opacity-60"
+                  className="flex w-full cursor-not-allowed items-center gap-2.5 rounded-[14px] px-3 py-2.5 text-left text-[0.82rem] text-[var(--workspace-text-soft)] opacity-60"
                 >
+                  <ActionGlyph name={action === "Archive" ? "archive" : action === "Delete" ? "delete" : "mail"} />
                   {action}
                 </button>
               ))}
