@@ -89,7 +89,7 @@ export function MicrosoftPlannedMessageActions({unread}: {unread: boolean}) {
               aria-label="Other planned Microsoft message actions"
               className="absolute left-0 top-full z-20 mt-2 min-w-[190px] rounded-[18px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-[0_14px_32px_rgba(41,34,27,0.10)]"
             >
-              {["Archive", "Delete", unread ? "Mark as read" : "Mark as unread", "Show less"].map((action) => (
+              {["Archive", "Delete", unread ? "Mark as read" : "Mark as unread"].map((action) => (
                 <button
                   type="button"
                   disabled

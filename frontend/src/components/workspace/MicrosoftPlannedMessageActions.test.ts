@@ -27,7 +27,7 @@ const source = readFileSync(
   resolve(process.cwd(), "src/components/workspace/MicrosoftPlannedMessageActions.tsx"), "utf8",
 );
 assert.match(source, /setMoreOpen\(!moreOpen\)/);
-assert.match(source, /"Archive", "Delete", unread \? "Mark as read" : "Mark as unread", "Show less"/);
+assert.match(source, /"Archive", "Delete", unread \? "Mark as read" : "Mark as unread"/);
 assert.match(source, /type="button"\s+disabled/);
 assert.doesNotMatch(source, /fetch\(|sendMicrosoft|setMicrosoftMessageUnread\(/);
 
