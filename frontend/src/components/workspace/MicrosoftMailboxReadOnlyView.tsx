@@ -31,6 +31,12 @@ import { MicrosoftPlannedMessageActions } from "./MicrosoftPlannedMessageActions
 import { MicrosoftReconnectConsentButton } from "./MicrosoftReconnectConsentButton";
 import { MicrosoftLinkifiedText } from "./MicrosoftLinkifiedText";
 import { filterMicrosoftLoadedMessages, type MicrosoftMessageSortOrder } from "./microsoftMailboxListFilters";
+import {
+  microsoftVisibleFolderRows,
+  isMicrosoftFilteredProtectionActive,
+} from "./microsoftVirtualFiltered";
+import { useMicrosoftFilteredLearning } from "./useMicrosoftFilteredLearning";
+import { MicrosoftFilteredSenderAction } from "./MicrosoftFilteredSenderAction";
 
 // UI convenience only. Real production write prevention is enforced before
 // any Graph mutation at the server boundary in microsoft_production_pilot.py.
@@ -41,7 +47,7 @@ const MICROSOFT_AUTO_MARK_READ_RELEASED = true;
 const MICROSOFT_POLL_INTERVAL_MS = 120_000;
 const MICROSOFT_INBOX_LIMIT = 25;
 const MICROSOFT_MAX_PAGES = 4;
-type MicrosoftFolder = "Inbox" | "Sent" | "Archive" | "Drafts" | "Deleted" | "Junk";
+type MicrosoftFolder = "Inbox" | "Filtered" | "Sent" | "Archive" | "Drafts" | "Deleted" | "Junk";
 
 type MicrosoftReadOnlyMailbox = {
   id: string;
@@ -128,16 +134,25 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const [searchQuery, setSearchQuery] = useState("");
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [sortOrder, setSortOrder] = useState<MicrosoftMessageSortOrder>("newest");
+  const [placementNotice, setPlacementNotice] = useState<string | null>(null);
+  const microsoftFiltering = useMicrosoftFilteredLearning(mailbox.id, connected);
+  const folderRows = useMemo(
+    () => microsoftVisibleFolderRows(
+      rows, folder, microsoftFiltering.learned, microsoftFiltering.placements,
+      microsoftFiltering.ready,
+    ),
+    [rows, folder, microsoftFiltering.learned, microsoftFiltering.placements, microsoftFiltering.ready],
+  );
   const visibleRows = useMemo(
-    () => filterMicrosoftLoadedMessages(rows, {
+    () => filterMicrosoftLoadedMessages(folderRows, {
       folder,
       search: searchQuery,
       unreadOnly,
       sortOrder,
     }),
-    [rows, folder, searchQuery, unreadOnly, sortOrder],
+    [folderRows, folder, searchQuery, unreadOnly, sortOrder],
   );
-  const hasActiveListFilter = Boolean(searchQuery.trim()) || ((folder === "Inbox" || folder === "Archive" || folder === "Deleted" || folder === "Junk") && unreadOnly);
+  const hasActiveListFilter = Boolean(searchQuery.trim()) || ((folder === "Inbox" || folder === "Filtered" || folder === "Archive" || folder === "Deleted" || folder === "Junk") && unreadOnly);
 
   const refresh = useCallback(async () => {
     if (!connected || mutationInFlight.current || composer !== null) {
@@ -281,6 +296,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     setLastUpdated(null);
     setSearchQuery("");
     setUnreadOnly(false);
+    setPlacementNotice(null);
     setPage(1);
     setFolder(nextFolder);
   }, [connected, composer]);
@@ -482,7 +498,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
         void fetchMicrosoftAttachments({
           mailboxId: mailbox.id,
           providerMessageId,
-          folder: requestedFolder,
+          folder: requestedFolder === "Filtered" ? "Inbox" : requestedFolder,
         }).then((result) => {
           if (
             ticket !== messageTicket.current ||
@@ -517,6 +533,41 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     }
   }, [connected, mailbox.id, rows, composer]);
 
+  const changeSenderPlacement = useCallback((placement: "show_less" | "keep") => {
+    const activeFolder = folderRef.current;
+    const message = selectedMessage;
+    if (
+      !connected ||
+      !microsoftFiltering.ready ||
+      mutationInFlight.current ||
+      mutationBusy ||
+      !message?.providerMessageId ||
+      selectedIdRef.current !== message.providerMessageId ||
+      message.providerFolder !== "INBOX" ||
+      (placement === "show_less" && isMicrosoftFilteredProtectionActive(message)) ||
+      (activeFolder !== "Inbox" && activeFolder !== "Filtered")
+    ) return;
+    if (!microsoftFiltering.savePlacement(message.from, placement)) return;
+    // The visible partition changes synchronously. Invalidate any pending
+    // detail/attachment read; the user can re-open from the new tab.
+    selectedIdRef.current = null;
+    messageTicket.current += 1;
+    attachmentTicket.current += 1;
+    attachmentDownloadTicket.current += 1;
+    setSelectedId(null);
+    setSelectedMessage(null);
+    setAttachmentRows([]);
+    setAttachmentBusy(false);
+    setAttachmentError(null);
+    setAttachmentDownloadBusy(null);
+    setAttachmentDownloadError(null);
+    setPlacementNotice(
+      placement === "show_less"
+        ? "This sender now appears in Microsoft Filtered."
+        : "This sender now appears in Microsoft Inbox.",
+    );
+  }, [connected, microsoftFiltering, mutationBusy, selectedMessage]);
+
   const downloadAttachment = useCallback(async (item: MicrosoftAttachmentMetadata) => {
     const messageId = selectedMessage?.providerMessageId;
     if (
@@ -541,7 +592,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
         mailboxId: mailbox.id,
         providerMessageId: messageId,
         attachmentId: item.id,
-        folder: currentFolder,
+        folder: currentFolder === "Filtered" ? "Inbox" : currentFolder,
       });
       if (
         ticket !== attachmentDownloadTicket.current ||
@@ -722,6 +773,16 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           </button>
           <button
             type="button"
+            aria-pressed={folder === "Filtered"}
+            disabled={!connected || composer !== null || mutationBusy}
+            onClick={() => selectFolder("Filtered")}
+            title="Quiet view from the same Outlook Inbox; no messages are moved."
+            className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium aria-pressed:bg-[var(--workspace-card-subtle)] disabled:opacity-50"
+          >
+            Filtered
+          </button>
+          <button
+            type="button"
             aria-pressed={folder === "Sent"}
             disabled={!connected || composer !== null || mutationBusy}
             onClick={() => selectFolder("Sent")}
@@ -805,7 +866,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
             <div className="flex shrink-0 items-center justify-between border-b border-[var(--workspace-border-soft)] px-4 py-3">
               <h2 className="text-sm font-semibold">
                 {folder} <span className="font-normal text-[var(--workspace-text-muted)]">
-                  ({rows.length}{folder === "Sent"
+                  ({folder === "Filtered" || folder === "Inbox" ? folderRows.length : rows.length}{folder === "Sent"
                     ? " sent shown"
                     : folder === "Drafts"
                       ? " drafts shown"
@@ -813,7 +874,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                         ? " deleted items shown"
                         : folder === "Junk"
                           ? " junk messages shown"
-                          : ", " + rows.filter((row) => row.unread).length + " unread shown"})
+                          : ", " + folderRows.filter((row) => row.unread).length + " unread shown"})
                 </span>
               </h2>
               {lastUpdated && <span className="text-[0.7rem] text-[var(--workspace-text-faint)]">Updated {readableTime(lastUpdated)}</span>}
@@ -834,7 +895,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                 className="w-full rounded-xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-2 text-sm text-[var(--workspace-text)] placeholder:text-[var(--workspace-text-faint)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]"
               />
               <div className="flex flex-wrap items-center justify-between gap-2">
-                {folder === "Inbox" || folder === "Archive" || folder === "Deleted" || folder === "Junk" ? (
+                {folder === "Inbox" || folder === "Filtered" || folder === "Archive" || folder === "Deleted" || folder === "Junk" ? (
                   <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-[var(--workspace-text-muted)]">
                     <input
                       type="checkbox"
@@ -862,6 +923,17 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                   </select>
                 </label>
               </div>
+              {(folder === "Inbox" || folder === "Filtered") && (
+                <p className="text-[0.68rem] text-[var(--workspace-text-muted)]">
+                  {folder === "Filtered"
+                    ? "Quiet view from your Outlook Inbox. Only the loaded page is checked; no messages are moved."
+                    : "Only messages in this loaded page are shown; quiet senders appear under Filtered."}
+                </p>
+              )}
+              {placementNotice && <p role="status" className="text-xs text-[var(--workspace-text-muted)]">{placementNotice}</p>}
+              {microsoftFiltering.error && (folder === "Inbox" || folder === "Filtered") && (
+                <p role="alert" className="text-xs text-[var(--workspace-text-muted)]">{microsoftFiltering.error}</p>
+              )}
               {hasActiveListFilter ? (
                 <p className="text-xs text-[var(--workspace-text-faint)]" aria-live="polite">
                   {visibleRows.length} of {rows.length} loaded messages match.
@@ -883,7 +955,11 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
               )}
               {rows.length > 0 && visibleRows.length === 0 && (
                 <p className="p-5 text-sm text-[var(--workspace-text-muted)]" role="status">
-                  No matching messages in this loaded set. Clear the search or unread filter.
+                  {folder === "Filtered" && !searchQuery.trim() && !unreadOnly
+                    ? microsoftFiltering.ready
+                      ? "No quiet messages on this page yet. Open an Inbox message and choose Show less from this sender."
+                      : "Loading your learned preferences. No Outlook messages are being moved."
+                    : "No matching messages in this loaded set. Clear the search or unread filter."}
                 </p>
               )}
               {visibleRows.map((message) => (
@@ -920,7 +996,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
               </nav>
               {hasMore && page >= MICROSOFT_MAX_PAGES && (
                 <p className="px-4 pb-3 text-xs text-[var(--workspace-text-muted)]">
-                  This read-only pilot currently limits history to {MICROSOFT_MAX_PAGES * MICROSOFT_INBOX_LIMIT} messages per folder.
+                  This Microsoft pilot currently limits loaded history to {MICROSOFT_MAX_PAGES * MICROSOFT_INBOX_LIMIT} messages per folder. Filtered is a view of the underlying Inbox pages.
                 </p>
               )}
             </div>
@@ -953,6 +1029,17 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                   <>
                 {MICROSOFT_READ_ONLY_PILOT && (
                   <MicrosoftPlannedMessageActions unread={selectedMessage.unread === true} />
+                )}
+                {(folder === "Inbox" || folder === "Filtered") && (
+                  <MicrosoftFilteredSenderAction
+                    folder={folder}
+                    disabled={
+                      !microsoftFiltering.ready || mutationBusy ||
+                      !selectedMessage.providerMessageId ||
+                      (folder === "Inbox" && isMicrosoftFilteredProtectionActive(selectedMessage))
+                    }
+                    onChange={changeSenderPlacement}
+                  />
                 )}
                 <div className="mt-4 flex flex-wrap items-center gap-3">
                   {!MICROSOFT_READ_ONLY_PILOT && (

@@ -37,7 +37,7 @@ export function shouldAutoMarkMicrosoftOpenedMessageRead(input: {
 }): boolean {
   const { readWriteEnabled, folder, selectedMessageId, message } = input;
   return readWriteEnabled === true &&
-    folder === "Inbox" &&
+    (folder === "Inbox" || folder === "Filtered") &&
     typeof selectedMessageId === "string" && selectedMessageId.length > 0 &&
     message?.providerFolder === "INBOX" &&
     message.providerMessageId === selectedMessageId &&

@@ -105,7 +105,7 @@ export function MicrosoftPlannedMessageActions({unread}: {unread: boolean}) {
         </div>
       </div>
       <p className="text-[0.68rem] text-[var(--workspace-text-faint)]">
-        Preview only — actions are disabled during the Microsoft read-only pilot.
+        Preview only — Reply, Forward and mailbox-moving actions are not yet enabled for Microsoft.
       </p>
     </section>
   );
