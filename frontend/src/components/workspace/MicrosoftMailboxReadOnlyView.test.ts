@@ -114,13 +114,25 @@ assert.match(viewSource, /const selectFolder = useCallback/);
 assert.match(viewSource, /folderRef\.current = nextFolder/);
 assert.match(viewSource, /folderRef\.current !== requestedFolder/);
 assert.match(viewSource, /folderRef\.current !== "Inbox"/);
-assert.match(viewSource, /folder === "Inbox" && \(/);
+assert.match(viewSource, /isMicrosoftInboxProjection\(folder\) && \(/);
 assert.match(viewSource, /folder === "Sent" \|\| folder === "Drafts"/);
 assert.match(viewSource, /setMicrosoftMessageUnread\(/);
 assert.match(viewSource, /onClick=\{\(\) => void changeReadState\(!selectedMessage\.unread\)\}/);
 assert.match(viewSource, /mutationInFlight\.current/);
 assert.match(viewSource, /mutationTicket\.current/);
 assert.match(viewSource, /applyConfirmedMicrosoftUnread\(/);
+assert.ok(
+  viewSource.includes("!isMicrosoftInboxProjection(folderRef.current)"),
+  "A confirmed auto-read of a virtual Filtered message must update the visible read state",
+);
+assert.ok(
+  viewSource.includes('{isMicrosoftInboxProjection(folder) && ('),
+  "Auto-read feedback must be visible in both Inbox and Filtered",
+);
+assert.ok(
+  viewSource.includes('{folder === "Inbox" && !MICROSOFT_READ_ONLY_PILOT && ('),
+  "Reply and manual flag actions must not become available in Filtered",
+);
 assert.match(viewSource, /Opening a message does not change its read status/);
 assert.match(viewSource, /setMutationConfirmation\(nextUnread \? "Marked as unread\." : "Marked as read\."\)/);
 assert.match(viewSource, /setMutationError\(/);

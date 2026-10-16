@@ -24,6 +24,11 @@ export function applyConfirmedMicrosoftUnread(
   };
 }
 
+/** A Filtered row is still an exact Graph Inbox message, not a separate folder. */
+export function isMicrosoftInboxProjection(folder: string): boolean {
+  return folder === "Inbox" || folder === "Filtered";
+}
+
 /**
  * Only open-and-read a newly displayed, exact Inbox message after consent.
  * This predicate contains NO side effects; preview and Production pilot
@@ -37,7 +42,7 @@ export function shouldAutoMarkMicrosoftOpenedMessageRead(input: {
 }): boolean {
   const { readWriteEnabled, folder, selectedMessageId, message } = input;
   return readWriteEnabled === true &&
-    (folder === "Inbox" || folder === "Filtered") &&
+    isMicrosoftInboxProjection(folder) &&
     typeof selectedMessageId === "string" && selectedMessageId.length > 0 &&
     message?.providerFolder === "INBOX" &&
     message.providerMessageId === selectedMessageId &&

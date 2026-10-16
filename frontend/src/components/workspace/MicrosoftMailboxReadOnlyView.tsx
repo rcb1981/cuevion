@@ -24,7 +24,7 @@ import {
   type LiveInboxMessageSnapshot,
   type MicrosoftAttachmentMetadata,
 } from "../../lib/inboxConnectionApi";
-import { applyConfirmedMicrosoftUnread, shouldAutoMarkMicrosoftOpenedMessageRead } from "./microsoftReadState";
+import { applyConfirmedMicrosoftUnread, isMicrosoftInboxProjection, shouldAutoMarkMicrosoftOpenedMessageRead } from "./microsoftReadState";
 import { MicrosoftComposePanel } from "./MicrosoftComposePanel";
 import { MicrosoftMessageListRow } from "./MicrosoftMessageListRow";
 import { MicrosoftPlannedMessageActions } from "./MicrosoftPlannedMessageActions";
@@ -461,7 +461,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           if (
             flagTicket !== mutationTicket.current ||
             ticket !== messageTicket.current ||
-            folderRef.current !== "Inbox" ||
+            !isMicrosoftInboxProjection(folderRef.current) ||
             selectedIdRef.current !== providerMessageId
           ) return;
           if (
@@ -1039,10 +1039,10 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                     onChange={changeSenderPlacement}
                   />
                 )}
-                {folder === "Inbox" && (
+                {isMicrosoftInboxProjection(folder) && (
                   <>
                 <div className="mt-4 flex flex-wrap items-center gap-3">
-                  {!MICROSOFT_READ_ONLY_PILOT && (
+                  {folder === "Inbox" && !MICROSOFT_READ_ONLY_PILOT && (
                     <>
                       <button
                         type="button"

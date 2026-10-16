@@ -38,14 +38,18 @@ console.log("✓ Confirmed Microsoft unread state projection tests passed.");
 
 // Opening a verified unread Inbox message is the only future automatic
 // mutation. Other folders, stale selections and the read-only pilot never write.
-const { shouldAutoMarkMicrosoftOpenedMessageRead } = require("./microsoftReadState") as typeof import("./microsoftReadState");
+const { shouldAutoMarkMicrosoftOpenedMessageRead, isMicrosoftInboxProjection } = require("./microsoftReadState") as typeof import("./microsoftReadState");
 const open = {
   readWriteEnabled: true,
   folder: "Inbox",
   selectedMessageId: "m-1",
   message: entry,
 };
+assert.equal(isMicrosoftInboxProjection("Inbox"), true);
+assert.equal(isMicrosoftInboxProjection("Filtered"), true);
+assert.equal(isMicrosoftInboxProjection("Archive"), false);
 assert.equal(shouldAutoMarkMicrosoftOpenedMessageRead(open), true);
+assert.equal(shouldAutoMarkMicrosoftOpenedMessageRead({...open, folder: "Filtered"}), true);
 assert.equal(shouldAutoMarkMicrosoftOpenedMessageRead({...open, readWriteEnabled: false}), false);
 assert.equal(shouldAutoMarkMicrosoftOpenedMessageRead({...open, folder: "Sent"}), false);
 assert.equal(shouldAutoMarkMicrosoftOpenedMessageRead({...open, folder: "Archive"}), false);
