@@ -16,19 +16,22 @@ for (const name of ["Reply", "Reply All", "Forward"]) {
 }
 assert.match(markup, /aria-expanded="false"/);
 assert.match(markup, /\bMore\b/);
-assert.match(markup, /border-\[var\(--workspace-accent-border\)\]/);
-assert.match(markup, /bg-\[linear-gradient/);
+assert.match(markup, /h-9 w-9/);
+assert.match(markup, /rounded-full/);
 assert.match(markup, /disabled=""/);
 assert.match(markup, /Preview only/);
 assert.doesNotMatch(markup, /href=|contentEditable|mailto:/);
-assert.doesNotMatch(markup, /\bArchive\b|>Delete</);
+for (const name of ["Archive", "Attachments", "Delete", "Bookmark"]) {
+  assert.match(markup, new RegExp('aria-label="' + name + '"'));
+}
+assert.doesNotMatch(markup, /onClick=|type="submit"/);
 
 const source = readFileSync(
   resolve(process.cwd(), "src/components/workspace/MicrosoftPlannedMessageActions.tsx"), "utf8",
 );
-assert.match(source, /setMoreOpen\(!moreOpen\)/);
-assert.match(source, /"Archive", "Delete", unread \? "Mark as read" : "Mark as unread"/);
-assert.match(source, /<ActionGlyph name=\{action === "Archive" \? "archive" : action === "Delete" \? "delete" : "mail"\} \/>/);
+assert.match(source, /setMoreOpen\(\(open\) => !open\)/);
+assert.match(source, /unread \? "Mark as read" : "Mark as unread"/);
+assert.match(source, /<ActionGlyph name=\{name\} \/>/);
 assert.match(source, /type="button"\s+disabled/);
 assert.doesNotMatch(source, /fetch\(|sendMicrosoft|setMicrosoftMessageUnread\(/);
 

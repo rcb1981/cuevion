@@ -31,7 +31,12 @@ assert.doesNotMatch(src, /fetch\(|setMicrosoftMessageUnread\(|localStorage/);
 const view = readFileSync(resolve(
   process.cwd(), "src/components/workspace/MicrosoftMailboxReadOnlyView.tsx",
 ), "utf8");
-assert.match(view, /selectFolder\("Filtered"\)/);
+assert.match(view, /onSelectFolder=\{selectFolder\}/);
+const rail = readFileSync(resolve(
+  process.cwd(), "src/components/workspace/MicrosoftMailboxFolderRail.tsx",
+), "utf8");
+assert.match(rail, /id: "Filtered", label: "Filtered"/);
+assert.match(rail, /onClick=\{\(\) => onSelectFolder\(item\.id\)\}/);
 assert.match(view, /microsoftVisibleFolderRows\(/);
 assert.match(view, /useMicrosoftFilteredLearning\(mailbox\.id, connected\)/);
 assert.match(view, /fetchMicrosoftInbox\(/);

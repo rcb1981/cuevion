@@ -29,6 +29,7 @@ import { MicrosoftComposePanel } from "./MicrosoftComposePanel";
 import { MicrosoftComposeDesignPreview } from "./MicrosoftComposeDesignPreview";
 import { MicrosoftMessageListRow } from "./MicrosoftMessageListRow";
 import { MicrosoftPlannedMessageActions } from "./MicrosoftPlannedMessageActions";
+import { MicrosoftMailboxFolderRail } from "./MicrosoftMailboxFolderRail";
 import { MicrosoftReconnectConsentButton } from "./MicrosoftReconnectConsentButton";
 import { MicrosoftLinkifiedText } from "./MicrosoftLinkifiedText";
 import { filterMicrosoftLoadedMessages, type MicrosoftMessageSortOrder } from "./microsoftMailboxListFilters";
@@ -730,125 +731,78 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden text-[var(--workspace-text)]">
-      <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[var(--workspace-border-soft)] px-4 py-4 sm:px-6">
-        <div className="flex min-w-0 items-center gap-3">
+      <header className="flex shrink-0 flex-wrap items-center justify-between gap-4 border-b border-[var(--workspace-border-soft)] px-4 py-4 sm:px-6">
+        <div className="flex min-w-0 items-center gap-4">
           <button
             type="button"
             onClick={onBack}
-            className="rounded-lg px-2 py-1 text-sm text-[var(--workspace-text-muted)] hover:text-[var(--workspace-text)] focus-visible:outline focus-visible:outline-2"
+            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-xs font-medium text-[var(--workspace-text-muted)] transition hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]"
             aria-label="Back to workspace"
           >
-            ← Back
+            <svg aria-hidden="true" viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12.5 8h-9M7 4.5 3.5 8 7 11.5" />
+            </svg>
+            Back
           </button>
           <div className="min-w-0">
             <h1 className="truncate text-lg font-semibold">{mailbox.title}</h1>
             <p className="truncate text-xs text-[var(--workspace-text-muted)]">{mailbox.email}</p>
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="rounded-full border border-[var(--workspace-border-soft)] px-3 py-1 text-[0.7rem] font-medium text-[var(--workspace-text-muted)]">
-            Microsoft 365 · Mail
-          </span>
-          <span role="status" className="rounded-full border border-[var(--workspace-border-soft)] px-3 py-1 text-[0.7rem] font-medium text-[var(--workspace-text-muted)]">
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+          <span className="hidden text-[0.7rem] text-[var(--workspace-text-faint)] sm:inline">Microsoft 365 · Mail</span>
+          <span role="status" className="hidden text-[0.68rem] text-[var(--workspace-text-faint)] xl:inline">
             {MICROSOFT_AUTO_MARK_READ_RELEASED
               ? "Auto-read enabled · other actions disabled"
               : "Read-only pilot"}
           </span>
           <MicrosoftReconnectConsentButton mailboxId={mailbox.id} email={mailbox.email} />
-          <button
-            type="button"
-            aria-haspopup={MICROSOFT_READ_ONLY_PILOT ? "dialog" : undefined}
-            aria-label={MICROSOFT_READ_ONLY_PILOT ? "Compose message (design preview only)" : "Compose message"}
-            title={MICROSOFT_READ_ONLY_PILOT ? "Explore the new-message design. Nothing can be sent or saved." : "Compose new message"}
-            disabled={!connected || composer !== null || mutationBusy || composeDesignPreviewOpen}
-            onClick={() => {
-              if (MICROSOFT_READ_ONLY_PILOT) {
-                setComposeDesignPreviewOpen(true);
-              } else {
-                openComposer("new");
-              }
-            }}
-            className="inline-flex h-8 items-center justify-center gap-2 rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] px-3.5 text-[0.68rem] font-semibold uppercase tracking-[0.13em] text-[var(--workspace-accent-text)] transition hover:brightness-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <svg aria-hidden="true" viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M8 3v10M3 8h10" />
-            </svg>
-            Compose
-          </button>
-          <button
-            type="button"
-            aria-pressed={folder === "Inbox"}
-            disabled={!connected || composer !== null || mutationBusy}
-            onClick={() => selectFolder("Inbox")}
-            className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium aria-pressed:bg-[var(--workspace-card-subtle)] disabled:opacity-50"
-          >
-            Inbox
-          </button>
-          <button
-            type="button"
-            aria-pressed={folder === "Filtered"}
-            disabled={!connected || composer !== null || mutationBusy}
-            onClick={() => selectFolder("Filtered")}
-            title="Quiet view from the same Outlook Inbox; no messages are moved."
-            className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium aria-pressed:bg-[var(--workspace-card-subtle)] disabled:opacity-50"
-          >
-            Filtered
-          </button>
-          <button
-            type="button"
-            aria-pressed={folder === "Sent"}
-            disabled={!connected || composer !== null || mutationBusy}
-            onClick={() => selectFolder("Sent")}
-            className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium aria-pressed:bg-[var(--workspace-card-subtle)] disabled:opacity-50"
-          >
-            Sent
-          </button>
-          <button
-            type="button"
-            aria-pressed={folder === "Archive"}
-            disabled={!connected || composer !== null || mutationBusy}
-            onClick={() => selectFolder("Archive")}
-            className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium aria-pressed:bg-[var(--workspace-card-subtle)] disabled:opacity-50"
-          >
-            Archive
-          </button>
-          <button
-            type="button"
-            aria-pressed={folder === "Drafts"}
-            disabled={!connected || composer !== null || mutationBusy}
-            onClick={() => selectFolder("Drafts")}
-            className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium aria-pressed:bg-[var(--workspace-card-subtle)] disabled:opacity-50"
-          >
-            Drafts
-          </button>
-          <button
-            type="button"
-            aria-pressed={folder === "Deleted"}
-            disabled={!connected || composer !== null || mutationBusy}
-            onClick={() => selectFolder("Deleted")}
-            className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium aria-pressed:bg-[var(--workspace-card-subtle)] disabled:opacity-50"
-          >
-            Deleted Items
-          </button>
-          <button
-            type="button"
-            aria-pressed={folder === "Junk"}
-            disabled={!connected || composer !== null || mutationBusy}
-            onClick={() => selectFolder("Junk")}
-            className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium aria-pressed:bg-[var(--workspace-card-subtle)] disabled:opacity-50"
-          >
-            Junk Email
-          </button>
-          <button
-            type="button"
-            onClick={() => void refresh()}
-            disabled={!connected || composer !== null || listBusy || mutationBusy}
-            className="rounded-xl border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium disabled:opacity-50"
-          >
-            {listBusy ? "Refreshing…" : "Refresh"}
-          </button>
         </div>
       </header>
+      <div className="relative z-20 flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--workspace-border-soft)] px-4 py-3 sm:px-6">
+        <button
+          type="button"
+          aria-haspopup={MICROSOFT_READ_ONLY_PILOT ? "dialog" : undefined}
+          aria-label={MICROSOFT_READ_ONLY_PILOT ? "Compose message (design preview only)" : "Compose message"}
+          title={MICROSOFT_READ_ONLY_PILOT ? "Explore the new-message design. Nothing can be sent or saved." : "Compose new message"}
+          disabled={!connected || composer !== null || mutationBusy || composeDesignPreviewOpen}
+          onClick={() => {
+            if (MICROSOFT_READ_ONLY_PILOT) {
+              setComposeDesignPreviewOpen(true);
+            } else {
+              openComposer("new");
+            }
+          }}
+          className="inline-flex h-9 items-center justify-center gap-2 rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] px-3.5 text-[0.69rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-accent-text)] transition hover:brightness-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <svg aria-hidden="true" viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M8 3v10M3 8h10" />
+          </svg>
+          Compose
+        </button>
+        <button
+          type="button"
+          aria-label={listBusy ? "Refreshing" : "Refresh"}
+          title="Sync Microsoft folder (read-only)"
+          disabled={!connected || composer !== null || listBusy || mutationBusy}
+          onClick={() => void refresh()}
+          className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-soft)] transition hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <svg aria-hidden="true" viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M13 5.5A5 5 0 0 0 4.5 3L3 4.5" />
+            <path d="M3.5 2.5v2h2" />
+            <path d="M3 10.5A5 5 0 0 0 11.5 13L13 11.5" />
+            <path d="M12.5 13.5v-2h-2" />
+          </svg>
+        </button>
+        <span aria-hidden="true" className="mx-1 h-6 w-px bg-[var(--workspace-border-soft)]" />
+        {MICROSOFT_READ_ONLY_PILOT && (
+          <MicrosoftPlannedMessageActions unread={selectedMessage?.unread === true} />
+        )}
+        <span className="ml-auto hidden text-[0.68rem] text-[var(--workspace-text-faint)] 2xl:inline">
+          Design trial · mail actions disabled
+        </span>
+      </div>
 
       {!connected ? (
         <div className="m-6 max-w-lg rounded-xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] p-6" role="status">
@@ -874,7 +828,19 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           }}
         />
       ) : (
-        <div className="grid min-h-0 flex-1 grid-cols-1 gap-0 md:grid-cols-[minmax(245px,37%)_minmax(0,1fr)]">
+        <div className="flex min-h-0 flex-1 flex-col">
+          <MicrosoftMailboxFolderRail
+            folder={folder}
+            disabled={!connected || composer !== null || mutationBusy}
+            onSelectFolder={selectFolder}
+            compact
+          />
+          <div className="grid min-h-0 flex-1 grid-cols-1 gap-0 md:grid-cols-[minmax(245px,37%)_minmax(0,1fr)] lg:grid-cols-[152px_minmax(275px,37%)_minmax(0,1fr)]">
+            <MicrosoftMailboxFolderRail
+              folder={folder}
+              disabled={!connected || composer !== null || mutationBusy}
+              onSelectFolder={selectFolder}
+            />
           <section aria-label={"Microsoft " + folder + " messages"} className="flex min-h-0 flex-col border-b border-[var(--workspace-border-soft)] md:border-b-0 md:border-r">
             <div className="flex shrink-0 items-center justify-between border-b border-[var(--workspace-border-soft)] px-4 py-3">
               <h2 className="text-sm font-semibold">
@@ -1038,9 +1004,6 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                     {folder === "Deleted" ? "Last changed: " : ""}{readableTime(selectedMessage.createdAt)}
                   </p>
                 </div>
-                {folder === "Inbox" && MICROSOFT_READ_ONLY_PILOT && (
-                  <MicrosoftPlannedMessageActions unread={selectedMessage.unread === true} />
-                )}
                 {(folder === "Inbox" || folder === "Filtered") && (
                   <MicrosoftFilteredSenderAction
                     folder={folder}
@@ -1171,6 +1134,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
               </article>
             )}
           </section>
+          </div>
         </div>
       )}
       {MICROSOFT_READ_ONLY_PILOT && connected && composeDesignPreviewOpen && (

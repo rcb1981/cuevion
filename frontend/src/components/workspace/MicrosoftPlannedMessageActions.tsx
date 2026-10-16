@@ -1,130 +1,80 @@
 import React, { useId, useState } from "react";
 
-/**
- * Read-only, visual preview of the established Cuevion Gmail/IMAP action bar.
- * No mailbox command is wired to these buttons. A future feature must
- * separately add ownership, provider scopes, confirmation, and send safety.
- */
-function ActionGlyph({name}: {name: "reply" | "reply-all" | "forward" | "more" | "archive" | "delete" | "mail"}) {
+/** Microsoft-only Gmail/IMAP-style icon preview. No Graph writes or mailbox changes. */
+type GlyphName =
+  | "reply" | "reply-all" | "forward" | "archive" | "attach"
+  | "delete" | "bookmark" | "more" | "mail" | "move";
+
+function ActionGlyph({ name }: { name: GlyphName }) {
   return (
-    <svg
-      aria-hidden="true"
-      focusable="false"
-      viewBox="0 0 16 16"
-      className="h-4 w-4 flex-none"
-      fill={name === "more" ? "currentColor" : "none"}
-      stroke="currentColor"
-      strokeWidth={name === "reply-all" ? "1.75" : "1.6"}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      {name === "reply" && (
-        <>
-          <path d="M6 4 2.5 8 6 12" />
-          <path d="M3 8h7c2.3 0 4 1.2 4 3.5" />
-        </>
-      )}
-      {name === "reply-all" && (
-        <>
-          <path d="M5.75 4 2.5 8l3.25 4" />
-          <path d="M10.75 4 7.5 8l3.25 4" />
-          <path d="M3 8h7c2.1 0 3.75 1.1 3.75 3.3" />
-        </>
-      )}
-      {name === "forward" && (
-        <>
-          <path d="M10 4 13.5 8 10 12" />
-          <path d="M13 8H6.5C4.2 8 2.5 9.2 2.5 11.5" />
-        </>
-      )}
-      {name === "more" && (
-        <>
-          <circle cx="3.5" cy="8" r="1.1" stroke="none" />
-          <circle cx="8" cy="8" r="1.1" stroke="none" />
-          <circle cx="12.5" cy="8" r="1.1" stroke="none" />
-        </>
-      )}
-      {name === "archive" && (
-        <>
-          <rect x="2.4" y="3" width="11.2" height="3" rx="0.7" />
-          <path d="M3.4 6v7h9.2V6M6 9h4" />
-        </>
-      )}
-      {name === "delete" && (
-        <>
-          <path d="M3.5 5.2h9M6 3.5h4M5 5.2l.5 7.5h5l.5-7.5M7 7.5v3M9 7.5v3" />
-        </>
-      )}
-      {name === "mail" && (
-        <>
-          <rect x="2.2" y="4.2" width="11.6" height="8.2" rx="1" />
-          <path d="m2.5 5 5.5 4 5.5-4" />
-        </>
-      )}
+    <svg aria-hidden="true" focusable="false" viewBox="0 0 16 16"
+      className="h-4 w-4 shrink-0" fill={name === "more" ? "currentColor" : "none"}
+      stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round">
+      {name === "reply" && <><path d="M6 4 2.5 8 6 12"/><path d="M3 8h7c2.3 0 4 1.2 4 3.5"/></>}
+      {name === "reply-all" && <><path d="M5.75 4 2.5 8l3.25 4"/><path d="M10.75 4 7.5 8l3.25 4"/><path d="M3 8h7c2.1 0 3.75 1.1 3.75 3.3"/></>}
+      {name === "forward" && <><path d="M10 4 13.5 8 10 12"/><path d="M13 8H6.5C4.2 8 2.5 9.2 2.5 11.5"/></>}
+      {name === "archive" && <><path d="M2.5 4.5h11v3h-11z"/><path d="M4 7.5v4.25h8V7.5M6 9.5h4"/></>}
+      {name === "attach" && <path d="M6 6.5v4.5a2 2 0 0 0 4 0v-6a3 3 0 1 0-6 0v6.5a4 4 0 0 0 8 0V6.5"/>}
+      {name === "delete" && <><path d="M3.2 4.5h9.6M5.1 4.5l.6 8h4.6l.6-8M6.6 3h2.8"/><path d="M7 6.5V10m2-3.5V10"/></>}
+      {name === "bookmark" && <path d="M4.5 2.8h7v10l-3.5-2.5-3.5 2.5V2.8z"/>}
+      {name === "mail" && <><rect x="2.1" y="4.1" width="11.8" height="8" rx="1"/><path d="m2.5 5 5.5 4 5.5-4"/></>}
+      {name === "move" && <><path d="M2.3 5h4l1.2 1.4h6.2v6.3H2.3z"/><path d="M8 9.5h4m-1.5-1.5L12 9.5 10.5 11"/></>}
+      {name === "more" && <><circle cx="3.5" cy="8" r="1.1" stroke="none"/><circle cx="8" cy="8" r="1.1" stroke="none"/><circle cx="12.5" cy="8" r="1.1" stroke="none"/></>}
     </svg>
   );
 }
 
-const primaryStyle =
-  "inline-flex h-7 items-center justify-center gap-1.5 whitespace-nowrap rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] px-3 text-[0.68rem] font-medium text-[var(--workspace-accent-text)] disabled:cursor-not-allowed disabled:opacity-55";
-const secondaryStyle =
-  "inline-flex h-7 items-center justify-center gap-1.5 whitespace-nowrap rounded-full border border-[var(--workspace-border-soft)] bg-transparent px-3 text-[0.68rem] font-medium text-[var(--workspace-text-soft)] disabled:cursor-not-allowed disabled:opacity-55";
+const iconButton =
+  "inline-flex h-9 w-9 items-center justify-center rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:cursor-not-allowed disabled:opacity-40";
 
-export function MicrosoftPlannedMessageActions({unread}: {unread: boolean}) {
+const actions = [
+  { name: "reply", label: "Reply" },
+  { name: "reply-all", label: "Reply All" },
+  { name: "forward", label: "Forward" },
+  { name: "archive", label: "Archive" },
+  { name: "attach", label: "Attachments" },
+  { name: "delete", label: "Delete" },
+  { name: "bookmark", label: "Bookmark" },
+] as const;
+
+export function MicrosoftPlannedMessageActions({ unread }: { unread: boolean }) {
   const [moreOpen, setMoreOpen] = useState(false);
   const moreId = useId();
+
   return (
-    <section aria-label="Microsoft message actions preview" className="mt-4 space-y-2">
-      <div className="flex flex-wrap items-center gap-2">
-        <button type="button" disabled title="Reply will be available after a separate send approval." className={primaryStyle}>
-          <ActionGlyph name="reply" />
-          Reply
+    <div aria-label="Microsoft message actions preview" className="flex items-center gap-1.5">
+      {actions.map(({ name, label }) => (
+        <button
+          key={name} type="button" aria-label={label} disabled
+          title={label + " requires separate Microsoft action approval"}
+          className={iconButton}
+        >
+          <ActionGlyph name={name} />
         </button>
-        <button type="button" disabled title="Reply All requires separate Microsoft sending approval." className={secondaryStyle}>
-          <ActionGlyph name="reply-all" />
-          Reply All
+      ))}
+      <div className="relative">
+        <button type="button" aria-label="More" aria-expanded={moreOpen}
+          aria-controls={moreId} onClick={() => setMoreOpen((open) => !open)}
+          title="Preview more planned Microsoft actions" className={iconButton}>
+          <ActionGlyph name="more" />
         </button>
-        <button type="button" disabled title="Forward requires separate Microsoft sending approval." className={secondaryStyle}>
-          <ActionGlyph name="forward" />
-          Forward
-        </button>
-        <div className="relative">
-          <button
-            type="button"
-            aria-expanded={moreOpen}
-            aria-controls={moreId}
-            onClick={() => setMoreOpen(!moreOpen)}
-            title="Preview the other planned mail actions"
-            className={secondaryStyle + " cursor-pointer hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)]"}
-          >
-            <ActionGlyph name="more" />
-            More
-          </button>
-          {moreOpen && (
-            <div
-              id={moreId}
-              aria-label="Other planned Microsoft message actions"
-              className="absolute left-0 top-full z-20 mt-2 min-w-[190px] rounded-[18px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-[0_14px_32px_rgba(41,34,27,0.10)]"
-            >
-              {["Archive", "Delete", unread ? "Mark as read" : "Mark as unread"].map((action) => (
-                <button
-                  type="button"
-                  disabled
-                  key={action}
-                  title="Planned action; not yet enabled for Microsoft"
-                  className="flex w-full cursor-not-allowed items-center gap-2.5 rounded-[14px] px-3 py-2.5 text-left text-[0.82rem] text-[var(--workspace-text-soft)] opacity-60"
-                >
-                  <ActionGlyph name={action === "Archive" ? "archive" : action === "Delete" ? "delete" : "mail"} />
-                  {action}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+        {moreOpen && (
+          <div id={moreId} aria-label="Other planned Microsoft message actions"
+            className="absolute right-0 top-full z-40 mt-2 min-w-[190px] rounded-[18px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-[0_14px_32px_rgba(20,18,16,0.25)]">
+            {([
+              { key: "read", label: unread ? "Mark as read" : "Mark as unread", icon: "mail" },
+              { key: "move", label: "Move to folder", icon: "move" },
+            ] as const).map(({ key, label, icon }) => (
+              <button key={key} type="button" disabled title="Planned action; not enabled for Microsoft"
+                className="flex w-full cursor-not-allowed items-center gap-2.5 rounded-[12px] px-3 py-2 text-left text-[0.79rem] text-[var(--workspace-text-soft)] opacity-55">
+                <ActionGlyph name={icon} />
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
-      <p className="text-[0.68rem] text-[var(--workspace-text-faint)]">
-        Preview only — Reply, Forward and mailbox-moving actions are not yet enabled for Microsoft.
-      </p>
-    </section>
+      <span className="sr-only">Preview only — Microsoft message actions are disabled.</span>
+    </div>
   );
 }
