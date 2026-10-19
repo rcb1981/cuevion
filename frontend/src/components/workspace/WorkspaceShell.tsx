@@ -3564,8 +3564,8 @@ const SMART_FOLDERS_STORAGE_KEY = "cuevion-smart-folders";
 const MAIL_LIST_PANE_WIDTH_STORAGE_KEY = "cuevion-mail-list-pane-width";
 const COMPOSE_RECIPIENT_MEMORY_STORAGE_KEY = "cuevion-compose-recipient-memory";
 const ACTIVE_MAILBOX_AUTO_REFRESH_INTERVAL_MS = 3 * 60 * 1000;
-const MAIL_FOLDER_COLUMN_WIDTH = 140;
-const MAIL_SPLIT_GAP = 24;
+const MAIL_FOLDER_COLUMN_WIDTH = 152;
+const MAIL_SPLIT_GAP = 0;
 
 function getBrowserLearningStorage() {
   if (typeof window === "undefined") {
@@ -28005,49 +28005,42 @@ function MailboxView({
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden md:gap-4">
-      <header className="flex-none">
-        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between md:gap-6">
-          <div className="flex min-w-0 flex-col items-start gap-2">
-            <div className="min-w-0 space-y-1">
-              <div className="text-[0.72rem] font-medium uppercase tracking-[0.24em] text-[var(--workspace-text-faint)]">
-                {activeSmartFolder ? "Smart folder" : "Inbox"}
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={handleMailboxBack}
-              className={mailboxNavigationBackButtonClass}
-            >
-              Back
-            </button>
+    <div data-cuevion-mailbox-visual="unified" className="flex h-full min-h-0 flex-col overflow-hidden text-[var(--workspace-text)]">
+      <header className="flex shrink-0 flex-wrap items-center justify-between gap-4 border-b border-[var(--workspace-border-soft)] px-4 py-4 sm:px-6">
+        <div className="flex min-w-0 items-center gap-4">
+          <button
+            type="button"
+            onClick={handleMailboxBack}
+            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-xs font-medium text-[var(--workspace-text-muted)] transition hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]"
+          >
+            <span aria-hidden="true">←</span> Back
+          </button>
+        </div>
+        <div className="flex min-w-0 items-center gap-3 text-right">
+          <div className="min-w-0">
+            <MailboxTitleEditor
+              canonicalTitle={mailbox.title}
+              displayTitle={activeDestinationTitle}
+              canEdit={
+                activeFolder === "Inbox" &&
+                !isSharedView &&
+                !activeSmartFolder
+              }
+              onCommit={(nextTitle) =>
+                onRenameMailbox(mailbox.id, nextTitle)
+              }
+            />
+            <div className="truncate text-xs text-[var(--workspace-text-muted)]">{mailbox.email}</div>
           </div>
-          <div className="flex flex-none items-start md:justify-end">
-            <div className="flex flex-col items-start gap-0.5 text-[0.82rem] leading-5 text-[var(--workspace-text-faint)] md:items-end">
-              <MailboxTitleEditor
-                canonicalTitle={mailbox.title}
-                displayTitle={activeDestinationTitle}
-                canEdit={
-                  activeFolder === "Inbox" &&
-                  !isSharedView &&
-                  !activeSmartFolder
-                }
-                onCommit={(nextTitle) =>
-                  onRenameMailbox(mailbox.id, nextTitle)
-                }
-              />
-              <div className="text-[var(--workspace-text-faint)]">{mailbox.email}</div>
-              <MailboxConnectionState
-                health={mailboxHealth}
-                onActionRequired={onOpenConnectionSettings}
-              />
-            </div>
-          </div>
+          <MailboxConnectionState
+            health={mailboxHealth}
+            onActionRequired={onOpenConnectionSettings}
+          />
         </div>
       </header>
 
-      <section className="relative flex h-0 min-h-0 flex-1 flex-col overflow-hidden rounded-[30px] border border-[var(--workspace-border)] bg-[var(--workspace-card)] p-5 shadow-panel md:p-6">
-        <div className="mb-4 flex flex-none flex-wrap items-center gap-2">
+      <section className="relative flex h-0 min-h-0 flex-1 flex-col overflow-hidden bg-transparent">
+        <div className="flex flex-none flex-wrap items-center justify-end gap-2 border-b border-[var(--workspace-border-soft)] px-4 py-3 sm:px-6">
           <button
             type="button"
             className={mailboxComposeActionButtonClass}
@@ -28828,10 +28821,10 @@ function MailboxView({
               inboxInteractionViewportRef.current = node;
               splitPaneContainerRef.current = node;
             }}
-            className={`grid h-0 min-h-0 flex-1 items-stretch gap-6 overflow-hidden ${
+            className={`grid h-0 min-h-0 flex-1 items-stretch gap-0 overflow-hidden ${
               activeSmartFolder
-                ? "xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.28fr)]"
-                : "xl:grid-cols-[140px_minmax(0,0.92fr)_minmax(0,1.28fr)]"
+                ? "xl:grid-cols-[minmax(275px,37%)_minmax(0,1fr)]"
+                : "xl:grid-cols-[152px_minmax(275px,37%)_minmax(0,1fr)]"
             }`}
             style={
               isWideSplitView && effectiveMailListPaneWidth !== null
@@ -28844,9 +28837,10 @@ function MailboxView({
             }
           >
             {!activeSmartFolder ? (
-              <div className="flex min-h-0 min-w-0 flex-col overflow-hidden">
+              <div className="flex min-h-0 min-w-0 flex-col overflow-hidden border-r border-[var(--workspace-border-soft)] px-3 py-5">
+                <div className="shrink-0 px-2 pb-3 text-[0.62rem] font-semibold uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">Folders</div>
                 <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
-                  {(["Inbox", "Drafts", "Sent", "Archive", "Spam", "Trash"] as MailFolder[]).map(
+                  {(["Inbox", "Sent", "Archive", "Drafts", "Trash", "Spam"] as MailFolder[]).map(
                     (folder) => {
                       const active =
                         !isSharedView &&
@@ -28883,7 +28877,7 @@ function MailboxView({
                               handleDropToTarget({ type: "folder", folder });
                             }}
                             onClick={() => switchToFolder(folder)}
-                            className={`flex w-full items-center justify-between rounded-[14px] px-3 py-2 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
+                            className={`flex w-full items-center justify-between rounded-[10px] px-3 py-2 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
                               active
                                 ? "bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] text-[var(--workspace-text)]"
                                 : isDragTargetActive
@@ -28891,7 +28885,7 @@ function MailboxView({
                                   : "text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-card-subtle)]"
                             } focus-visible:outline-none`}
                           >
-                            <span className="block min-w-0 truncate text-[0.75rem] font-medium uppercase tracking-[0.1em]">
+                            <span className="block min-w-0 truncate text-[0.79rem] font-medium">
                               {folderLabel}
                             </span>
                             {shouldShowFolderCount ? (
@@ -29002,9 +28996,9 @@ function MailboxView({
               </button>
             ) : null}
 
-            <div className="flex min-h-0 min-w-0 flex-col overflow-hidden">
-              <div className="mb-4 flex-none space-y-3">
-                <label className="flex h-11 items-center gap-3 rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 focus-within:border-[var(--workspace-border)] focus-within:bg-[var(--workspace-hover-surface)]">
+            <div className="flex min-h-0 min-w-0 flex-col overflow-hidden border-r border-[var(--workspace-border-soft)]">
+              <div className="flex-none space-y-3 border-b border-[var(--workspace-border-soft)] px-3 pb-3 pt-4">
+                <label className="flex h-10 items-center gap-3 rounded-xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 focus-within:border-[var(--workspace-border)] focus-within:bg-[var(--workspace-hover-surface)]">
                   <svg
                     aria-hidden="true"
                     viewBox="0 0 16 16"
@@ -29168,9 +29162,9 @@ function MailboxView({
                   mail-list scroller dark and opt it into dark color-scheme directly. */}
               <div
                 ref={mailListViewportRef}
-                className="cuevion-dark-scroll cuevion-soft-scroll min-h-0 flex-1 overflow-y-auto bg-[var(--workspace-card-featured-end)] pr-1"
+                className="cuevion-dark-scroll cuevion-soft-scroll min-h-0 flex-1 overflow-y-auto"
                 style={{
-                  backgroundColor: "var(--workspace-card-featured-end)",
+                  backgroundColor: "transparent",
                   colorScheme: themeMode,
                   scrollbarWidth: "thin",
                   scrollbarColor:
@@ -29406,10 +29400,10 @@ function MailboxView({
                               organizerAnchorHeight: null,
                             });
                           }}
-                          className={`flex min-h-[92px] w-full cursor-pointer flex-col rounded-[18px] border px-4 py-2.5 text-left transition-[background-color,background-image,border-color,box-shadow,transform] duration-150 ${
+                          className={`flex min-h-[92px] w-full cursor-pointer flex-col rounded-none border-b border-l-[3px] border-t-0 border-r-0 px-4 py-3 text-left transition-[background-color,border-color] duration-150 ${
                             active
-                              ? "border-[var(--workspace-border-hover)] bg-[linear-gradient(180deg,var(--workspace-selected-surface-start),var(--workspace-selected-surface-end))] shadow-[0_10px_24px_rgba(31,42,36,0.08),inset_0_1px_0_rgba(255,255,255,0.08)]"
-                              : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)]"
+                              ? "border-b-[var(--workspace-border-soft)] border-l-moss bg-[var(--workspace-card-subtle)]"
+                              : "border-b-[var(--workspace-border-soft)] border-l-transparent bg-transparent hover:bg-[var(--workspace-card-subtle)]"
                           } focus-visible:border-[var(--workspace-border-hover)] focus-visible:outline-none`}
                         >
                           <div className="flex min-w-0 flex-1 flex-col justify-between text-[var(--workspace-text)] opacity-100">
@@ -29598,7 +29592,7 @@ function MailboxView({
                 reading-pane scroller dark and opt it into dark color-scheme directly. */}
             <div
               ref={readingPaneViewportRef}
-              className="cuevion-dark-scroll cuevion-soft-scroll flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overflow-x-auto rounded-[24px] border border-[color:rgba(128,142,121,0.14)] bg-[linear-gradient(180deg,rgba(255,255,253,0.98),rgba(249,245,238,0.97))] shadow-[0_12px_34px_rgba(164,147,125,0.06)] dark:border-[var(--workspace-border-soft)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
+              className="cuevion-dark-scroll cuevion-soft-scroll flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overflow-x-auto bg-transparent"
               style={{
                 colorScheme: themeMode,
                 scrollbarWidth: "thin",

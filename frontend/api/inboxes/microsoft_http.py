@@ -401,6 +401,7 @@ def microsoft_inbox_response(request, *, mode: str):
                 stage = getattr(error, "safe_stage", None)
                 if stage not in {
                     "download_metadata", "download_file_type", "download_raw_size",
+                    "download_raw_invalid_png", "download_raw_other_format",
                 }:
                     stage = "download_other"
                 print("microsoft_attachment_invalid_response_stage=" + stage, flush=True)

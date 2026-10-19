@@ -91,6 +91,24 @@ async function main() {
   }
   assert.deepEqual(Object.keys(await loadMicrosoftInlineCidImages(request, () => false, good)), []);
 
+  const normalizedSizeFromGraph = await loadMicrosoftInlineCidImages(
+    {...request, attachments: [{...attachment, size: png.length + 13}]},
+    () => true, async () => ({
+      ok: true, attachmentId: attachment.id, size: png.length,
+      base64: png.toString("base64"), fileName: attachment.name,
+    }),
+  );
+  assert.equal(normalizedSizeFromGraph[cid],
+    "data:image/png;base64," + png.toString("base64"));
+  const nonPngMismatch = await loadMicrosoftInlineCidImages(
+    {...request, attachments: [{...attachment, size: png.length + 13}]},
+    () => true, async () => ({
+      ok: true, attachmentId: attachment.id, size: 4,
+      base64: Buffer.from("GIF89a").toString("base64"), fileName: attachment.name,
+    }),
+  );
+  assert.deepEqual(Object.keys(nonPngMismatch), []);
+
   const invalid: Download = async () => ({
     ok: true, attachmentId: attachment.id, size: attachment.size,
     base64: Buffer.alloc(attachment.size, 0).toString("base64"),

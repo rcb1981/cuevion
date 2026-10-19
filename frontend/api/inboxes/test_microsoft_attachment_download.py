@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import base64
+import binascii
+import struct
+import zlib
 import unittest
 from unittest.mock import patch
 
@@ -41,6 +44,20 @@ class ThreeStepGraphOpener:
         if len(self.calls) > len(self.responses):
             raise AssertionError("Unexpected Graph request")
         return FakeResponse(self.responses[len(self.calls) - 1])
+
+
+def complete_png_fixture() -> bytes:
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(body)) + kind + body +
+            struct.pack(">I", binascii.crc32(kind + body) & 0xffffffff)
+        )
+    return (
+        bytes.fromhex("89504e470d0a1a0a")
+        + chunk(b"IHDR", struct.pack(">2I5B", 1, 1, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(bytes.fromhex("00000000")))
+        + chunk(b"IEND", b"")
+    )
 
 
 class GraphDownloadTests(unittest.TestCase):
@@ -114,6 +131,56 @@ class GraphDownloadTests(unittest.TestCase):
             TOKEN, MESSAGE, ATTACHMENT, folder="Inbox", opener=opener,
         )
         self.assertEqual(base64.b64decode(recovered["base64"]), CONTENT)
+
+    def test_raw_png_complete_crc_can_differ_from_graph_reported_size(self):
+        image = complete_png_fixture()
+        self.assertTrue(download._complete_png(image))
+        inflated = len(image) + 31
+        opener = ThreeStepGraphOpener(
+            payload(contentBytes=None, size=inflated),
+            {"value": [{
+                "id": ATTACHMENT, "@odata.type": "#microsoft.graph.fileAttachment",
+                "name": "logo.png", "size": inflated,
+                "contentType": "image/png", "isInline": True,
+                "contentId": "LOGO@MESSAGE",
+            }]},
+            image,
+        )
+        decoded = download.read_microsoft_file_attachment(
+            TOKEN, MESSAGE, ATTACHMENT, folder="Inbox", opener=opener,
+        )
+        self.assertEqual(decoded["size"], len(image))
+        self.assertEqual(base64.b64decode(decoded["base64"]), image)
+        self.assertEqual(len(opener.calls), 3)
+
+    def test_mismatched_corrupt_png_and_nonimage_stay_blocked(self):
+        image = complete_png_fixture()
+        corrupted = bytearray(image)
+        corrupted[35] ^= 1  # invalid CRC: a signature alone cannot authorize data
+        self.assertFalse(download._complete_png(bytes(corrupted)))
+        self.assertFalse(download._complete_png(image[:-5]))
+        self.assertFalse(download._complete_png(b"PNG" + image))
+        for raw, content_type in (
+            (bytes(corrupted), "image/png"),
+            (image[:-5], "image/png"),
+            (b"<svg onload='evil()'/>", "image/png"),
+            (image, "application/pdf"),
+        ):
+            with self.subTest(raw_length=len(raw), content_type=content_type):
+                opener = ThreeStepGraphOpener(
+                    payload(contentBytes=None),
+                    {"value": [{
+                        "id": ATTACHMENT, "@odata.type": "#microsoft.graph.fileAttachment",
+                        "name": "test.file", "size": len(raw) + 1,
+                        "contentType": content_type, "isInline": True,
+                        "contentId": "x@y",
+                    }]},
+                    raw,
+                )
+                with self.assertRaises(microsoft_graph.MicrosoftGraphError):
+                    download.read_microsoft_file_attachment(
+                        TOKEN, MESSAGE, ATTACHMENT, folder="Inbox", opener=opener,
+                    )
 
     def test_raw_fallback_rejects_item_reference_wrong_id_size_and_oversized_data(self):
         known = {

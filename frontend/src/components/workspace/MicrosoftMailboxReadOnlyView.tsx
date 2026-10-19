@@ -383,6 +383,21 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     setMutationConfirmation(null);
     try {
       const requestedFolder = folderRef.current;
+      // The listing already has authoritative Graph attachment presence.
+      // Begin its read in parallel with exact body loading when available.
+      // Inline-only messages with hasAttachments=false still get their
+      // metadata after the exact HTML CID markers are confirmed.
+      const hasKnownAttachments = rows.some(
+        (entry) => entry.providerMessageId === providerMessageId &&
+          entry.hasAttachments === true,
+      );
+      const attachmentFolder = requestedFolder === "Filtered" ? "Inbox" : requestedFolder;
+      const prefetchedAttachments = hasKnownAttachments && attachmentFolder !== "Junk"
+        ? fetchMicrosoftAttachments({
+            mailboxId: mailbox.id, providerMessageId, folder: attachmentFolder,
+          })
+        : null;
+      if (prefetchedAttachments) setAttachmentBusy(true);
       const response = requestedFolder === "Sent"
         ? await fetchMicrosoftSentMessage({
             mailboxId: mailbox.id, providerMessageId,
@@ -505,11 +520,11 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           typeof response.message.bodyHtml === "string" &&
           response.message.bodyHtml.includes("data-microsoft-cid=")) {
         setAttachmentBusy(true);
-        void fetchMicrosoftAttachments({
+        void (prefetchedAttachments ?? fetchMicrosoftAttachments({
           mailboxId: mailbox.id,
           providerMessageId,
-          folder: requestedFolder === "Filtered" ? "Inbox" : requestedFolder,
-        }).then((result) => {
+          folder: attachmentFolder,
+        })).then((result) => {
           if (
             ticket !== messageTicket.current ||
             attachmentRequest !== attachmentTicket.current ||
@@ -531,6 +546,10 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
             setAttachmentBusy(false);
           }
         });
+      } else if (prefetchedAttachments) {
+        // Do not leave the reader waiting when the exact response says the
+        // message has neither downloadable files nor inline CID references.
+        setAttachmentBusy(false);
       }
     } catch {
       if (ticket === messageTicket.current) {
@@ -761,31 +780,21 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden text-[var(--workspace-text)]">
-      <header className="flex shrink-0 flex-wrap items-center justify-between gap-4 border-b border-[var(--workspace-border-soft)] px-4 py-4 sm:px-6">
-        <div className="flex min-w-0 items-center gap-4">
-          <button
-            type="button"
-            onClick={onBack}
-            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-xs font-medium text-[var(--workspace-text-muted)] transition hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]"
-            aria-label="Back to workspace"
-          >
-            <svg aria-hidden="true" viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12.5 8h-9M7 4.5 3.5 8 7 11.5" />
-            </svg>
-            Back
-          </button>
-          <div className="min-w-0">
-            <h1 className="truncate text-lg font-semibold">{mailbox.title}</h1>
-            <p className="truncate text-xs text-[var(--workspace-text-muted)]">{mailbox.email}</p>
-          </div>
-        </div>
-        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
-          <span className="hidden text-[0.7rem] text-[var(--workspace-text-faint)] sm:inline">Microsoft 365 · Mail</span>
-          <span role="status" className="hidden text-[0.68rem] text-[var(--workspace-text-faint)] xl:inline">
-            {MICROSOFT_AUTO_MARK_READ_RELEASED
-              ? "Auto-read enabled · other actions disabled"
-              : "Read-only pilot"}
-          </span>
+      <header className="flex shrink-0 items-center justify-between gap-4 border-b border-[var(--workspace-border-soft)] px-4 py-4 sm:px-6">
+        <button
+          type="button"
+          onClick={onBack}
+          className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-xs font-medium text-[var(--workspace-text-muted)] transition hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]"
+          aria-label="Back to workspace"
+        >
+          <svg aria-hidden="true" viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12.5 8h-9M7 4.5 3.5 8 7 11.5" />
+          </svg>
+          Back
+        </button>
+        <div className="min-w-0 text-right">
+          <h1 className="truncate text-lg font-semibold">{mailbox.title}</h1>
+          <p className="truncate text-xs text-[var(--workspace-text-muted)]">{mailbox.email}</p>
         </div>
       </header>
 
@@ -1086,7 +1095,11 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                       key={mailbox.id + ":" + folder + ":" + selectedMessage.providerMessageId}
                       messageKey={mailbox.id + ":" + folder + ":" + selectedMessage.providerMessageId}
                       html={selectedMessage.bodyHtml}
-                      fallbackText={selectedMessage.body.join("\n\n")}
+                      fallbackText={
+                        selectedMessage.body.join("\n\n").trim() ||
+                        selectedMessage.snippet ||
+                        "This message has no readable text."
+                      }
                       mailboxId={mailbox.id}
                       providerMessageId={selectedMessage.providerMessageId}
                       folder={folder === "Filtered" ? "Inbox" : folder}

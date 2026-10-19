@@ -139,3 +139,158 @@ Working agreement — 2026-10-19
 - **Not yet verified:** raw /$value fallback on the user's actual Paulshine
   message, and exact failure reason behind the original 502. No deployment or
   GitHub push without explicit approval.
+
+
+## 2026-10-19 image + newsletter live regression follow-up (LOCAL, NOT DEPLOYED)
+
+- Screenshots of actual Microsoft test account still showed an unresolved
+  805650-byte Paulshine CID image and a blank white body for a forwarded
+  newsletter. No UI redesign is authorized.
+- Live Production logs on deployment dpl_Em8EVJMoeonE7NsR65nMCXU9WpvL:
+  two attachment requests at ~19:03 UTC recorded the fixed static category
+  microsoft_attachment_invalid_response_stage=download_raw_size. The raw
+  image bytes were not logged. Their exact size/format is still unknown.
+- Microsoft Graph explicitly documents /$value for raw file-attachment bytes.
+  Current production implementation rejects a raw response unless its byte
+  count exactly equals the Graph attachment-metadata size. A valid PNG may
+  therefore be lost even when it has all its data. Local patch allows only
+  CRC-verified, complete, <=2 MiB PNG with an otherwise mismatched metadata
+  size. Non-PNG data and truncated/corrupt PNG remain fail-closed. The
+  Microsoft client also accepts the server-validated PNG's actual size.
+- Gmail/IMAP in WorkspaceShell already have a richer presentation sanitizer,
+  CID source resolution, text visibility adjustments and renderable-content
+  fallback. Microsoft remains isolated and uses a restricted independent
+  sanitizer; it now corrects very light text that would disappear against a
+  white iframe background, returns readable text if HTML contains no visible
+  text/image, and falls back to bounded bodyPreview if full text is absent.
+- For Microsoft list rows with Graph hasAttachments=true, start the
+  owner-scoped metadata request concurrently with exact-body loading rather
+  than serially; inline-only rows with false hasAttachments still wait for
+  exact HTML CID discovery. This reduces a known sequential round trip
+  without changing total provider authority, writes or Gmail/IMAP.
+- While CID bytes are pending, display the body text on the same white
+  reading surface used by the iframe. Never abruptly flip from dark plain
+  text to white rich HTML due to background choice.
+- A real Chromium fixture verified a valid 805650-byte PNG despite Graph
+  metadata claiming 805690 bytes, without releasing client mail state.
+  Another real Chromium fixture verified legible light-on-white newsletter
+  text and readable fallback instead of a blank iframe. Synthetic only.
+- **Still outstanding:** accepting the actual user email (PNG format
+  integrity, server byte response) and determining whether the particular
+  energy newsletter includes style-only markup or empty sanitized HTML.
+  No further GitHub push, Preview or Production deploy without approval.
+
+
+## 2026-10-19 real-mail comparison and regression fixes (LOCAL ONLY)
+
+- User-provided screenshots after Production deployment aa3c4669 show two
+  independent failures: the Paulshine inline image remains broken, and a
+  forwarded energy newsletter appears as an empty white reader. Opening the
+  Paulshine message shows plain text followed by a delayed iframe swap.
+- Vercel production logs on deployment dpl_Em8EVJMoeonE7NsR65nMCXU9WpvL
+  recorded download_raw_size twice (19:03:08 and 19:03:54 UTC).
+  **Verified:** Graph raw download fails server's exact size equality against
+  metadata. **Unknown:** the actual returned byte count and whether those
+  bytes contain a complete PNG; no raw mail, image bytes or tokens were logged.
+- Microsoft Graph documents that fileAttachment size is the attachment
+  size in bytes, and /$value provides raw bytes. The local recovery now checks
+  the complete PNG signature, IHDR, CRC for *every* chunk, IDAT, exact final
+  IEND, at most 4096 chunks and <=2 MiB. A different byte count is accepted
+  ONLY for a complete PNG already verified by exact message/attachment owner
+  and folder. Other formats and truncated PNG still fail closed. The client
+  consumes server-confirmed actual PNG bytes, not the potentially inaccurate
+  metadata size. Static operational error categories distinguish unverified
+  PNG versus other raw payload formats without logging user data.
+- Gmail/IMAP WorkspaceShell has a more mature HTML pipeline: CID to inlineSrc
+  matching, renderable-content fallback, presentation CSS sanitization,
+  light-mode contrast repairs and cached projections. Microsoft retains a
+  provider-specific isolated HTML sandbox and now independently protects
+  against blank sanitized bodies and white text on a white background.
+  Empty HTML returns readable text or a bounded message snippet.
+- Microsoft avoids dark-text-to-white-iframe background flash by showing the
+  same white reading surface while waiting for CID bytes. When a list row's
+  Graph hasAttachments is true, attachment metadata starts in parallel with
+  exact-message retrieval; inline-only messages still get CID detection from
+  the exact HTML before requesting metadata. No Outlook mutation added.
+- Headless Chromium confirmed a synthetic complete 805650-byte PNG with a
+  different metadata size resolves and displays, and confirmed the contrast
+  repair/blank-HTML fallback. This is not yet a successful live Paulshine or
+  newsletter rendering acceptance.
+- No Gmail/IMAP implementation changed. No remote GitHub push, Vercel Preview
+  or Production deployment is authorized for this local WIP without a fresh,
+  explicit user approval.
+
+
+## 2026-10-19 product decision: complete Microsoft functionality before UI sign-off
+
+The user approved the existing three-column Microsoft layout as a working
+design direction but does NOT consider the Microsoft inbox accepted
+or finished. Do not redesign it or treat an HTML test as full parity.
+Acceptance requires functional completeness before final visual review:
+
+- Rendering: actual Outlook-test-account Paulshine CID renders; newsletters
+  show legible HTML; no text-to-white flash or long serial attachment wait;
+  all folders handled.
+- Learning: categories and Important/Not Important; protected senders;
+  scoped sender preferences, Filtered/Inbox and priority decisions.
+- Interactions: context menu with real shared toolbar actions;
+  All/Unread/Priority, folder switches, search, sort, pagination, refresh,
+  read states and unread counts.
+- Writes: Compose/Reply/Reply All/Forward, recipients/CC/BCC, attachments,
+  drafts, read/unread, archive/delete/restore/move, bookmark/flag and
+  confirmations; exact owner/ID scoped, permission-gated and separately
+  reviewed before Production enablement.
+- Sync: safe background/foreground refresh and persisted learning,
+  including loading/error/reconnect states.
+- Final review: unit/API and real Chromium/Graph acceptance using the sole
+  Outlook tester's account. Inspect every button and preserve approved
+  three-column layout. ONLY after user approval of the completed Microsoft
+  inbox, port its visual appearance to Gmail/IMAP without altering their
+  already-stable provider behavior.
+
+Current code still explicitly enables MICROSOFT_READ_ONLY_PILOT, which blocks
+most Microsoft writes. The UI controls and Compose remain previews;
+automatic Inbox unread-to-read is separately approved. Past approval for
+a Microsoft HTML-only deployment is not general consent to enable writes.
+
+No GitHub push, Vercel Preview or Production deploy without explicit approval.
+Gmail/IMAP implementation remains untouched throughout Microsoft completion.
+
+
+## Wednesday October 21 visual-demo milestone (LOCAL ONLY)
+
+- The user wants to show a common inbox appearance on Wednesday, while
+  Vercel usage is near its limit. Do not introduce Vercel Previews or multiple
+  deployments. Prepare and verify one bundled local candidate, then require
+  separate explicit Production approval.
+- Gmail and IMAP already share the existing MailboxView. Apply the Microsoft
+  presentation language to that shared view in a narrow CSS/JSX pass:
+  flatter header, folder rail, list rows, border separators, and reading pane.
+  Keep every Gmail/IMAP provider action, Learning and context-menu handler
+  intact; do not replace their proven transport/auth/sync engines.
+- Microsoft still needs remaining Graph write workflows, Learning and Priority,
+  context menu and background sync before being described as functionally
+  complete. A unified visual demo is NOT a full-mailbox acceptance or
+  permission to enable write actions.
+- Visual parity is provisionally source/build/synthetic-browser tested. Real
+  Gmail, IMAP and Microsoft accounts must be inspected by the sole Production
+  tester before final visual sign-off.
+
+
+## 2026-10-19 visual-header and action-preservation gate (LOCAL)
+
+- The user requires that Gmail/IMAP functionality and CTA semantics stay
+  EXACTLY as before. Only visual arrangement may change. Neither existing
+  Gmail/IMAP action handlers, keyboard shortcuts, drag-and-drop logic,
+  button disabled states, nor mail transport/sync/learning should change.
+- Header placement for all provider mailboxes: Back on the left, mailbox
+  display name and address on the right. The Microsoft-specific status
+  banner (Microsoft 365 Mail / Auto-read enabled / other actions disabled)
+  is removed from the top-right presentation; true underlying read-only
+  guards remain active and the action buttons remain disabled as before.
+- Static TypeScript AST audit compared the pre-visual Gmail/IMAP MailboxView
+  with the local updated view: 195 event handler bindings and 26 disabled/
+  draggable/href/haspopup bindings before and after; **zero differences**.
+  This is strong static preservation evidence, not real account E2E proof.
+- No new deployment without explicit user approval. Do NOT describe Microsoft
+  as fully functional until real Graph actions are separately enabled/tested.

@@ -89,6 +89,64 @@ function isSafeMicrosoftCidDataUrl(value: unknown): value is string {
     /^data:image\/(?:png|jpeg|gif|webp);base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
 }
 
+function cssBrightness(value: string): number | null {
+  const color = value.trim().toLowerCase();
+  const named: Record<string, number> = {white: 255, black: 0};
+  if (Object.prototype.hasOwnProperty.call(named, color)) return named[color];
+  const match = /^#([0-9a-f]{3}|[0-9a-f]{6})$/.exec(color);
+  if (match) {
+    const hex = match[1].length === 3
+      ? [...match[1]].map((c) => c + c).join("") : match[1];
+    const r = Number.parseInt(hex.slice(0, 2), 16);
+    const g = Number.parseInt(hex.slice(2, 4), 16);
+    const b = Number.parseInt(hex.slice(4, 6), 16);
+    return (r * 299 + g * 587 + b * 114) / 1000;
+  }
+  const rgb = /^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$/.exec(color);
+  if (!rgb) return null;
+  const [r, g, b] = rgb.slice(1).map(Number);
+  return r <= 255 && g <= 255 && b <= 255
+    ? (r * 299 + g * 587 + b * 114) / 1000 : null;
+}
+
+function cssProperty(style: string | null, property: string): string {
+  const values = (style ?? "").split(";")
+    .map((declaration) => declaration.split(":"))
+    .filter(([name, value]) => name?.trim().toLowerCase() === property && value)
+    .map(([, value]) => value.trim());
+  return values.length > 0 ? values[values.length - 1] : "";
+}
+
+/**
+ * Gmail/IMAP correct low-contrast provider HTML after load. Microsoft's
+ * opaque origin forbids touching iframe DOM after mount; conservatively fix
+ * very light text on the white default background before building srcDoc.
+ */
+function restoreMicrosoftEmailTextContrast(root: HTMLElement): void {
+  for (const element of Array.from(root.querySelectorAll<HTMLElement>("[style]"))) {
+    const ownStyle = element.getAttribute("style");
+    const brightness = cssBrightness(cssProperty(ownStyle, "color"));
+    if (brightness === null || brightness < 225) continue;
+    let darkBackground = false;
+    for (let parent: HTMLElement | null = element; parent && parent !== root; parent = parent.parentElement) {
+      const bg = cssProperty(parent.getAttribute("style"), "background-color") ||
+        (parent.getAttribute("bgcolor") ?? "");
+      const brightnessBg = cssBrightness(bg);
+      if (brightnessBg !== null) {
+        darkBackground = brightnessBg < 140;
+        break;
+      }
+    }
+    if (!darkBackground) {
+      const updated = (ownStyle ?? "").split(";").filter((part) =>
+        part.split(":")[0]?.trim().toLowerCase() !== "color"
+      ).join(";").trim();
+      if (updated) element.setAttribute("style", updated);
+      else element.removeAttribute("style");
+    }
+  }
+}
+
 export function sanitizeMicrosoftInertHtmlForStage(
   source: string, showRemoteImages: boolean,
   cidImages: MicrosoftCidImageMap = {},
@@ -173,6 +231,15 @@ export function sanitizeMicrosoftInertHtmlForStage(
       el.setAttribute("referrerpolicy", "no-referrer");
     }
   }
+  restoreMicrosoftEmailTextContrast(parsed.body);
+  // Never display an apparently successful, blank white iframe. The stable
+  // Gmail/IMAP renderer also falls back when sanitization leaves no content.
+  const hasText = Boolean(parsed.body.textContent?.replace(/\s+/g, ""));
+  const hasImages = Boolean(parsed.body.querySelector('img[src]'));
+  if (!hasText && !hasImages) {
+    return {html: null, remoteImageCount, cidImageCount, blockedReason: "unavailable"};
+  }
+
   // MAX_HTML bounds the original sanitized mail body. Authorized CID bytes
   // are embedded later as base64. NEVER slice the final HTML: that truncates
   // src="data:..." halfway and can silently remove whole image/table nodes.
@@ -275,11 +342,14 @@ export function MicrosoftInertHtmlStage({
   if (waitingForCid) {
     return (
       <section aria-label="Microsoft HTML message content" data-message-key={messageKey}>
-        <p role="status" className="mb-3 text-xs text-[var(--workspace-text-muted)]">
-          Loading inline images…
-        </p>
-        <div className="whitespace-pre-wrap break-words text-sm leading-7 text-[var(--workspace-text)]">
-          {fallbackText}
+        <div className="block w-full bg-white px-3 py-3 text-[#242424]"
+          style={{ minHeight: 320, maxHeight: "calc(100dvh - 96px)" }}>
+          <p role="status" className="mb-3 text-xs text-[#666666]">
+            Loading inline images…
+          </p>
+          <div className="whitespace-pre-wrap break-words text-sm leading-7">
+            {fallbackText}
+          </div>
         </div>
       </section>
     );

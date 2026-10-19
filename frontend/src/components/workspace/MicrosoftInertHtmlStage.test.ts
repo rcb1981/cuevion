@@ -121,6 +121,10 @@ assert.ok(stageSource.includes('loadMicrosoftInlineCidImages('));
 // remains bounded, but inserting verified data:src can enlarge the final
 // string. Cutting it to MAX_HTML corrupts the img element in Chromium.
 assert.ok(stageSource.includes('const renderedHtml = parsed.body.innerHTML'));
+assert.ok(stageSource.includes('restoreMicrosoftEmailTextContrast(parsed.body)'));
+assert.ok(stageSource.includes('if (!hasText && !hasImages)'));
+assert.ok(stageSource.includes('Loading inline images'));
+
 assert.ok(!stageSource.includes('parsed.body.innerHTML.slice(0, MAX_HTML)'));
 assert.ok(stageSource.includes('MAX_MICROSOFT_CID_TOTAL_BYTES'));
 

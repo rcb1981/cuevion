@@ -24,9 +24,9 @@ const ready = renderToStaticMarkup(createElement(MicrosoftMailboxReadOnlyView, {
 }));
 assert.match(ready, /Microsoft Work/);
 assert.match(ready, /owner@example\.com/);
-assert.match(ready, /Microsoft 365 · Mail/);
-assert.match(ready, /Auto-read enabled · other actions disabled/);
-assert.doesNotMatch(ready, />Read-only pilot</);
+// Header is product chrome, not a visible Microsoft demo/status banner.
+assert.doesNotMatch(ready, /Microsoft 365 · Mail|Auto-read enabled · other actions disabled|Read-only pilot/);
+assert.match(ready, /<header[^>]*>[\s\S]*?Back[\s\S]*?<div class="min-w-0 text-right">[\s\S]*?Microsoft Work[\s\S]*?owner@example\.com/);
 assert.doesNotMatch(ready, />New message<|>Reply<|>Mark as read<|>Mark as unread</);
 assert.match(ready, /Select a message to read it/);
 assert.match(ready, /Page 1 of up to 4/);

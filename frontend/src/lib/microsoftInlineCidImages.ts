@@ -116,12 +116,17 @@ export async function loadMicrosoftInlineCidImages(
       });
       if (!isCurrent()) break;
       if (!result.ok || result.attachmentId !== item.id ||
-          result.size !== item.size || typeof result.base64 !== "string") continue;
-      // Graph contentType is advisory (often application/octet-stream for
-      // real inline email images). Only verified PNG/JPEG/GIF/WebP bytes pass.
-      const mime = sniffMicrosoftImageMime(result.base64, item.size);
-      if (!mime || !MIME_TYPES.has(mime)) continue;
-      acceptedBytes += item.size;
+          !Number.isSafeInteger(result.size) || typeof result.size !== "number" ||
+          result.size < 1 || result.size > MAX_MICROSOFT_CID_IMAGE_BYTES ||
+          result.size > MAX_MICROSOFT_CID_TOTAL_BYTES - acceptedBytes ||
+          typeof result.base64 !== "string") continue;
+      // Graph's metadata size is not always the exact byte length. The server
+      // accepts a mismatch ONLY for a fully CRC-verified PNG from this exact
+      // owned attachment. Keep mismatched sizes rejected for all other formats.
+      const mime = sniffMicrosoftImageMime(result.base64, result.size);
+      if (!mime || !MIME_TYPES.has(mime) ||
+          (result.size !== item.size && mime !== "image/png")) continue;
+      acceptedBytes += result.size;
       output[cid] = "data:" + mime + ";base64," + result.base64;
     } catch {
       // A missing or malformed image is not fatal to the email's text content.

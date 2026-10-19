@@ -40,7 +40,8 @@ assert.match(rail, /onClick=\{\(\) => onSelectFolder\(item\.id\)\}/);
 assert.match(view, /microsoftVisibleFolderRows\(/);
 assert.match(view, /useMicrosoftFilteredLearning\(mailbox\.id, connected\)/);
 assert.match(view, /fetchMicrosoftInbox\(/);
-assert.match(view, /folder: requestedFolder === "Filtered" \? "Inbox" : requestedFolder/);
+assert.match(view, /const attachmentFolder = requestedFolder === "Filtered" \? "Inbox" : requestedFolder/);
+assert.match(view, /folder: attachmentFolder/);
 assert.match(view, /folder: currentFolder === "Filtered" \? "Inbox" : currentFolder/);
 assert.match(view, /<MicrosoftFilteredSenderAction/);
 

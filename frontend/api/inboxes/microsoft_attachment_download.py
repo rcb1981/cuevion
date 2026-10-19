@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import struct
 import unicodedata
 from http.client import IncompleteRead
 from urllib.error import HTTPError, URLError
@@ -36,6 +37,43 @@ def _download_filename(value: object) -> str:
         for c in tail
     ).strip(" .")
     return cleaned[:128] or "attachment.bin"
+
+
+
+def _complete_png(data: bytes) -> bool:
+    """Verify a complete PNG file, including CRC for every bounded chunk.
+
+    Graph's reported attachment size is not used as file integrity proof.
+    This validation is deliberately PNG-only, with no decompression or
+    thumbnail processing. Other file types keep the exact-size rule.
+    """
+    if type(data) is not bytes or not 45 <= len(data) <= MAX_FILE_BYTES:
+        return False
+    if not data.startswith(bytes.fromhex("89504e470d0a1a0a")):
+        return False
+    offset, chunks, saw_idat, saw_ihdr = 8, 0, False, False
+    while offset + 12 <= len(data) and chunks < 4096:
+        length = struct.unpack_from(">I", data, offset)[0]
+        end = offset + 12 + length
+        if length > MAX_FILE_BYTES or end > len(data):
+            return False
+        tag = data[offset + 4:offset + 8]
+        crc = struct.unpack_from(">I", data, offset + 8 + length)[0]
+        if binascii.crc32(data[offset + 4:offset + 8 + length]) & 0xffffffff != crc:
+            return False
+        if chunks == 0:
+            if tag != b"IHDR" or length != 13:
+                return False
+            saw_ihdr = True
+        elif tag == b"IHDR":
+            return False
+        if tag == b"IDAT":
+            saw_idat = True
+        if tag == b"IEND":
+            return bool(saw_ihdr and saw_idat and length == 0 and end == len(data))
+        chunks += 1
+        offset = end
+    return False
 
 
 def _raw_verified_file_attachment(
@@ -107,10 +145,26 @@ def _raw_verified_file_attachment(
         raise MicrosoftGraphError("microsoft_graph_unavailable") from None
     except (URLError, TimeoutError, OSError, IncompleteRead):
         raise MicrosoftGraphError("microsoft_graph_unavailable") from None
-    if type(data) is not bytes or len(data) > MAX_FILE_BYTES or len(data) != expected_size:
+    if type(data) is not bytes or not 0 <= len(data) <= MAX_FILE_BYTES:
         raise MicrosoftGraphError(
             "microsoft_graph_invalid_response", safe_stage="download_raw_size",
         )
+    if len(data) != expected_size:
+        # Exact file IDs/ownership and metadata are already verified. Exchange
+        # can report an attachment size that differs from the actual PNG byte
+        # stream. Accept only a fully CRC-verified, length-bounded PNG, never
+        # incomplete, nonimage, MIME text, SVG or arbitrary file content.
+        if not (
+            item["contentType"].split(";", 1)[0].lower() == "image/png"
+            and _complete_png(data)
+        ):
+            # Fixed diagnostic categories reveal no attachment content.
+            stage = "download_raw_other_format"
+            if data.startswith(bytes.fromhex("89504e470d0a1a0a")):
+                stage = "download_raw_invalid_png"
+            raise MicrosoftGraphError(
+                "microsoft_graph_invalid_response", safe_stage=stage,
+            )
 
     return {
         "attachmentId": attachment_id,
