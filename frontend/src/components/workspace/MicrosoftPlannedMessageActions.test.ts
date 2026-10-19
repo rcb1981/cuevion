@@ -19,6 +19,14 @@ assert.match(markup, /\bMore\b/);
 assert.match(markup, /h-9 w-9/);
 assert.match(markup, /rounded-full/);
 assert.match(markup, /disabled=""/);
+for (const action of ["Reply", "Reply All", "Forward", "Archive", "Attachments", "Delete", "Bookmark", "More"]) {
+  assert.match(markup, new RegExp('aria-label="' + action + '"'), action + " must be visible");
+}
+const withoutMessage = renderToStaticMarkup(createElement(
+  MicrosoftPlannedMessageActions, { unread: false, hasMessage: false },
+));
+assert.match(withoutMessage, /aria-label="More"[^>]*disabled=""/,
+  "More must be disabled until a message is selected");
 assert.match(markup, /Preview only/);
 assert.doesNotMatch(markup, /href=|contentEditable|mailto:/);
 for (const name of ["Archive", "Attachments", "Delete", "Bookmark"]) {
@@ -39,7 +47,7 @@ const view = readFileSync(
   resolve(process.cwd(), "src/components/workspace/MicrosoftMailboxReadOnlyView.tsx"), "utf8",
 );
 assert.match(view, /MICROSOFT_READ_ONLY_PILOT && \(/);
-assert.match(view, /<MicrosoftPlannedMessageActions unread=/);
+assert.match(view, /<MicrosoftPlannedMessageActions\s+unread=/);
 assert.match(view, /shouldAutoMarkMicrosoftOpenedMessageRead\(/);
 assert.match(view, /readWriteEnabled: MICROSOFT_AUTO_MARK_READ_RELEASED/);
 assert.match(view, /flagTicket !== mutationTicket\.current/);

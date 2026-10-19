@@ -25,7 +25,7 @@ function ActionGlyph({ name }: { name: GlyphName }) {
 }
 
 const iconButton =
-  "inline-flex h-9 w-9 items-center justify-center rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:cursor-not-allowed disabled:opacity-40";
+  "inline-flex h-9 w-9 items-center justify-center rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:cursor-not-allowed disabled:opacity-60";
 
 const actions = [
   { name: "reply", label: "Reply" },
@@ -37,12 +37,12 @@ const actions = [
   { name: "bookmark", label: "Bookmark" },
 ] as const;
 
-export function MicrosoftPlannedMessageActions({ unread }: { unread: boolean }) {
+export function MicrosoftPlannedMessageActions({ unread, hasMessage = true }: { unread: boolean; hasMessage?: boolean }) {
   const [moreOpen, setMoreOpen] = useState(false);
   const moreId = useId();
 
   return (
-    <div aria-label="Microsoft message actions preview" className="flex items-center gap-1.5">
+    <div aria-label="Microsoft message actions preview" className="flex flex-wrap items-center justify-end gap-1.5">
       {actions.map(({ name, label }) => (
         <button
           key={name} type="button" aria-label={label} disabled
@@ -54,11 +54,11 @@ export function MicrosoftPlannedMessageActions({ unread }: { unread: boolean }) 
       ))}
       <div className="relative">
         <button type="button" aria-label="More" aria-expanded={moreOpen}
-          aria-controls={moreId} onClick={() => setMoreOpen((open) => !open)}
+          aria-controls={moreId} disabled={!hasMessage} onClick={() => setMoreOpen((open) => !open)}
           title="Preview more planned Microsoft actions" className={iconButton}>
           <ActionGlyph name="more" />
         </button>
-        {moreOpen && (
+        {moreOpen && hasMessage && (
           <div id={moreId} aria-label="Other planned Microsoft message actions"
             className="absolute right-0 top-full z-40 mt-2 min-w-[190px] rounded-[18px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-[0_14px_32px_rgba(20,18,16,0.25)]">
             {([

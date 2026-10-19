@@ -17,6 +17,17 @@ const compact = renderToStaticMarkup(createElement(MicrosoftMailboxFolderRail, {
   folder: "Inbox", disabled: false, onSelectFolder: noop, compact: true,
 }));
 assert.equal(microsoftVisualFolders.length, 7);
+const withCompose = renderToStaticMarkup(createElement(MicrosoftMailboxFolderRail, {
+  folder: "Inbox", disabled: false, onSelectFolder: noop,
+  composeAction: createElement("button", {type: "button", "aria-label": "Compose preview"}, "Compose"),
+}));
+const compactWithCompose = renderToStaticMarkup(createElement(MicrosoftMailboxFolderRail, {
+  folder: "Inbox", disabled: false, onSelectFolder: noop, compact: true,
+  composeAction: createElement("button", {type: "button", "aria-label": "Compose preview"}, "Compose"),
+}));
+assert.match(withCompose, /Compose preview/);
+assert.match(compactWithCompose, /Compose preview/);
+assert.ok(withCompose.indexOf("Compose preview") < withCompose.indexOf("Folders"));
 assert.match(rail, /Microsoft mail folders/);
 assert.match(compact, /Microsoft mail folders \(compact\)/);
 assert.match(rail, /aria-pressed="true"[^>]*>Filtered<\/button>/);

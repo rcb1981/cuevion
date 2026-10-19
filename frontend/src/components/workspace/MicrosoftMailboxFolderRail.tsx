@@ -22,11 +22,13 @@ export function MicrosoftMailboxFolderRail({
   onSelectFolder,
   disabled,
   compact = false,
+  composeAction,
 }: {
   folder: MicrosoftVisualFolder;
   onSelectFolder: (value: MicrosoftVisualFolder) => void;
   disabled: boolean;
   compact?: boolean;
+  composeAction?: React.ReactNode;
 }) {
   const containerClass = compact
     ? "flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--workspace-border-soft)] px-3 py-2 lg:hidden"
@@ -37,6 +39,11 @@ export function MicrosoftMailboxFolderRail({
       aria-label={compact ? "Microsoft mail folders (compact)" : "Microsoft mail folders"}
       className={containerClass}
     >
+      {composeAction && (
+        <div className={compact ? "mr-2 shrink-0" : "mb-4 min-w-0"}>
+          {composeAction}
+        </div>
+      )}
       {!compact && (
         <p className="mb-3 px-3 text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
           Folders

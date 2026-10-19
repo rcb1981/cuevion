@@ -65,7 +65,22 @@ assert.match(microsoftSource, /Links in junk mail are displayed as plain text/);
 assert.match(microsoftSource, /<MicrosoftMailboxFolderRail/);
 assert.match(microsoftSource, /onSelectFolder=\{selectFolder\}/);
 assert.match(microsoftSource, /lg:grid-cols-\[152px_minmax/);
-assert.match(microsoftSource, /<MicrosoftPlannedMessageActions unread=\{selectedMessage\?\.unread === true\}/);
+assert.match(microsoftSource, /<MicrosoftPlannedMessageActions\s+unread=\{selectedMessage\?\.unread === true\}/);
+assert.match(microsoftSource, /hasMessage=\{Boolean\(selectedId && selectedMessage && !messageBusy\)\}/);
+assert.match(microsoftSource, /<MicrosoftMessageListControls/);
+assert.match(microsoftSource, /composeAction=\{composeAction\}/);
+const folderRailPos = microsoftSource.indexOf("<MicrosoftMailboxFolderRail");
+const listControlsPos = microsoftSource.indexOf("<MicrosoftMessageListControls");
+const paneToolbarPos = microsoftSource.indexOf('aria-label="Microsoft selected message actions"');
+const messageActionsPos = microsoftSource.indexOf("<MicrosoftPlannedMessageActions");
+const messageBodyPos = microsoftSource.indexOf('aria-label="Selected Microsoft message"');
+assert.ok(folderRailPos > 0 && folderRailPos < listControlsPos,
+  "Compose and folders precede the message-list filters");
+assert.ok(listControlsPos < paneToolbarPos && paneToolbarPos < messageActionsPos && messageActionsPos < messageBodyPos,
+  "All message actions belong in the right read pane, above the message body");
+assert.equal((microsoftSource.match(/<MicrosoftPlannedMessageActions/g) ?? []).length, 1,
+  "Do not duplicate message actions in the global or list toolbar");
+
 assert.match(microsoftSource, /Deleted Items are read-only/);
 assert.match(microsoftSource, /Last changed:/);
 assert.match(microsoftSource, /folder === "Drafts"/);

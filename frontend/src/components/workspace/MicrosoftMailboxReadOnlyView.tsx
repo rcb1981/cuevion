@@ -30,6 +30,7 @@ import { MicrosoftComposeDesignPreview } from "./MicrosoftComposeDesignPreview";
 import { MicrosoftMessageListRow } from "./MicrosoftMessageListRow";
 import { MicrosoftPlannedMessageActions } from "./MicrosoftPlannedMessageActions";
 import { MicrosoftMailboxFolderRail } from "./MicrosoftMailboxFolderRail";
+import { MicrosoftMessageListControls } from "./MicrosoftMessageListControls";
 import { MicrosoftLinkifiedText } from "./MicrosoftLinkifiedText";
 import { filterMicrosoftLoadedMessages, type MicrosoftMessageSortOrder } from "./microsoftMailboxListFilters";
 import {
@@ -728,6 +729,30 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     }
   }, [connected, mailbox.id, selectedMessage]);
 
+  // Compose belongs to the folder rail and never invokes a send during the pilot.
+  const composeAction = (
+        <button
+          type="button"
+          aria-haspopup={MICROSOFT_READ_ONLY_PILOT ? "dialog" : undefined}
+          aria-label={MICROSOFT_READ_ONLY_PILOT ? "Compose message (design preview only)" : "Compose message"}
+          title={MICROSOFT_READ_ONLY_PILOT ? "Explore the new-message design. Nothing can be sent or saved." : "Compose new message"}
+          disabled={!connected || composer !== null || mutationBusy || composeDesignPreviewOpen}
+          onClick={() => {
+            if (MICROSOFT_READ_ONLY_PILOT) {
+              setComposeDesignPreviewOpen(true);
+            } else {
+              openComposer("new");
+            }
+          }}
+          className="inline-flex h-9 items-center justify-center gap-2 rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] px-3.5 text-[0.69rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-accent-text)] transition hover:brightness-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <svg aria-hidden="true" viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M8 3v10M3 8h10" />
+          </svg>
+          Compose
+        </button>
+  );
+
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden text-[var(--workspace-text)]">
       <header className="flex shrink-0 flex-wrap items-center justify-between gap-4 border-b border-[var(--workspace-border-soft)] px-4 py-4 sm:px-6">
@@ -757,50 +782,6 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           </span>
         </div>
       </header>
-      <div className="relative z-20 flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--workspace-border-soft)] px-4 py-3 sm:px-6">
-        <button
-          type="button"
-          aria-haspopup={MICROSOFT_READ_ONLY_PILOT ? "dialog" : undefined}
-          aria-label={MICROSOFT_READ_ONLY_PILOT ? "Compose message (design preview only)" : "Compose message"}
-          title={MICROSOFT_READ_ONLY_PILOT ? "Explore the new-message design. Nothing can be sent or saved." : "Compose new message"}
-          disabled={!connected || composer !== null || mutationBusy || composeDesignPreviewOpen}
-          onClick={() => {
-            if (MICROSOFT_READ_ONLY_PILOT) {
-              setComposeDesignPreviewOpen(true);
-            } else {
-              openComposer("new");
-            }
-          }}
-          className="inline-flex h-9 items-center justify-center gap-2 rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] px-3.5 text-[0.69rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-accent-text)] transition hover:brightness-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          <svg aria-hidden="true" viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M8 3v10M3 8h10" />
-          </svg>
-          Compose
-        </button>
-        <button
-          type="button"
-          aria-label={listBusy ? "Refreshing" : "Refresh"}
-          title="Sync Microsoft folder (read-only)"
-          disabled={!connected || composer !== null || listBusy || mutationBusy}
-          onClick={() => void refresh()}
-          className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-soft)] transition hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          <svg aria-hidden="true" viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M13 5.5A5 5 0 0 0 4.5 3L3 4.5" />
-            <path d="M3.5 2.5v2h2" />
-            <path d="M3 10.5A5 5 0 0 0 11.5 13L13 11.5" />
-            <path d="M12.5 13.5v-2h-2" />
-          </svg>
-        </button>
-        <span aria-hidden="true" className="mx-1 h-6 w-px bg-[var(--workspace-border-soft)]" />
-        {MICROSOFT_READ_ONLY_PILOT && (
-          <MicrosoftPlannedMessageActions unread={selectedMessage?.unread === true} />
-        )}
-        <span className="ml-auto hidden text-[0.68rem] text-[var(--workspace-text-faint)] 2xl:inline">
-          Design trial · mail actions disabled
-        </span>
-      </div>
 
       {!connected ? (
         <div className="m-6 max-w-lg rounded-xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] p-6" role="status">
@@ -831,6 +812,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
             folder={folder}
             disabled={!connected || composer !== null || mutationBusy}
             onSelectFolder={selectFolder}
+            composeAction={composeAction}
             compact
           />
           <div className="grid min-h-0 flex-1 grid-cols-1 gap-0 md:grid-cols-[minmax(245px,37%)_minmax(0,1fr)] lg:grid-cols-[152px_minmax(275px,37%)_minmax(0,1fr)]">
@@ -838,6 +820,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
               folder={folder}
               disabled={!connected || composer !== null || mutationBusy}
               onSelectFolder={selectFolder}
+              composeAction={composeAction}
             />
           <section aria-label={"Microsoft " + folder + " messages"} className="flex min-h-0 flex-col border-b border-[var(--workspace-border-soft)] md:border-b-0 md:border-r">
             <div className="flex shrink-0 items-center justify-between border-b border-[var(--workspace-border-soft)] px-4 py-3">
@@ -857,49 +840,19 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
               {lastUpdated && <span className="text-[0.7rem] text-[var(--workspace-text-faint)]">Updated {readableTime(lastUpdated)}</span>}
             </div>
             <div className="shrink-0 space-y-2 border-b border-[var(--workspace-border-soft)] px-3 py-3">
-              <label htmlFor={"microsoft-list-search-" + mailbox.id} className="sr-only">
-                Search loaded Microsoft messages
-              </label>
-              <input
-                id={"microsoft-list-search-" + mailbox.id}
-                type="search"
-                autoComplete="off"
-                value={searchQuery}
-                maxLength={160}
-                onChange={(event) => setSearchQuery(event.target.value)}
-                placeholder={"Search loaded " + folder.toLowerCase() + " messages"}
-                aria-label="Search loaded Microsoft messages"
-                className="w-full rounded-xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-2 text-sm text-[var(--workspace-text)] placeholder:text-[var(--workspace-text-faint)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]"
+              <MicrosoftMessageListControls
+                mailboxId={mailbox.id}
+                searchQuery={searchQuery}
+                onSearchChange={setSearchQuery}
+                unreadOnly={unreadOnly}
+                onUnreadOnlyChange={setUnreadOnly}
+                canFilterUnread={folder !== "Sent" && folder !== "Drafts"}
+                sortOrder={sortOrder}
+                onSortChange={setSortOrder}
+                refreshBusy={listBusy}
+                refreshDisabled={!connected || composer !== null || listBusy || mutationBusy}
+                onRefresh={() => void refresh()}
               />
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                {folder === "Inbox" || folder === "Filtered" || folder === "Archive" || folder === "Deleted" || folder === "Junk" ? (
-                  <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-[var(--workspace-text-muted)]">
-                    <input
-                      type="checkbox"
-                      checked={unreadOnly}
-                      onChange={(event) => setUnreadOnly(event.target.checked)}
-                      className="accent-[var(--workspace-accent-primary)]"
-                    />
-                    Unread only
-                  </label>
-                ) : (
-                  <span className="text-xs text-[var(--workspace-text-faint)]">
-                    {folder === "Drafts" ? "Unsent drafts" : "Sent Items"}
-                  </span>
-                )}
-                <label className="inline-flex items-center gap-2 text-xs text-[var(--workspace-text-muted)]">
-                  <span className="sr-only">Sort loaded Microsoft messages</span>
-                  <select
-                    aria-label="Sort loaded Microsoft messages"
-                    value={sortOrder}
-                    onChange={(event) => setSortOrder(event.target.value as MicrosoftMessageSortOrder)}
-                    className="rounded-lg border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-2 py-1.5 text-xs text-[var(--workspace-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]"
-                  >
-                    <option value="newest">Newest first</option>
-                    <option value="oldest">Oldest first</option>
-                  </select>
-                </label>
-              </div>
               {(folder === "Inbox" || folder === "Filtered") && (
                 <p className="text-[0.68rem] text-[var(--workspace-text-muted)]">
                   {folder === "Filtered"
@@ -978,7 +931,19 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
               )}
             </div>
           </section>
-          <section aria-label="Selected Microsoft message" className="min-h-0 overflow-y-auto p-5 sm:p-7">
+          <div className="flex min-h-0 flex-col">
+            <div
+              aria-label="Microsoft selected message actions"
+              className="relative z-20 flex min-h-[60px] shrink-0 items-center justify-end border-b border-[var(--workspace-border-soft)] px-4 py-2 sm:px-6"
+            >
+              {MICROSOFT_READ_ONLY_PILOT && (
+                <MicrosoftPlannedMessageActions
+                  unread={selectedMessage?.unread === true}
+                  hasMessage={Boolean(selectedId && selectedMessage && !messageBusy)}
+                />
+              )}
+            </div>
+            <section aria-label="Selected Microsoft message" className="min-h-0 flex-1 overflow-y-auto p-5 sm:p-7">
             {!selectedId && <p className="text-sm text-[var(--workspace-text-muted)]">Select a message to read it.</p>}
             {selectedId && messageBusy && <p role="status" className="text-sm text-[var(--workspace-text-muted)]">Opening message…</p>}
             {selectedId && messageError && <div role="alert" className="rounded-xl border border-[var(--workspace-border)] p-4 text-sm">{messageError}</div>}
@@ -1131,7 +1096,8 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                 </p>
               </article>
             )}
-          </section>
+            </section>
+          </div>
           </div>
         </div>
       )}
