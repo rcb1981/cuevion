@@ -34,6 +34,20 @@ async function run() {
       mailboxId, providerMessageId, folder: "Inbox",
     });
 
+    const inlineAttachment = {
+      ...attachment, name: "image001.png", contentType: "image/png",
+      isInline: true, contentId: "image001.png@message",
+    };
+    mock({ok: true, attachments: [inlineAttachment], hasMore: false});
+    const withCid = await fetchMicrosoftAttachments({mailboxId, providerMessageId, folder: "Inbox"});
+    assert.equal(withCid.ok, true);
+    assert.equal(withCid.attachments?.[0].contentId, "image001.png@message");
+
+    mock({ok: true, attachments: [{...inlineAttachment, contentId: "cid:bad"}], hasMore: false});
+    assert.equal((await fetchMicrosoftAttachments({mailboxId, providerMessageId, folder: "Inbox"})).ok, false);
+    mock({ok: true, attachments: [{...attachment, contentId: "unrelated@message"}], hasMore: false});
+    assert.equal((await fetchMicrosoftAttachments({mailboxId, providerMessageId, folder: "Inbox"})).ok, false);
+
     mock({ok: true, attachments: [{...attachment, contentBytes: "private"}], hasMore: false});
     assert.equal((await fetchMicrosoftAttachments({mailboxId, providerMessageId, folder: "Sent"})).ok, false);
 

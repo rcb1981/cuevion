@@ -1,6 +1,7 @@
 """Bounded read-only Microsoft Graph attachment metadata; never return file content."""
 from __future__ import annotations
 
+import re
 from urllib.parse import quote, urlencode
 from urllib.request import urlopen
 
@@ -10,7 +11,7 @@ from api.inboxes.microsoft_graph import (
 
 MAX_ATTACHMENT_ROWS = 25
 MAX_ATTACHMENT_BYTES = 256 * 1024
-_ATTACHMENT_SELECT = "id,name,size,contentType,isInline"
+_ATTACHMENT_SELECT = "id,name,size,contentType,isInline,microsoft.graph.fileAttachment/contentId"
 _FOLDER_PATHS = {"Inbox": "inbox", "Sent": "sentitems", "Archive": "archive", "Drafts": "drafts", "Deleted": "deleteditems", "Junk": "junkemail"}
 
 
@@ -20,12 +21,15 @@ def _attachment_summary(value: object) -> dict:
     identifier = _required_message_id(value.get("id"))
     name, size = value.get("name"), value.get("size")
     content_type, inline = value.get("contentType"), value.get("isInline")
+    content_id = value.get("contentId")
     if (
         type(name) is not str or not 1 <= len(name) <= 256
         or type(size) is not int or not 0 <= size <= 1024**4
         or content_type is not None
         and (type(content_type) is not str or len(content_type) > 128)
         or type(inline) is not bool
+        or content_id is not None
+        and (type(content_id) is not str or len(content_id) > 202)
     ):
         raise MicrosoftGraphError("microsoft_graph_invalid_response")
     graph_type = value.get("@odata.type")
@@ -36,10 +40,17 @@ def _attachment_summary(value: object) -> dict:
         "#microsoft.graph.itemAttachment": "item",
         "#microsoft.graph.referenceAttachment": "reference",
     }.get(graph_type, "other")
+    # CID is only a hint for an exact, authenticated inline file attachment.
+    # Never trust it as a URL or use it to retrieve attachment bytes.
+    normalized_cid = None
+    if inline and kind == "file" and content_id:
+        candidate = content_id[1:-1] if content_id.startswith("<") and content_id.endswith(">") else content_id
+        if 1 <= len(candidate) <= 200 and re.fullmatch(r"[a-zA-Z0-9_.@+%\-]+", candidate):
+            normalized_cid = candidate
     return {
         "id": identifier, "name": name, "size": size,
         "contentType": content_type or "application/octet-stream",
-        "isInline": inline, "kind": kind,
+        "isInline": inline, "kind": kind, "contentId": normalized_cid,
     }
 
 

@@ -44,6 +44,35 @@ class AttachmentGraphTests(unittest.TestCase):
         self.assertEqual(request.get_header("Authorization"), "Bearer " + TOKEN)
         self.assertEqual(timeout, 20)
 
+    def test_only_exact_inline_file_exposes_normalized_inert_cid(self):
+        inline = attachments._attachment_summary(file_row(
+            name="image001.png", contentType="image/png", isInline=True,
+            contentId="<image001.png@message>",
+        ))
+        self.assertEqual(inline["contentId"], "image001.png@message")
+        self.assertEqual(inline["id"], FILE_ID)
+        self.assertIsNone(attachments._attachment_summary(
+            file_row(contentId="<unused@message>")
+        )["contentId"])
+        self.assertIsNone(attachments._attachment_summary(
+            file_row(isInline=True, contentId="https://tracker.example/pixel")
+        )["contentId"])
+        with self.assertRaises(microsoft_graph.MicrosoftGraphError):
+            attachments._attachment_summary(file_row(isInline=True, contentId=123))
+
+    def test_graph_selects_cid_without_attachment_content(self):
+        opener = FakeOpener({"value": [file_row(
+            name="inline.png", contentType="image/png",
+            isInline=True, contentId="logo@message",
+        )]})
+        result = attachments.list_microsoft_attachments(
+            TOKEN, MSG, folder="Inbox", opener=opener,
+        )
+        self.assertEqual(result["attachments"][0]["contentId"], "logo@message")
+        url = opener.calls[0][0].full_url
+        self.assertIn("microsoft.graph.fileAttachment%2FcontentId", url)
+        self.assertNotIn("contentBytes", url)
+
     def test_sent_uses_fixed_sentitems_folder(self):
         opener = FakeOpener({"value": []})
         attachments.list_microsoft_attachments(

@@ -110,6 +110,8 @@ class DeletedGraphTests(unittest.TestCase):
         projected = projection.project_deleted_message(result, BOX, exact_body=True)
         self.assertIn("Private mix", "".join(projected["body"]))
         self.assertNotIn("danger()", "".join(projected["body"]))
+        self.assertIn("<p>Private mix</p>", projected["bodyHtml"])
+        self.assertNotIn("danger()", projected["bodyHtml"])
         self.assertEqual(projected["providerFolder"], "DELETED")
         with self.assertRaises(microsoft_graph.MicrosoftGraphError):
             deleted.get_microsoft_deleted_message(

@@ -10,6 +10,7 @@ from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
 from api.inboxes.microsoft_graph import MicrosoftGraphError
+from api.inboxes.microsoft_email_html_policy import project_inert_microsoft_html
 
 _MAX_BODY_CHARACTERS = 262_144
 _IGNORED_HTML = frozenset(("script", "style", "noscript", "template", "svg"))
@@ -142,19 +143,29 @@ def project_message(message: object, mailbox_id: str, *, exact_body: bool = Fals
     kind, content = body.get("contentType"), body.get("content")
     if kind not in {"text", "html"} or type(content) is not str:
         raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    safe_html = None
     if kind == "html":
         parser = _PlainTextHTML()
         try:
             parser.feed(content[:_MAX_BODY_CHARACTERS])
             parser.close()
             text = parser.result()
+            # Independent server-side HTML allowlist for exact messages only.
+            # Remote and CID images remain inert without a src attribute.
+            safe_html = (
+                project_inert_microsoft_html(content[:_MAX_BODY_CHARACTERS])
+                if folder != "JUNK" else None
+            )
         except (ValueError, AssertionError):
             raise MicrosoftGraphError("microsoft_graph_invalid_response") from None
     else:
         text = content[:_MAX_BODY_CHARACTERS]
     result["body"] = [section for section in text.split("\n\n") if section] or [""]
-    # Deliberately do not include untrusted Graph HTML, tracked image links,
-    # attachments without authoritative metadata or raw Graph tokens.
+    if safe_html and safe_html["html"]:
+        result["bodyHtml"] = safe_html["html"]
+    # Graph HTML itself is never passed through; only the bounded inert
+    # projection, plus the existing plain-text fallback. Never fabricate
+    # attachment objects or expose Graph credentials.
     return result
 
 
@@ -249,6 +260,13 @@ def project_draft_message(message: object, mailbox_id: str, *, exact_body: bool 
     else:
         body_text = content[:_MAX_BODY_CHARACTERS]
     projected["body"] = [segment for segment in body_text.split("\n\n") if segment] or [""]
+    if kind == "html":
+        try:
+            safe_html = project_inert_microsoft_html(content[:_MAX_BODY_CHARACTERS])
+        except (ValueError, AssertionError):
+            raise MicrosoftGraphError("microsoft_graph_invalid_response") from None
+        if safe_html and safe_html["html"]:
+            projected["bodyHtml"] = safe_html["html"]
     return projected
 
 
@@ -330,6 +348,13 @@ def project_deleted_message(
     else:
         text = content[:_MAX_BODY_CHARACTERS]
     result["body"] = [section for section in text.split("\n\n") if section] or [""]
+    if kind == "html":
+        try:
+            safe_html = project_inert_microsoft_html(content[:_MAX_BODY_CHARACTERS])
+        except (ValueError, AssertionError):
+            raise MicrosoftGraphError("microsoft_graph_invalid_response") from None
+        if safe_html and safe_html["html"]:
+            result["bodyHtml"] = safe_html["html"]
     return result
 
 
@@ -433,6 +458,13 @@ def project_sent_message(message: object, mailbox_id: str, *, exact_body: bool =
     else:
         plain = content[:_MAX_BODY_CHARACTERS]
     result["body"] = [part for part in plain.split("\n\n") if part] or [""]
+    if content_type == "html":
+        try:
+            safe_html = project_inert_microsoft_html(content[:_MAX_BODY_CHARACTERS])
+        except (ValueError, AssertionError):
+            raise MicrosoftGraphError("microsoft_graph_invalid_response") from None
+        if safe_html and safe_html["html"]:
+            result["bodyHtml"] = safe_html["html"]
     return result
 
 

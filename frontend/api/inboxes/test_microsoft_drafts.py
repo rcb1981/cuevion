@@ -114,6 +114,8 @@ class DraftGraphTests(unittest.TestCase):
         projected = projection.project_draft_message(result, BOX, exact_body=True)
         self.assertEqual(projected["providerFolder"], "DRAFTS")
         self.assertIn("Unsent", "".join(projected["body"]))
+        self.assertIn("<b>message</b>", projected["bodyHtml"])
+        self.assertNotIn(" src=", projected["bodyHtml"])
         with self.assertRaises(microsoft_graph.MicrosoftGraphError):
             drafts.get_microsoft_draft(TOKEN, ID, opener=FakeOpener(message(isDraft=False)))
 

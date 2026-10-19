@@ -81,6 +81,13 @@ async function run() {
     assert.equal(exact.ok, true);
     assert.deepEqual(exact.message?.body, ["Sent message content"]);
     assert.equal(calls[0].url, "/api/inboxes/fetch-microsoft-sent-message");
+    fake({...EXACT, message: {...EXACT.message, bodyHtml: "<table><tr><td>Safe HTML</td></tr></table>"}});
+    assert.equal((await fetchMicrosoftSentMessage({mailboxId: BOX, providerMessageId: ID})).message?.bodyHtml?.includes("Safe HTML"), true);
+    fake({...EXACT, message: {...EXACT.message, bodyHtml: '<img src="https://tracker.invalid/pixel">'}});
+    assert.equal((await fetchMicrosoftSentMessage({mailboxId: BOX, providerMessageId: ID})).ok, false);
+    fake({...LIST, messages: [{...ROW, bodyHtml: "<strong>unexpected</strong>"}]});
+    assert.equal((await fetchMicrosoftSent({mailboxId: BOX})).ok, false);
+
 
     for (const data of (
       [

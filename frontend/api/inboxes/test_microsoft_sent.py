@@ -154,7 +154,9 @@ class SentProjectionTests(unittest.TestCase):
         text = "\n".join(projected["body"])
         self.assertIn("Sent message!", text)
         self.assertNotIn("evil()", text)
-        self.assertNotIn("bodyHtml", projected)
+        self.assertIn("<p>Sent message!</p>", projected["bodyHtml"])
+        self.assertNotIn("evil()", projected["bodyHtml"])
+        self.assertNotIn("<script", projected["bodyHtml"])
 
     def test_malformed_projection_not_published(self):
         for invalid in (

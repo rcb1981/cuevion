@@ -93,8 +93,36 @@ class MicrosoftProjectionTests(unittest.TestCase):
         self.assertNotIn("secret()", displayed)
         self.assertNotIn("<script", displayed)
         self.assertNotIn(".x{}", displayed)
-        self.assertNotIn("bodyHtml", result)
+        self.assertIn("<p>Hi there.</p>", result["bodyHtml"])
+        self.assertIn("<p>Listen to this track.</p>", result["bodyHtml"])
+        self.assertNotIn("secret()", result["bodyHtml"])
+        self.assertNotIn("<script", result["bodyHtml"])
         self.assertEqual(result["providerMessageId"], MESSAGE_ID)
+
+    def test_exact_html_tracks_remote_images_without_exposing_loadable_src(self):
+        exact = {
+            **GRAPH_BODY,
+            "body": {
+                "contentType": "html",
+                "content": (
+                    '<p>New track <strong>inside</strong></p>'
+                    '<table><tr><td>Mastered</td></tr></table>'
+                    '<img src="https://tracking.example/cover.jpg" alt="Cover">'
+                    '<img src="cid:artwork.1@example.com">'
+                    '<iframe src="https://tracker.example/frame"></iframe>'
+                ),
+            },
+        }
+        summary = project_message(exact, MAILBOX)
+        self.assertNotIn("bodyHtml", summary)
+        body = project_message(exact, MAILBOX, exact_body=True)
+        self.assertIn("<strong>inside</strong>", body["bodyHtml"])
+        self.assertIn("<table>", body["bodyHtml"])
+        self.assertIn("data-microsoft-remote-src=", body["bodyHtml"])
+        self.assertIn("data-microsoft-cid=", body["bodyHtml"])
+        self.assertNotIn(' src="https://', body["bodyHtml"])
+        self.assertNotIn("<iframe", body["bodyHtml"])
+        self.assertIn("New track", " ".join(body["body"]))
 
     def test_exact_plain_text_body_is_complete_not_preview(self):
         result = project_message(
@@ -102,6 +130,7 @@ class MicrosoftProjectionTests(unittest.TestCase):
             MAILBOX, exact_body=True,
         )
         self.assertEqual(result["body"], ["First.", "Second."])
+        self.assertNotIn("bodyHtml", result)
 
     def test_provider_folder_and_mailbox_never_from_graph_payload(self):
         evil = {**GRAPH_BODY, "serverMailboxId": "other", "providerFolder": "Trash", "body": "untrusted"}

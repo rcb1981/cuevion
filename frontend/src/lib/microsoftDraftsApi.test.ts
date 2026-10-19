@@ -43,6 +43,13 @@ async function test() {
     assert.equal(exact.ok, true);
     assert.equal(exact.message?.body[0], "Unsent message.");
     assert.equal(calls[0].url, "/api/inboxes/fetch-microsoft-draft-message");
+    mock({...EXACT, message: {...EXACT.message, bodyHtml: "<table><tr><td>Safe HTML</td></tr></table>"}});
+    assert.equal((await fetchMicrosoftDraftMessage({mailboxId: BOX, providerMessageId: ID})).message?.bodyHtml?.includes("Safe HTML"), true);
+    mock({...EXACT, message: {...EXACT.message, bodyHtml: '<img src="https://tracker.invalid/pixel">'}});
+    assert.equal((await fetchMicrosoftDraftMessage({mailboxId: BOX, providerMessageId: ID})).ok, false);
+    mock({...LIST, messages: [{...draft, bodyHtml: "<strong>unexpected</strong>"}]});
+    assert.equal((await fetchMicrosoftDrafts({mailboxId: BOX})).ok, false);
+
 
     for (const bad of [
       {...LIST, messages: [{...draft, providerFolder: "INBOX"}]},

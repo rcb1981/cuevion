@@ -64,6 +64,13 @@ async function run() {
     assert.equal(exact.ok, true);
     assert.equal(exact.message?.body[0], "Archived full message.");
     assert.equal(calls[0].url, "/api/inboxes/fetch-microsoft-archive-message");
+    stub({...EXACT, message: {...EXACT.message, bodyHtml: "<table><tr><td>Safe HTML</td></tr></table>"}});
+    assert.equal((await fetchMicrosoftArchiveMessage({mailboxId: BOX, providerMessageId: ID})).message?.bodyHtml?.includes("Safe HTML"), true);
+    stub({...EXACT, message: {...EXACT.message, bodyHtml: '<img src="https://tracker.invalid/pixel">'}});
+    assert.equal((await fetchMicrosoftArchiveMessage({mailboxId: BOX, providerMessageId: ID})).ok, false);
+    stub({...LIST, messages: [{...ENTRY, bodyHtml: "<strong>unexpected</strong>"}]});
+    assert.equal((await fetchMicrosoftArchive({mailboxId: BOX})).ok, false);
+
 
     for (const bad of [
       { ...LIST, messages: [{ ...ENTRY, providerFolder: "INBOX" }] },

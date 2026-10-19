@@ -1,3 +1,4 @@
+import { isTrustedMicrosoftInertHtmlTransport } from "./microsoftInertHtmlTransport";
 import {
   applyProviderDefaults,
   getProviderConnectionMethod,
@@ -4485,7 +4486,7 @@ const MICROSOFT_INBOX_MESSAGE_FIELDS = new Set([
   "id", "providerMessageId", "providerThreadId", "serverMailboxId",
   "providerFolder", "labelIds", "sender", "subject", "snippet", "from",
   "to", "cc", "timestamp", "createdAt", "body", "unread", "flagged",
-  "attachments", "hasAttachments",
+  "attachments", "hasAttachments", "bodyHtml",
 ]);
 
 const MICROSOFT_INBOX_SAFE_ERRORS: Record<string, string> = {
@@ -4566,7 +4567,9 @@ function isTrustedMicrosoftInboxMessage(
     !message.body.every((item) => typeof item === "string") ||
     (options.exact && message.body.length === 0) ||
     (!options.exact && message.body.length !== 0) ||
-    "bodyHtml" in message
+    (message.bodyHtml !== undefined &&
+      (!options.exact || options.folder === "JUNK" ||
+        !isTrustedMicrosoftInertHtmlTransport(message.bodyHtml)))
   ) {
     return false;
   }
@@ -4832,6 +4835,8 @@ function isTrustedMicrosoftSentMessage(
     Array.isArray(item.attachments) &&
     item.attachments.length === 0 &&
     (item.hasAttachments === undefined || typeof item.hasAttachments === "boolean") &&
+    (item.bodyHtml === undefined ||
+      (options.exact && isTrustedMicrosoftInertHtmlTransport(item.bodyHtml))) &&
     Object.keys(item).every((field) => MICROSOFT_INBOX_MESSAGE_FIELDS.has(field))
   );
 }
@@ -5211,6 +5216,7 @@ export type MicrosoftAttachmentMetadata = {
   contentType: string;
   isInline: boolean;
   kind: "file" | "item" | "reference" | "other";
+  contentId?: string | null; // inert CID hint; never a fetch URL
 };
 
 export type MicrosoftAttachmentListResponse = {
@@ -5225,7 +5231,7 @@ function trustedMicrosoftAttachment(value: unknown): value is MicrosoftAttachmen
   const a = value as Record<string, unknown>;
   return (
     Object.keys(a).every((key) =>
-      ["id", "name", "size", "contentType", "isInline", "kind"].includes(key)
+      ["id", "name", "size", "contentType", "isInline", "kind", "contentId"].includes(key)
     ) &&
     typeof a.id === "string" &&
     /^[^\s?#]+$/.test(a.id) &&
@@ -5236,7 +5242,11 @@ function trustedMicrosoftAttachment(value: unknown): value is MicrosoftAttachmen
     a.size >= 0 && a.size <= 1024 ** 4 &&
     typeof a.contentType === "string" && a.contentType.length <= 128 &&
     typeof a.isInline === "boolean" &&
-    ["file", "item", "reference", "other"].includes(String(a.kind))
+    ["file", "item", "reference", "other"].includes(String(a.kind)) &&
+    (a.contentId === undefined || a.contentId === null ||
+      (typeof a.contentId === "string" &&
+        /^[a-zA-Z0-9_.@+%\-]{1,200}$/.test(a.contentId) &&
+        a.isInline === true && a.kind === "file"))
   );
 }
 

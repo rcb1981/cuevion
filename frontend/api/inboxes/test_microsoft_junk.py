@@ -72,6 +72,7 @@ class JunkGraphTests(unittest.TestCase):
         self.assertIn("Claim prize", " ".join(output["body"]))
         self.assertNotIn("secret()", " ".join(output["body"]))
         self.assertEqual(output["providerFolder"], "JUNK")
+        self.assertNotIn("bodyHtml", output)
 
     def test_nonmatching_ids_and_pagination_never_leave_junk(self):
         opener = FakeOpener({"value": []})

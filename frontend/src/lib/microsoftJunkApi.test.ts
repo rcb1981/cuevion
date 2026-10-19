@@ -48,6 +48,9 @@ async function run() {
     });
     assert.equal(exact.ok, true);
     assert.equal(exact.message?.body[0], "Click https://example.com/");
+    stub({...EXACT, message: {...EXACT.message, bodyHtml: "<p>Unsafe in junk</p>"}});
+    assert.equal((await fetchMicrosoftJunkMessage({mailboxId: BOX, providerMessageId: ID})).ok, false);
+
     assert.equal(calls[0].url, "/api/inboxes/fetch-microsoft-junk-message");
 
     for (const invalid of [

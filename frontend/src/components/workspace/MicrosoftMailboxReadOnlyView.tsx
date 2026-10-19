@@ -32,6 +32,7 @@ import { MicrosoftPlannedMessageActions } from "./MicrosoftPlannedMessageActions
 import { MicrosoftMailboxFolderRail } from "./MicrosoftMailboxFolderRail";
 import { MicrosoftMessageListControls } from "./MicrosoftMessageListControls";
 import { MicrosoftLinkifiedText } from "./MicrosoftLinkifiedText";
+import { MicrosoftInertHtmlStage } from "./MicrosoftInertHtmlStage";
 import { filterMicrosoftLoadedMessages, type MicrosoftMessageSortOrder } from "./microsoftMailboxListFilters";
 import {
   microsoftVisibleFolderRows,
@@ -497,7 +498,12 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           if (flagTicket === mutationTicket.current) setMutationBusy(false);
         });
       }
-      if (response.message.hasAttachments === true) {
+      // Graph hasAttachments excludes inline-only messages. Detect the inert
+      // CID markers in the authenticated exact HTML response as well.
+      if (response.message.hasAttachments === true ||
+          requestedFolder !== "Junk" &&
+          typeof response.message.bodyHtml === "string" &&
+          response.message.bodyHtml.includes("data-microsoft-cid=")) {
         setAttachmentBusy(true);
         void fetchMicrosoftAttachments({
           mailboxId: mailbox.id,
@@ -1074,13 +1080,28 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                     Links in junk mail are displayed as plain text and cannot be clicked here.
                   </p>
                 )}
-                <div className="mt-6 space-y-4 whitespace-pre-wrap break-words text-sm leading-7">
-                  {selectedMessage.body.map((part, index) => (
-                    <p key={index}>
-                      {folder === "Junk" ? part : <MicrosoftLinkifiedText text={part} />}
-                    </p>
-                  ))}
-                </div>
+                {selectedMessage.bodyHtml && folder !== "Junk" ? (
+                  <div className="mt-6">
+                    <MicrosoftInertHtmlStage
+                      key={mailbox.id + ":" + folder + ":" + selectedMessage.providerMessageId}
+                      messageKey={mailbox.id + ":" + folder + ":" + selectedMessage.providerMessageId}
+                      html={selectedMessage.bodyHtml}
+                      fallbackText={selectedMessage.body.join("\n\n")}
+                      mailboxId={mailbox.id}
+                      providerMessageId={selectedMessage.providerMessageId}
+                      folder={folder === "Filtered" ? "Inbox" : folder}
+                      attachments={attachmentRows}
+                    />
+                  </div>
+                ) : (
+                  <div className="mt-6 space-y-4 whitespace-pre-wrap break-words text-sm leading-7">
+                    {selectedMessage.body.map((part, index) => (
+                      <p key={index}>
+                        {folder === "Junk" ? part : <MicrosoftLinkifiedText text={part} />}
+                      </p>
+                    ))}
+                  </div>
+                )}
                 <p className="mt-8 text-xs text-[var(--workspace-text-faint)]">
                   {folder === "Sent"
                     ? "Sent Items are read-only. Sending and replies are not enabled yet."

@@ -80,6 +80,7 @@ class GraphArchiveTests(unittest.TestCase):
         projected = projection.project_message(result, MAILBOX, exact_body=True, folder="ARCHIVE")
         self.assertEqual(projected["providerFolder"], "ARCHIVE")
         self.assertIn("Archived body.", projected["body"][0])
+        self.assertIn("<p>Archived body.</p>", projected["bodyHtml"])
 
     def test_invalid_archive_limits_and_exact_ids_make_no_network_calls(self):
         opener = FakeOpener({"value": []})

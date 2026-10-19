@@ -107,6 +107,17 @@ async function run() {
 
     setFetch({...EXACT, message: {...EXACT.message, bodyHtml: "<img src='https://tracker'>"}});
     assert.equal((await fetchMicrosoftMessage({mailboxId: BOX, providerMessageId: ID})).ok, false);
+    const inertHtml = '<p>Listen to this release.</p>' +
+      '<img alt="Artwork" data-microsoft-remote-src="https://cdn.example.com/cover.png">';
+    setFetch({...EXACT, message: {...EXACT.message, bodyHtml: inertHtml}});
+    const safeHtml = await fetchMicrosoftMessage({mailboxId: BOX, providerMessageId: ID});
+    assert.equal(safeHtml.ok, true);
+    assert.equal(safeHtml.message?.bodyHtml, inertHtml);
+    setFetch({...LIST, messages: [{...ENTRY, bodyHtml: inertHtml}]});
+    assert.equal((await fetchMicrosoftInbox({mailboxId: BOX})).ok, false,
+      "Unproven list previews cannot carry HTML bodies");
+    setFetch({...EXACT, message: {...EXACT.message, bodyHtml: '<script>alert(1)</script>'}});
+    assert.equal((await fetchMicrosoftMessage({mailboxId: BOX, providerMessageId: ID})).ok, false);
 
     setFetch({...EXACT, message: {...EXACT.message, providerMessageId: "different"}});
     assert.equal((await fetchMicrosoftMessage({mailboxId: BOX, providerMessageId: ID})).ok, false);
