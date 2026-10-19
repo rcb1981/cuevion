@@ -1091,6 +1091,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                       providerMessageId={selectedMessage.providerMessageId}
                       folder={folder === "Filtered" ? "Inbox" : folder}
                       attachments={attachmentRows}
+                      attachmentsBusy={attachmentBusy}
                     />
                   </div>
                 ) : (

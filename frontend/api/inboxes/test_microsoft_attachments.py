@@ -44,16 +44,30 @@ class AttachmentGraphTests(unittest.TestCase):
         self.assertEqual(request.get_header("Authorization"), "Bearer " + TOKEN)
         self.assertEqual(timeout, 20)
 
-    def test_only_exact_inline_file_exposes_normalized_inert_cid(self):
+    def test_exact_file_cid_even_when_inline_flag_is_unreliable(self):
         inline = attachments._attachment_summary(file_row(
             name="image001.png", contentType="image/png", isInline=True,
             contentId="<image001.png@message>",
         ))
         self.assertEqual(inline["contentId"], "image001.png@message")
         self.assertEqual(inline["id"], FILE_ID)
-        self.assertIsNone(attachments._attachment_summary(
+        self.assertEqual(attachments._attachment_summary(
             file_row(contentId="<unused@message>")
+        )["contentId"], "unused@message")
+        self.assertEqual(attachments._attachment_summary(
+            file_row(**{"@odata.type": "microsoft.graph.fileAttachment",
+                        "isInline": False, "contentId": "<LOGO@message>",
+                        "contentType": "application/octet-stream"})
+        )["contentId"], "LOGO@message")
+        # No untrusted URL-based CID resolver; metadata alone cannot download.
+        self.assertIsNone(attachments._attachment_summary(
+            file_row(**{"@odata.type": "microsoft.graph.referenceAttachment",
+                        "isInline": True, "contentId": "logo@message"})
         )["contentId"])
+        self.assertEqual(attachments._attachment_summary(
+            file_row(**{"@odata.type": None, "contentId": "logo@message",
+                        "isInline": True, "contentType": "image/png"})
+        )["kind"], "file")
         self.assertIsNone(attachments._attachment_summary(
             file_row(isInline=True, contentId="https://tracker.example/pixel")
         )["contentId"])

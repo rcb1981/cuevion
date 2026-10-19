@@ -50,7 +50,9 @@ def read_microsoft_file_attachment(
         opener=opener,
     )
     if (
-        payload.get("@odata.type") != "#microsoft.graph.fileAttachment"
+        payload.get("@odata.type") not in (
+            "#microsoft.graph.fileAttachment", "microsoft.graph.fileAttachment"
+        )
         or payload.get("id") != attachment_id
         or type(payload.get("size")) is not int
     ):

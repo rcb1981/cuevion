@@ -10,10 +10,21 @@ import {
 } from "./inboxConnectionApi";
 import { isTrustedMicrosoftInertHtmlTransport } from "./microsoftInertHtmlTransport";
 
-export const MAX_MICROSOFT_CID_IMAGE_BYTES = 512 * 1024;
+// Reuse the exact, authenticated download limit instead of rejecting normal
+// high-resolution inline photos at the previous 512 KiB UI-only threshold.
+export const MAX_MICROSOFT_CID_IMAGE_BYTES = 2 * 1024 * 1024;
+export const MAX_MICROSOFT_CID_TOTAL_BYTES = 8 * 1024 * 1024;
 export const MAX_MICROSOFT_CID_IMAGES = 8;
 const CID_PATTERN = /^[a-zA-Z0-9_.@+%\-]{1,200}$/;
 const MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+// Same canonical CID matching semantics as stable Gmail/IMAP: trim,
+// unwrap angle brackets and case-fold. Never turn a CID into a fetch URL.
+export function normalizeMicrosoftCid(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const candidate = value.trim().replace(/^<|>$/g, "").toLowerCase();
+  return CID_PATTERN.test(candidate) ? candidate : "";
+}
 const INLINE_CID_PATTERN = /data-microsoft-cid="([a-zA-Z0-9_.@+%\-]{1,200})"/g;
 
 export type MicrosoftInlineCidFolder = "Inbox" | "Sent" | "Archive" | "Drafts" | "Deleted";
@@ -49,30 +60,25 @@ export function discoverMicrosoftInlineCids(html: string): string[] {
   return Array.from(cids);
 }
 
-function validMicrosoftImageBytes(base64: string, mime: string, size: number): boolean {
+function sniffMicrosoftImageMime(base64: string, size: number): string | null {
   if (size < 1 || size > MAX_MICROSOFT_CID_IMAGE_BYTES ||
-      base64.length !== 4 * Math.ceil(size / 3)) return false;
+      base64.length !== 4 * Math.ceil(size / 3)) return null;
   try {
     const binary = atob(base64);
-    if (binary.length !== size) return false;
-    const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
-    if (mime === "image/png")
-      return bytes.length >= 24 &&
-        [137,80,78,71,13,10,26,10].every((b, i) => bytes[i] === b);
-    if (mime === "image/jpeg")
-      return bytes.length >= 4 &&
-        bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255 &&
-        bytes[bytes.length - 2] === 255 && bytes[bytes.length - 1] === 217;
-    if (mime === "image/gif")
-      return bytes.length >= 10 &&
-        (binary.startsWith("GIF89a") || binary.startsWith("GIF87a"));
-    if (mime === "image/webp")
-      return bytes.length >= 16 && binary.startsWith("RIFF") &&
-        binary.slice(8, 12) === "WEBP";
-  } catch {
-    return false;
-  }
-  return false;
+    if (binary.length !== size) return null;
+    const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
+    if (bytes.length >= 24 &&
+        [137, 80, 78, 71, 13, 10, 26, 10].every((b, i) => bytes[i] === b))
+      return "image/png";
+    if (bytes.length >= 4 && bytes[0] === 255 && bytes[1] === 216 &&
+        bytes[2] === 255 && bytes[bytes.length - 2] === 255 &&
+        bytes[bytes.length - 1] === 217) return "image/jpeg";
+    if (bytes.length >= 10 && (binary.startsWith("GIF89a") || binary.startsWith("GIF87a")))
+      return "image/gif";
+    if (bytes.length >= 16 && binary.startsWith("RIFF") &&
+        binary.slice(8, 12) === "WEBP") return "image/webp";
+  } catch { /* non-canonical base64 and failed decoding stay inert */ }
+  return null;
 }
 
 /**
@@ -89,14 +95,15 @@ export async function loadMicrosoftInlineCidImages(
       !Array.isArray(request.attachments) || request.attachments.length > 25) return {};
   const needed = discoverMicrosoftInlineCids(request.html);
   const output: Record<string, string> = Object.create(null);
+  let acceptedBytes = 0;
   for (const cid of needed) {
     if (!isCurrent()) break;
+    const expectedCid = normalizeMicrosoftCid(cid);
+    if (!expectedCid) continue;
     const candidates = request.attachments.filter((item) =>
-      item.kind === "file" && item.isInline === true &&
-      item.contentId === cid && item.size > 0 &&
-      item.size <= MAX_MICROSOFT_CID_IMAGE_BYTES &&
-      typeof item.contentType === "string" &&
-      MIME_TYPES.has(item.contentType.toLowerCase()),
+      item.kind === "file" && normalizeMicrosoftCid(item.contentId) === expectedCid &&
+      item.size > 0 && item.size <= MAX_MICROSOFT_CID_IMAGE_BYTES &&
+      item.size <= MAX_MICROSOFT_CID_TOTAL_BYTES - acceptedBytes,
     );
     if (candidates.length !== 1) continue; // ambiguous CIDs fail closed
     const item = candidates[0];
@@ -110,8 +117,11 @@ export async function loadMicrosoftInlineCidImages(
       if (!isCurrent()) break;
       if (!result.ok || result.attachmentId !== item.id ||
           result.size !== item.size || typeof result.base64 !== "string") continue;
-      const mime = item.contentType.toLowerCase();
-      if (!validMicrosoftImageBytes(result.base64, mime, item.size)) continue;
+      // Graph contentType is advisory (often application/octet-stream for
+      // real inline email images). Only verified PNG/JPEG/GIF/WebP bytes pass.
+      const mime = sniffMicrosoftImageMime(result.base64, item.size);
+      if (!mime || !MIME_TYPES.has(mime)) continue;
+      acceptedBytes += item.size;
       output[cid] = "data:" + mime + ";base64," + result.base64;
     } catch {
       // A missing or malformed image is not fatal to the email's text content.

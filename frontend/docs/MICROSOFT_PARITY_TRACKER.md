@@ -51,3 +51,64 @@ Working agreement — 2026-10-19
 - Tests: `frontend/api/inboxes/test_microsoft_email_html_policy.py`.
 - Test result at integration checkpoint: 415 Microsoft backend tests pass; Microsoft HTML transport and iframe/fallback tests pass; Microsoft client API/UI and frontend build pass; Gmail/OAuth/Waiting/Trash regressions pass.
 - Production remains on `b93b5212` until a later approved deploy.
+
+## 2026-10-19 CID live-screenshot regression (LOCAL, NOT DEPLOYED)
+
+- Production screenshot of Paulshine mail showed a real CID reference but the
+  image remained blank. Live Graph metadata and file bytes for that one
+  message have **not** been inspected; do not present its exact provider
+  failure mode as confirmed.
+- Verified code defects from Production: narrow Graph fileAttachment
+  type matching (Graph also emits unprefixed type), CID case-sensitive matching
+  (unlike Gmail/IMAP), exclusive dependence on isInline, rejected images
+  above 512 KiB even though the authenticated download route supports 2 MiB,
+  and strict trust in provider image MIME (octet-stream is possible).
+- **Critical reproduced browser root cause:** after embedding a >512 KiB CID
+  image as data:image/...;base64, the Microsoft sanitizer truncated
+  parsed.body.innerHTML to 294,912 characters, splitting the img src
+  attribute and discarding the image. A real 768,698-byte PNG failed in
+  Chromium before the fix and loaded/decoded in Chromium afterward.
+- Local correction: original server HTML remains strictly bounded, final
+  HTML uses a larger overall bound but is never cut mid-tag, CID comparison
+  reuses Gmail/IMAP-style canonicalization without changing those modules,
+  exact authenticated Graph download still validates type and ownership,
+  and only byte-verified PNG/JPEG/GIF/WebP up to 2 MiB each and 8 MiB
+  aggregate are embedded. Remote tracking stays opt-in, and Junk text-only.
+- **Not verified:** Paulshine's actual Graph CID list and bytes, live
+  Microsoft mailbox acceptance, CID images >2 MiB, and unusual CID syntax.
+  No additional GitHub push, Preview or Production release is authorized.
+
+
+## 2026-10-19 automatic images UI preference (LOCAL, NOT DEPLOYED)
+
+- User explicitly chose Apple Mail-style automatic image loading in the
+  Microsoft reader, without a Show/Hide images button. The action is not a
+  request to change Gmail, IMAP, Junk or mailbox write behavior.
+- Remote HTTPS images now load when a message is opened; this means the
+  remote sender/image host may learn that the user opened the message,
+  unlike a Gmail proxy or consent-gated reader. HTTP/javascript/data remote
+  links and active content remain blocked by server/client sanitizers.
+- CID images still come exclusively from exact authenticated Graph
+  attachment reads with byte-signature validation and size caps; no remote
+  fetch is attempted for raw cid: references. The inline loading/error label
+  appears only when a CID is unresolved and no metadata/download request is
+  still in flight. No success banner or Show/Hide button remains.
+- Synthetic browser validation is required after this preference change.
+  Actual Outlook test-account acceptance and another Production release
+  still need the user's separate approval.
+
+## 2026-10-19 automatic images acceptance (LOCAL CHECKPOINT)
+
+- Headless Chromium rendered a valid 805,650-byte PNG (same *size* as the
+  provided live Graph inline attachment metadata) inside the isolated iframe.
+  That PNG and Graph responses were synthetic, not the user's actual email.
+- Confirmed automatic HTTPS remote image loading without Show/Hide controls.
+- Prevented double remote downloads by waiting for the authenticated exact
+  CID response before first iframe mount. Plain-text text is shown during
+  CID processing. One remote fetch per Inbox and Sent test message passed.
+- Cross-message state, owner/folder-scoped CID reads, scriptless iframe CSP
+  and invalid HTML fallback remained verified in Chromium.
+- CID and external images remain bounded to server/client policies; an
+  oversized or invalid CID attachment can still fail closed. Auto-loading
+  remote images can expose that an email has been opened to remote hosts.
+- No Gmail/IMAP edits, GitHub feature pushes, Previews, or Production deploy.

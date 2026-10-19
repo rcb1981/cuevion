@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import {
-  discoverMicrosoftInlineCids, loadMicrosoftInlineCidImages,
-  MAX_MICROSOFT_CID_IMAGE_BYTES,
+  discoverMicrosoftInlineCids, loadMicrosoftInlineCidImages, normalizeMicrosoftCid,
+  MAX_MICROSOFT_CID_IMAGE_BYTES, MAX_MICROSOFT_CID_TOTAL_BYTES,
 } from "./microsoftInlineCidImages";
 import type { MicrosoftAttachmentMetadata } from "./inboxConnectionApi";
 
@@ -26,6 +26,22 @@ type Download = Parameters<typeof loadMicrosoftInlineCidImages>[2];
 
 async function main() {
   assert.deepEqual(discoverMicrosoftInlineCids(validHtml), [cid]);
+  assert.equal(normalizeMicrosoftCid("  <LOGO@EXAMPLE.COM> "), "logo@example.com");
+  assert.equal(normalizeMicrosoftCid("https://untrusted.example/pixel"), "");
+  assert.equal(MAX_MICROSOFT_CID_IMAGE_BYTES, 2 * 1024 * 1024);
+  assert.equal(MAX_MICROSOFT_CID_TOTAL_BYTES, 8 * 1024 * 1024);
+  // Sender spelling differs in case/angle brackets; Graph also commonly
+  // misstates isInline or uses octet-stream MIME for a valid inline file.
+  const recovered = await loadMicrosoftInlineCidImages(
+    { ...request, attachments: [
+      {...attachment, contentId: "<IMAGE001.PNG@MSG>", isInline: false,
+       contentType: "application/octet-stream"},
+    ] }, () => true, async () => ({
+      ok: true, attachmentId: attachment.id, size: png.length,
+      base64: png.toString("base64"), fileName: attachment.name,
+    }),
+  );
+  assert.equal(recovered[cid], "data:image/png;base64," + png.toString("base64"));
   assert.deepEqual(discoverMicrosoftInlineCids('<img src="https://tracker.invalid/">'), []);
   assert.deepEqual(discoverMicrosoftInlineCids('<img onerror="run()" data-microsoft-cid="ok">'), []);
   const calls: unknown[] = [];
@@ -52,12 +68,13 @@ async function main() {
   assert.deepEqual(Object.keys(await loadMicrosoftInlineCidImages(
     {...request, attachments: [attachment, {...attachment, id: "AAMkOther/"}]}, () => true, good,
   )), []); // ambiguous CID cannot select one
+  // MIME cannot authorize unsafe SVG. Valid PNG bytes win over a bad metadata MIME.
   assert.deepEqual(Object.keys(await loadMicrosoftInlineCidImages(
     {...request, attachments: [{...attachment, contentType: "image/svg+xml"}]}, () => true, good,
-  )), []);
+  )), [cid]);
   assert.deepEqual(Object.keys(await loadMicrosoftInlineCidImages(
     {...request, attachments: [{...attachment, isInline: false}]}, () => true, good,
-  )), []);
+  )), [cid]);
   assert.deepEqual(Object.keys(await loadMicrosoftInlineCidImages(
     {...request, attachments: [{...attachment, size: MAX_MICROSOFT_CID_IMAGE_BYTES + 1}]},
     () => true, good,
@@ -80,6 +97,16 @@ async function main() {
     fileName: attachment.name,
   });
   assert.deepEqual(Object.keys(await loadMicrosoftInlineCidImages(request, () => true, invalid)), []);
+  const dangerousSvg: Download = async () => {
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>evil()</script></svg>');
+    return {ok: true, attachmentId: attachment.id, size: svg.length,
+      base64: svg.toString("base64"), fileName: "logo.svg"};
+  };
+  assert.deepEqual(Object.keys(await loadMicrosoftInlineCidImages(
+    {...request, attachments: [{...attachment, size: Buffer.byteLength(
+      '<svg xmlns="http://www.w3.org/2000/svg"><script>evil()</script></svg>')}]},
+    () => true, dangerousSvg,
+  )), []);
   const mismatch: Download = async () => ({
     ok: true, attachmentId: "another", size: attachment.size,
     base64: png.toString("base64"), fileName: attachment.name,

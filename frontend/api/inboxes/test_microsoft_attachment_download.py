@@ -46,6 +46,19 @@ class GraphDownloadTests(unittest.TestCase):
         self.assertEqual(request.get_header("Authorization"), "Bearer " + TOKEN)
         self.assertEqual(timeout, microsoft_graph.GRAPH_TIMEOUT_SECONDS)
 
+    def test_download_accepts_valid_unprefixed_graph_file_attachment_type(self):
+        # Microsoft Graph list examples use the unprefixed OData spelling.
+        item = download.read_microsoft_file_attachment(
+            TOKEN, MESSAGE, ATTACHMENT, folder="Inbox",
+            opener=FakeOpener(payload(**{"@odata.type": "microsoft.graph.fileAttachment"})),
+        )
+        self.assertEqual(base64.b64decode(item["base64"]), CONTENT)
+        with self.assertRaises(microsoft_graph.MicrosoftGraphError):
+            download.read_microsoft_file_attachment(
+                TOKEN, MESSAGE, ATTACHMENT, folder="Inbox",
+                opener=FakeOpener(payload(**{"@odata.type": "microsoft.graph.itemAttachment"})),
+            )
+
     def test_sent_download_is_folder_scoped(self):
         opener = FakeOpener(payload())
         download.read_microsoft_file_attachment(

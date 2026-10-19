@@ -2,7 +2,9 @@ import React, { useEffect, useMemo, useState } from "react";
 import { isTrustedMicrosoftInertHtmlTransport } from "../../lib/microsoftInertHtmlTransport";
 import {
   loadMicrosoftInlineCidImages,
+  discoverMicrosoftInlineCids,
   isMicrosoftInlineCidFolder,
+  MAX_MICROSOFT_CID_TOTAL_BYTES,
   type MicrosoftCidImageMap,
 } from "../../lib/microsoftInlineCidImages";
 import type { MicrosoftAttachmentMetadata } from "../../lib/inboxConnectionApi";
@@ -79,10 +81,11 @@ export type MicrosoftSafeHtmlResult = {
   remoteImageCount: number;
   cidImageCount: number;
   blockedReason?: "invalid" | "unavailable";
+  suppressedCidImages?: number;
 };
 
 function isSafeMicrosoftCidDataUrl(value: unknown): value is string {
-  return typeof value === "string" && value.length < 750_000 &&
+  return typeof value === "string" && value.length <= 2_800_000 &&
     /^data:image\/(?:png|jpeg|gif|webp);base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
 }
 
@@ -105,6 +108,11 @@ export function sanitizeMicrosoftInertHtmlForStage(
   }
   let remoteImageCount = 0;
   let cidImageCount = 0;
+  let suppressedCidImages = 0;
+  let embeddedImageChars = 0;
+  const maxEmbeddedImageChars =
+    4 * Math.ceil(MAX_MICROSOFT_CID_TOTAL_BYTES / 3) + 4096;
+  const cidUrlValidationCache = new Map<string, boolean>();
   for (const el of all) {
     const tag = el.tagName.toLowerCase();
     if (!TAGS.has(tag)) {
@@ -130,7 +138,19 @@ export function sanitizeMicrosoftInertHtmlForStage(
           // the opaque iframe. Never resolve a raw cid: URL in the browser.
           const dataUrl = Object.prototype.hasOwnProperty.call(cidImages, value)
             ? cidImages[value] : undefined;
-          if (isSafeMicrosoftCidDataUrl(dataUrl)) el.setAttribute("src", dataUrl);
+          if (dataUrl) {
+            let verified = cidUrlValidationCache.get(value);
+            if (verified === undefined) {
+              verified = isSafeMicrosoftCidDataUrl(dataUrl);
+              cidUrlValidationCache.set(value, verified);
+            }
+            if (verified && embeddedImageChars + dataUrl.length <= maxEmbeddedImageChars) {
+              embeddedImageChars += dataUrl.length;
+              el.setAttribute("src", dataUrl);
+            } else {
+              suppressedCidImages += 1;
+            }
+          }
         } else el.removeAttribute(key);
         el.removeAttribute(key);
       } else if (tag === "img" && key === "data-microsoft-remote-src") {
@@ -153,10 +173,20 @@ export function sanitizeMicrosoftInertHtmlForStage(
       el.setAttribute("referrerpolicy", "no-referrer");
     }
   }
+  // MAX_HTML bounds the original sanitized mail body. Authorized CID bytes
+  // are embedded later as base64. NEVER slice the final HTML: that truncates
+  // src="data:..." halfway and can silently remove whole image/table nodes.
+  const renderedHtml = parsed.body.innerHTML;
+  const maxRenderedHtml = MAX_HTML +
+    4 * Math.ceil(MAX_MICROSOFT_CID_TOTAL_BYTES / 3) + 4096;
+  if (renderedHtml.length > maxRenderedHtml) {
+    return {html: null, remoteImageCount: 0, cidImageCount: 0, blockedReason: "invalid"};
+  }
   return {
-    html: parsed.body.innerHTML.slice(0, MAX_HTML),
+    html: renderedHtml,
     remoteImageCount,
     cidImageCount,
+    suppressedCidImages,
   };
 }
 
@@ -165,8 +195,11 @@ function escapeHtml(value: string): string {
     .replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function buildStageDocument(bodyHtml: string, remoteImagesAllowed: boolean): string {
-  const imgPolicy = remoteImagesAllowed ? "img-src https: data:;" : "img-src data:;";
+function buildStageDocument(bodyHtml: string): string {
+  // Microsoft-only product choice: display HTTPS remote images automatically.
+  // Unlike Gmail's image proxy, this exposes the open to remote image hosts.
+  // Scripts, HTTP images, forms, frames and network JS remain blocked.
+  const imgPolicy = "img-src https: data:;";
   const csp = [
     "default-src 'none';",
     "script-src 'none';",
@@ -193,35 +226,65 @@ function buildStageDocument(bodyHtml: string, remoteImagesAllowed: boolean): str
 }
 
 export function MicrosoftInertHtmlStage({
-  html, fallbackText, messageKey, mailboxId, providerMessageId, folder, attachments,
+  html, fallbackText, messageKey, mailboxId, providerMessageId,
+  folder, attachments, attachmentsBusy = false,
 }: {
   html: string; fallbackText: string; messageKey: string;
   mailboxId?: string; providerMessageId?: string; folder?: string;
   attachments?: MicrosoftAttachmentMetadata[];
+  attachmentsBusy?: boolean;
 }) {
-  // A keyed component must be mounted for each exact provider message identity
-  // so that per-message remote-image consent does not cross message boundaries.
-  const [showImages, setShowImages] = useState(false);
-  const [cidImages, setCidImages] = useState<MicrosoftCidImageMap>({});
+  const [cidResult, setCidResult] = useState<{
+    html: string;
+    attachments: MicrosoftAttachmentMetadata[];
+    images: MicrosoftCidImageMap;
+  } | null>(null);
+  const expectedCids = useMemo(() => discoverMicrosoftInlineCids(html), [html]);
+  const currentCidResult = cidResult?.html === html &&
+    cidResult.attachments === attachments ? cidResult : null;
+  const cidImages: MicrosoftCidImageMap = currentCidResult?.images ?? {};
+  const waitingForCid = expectedCids.length > 0 &&
+    (attachmentsBusy || (Boolean(attachments?.length) && !currentCidResult));
   useEffect(() => {
     let current = true;
-    setCidImages({});
-    if (isMicrosoftInlineCidFolder(folder) && mailboxId && providerMessageId && attachments?.length) {
+    setCidResult(null);
+    if (isMicrosoftInlineCidFolder(folder) && mailboxId && providerMessageId &&
+        attachments?.length && expectedCids.length > 0) {
       void loadMicrosoftInlineCidImages(
         { html, mailboxId, providerMessageId, folder, attachments },
         () => current,
       ).then((images) => {
-        if (current) setCidImages(images);
+        if (current) setCidResult({ html, attachments, images });
+      }).catch(() => {
+        if (current) setCidResult({ html, attachments, images: {} });
       });
     }
     return () => { current = false; };
-  }, [html, mailboxId, providerMessageId, folder, attachments]);
+  }, [html, mailboxId, providerMessageId, folder, attachments, expectedCids]);
+  // Wait for the authenticated exact-CID reads before mounting the remote
+  // image iframe. Otherwise a CID result changes srcDoc and requests HTTPS
+  // tracking images a second time for the same message.
   const rendered = useMemo(
-    () => sanitizeMicrosoftInertHtmlForStage(html, showImages, cidImages),
-    [html, showImages, cidImages],
+    () => waitingForCid ? null : sanitizeMicrosoftInertHtmlForStage(html, true, cidImages),
+    [html, cidImages, waitingForCid],
   );
+  const unresolvedCidCount = expectedCids.filter((cid) =>
+    !Object.prototype.hasOwnProperty.call(cidImages, cid)
+  ).length;
 
-  if (!rendered.html) {
+  if (waitingForCid) {
+    return (
+      <section aria-label="Microsoft HTML message content" data-message-key={messageKey}>
+        <p role="status" className="mb-3 text-xs text-[var(--workspace-text-muted)]">
+          Loading inline images…
+        </p>
+        <div className="whitespace-pre-wrap break-words text-sm leading-7 text-[var(--workspace-text)]">
+          {fallbackText}
+        </div>
+      </section>
+    );
+  }
+  if (!rendered?.html) {
     return (
       <div role="note" className="whitespace-pre-wrap break-words text-sm leading-7 text-[var(--workspace-text)]">
         {fallbackText}
@@ -230,31 +293,17 @@ export function MicrosoftInertHtmlStage({
   }
   return (
     <section aria-label="Microsoft HTML message content" data-message-key={messageKey}>
-      {rendered.remoteImageCount > 0 && (
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-2 text-xs text-[var(--workspace-text-soft)]">
-          <span>
-            {showImages
-              ? "Remote images enabled for this message."
-              : rendered.remoteImageCount + " remote image(s) blocked for privacy."}
-          </span>
-          <button type="button" onClick={() => setShowImages((v) => !v)}
-            className="rounded-full border border-[var(--workspace-border)] px-3 py-1.5 font-medium text-[var(--workspace-text)] hover:bg-[var(--workspace-hover-surface)]">
-            {showImages ? "Hide images" : "Show images"}
-          </button>
-        </div>
-      )}
-      {rendered.cidImageCount > 0 && (
-        <p className="mb-3 text-xs text-[var(--workspace-text-muted)]">
-          {Object.keys(cidImages).length < rendered.cidImageCount
-            ? "Some inline images could not be displayed securely."
-            : "Inline images are provided by this email, without loading external sources."}
+      {rendered.cidImageCount > 0 &&
+        (unresolvedCidCount > 0 || (rendered.suppressedCidImages ?? 0) > 0) && (
+        <p className="mb-3 text-xs text-[var(--workspace-text-muted)]" role="status">
+          Some inline images could not be displayed securely.
         </p>
       )}
       <iframe
         title="Microsoft HTML email content"
         sandbox="allow-popups allow-popups-to-escape-sandbox"
         referrerPolicy="no-referrer"
-        srcDoc={buildStageDocument(rendered.html, showImages)}
+        srcDoc={buildStageDocument(rendered.html)}
         className="block w-full border-0 bg-white"
         style={{ height: "clamp(320px, 50dvh, 600px)", maxHeight: "calc(100dvh - 96px)" }}
       />

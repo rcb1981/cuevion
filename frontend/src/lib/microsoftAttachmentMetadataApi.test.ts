@@ -45,7 +45,12 @@ async function run() {
 
     mock({ok: true, attachments: [{...inlineAttachment, contentId: "cid:bad"}], hasMore: false});
     assert.equal((await fetchMicrosoftAttachments({mailboxId, providerMessageId, folder: "Inbox"})).ok, false);
+    // Some real Exchange messages mark an image isInline=false despite a
+    // valid CID. The client permits only its inert hint on exact file objects.
     mock({ok: true, attachments: [{...attachment, contentId: "unrelated@message"}], hasMore: false});
+    assert.equal((await fetchMicrosoftAttachments({mailboxId, providerMessageId, folder: "Inbox"})).ok, true);
+    mock({ok: true, attachments: [{...attachment, kind: "reference",
+      contentId: "unrelated@message"}], hasMore: false});
     assert.equal((await fetchMicrosoftAttachments({mailboxId, providerMessageId, folder: "Inbox"})).ok, false);
 
     mock({ok: true, attachments: [{...attachment, contentBytes: "private"}], hasMore: false});

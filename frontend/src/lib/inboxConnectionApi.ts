@@ -5246,7 +5246,7 @@ function trustedMicrosoftAttachment(value: unknown): value is MicrosoftAttachmen
     (a.contentId === undefined || a.contentId === null ||
       (typeof a.contentId === "string" &&
         /^[a-zA-Z0-9_.@+%\-]{1,200}$/.test(a.contentId) &&
-        a.isInline === true && a.kind === "file"))
+        a.kind === "file"))
   );
 }
 

@@ -79,16 +79,21 @@ assert.match(source, /referrerPolicy="no-referrer"/);
 assert.match(source, /Content-Security-Policy/);
 assert.match(source, /default-src 'none'/);
 assert.match(source, /script-src 'none'/);
-assert.match(source, /img-src data:/);
+assert.doesNotMatch(source, /const imgPolicy = remoteImagesAllowed/);
 assert.match(source, /img-src https: data:/);
 assert.match(source, /connect-src 'none'/);
 assert.match(source, /form-action 'none'/);
 assert.match(source, /base-uri 'none'/);
 assert.match(source, /<iframe/);
-assert.match(source, /remoteImageCount > 0/);
-assert.match(source, /Show images/);
+assert.match(source, /sanitizeMicrosoftInertHtmlForStage\(html, true, cidImages\)/);
+assert.match(source, /waitingForCid \? null : sanitizeMicrosoftInertHtmlForStage/);
+assert.match(source, /const imgPolicy = "img-src https: data:;"/);
+assert.match(source, /attachmentsBusy \|\| \(Boolean\(attachments\?\.length\) && !currentCidResult\)/);
+assert.match(source, /Loading inline images/);
+
+assert.doesNotMatch(source, /Show images|Hide images|setShowImages|setShowImages/);
 assert.match(source, /data-microsoft-remote-src/);
-assert.match(source, /srcDoc=\{buildStageDocument\(rendered.html, showImages\)\}/);
+assert.match(source, /srcDoc=\{buildStageDocument\(rendered.html\)\}/);
 assert.doesNotMatch(source, /dangerouslySetInnerHTML|fetch\(|localStorage|sessionStorage|window\.location\.assign/);
 
 // The production reader remains plain text while the exact Graph contract
@@ -102,7 +107,7 @@ assert.match(view, /key=\{mailbox.id \+ ":" \+ folder \+ ":" \+ selectedMessage.
 const api = readFileSync(resolve(process.cwd(), "src/lib/inboxConnectionApi.ts"), "utf8");
 assert.match(api, /isTrustedMicrosoftInertHtmlTransport\(message.bodyHtml\)/);
 
-console.log("Microsoft HTML iframe foundation: isolated sandbox, CSP, consent gate and SSR text fallback PASS");
+console.log("Microsoft HTML iframe foundation: isolated sandbox, HTTPS auto-images, CID owner gate, SSR fallback PASS");
 
 
 // The CID bridge must never dereference raw cid: references, and can only add
@@ -112,6 +117,13 @@ const stageSource = readFileSync(resolve(process.cwd(),
 const mailboxSource = readFileSync(resolve(process.cwd(),
   "src/components/workspace/MicrosoftMailboxReadOnlyView.tsx"), "utf8");
 assert.ok(stageSource.includes('loadMicrosoftInlineCidImages('));
+// Regression for Paulshine-style images >512 KiB: the initial email HTML
+// remains bounded, but inserting verified data:src can enlarge the final
+// string. Cutting it to MAX_HTML corrupts the img element in Chromium.
+assert.ok(stageSource.includes('const renderedHtml = parsed.body.innerHTML'));
+assert.ok(!stageSource.includes('parsed.body.innerHTML.slice(0, MAX_HTML)'));
+assert.ok(stageSource.includes('MAX_MICROSOFT_CID_TOTAL_BYTES'));
+
 assert.ok(stageSource.includes('el.setAttribute("src", dataUrl)'));
 assert.ok(stageSource.includes('Object.prototype.hasOwnProperty.call(cidImages, value)'));
 assert.ok(stageSource.includes('return () => { current = false; }'));

@@ -35,15 +35,25 @@ def _attachment_summary(value: object) -> dict:
     graph_type = value.get("@odata.type")
     if graph_type is not None and type(graph_type) is not str:
         raise MicrosoftGraphError("microsoft_graph_invalid_response")
+    # Graph examples use both '#microsoft.graph.fileAttachment' and the
+    # unprefixed OData type. Keep classification fail-closed for unknown types.
     kind = {
-        "#microsoft.graph.fileAttachment": "file",
-        "#microsoft.graph.itemAttachment": "item",
-        "#microsoft.graph.referenceAttachment": "reference",
-    }.get(graph_type, "other")
-    # CID is only a hint for an exact, authenticated inline file attachment.
-    # Never trust it as a URL or use it to retrieve attachment bytes.
+        "microsoft.graph.fileAttachment": "file",
+        "microsoft.graph.itemAttachment": "item",
+        "microsoft.graph.referenceAttachment": "reference",
+    }.get(graph_type.lstrip("#") if graph_type else None, "other")
+    # A Graph $select projection can omit the concrete @odata.type. A valid
+    # image contentId is an inert hint only; the separate download endpoint
+    # STILL requires an exact authenticated Graph fileAttachment response.
+    if kind == "other" and graph_type is None and content_id:
+        # Metadata $select may omit the type and claim octet-stream. This
+        # only allows an inert CID hint; exact download remains fail-closed
+        # unless the Graph response verifies an actual fileAttachment.
+        kind = "file"
+    # Match only the exact CID from this message. isInline is advisory in
+    # some Exchange-generated messages; the bytes route verifies file type.
     normalized_cid = None
-    if inline and kind == "file" and content_id:
+    if kind == "file" and content_id:
         candidate = content_id[1:-1] if content_id.startswith("<") and content_id.endswith(">") else content_id
         if 1 <= len(candidate) <= 200 and re.fullmatch(r"[a-zA-Z0-9_.@+%\-]+", candidate):
             normalized_cid = candidate
