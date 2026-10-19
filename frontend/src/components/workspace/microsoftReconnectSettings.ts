@@ -40,3 +40,18 @@ export function getPersistedMicrosoftReconnectTarget(
 
   return { id: matches[0].id, email };
 }
+
+
+/**
+ * This is only a *recorded* Microsoft OAuth connection, not a live Graph
+ * health check. The mailboxProviderHealth engine checks Gmail/IMAP only.
+ */
+export function hasRecordedMicrosoftOAuthConnection(mailbox: {
+  provider: string | null;
+  connected: boolean;
+  connectionStatus: string;
+}): boolean {
+  return mailbox.provider === "microsoft" &&
+    mailbox.connected === true &&
+    mailbox.connectionStatus === "connected";
+}

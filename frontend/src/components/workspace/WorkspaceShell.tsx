@@ -22,7 +22,7 @@ import { createPortal, flushSync } from "react-dom";
 import { ServerNotifications, type ServerNotificationsProps } from "./ServerNotifications";
 import { MicrosoftMailboxReadOnlyView } from "./MicrosoftMailboxReadOnlyView";
 import { MicrosoftReconnectConsentButton } from "./MicrosoftReconnectConsentButton";
-import { getPersistedMicrosoftReconnectTarget, type PersistedMicrosoftReconnectTarget } from "./microsoftReconnectSettings";
+import { getPersistedMicrosoftReconnectTarget, hasRecordedMicrosoftOAuthConnection, type PersistedMicrosoftReconnectTarget } from "./microsoftReconnectSettings";
 import { useWorkspaceNotifications } from "../../lib/useWorkspaceNotifications";
 import { notificationScopeKey, type ServerNotification } from "../../lib/notificationsApi";
 import { buildExactNotificationMessageIndex, exactNotificationSourceKey, createNotificationNavigator, type NotificationDisplayRequest, type NotificationNavigationPorts, type ExactNotificationTarget } from "../../lib/notificationNavigation";
@@ -35411,6 +35411,21 @@ function getCredentialAwareManagedInboxStatus(
         connectionStatus: "connection_failed" as const,
       }
     : mailbox;
+
+  // Microsoft has no provider health-check implementation in the Gmail/IMAP
+  // health engine. Do not show a perpetual CHECKING label or pretend that a
+  // stored OAuth link proves fresh Graph connectivity.
+  if (mailbox.provider === "microsoft") {
+    const linked = hasRecordedMicrosoftOAuthConnection(mailbox);
+    return {
+      credentialUnavailable,
+      healthStatus: null,
+      className: linked
+        ? "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-soft)]"
+        : getManagedInboxStatusClassName(displayMailbox),
+      label: linked ? "ACCOUNT LINKED" : getManagedInboxStatusLabel(displayMailbox),
+    };
+  }
 
   const fallbackHealthStatus =
     credentialUnavailable ||

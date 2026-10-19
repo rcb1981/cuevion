@@ -56,6 +56,10 @@ const markup = renderToStaticMarkup(createElement(MicrosoftReconnectConsentButto
 }));
 assert.match(markup, /Reconnect Microsoft/);
 assert.match(markup, /title="Reconnect this Microsoft account/);
+assert.ok(markup.includes("text-[var(--workspace-text)]"),
+  "Reconnect text must use explicit theme-aware foreground color");
+assert.ok(markup.includes("bg-[var(--workspace-card-subtle)]"),
+  "Reconnect background must be theme-aware");
 assert.doesNotMatch(markup, /Remove mailbox|Add mailbox/);
 
 const code = readFileSync(
@@ -87,6 +91,10 @@ assert.match(settingsSource, /<MicrosoftReconnectConsentButton\s+mailboxId=\{mic
 assert.match(settingsSource, /getPersistedMicrosoftReconnectTarget\(\s*savedManagedInboxes,\s*selectedInbox/);
 assert.match(settingsSource, /isExisting && !editable && mailbox\.provider === "microsoft"/,
   "Unsaved or editable Microsoft mailbox drafts must not expose reconnect");
+assert.ok(settingsSource.includes('label: linked ? "ACCOUNT LINKED"'));
+assert.match(settingsSource, /healthStatus: null/,
+  "Microsoft must not show a fabricated or perpetual live-health CHECKING state");
+assert.ok(settingsSource.includes("hasRecordedMicrosoftOAuthConnection(mailbox)"));
 assert.match(settingsSource, /canReconnectGmail && onReconnectAction/,
   "Gmail's existing reconnect action must remain intact");
 assert.match(view, /const MICROSOFT_READ_ONLY_PILOT = true/);

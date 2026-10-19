@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { getPersistedMicrosoftReconnectTarget } from "./microsoftReconnectSettings";
+import { getPersistedMicrosoftReconnectTarget, hasRecordedMicrosoftOAuthConnection } from "./microsoftReconnectSettings";
 
 const saved = [
   { id: "microsoft-0123456789abcdefabcd12345678", provider: "microsoft", email: "owner@example.com" },
@@ -46,4 +46,13 @@ assert.deepEqual(
   { id: microsoft.id, email: microsoft.email },
 );
 
-console.log("Microsoft Settings reconnect selection: exact saved owner mailbox, drafts rejected PASS");
+// A saved OAuth link is a known account state, not an ongoing live Graph test.
+const microsoftLinked = { provider: "microsoft", connected: true, connectionStatus: "connected" };
+assert.equal(hasRecordedMicrosoftOAuthConnection(microsoftLinked), true);
+assert.equal(hasRecordedMicrosoftOAuthConnection({ ...microsoftLinked, connected: false }), false);
+assert.equal(hasRecordedMicrosoftOAuthConnection({ ...microsoftLinked, connectionStatus: "connection_failed" }), false);
+assert.equal(hasRecordedMicrosoftOAuthConnection({ ...microsoftLinked, connectionStatus: "waiting_for_authentication" }), false);
+assert.equal(hasRecordedMicrosoftOAuthConnection({ ...microsoftLinked, provider: "google" }), false);
+assert.equal(hasRecordedMicrosoftOAuthConnection({ ...microsoftLinked, provider: "custom_imap" }), false);
+
+console.log("Microsoft Settings reconnect selection and recorded OAuth label: PASS");

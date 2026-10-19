@@ -93,7 +93,7 @@ export function MicrosoftReconnectConsentButton({
         onClick={() => void reconnect()}
         disabled={busy}
         title="Reconnect this Microsoft account to allow automatic mark-as-read."
-        className="rounded-lg border border-[var(--workspace-border)] px-3 py-2 text-xs font-medium hover:bg-[var(--workspace-hover-surface)] disabled:opacity-50"
+        className="inline-flex h-9 items-center justify-center rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-card-subtle)] px-3.5 text-xs font-medium text-[var(--workspace-text)] transition-colors hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:cursor-wait disabled:opacity-55"
       >
         {busy ? "Opening Microsoft…" : "Reconnect Microsoft"}
       </button>
