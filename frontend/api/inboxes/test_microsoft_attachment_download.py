@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from api.inboxes import microsoft_attachment_download as download
 from api.inboxes import microsoft_graph, microsoft_http, microsoft_mailbox_access
-from api.inboxes.test_microsoft_graph import FakeOpener, TOKEN
+from api.inboxes.test_microsoft_graph import FakeOpener, FakeResponse, TOKEN
 from api.inboxes.test_microsoft_http import _body, _request
 
 BOX = "microsoft-0123456789abcdefabcd12345678"
@@ -27,6 +27,20 @@ def payload(**overrides):
         "isInline": False,
         **overrides,
     }
+
+
+class ThreeStepGraphOpener:
+    """Simulate exact Graph detail -> safe metadata -> raw bytes, no real account."""
+
+    def __init__(self, detail: object, metadata: dict, raw: bytes):
+        self.responses = [detail, metadata, raw]
+        self.calls = []
+
+    def __call__(self, request, *, timeout):
+        self.calls.append((request, timeout))
+        if len(self.calls) > len(self.responses):
+            raise AssertionError("Unexpected Graph request")
+        return FakeResponse(self.responses[len(self.calls) - 1])
 
 
 class GraphDownloadTests(unittest.TestCase):
@@ -58,6 +72,75 @@ class GraphDownloadTests(unittest.TestCase):
                 TOKEN, MESSAGE, ATTACHMENT, folder="Inbox",
                 opener=FakeOpener(payload(**{"@odata.type": "microsoft.graph.itemAttachment"})),
             )
+
+    def test_missing_contentbytes_uses_exact_file_metadata_and_bounded_raw_bytes(self):
+        # Matches the user's 805650-byte PNG metadata, without exposing mail.
+        image = bytes.fromhex("89504e470d0a1a0a") + b"x" * (805650 - 8)
+        self.assertEqual(len(image), 805650)
+        attachment = {
+            "id": ATTACHMENT, "@odata.type": "#microsoft.graph.fileAttachment",
+            "name": "ChatGPT Image Apr 29, 2026, 06_04_40 PM.png",
+            "size": len(image), "contentType": "image/png",
+            "isInline": True, "contentId": "324575DD-BAA1-4FAF-8E9B-0255E8CE94E5",
+        }
+        opener = ThreeStepGraphOpener(
+            payload(**{"contentBytes": None, "size": len(image)}),
+            {"value": [attachment]},
+            image,
+        )
+        result = download.read_microsoft_file_attachment(
+            TOKEN, MESSAGE, ATTACHMENT, folder="Inbox", opener=opener,
+        )
+        self.assertEqual(result["size"], 805650)
+        self.assertEqual(result["fileName"], attachment["name"])
+        self.assertEqual(base64.b64decode(result["base64"]), image)
+        self.assertEqual(len(opener.calls), 3)
+        self.assertIn("/mailFolders/inbox/messages/", opener.calls[0][0].full_url)
+        self.assertIn("/mailFolders/inbox/messages/", opener.calls[1][0].full_url)
+        self.assertTrue(opener.calls[2][0].full_url.endswith("/$value"))
+        self.assertEqual(opener.calls[2][0].get_method(), "GET")
+        self.assertNotIn(TOKEN, opener.calls[2][0].full_url)
+        self.assertEqual(opener.calls[2][0].get_header("Authorization"), "Bearer " + TOKEN)
+
+    def test_corrupted_detail_json_falls_back_only_to_verified_file(self):
+        opener = ThreeStepGraphOpener(
+            b"{corrupt-non-json", {"value": [{
+                "id": ATTACHMENT, "@odata.type": "#microsoft.graph.fileAttachment",
+                "name": "image.png", "size": len(CONTENT),
+                "contentType": "image/png", "isInline": True, "contentId": "x@y",
+            }]}, CONTENT,
+        )
+        recovered = download.read_microsoft_file_attachment(
+            TOKEN, MESSAGE, ATTACHMENT, folder="Inbox", opener=opener,
+        )
+        self.assertEqual(base64.b64decode(recovered["base64"]), CONTENT)
+
+    def test_raw_fallback_rejects_item_reference_wrong_id_size_and_oversized_data(self):
+        known = {
+            "id": ATTACHMENT, "@odata.type": "#microsoft.graph.fileAttachment",
+            "name": "image.png", "size": len(CONTENT),
+            "contentType": "image/png", "isInline": True, "contentId": "x@y",
+        }
+        for change in (
+            {"@odata.type": "#microsoft.graph.itemAttachment"},
+            {"@odata.type": "#microsoft.graph.referenceAttachment"},
+            {"id": "different"},
+            {"size": len(CONTENT) + 1},
+            {"size": download.MAX_FILE_BYTES + 1},
+        ):
+            with self.subTest(change=change):
+                opener = ThreeStepGraphOpener(
+                    payload(contentBytes=None),
+                    {"value": [{**known, **change}]}, CONTENT,
+                )
+                with self.assertRaises(microsoft_graph.MicrosoftGraphError):
+                    download.read_microsoft_file_attachment(
+                        TOKEN, MESSAGE, ATTACHMENT, folder="Inbox", opener=opener,
+                    )
+                if change.get("@odata.type") or change.get("id") or change.get("size") == download.MAX_FILE_BYTES + 1:
+                    self.assertEqual(len(opener.calls), 2)  # no raw fetch
+                else:
+                    self.assertEqual(len(opener.calls), 3)  # length mismatch
 
     def test_sent_download_is_folder_scoped(self):
         opener = FakeOpener(payload())

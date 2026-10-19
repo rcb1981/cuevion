@@ -112,3 +112,30 @@ Working agreement — 2026-10-19
   oversized or invalid CID attachment can still fail closed. Auto-loading
   remote images can expose that an email has been opened to remote hosts.
 - No Gmail/IMAP edits, GitHub feature pushes, Previews, or Production deploy.
+
+
+## 2026-10-19 actual Microsoft attachment download rejection (LOCAL ONLY)
+
+- The Outlook test account returned exact inline attachment metadata for
+  Paulshine's PNG (contentId present, image/png, isInline true, 805650 bytes),
+  but the separate download-microsoft-attachment endpoint returned
+  microsoft_graph_invalid_response. The precise rejected Graph field has not
+  been observed: **do not claim contentBytes was certainly missing**.
+- The previous download endpoint depended entirely on the JSON attachment
+  object including matching id, correct type, size and canonical contentBytes.
+  Microsoft Graph also documents authenticated /$value for the raw contents
+  of a file attached to a message. This read-only local patch retries via that
+  endpoint only after invalid Graph JSON/record, first revalidating the
+  attachment as one exact file in the selected authenticated folder/message's
+  bounded Graph attachment listing. File byte size must equal the verified
+  metadata size and be at most 2 MiB; tokens, raw response, IDs and URLs never
+  enter client error messages or logs. No arbitrary URL or redirect permitted.
+- New synthetic test covers the same 805650-byte metadata, invalid/missing
+  contentBytes and raw /$value recovery; negative tests reject wrong IDs,
+  item/reference attachments, oversize and length mismatch.
+- Server logs now include only fixed low-cardinality failure stages:
+  download_metadata, download_file_type, download_raw_size or download_other.
+  No user-supplied text, message or attachment identifiers are logged.
+- **Not yet verified:** raw /$value fallback on the user's actual Paulshine
+  message, and exact failure reason behind the original 502. No deployment or
+  GitHub push without explicit approval.

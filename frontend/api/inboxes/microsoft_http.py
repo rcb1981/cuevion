@@ -395,6 +395,15 @@ def microsoft_inbox_response(request, *, mode: str):
         if error.code == "microsoft_reconnect_required":
             return _error(409, "microsoft_reconnect_required")
         if error.code == "microsoft_graph_invalid_response":
+            if mode == "download":
+                # Only static failure categories, never owner, message ID,
+                # Graph path, token, subject, attachment name or bytes.
+                stage = getattr(error, "safe_stage", None)
+                if stage not in {
+                    "download_metadata", "download_file_type", "download_raw_size",
+                }:
+                    stage = "download_other"
+                print("microsoft_attachment_invalid_response_stage=" + stage, flush=True)
             if mode == "list":
                 stage = getattr(error, "safe_stage", None)
                 if stage not in {"transport", "collection", "message", "pagination"}:
