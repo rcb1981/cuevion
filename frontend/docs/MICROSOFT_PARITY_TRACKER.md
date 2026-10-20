@@ -381,3 +381,10 @@ behavior. Correct in the existing shared MailboxView:
 - No new Graph writes, permissions, or mailbox mutations were enabled. Compose/reply/forward/delete/archive/move remain disabled in Production. Collaboration, full thread grouping, comprehensive priority intelligence and background sync still require dedicated implementation.
 - Focused Microsoft and Gmail/IMAP source/regression tests passed. Frontend TypeScript/Vite builds passed. Full npm test baseline still fails on pre-existing Gmail ownership DTO expectation (Europe/Amsterdam timezone); the UTC reply-quote expectation also remains timezone-sensitive.
 - Real Microsoft-browser acceptance is required after a separately approved production deployment.
+
+## 2026-10-20 — compact cross-provider Learning menu (local only)
+- Microsoft Learning adopts Gmail/IMAP's compact 244 px direct-action menu: Mark as important, Mark as not important, expandable Change label..., Keep in inbox and Move to spam. Existing Microsoft category and priority rules remain saved under the authenticated workspace-user-mailbox key. Current priority/label may show a checkmark.
+- No new Microsoft Graph writes were enabled: Move to spam is shown but disabled with an explicit reason, unlike its available Gmail/IMAP counterpart. This is *visual and supported-action parity*, not full functional provider parity.
+- Microsoft security notification sender domain safeguards prevent outdated Show Less preferences from hiding account-security mail.
+- This menu no longer exposes a new Show Less selection. Previously saved Show Less rules still apply; full cross-provider Show Less flow requires a follow-up design/behavior decision.
+- Local frontend build and focused Learning/Filtered/Microsoft/Gmail/IMAP contracts passed. A live Microsoft browser acceptance check remains pending after a separately approved deploy.

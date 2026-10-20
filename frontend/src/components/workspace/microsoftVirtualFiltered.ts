@@ -87,7 +87,12 @@ export function isMicrosoftFilteredProtectionActive(
     message.final_visibility === "show_priority" ||
     message.internalClassification === "reply" ||
     message.v7_final_priority?.trim().toUpperCase() === "PRIORITY" ||
-    message.categoryConfidence === "low"
+    message.categoryConfidence === "low" ||
+    // Account security notifications must not disappear through an unsafe
+    // learned sender preference or a stale Filtered rule.
+    /^(?:accountprotection\.microsoft\.com|accounts\.google\.com|account\.microsoft\.com)$/.test(
+      normalizeSenderLearningKey(message.from).split("@")[1] ?? "",
+    )
   );
 }
 

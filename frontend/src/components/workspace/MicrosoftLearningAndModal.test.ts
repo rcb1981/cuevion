@@ -20,7 +20,17 @@ const markup = renderToStaticMarkup(React.createElement(MicrosoftLearningControl
   onSave: () => true,
 }));
 assert.match(markup, /Learning/);
-assert.match(markup, /aria-haspopup="dialog"/);
+assert.match(markup, /aria-haspopup="menu"/);
+const menuSource = readFileSync(resolve(process.cwd(), "src/components/workspace/MicrosoftLearningControls.tsx"), "utf8");
+for (const action of ["Mark as important", "Mark as not important", "Change label...", "Keep in inbox", "Move to spam"]) {
+  assert.ok(menuSource.includes(action), "Shared Learning action missing: " + action);
+}
+assert.match(menuSource, /role="menu"/);
+assert.match(menuSource, /showLabels &&/);
+assert.match(menuSource, /if \(onSave\(next\)\)/);
+assert.match(menuSource, /type="button" role="menuitem" disabled/);
+assert.doesNotMatch(menuSource, /Save Learning|input type="radio"|<select/);
+
 assert.doesNotMatch(markup, /Show less from this sender/);
 const disabledMarkup = renderToStaticMarkup(React.createElement(MicrosoftLearningControls, {
   from: "invalid", disabled: false, canShowLess: true, onSave: () => true,
@@ -34,6 +44,13 @@ const showLess = { "paul@example.com": { priority: "show_less" as const, label: 
 assert.equal(classifyMicrosoftFilteredMessage(item, {}, {}, showLess), "Filtered");
 assert.equal(microsoftVisibleFolderRows([item], "Filtered", {}, {}, true, showLess).length, 1);
 assert.equal(classifyMicrosoftFilteredMessage({ ...item, signal: "Priority" }, {}, {}, showLess), "Inbox");
+const securityMessage = { ...item, from: "Microsoft <noreply@accountprotection.microsoft.com>" };
+assert.equal(classifyMicrosoftFilteredMessage(securityMessage, {}, {},
+  { "noreply@accountprotection.microsoft.com": "show_less" }), "Inbox");
+assert.equal(classifyMicrosoftFilteredMessage(securityMessage, {}, {},
+  { "noreply@accountprotection.microsoft.com": "show_less" },
+  { "noreply@accountprotection.microsoft.com": { priority: "show_less", label: "Update" } }), "Inbox");
+
 assert.equal(classifyMicrosoftFilteredMessage(item, {}, { "paul@example.com": "show_less" },
   { "paul@example.com": { priority: "important", label: "Demo" } }), "Inbox");
 
