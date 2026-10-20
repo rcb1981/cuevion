@@ -1,5 +1,6 @@
 import React from "react";
 import type { LiveInboxMessageSnapshot } from "../../lib/inboxConnectionApi";
+import type { MicrosoftLearningRule } from "./microsoftLearningRules";
 
 type MicrosoftMessageListRowProps = {
   message: LiveInboxMessageSnapshot;
@@ -8,6 +9,9 @@ type MicrosoftMessageListRowProps = {
   disabled: boolean;
   dateLabel: string;
   onOpenMessage: (providerMessageId: string) => void;
+  onOpenFullMessage?: (providerMessageId: string) => void;
+  onOpenContextMenu?: (providerMessageId: string, x: number, y: number) => void;
+  learningRule?: MicrosoftLearningRule;
 };
 
 /**
@@ -21,6 +25,9 @@ export function MicrosoftMessageListRow({
   disabled,
   dateLabel,
   onOpenMessage,
+  onOpenFullMessage,
+  onOpenContextMenu,
+  learningRule,
 }: MicrosoftMessageListRowProps) {
   const id = message.providerMessageId;
   if (!id) {
@@ -37,6 +44,12 @@ export function MicrosoftMessageListRow({
       data-read-state={readState}
       disabled={disabled}
       onClick={() => onOpenMessage(id)}
+      onDoubleClick={() => onOpenFullMessage?.(id)}
+      onContextMenu={(event) => {
+        if (!onOpenContextMenu) return;
+        event.preventDefault();
+        onOpenContextMenu(id, event.clientX, event.clientY);
+      }}
       className={
         "block w-full border-b border-l-[3px] border-b-[var(--workspace-border-soft)] px-4 py-4 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--workspace-provider-selected-border)] disabled:opacity-60 " +
         (selected
@@ -95,6 +108,12 @@ export function MicrosoftMessageListRow({
           <p className="mt-1 truncate text-xs text-[var(--workspace-text-muted)]">
             {message.snippet || "No preview available"}
           </p>
+          {learningRule && (
+            <span className="mt-1 block text-[0.67rem] text-[var(--workspace-text-muted)]">
+              {learningRule.priority === "important" ? "IMPORTANT" :
+                learningRule.priority === "show_less" ? "SHOW LESS" : "NORMAL"} · {learningRule.label}
+            </span>
+          )}
           {message.hasAttachments === true && (
             <span aria-label="Has attachments" className="mt-1 inline-flex text-[0.68rem] text-[var(--workspace-text-muted)]">
               Attachment

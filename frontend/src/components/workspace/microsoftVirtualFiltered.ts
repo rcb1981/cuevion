@@ -1,4 +1,5 @@
 import type { LiveInboxMessageSnapshot } from "../../lib/inboxConnectionApi";
+import type { MicrosoftLearningRuleStore } from "./microsoftLearningRules";
 import {
   normalizeSenderLearningKey,
   resolveSenderLearningEntry,
@@ -94,12 +95,16 @@ export function classifyMicrosoftFilteredMessage(
   message: LiveInboxMessageSnapshot,
   learned: SenderCategoryLearningStore,
   placements: MicrosoftSenderPlacementStore,
+  rules: MicrosoftLearningRuleStore = {},
 ): "Inbox" | "Filtered" {
   // Fail-open: an unclear or protected item always stays in the visible Inbox.
   if (isMicrosoftFilteredProtectionActive(message)) return "Inbox";
 
   const sender = normalizeSenderLearningKey(message.from);
   if (!EMAIL_PATTERN.test(sender)) return "Inbox";
+  const rule = rules[sender];
+  if (rule?.priority === "important" || rule?.priority === "normal") return "Inbox";
+  if (rule?.priority === "show_less") return "Filtered";
   const explicit = placements[sender];
   if (explicit === "keep") return "Inbox";
   if (explicit === "show_less") return "Filtered";
@@ -136,10 +141,11 @@ export function microsoftVisibleFolderRows(
   learned: SenderCategoryLearningStore,
   placements: MicrosoftSenderPlacementStore,
   ready: boolean,
+  rules: MicrosoftLearningRuleStore = {},
 ): LiveInboxMessageSnapshot[] {
   if (folder !== "Inbox" && folder !== "Filtered") return [...rows];
   if (!ready) return folder === "Filtered" ? [] : [...rows];
   return rows.filter((message) =>
-    classifyMicrosoftFilteredMessage(message, learned, placements) === folder
+    classifyMicrosoftFilteredMessage(message, learned, placements, rules) === folder
   );
 }

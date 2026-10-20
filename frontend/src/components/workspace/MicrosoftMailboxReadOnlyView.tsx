@@ -28,6 +28,7 @@ import { applyConfirmedMicrosoftUnread, isMicrosoftInboxProjection, shouldAutoMa
 import { MicrosoftComposePanel } from "./MicrosoftComposePanel";
 import { MicrosoftComposeDesignPreview } from "./MicrosoftComposeDesignPreview";
 import { MicrosoftMessageListRow } from "./MicrosoftMessageListRow";
+import { MicrosoftFullMessageModal } from "./MicrosoftFullMessageModal";
 import { MicrosoftPlannedMessageActions } from "./MicrosoftPlannedMessageActions";
 import { MicrosoftMailboxFolderRail } from "./MicrosoftMailboxFolderRail";
 import { MicrosoftMessageListControls } from "./MicrosoftMessageListControls";
@@ -39,7 +40,10 @@ import {
   isMicrosoftFilteredProtectionActive,
 } from "./microsoftVirtualFiltered";
 import { useMicrosoftFilteredLearning } from "./useMicrosoftFilteredLearning";
-import { MicrosoftFilteredSenderAction } from "./MicrosoftFilteredSenderAction";
+import { MicrosoftLearningControls } from "./MicrosoftLearningControls";
+import { normalizeSenderLearningKey } from "../../lib/learningEngine";
+import { isMicrosoftPriorityMessage } from "./microsoftLearningRules";
+import type { MicrosoftLearningRule } from "./microsoftLearningRules";
 
 // UI convenience only. Real production write prevention is enforced before
 // any Graph mutation at the server boundary in microsoft_production_pilot.py.
@@ -122,6 +126,9 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const [mutationConfirmation, setMutationConfirmation] = useState<string | null>(null);
   const [rows, setRows] = useState<LiveInboxMessageSnapshot[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [fullMessageTargetId, setFullMessageTargetId] = useState<string | null>(null);
+  const [learningRequestId, setLearningRequestId] = useState<string | null>(null);
+  const [rowContext, setRowContext] = useState<{ id: string; x: number; y: number } | null>(null);
   const [selectedMessage, setSelectedMessage] = useState<LiveInboxMessageSnapshot | null>(null);
   const [listBusy, setListBusy] = useState(false);
   const [messageBusy, setMessageBusy] = useState(false);
@@ -137,27 +144,51 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [unreadOnly, setUnreadOnly] = useState(false);
+  const [priorityOnly, setPriorityOnly] = useState(false);
   const [sortOrder, setSortOrder] = useState<MicrosoftMessageSortOrder>("newest");
   const [placementNotice, setPlacementNotice] = useState<string | null>(null);
-  useEffect(() => { setComposeDesignPreviewOpen(false); }, [mailbox.id, connected]);
+  useEffect(() => {
+    setComposeDesignPreviewOpen(false);
+    setFullMessageTargetId(null);
+    setLearningRequestId(null);
+    setRowContext(null);
+  }, [mailbox.id, connected, folder, page]);
   const microsoftFiltering = useMicrosoftFilteredLearning(mailbox.id, connected);
   const folderRows = useMemo(
     () => microsoftVisibleFolderRows(
       rows, folder, microsoftFiltering.learned, microsoftFiltering.placements,
-      microsoftFiltering.ready,
+      microsoftFiltering.ready, microsoftFiltering.rules,
     ),
-    [rows, folder, microsoftFiltering.learned, microsoftFiltering.placements, microsoftFiltering.ready],
+    [rows, folder, microsoftFiltering.learned, microsoftFiltering.placements, microsoftFiltering.ready, microsoftFiltering.rules],
   );
   const visibleRows = useMemo(
-    () => filterMicrosoftLoadedMessages(folderRows, {
-      folder,
-      search: searchQuery,
-      unreadOnly,
-      sortOrder,
-    }),
-    [folderRows, folder, searchQuery, unreadOnly, sortOrder],
+    () => filterMicrosoftLoadedMessages(
+      priorityOnly
+        ? folderRows.filter((row) => isMicrosoftPriorityMessage(row, microsoftFiltering.rules))
+        : folderRows,
+      { folder, search: searchQuery, unreadOnly, sortOrder },
+    ),
+    [folderRows, folder, searchQuery, unreadOnly, sortOrder, priorityOnly, microsoftFiltering.rules],
   );
-  const hasActiveListFilter = Boolean(searchQuery.trim()) || ((folder === "Inbox" || folder === "Filtered" || folder === "Archive" || folder === "Deleted" || folder === "Junk") && unreadOnly);
+  const hasActiveListFilter = priorityOnly || Boolean(searchQuery.trim()) || ((folder === "Inbox" || folder === "Filtered" || folder === "Archive" || folder === "Deleted" || folder === "Junk") && unreadOnly);
+
+  useEffect(() => {
+    if (!rowContext) return;
+    const close = (event: PointerEvent) => {
+      if (event.target instanceof Element &&
+          event.target.closest('[aria-label="Microsoft message context menu"]')) return;
+      setRowContext(null);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setRowContext(null);
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [rowContext]);
 
   const refresh = useCallback(async () => {
     if (!connected || mutationInFlight.current || composer !== null) {
@@ -562,6 +593,38 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     }
   }, [connected, mailbox.id, rows, composer]);
 
+  const saveSenderLearning = useCallback((rule: MicrosoftLearningRule) => {
+    const activeFolder = folderRef.current;
+    const message = selectedMessage;
+    if (!connected || !microsoftFiltering.ready || mutationBusy ||
+        !message?.providerMessageId || selectedIdRef.current !== message.providerMessageId ||
+        (activeFolder !== "Inbox" && activeFolder !== "Filtered") ||
+        (rule.priority === "show_less" && isMicrosoftFilteredProtectionActive(message))) return false;
+    if (!microsoftFiltering.saveRule(message.from, rule)) return false;
+    const rerouted = (activeFolder === "Inbox" && rule.priority === "show_less") ||
+      (activeFolder === "Filtered" && rule.priority !== "show_less");
+    if (rerouted) {
+      selectedIdRef.current = null;
+      messageTicket.current += 1;
+      attachmentTicket.current += 1;
+      attachmentDownloadTicket.current += 1;
+      setSelectedId(null);
+      setSelectedMessage(null);
+      setFullMessageTargetId(null);
+      setAttachmentRows([]);
+      setAttachmentBusy(false);
+      setAttachmentError(null);
+      setAttachmentDownloadBusy(null);
+      setAttachmentDownloadError(null);
+    }
+    setPlacementNotice(
+      "Learning saved for this Microsoft mailbox." +
+      (rerouted ? " The sender appears under " +
+        (rule.priority === "show_less" ? "Filtered." : "Inbox.") : ""),
+    );
+    return true;
+  }, [connected, microsoftFiltering, mutationBusy, selectedMessage]);
+
   const changeSenderPlacement = useCallback((placement: "show_less" | "keep") => {
     const activeFolder = folderRef.current;
     const message = selectedMessage;
@@ -881,6 +944,8 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                 onSearchChange={setSearchQuery}
                 unreadOnly={unreadOnly}
                 onUnreadOnlyChange={setUnreadOnly}
+                priorityOnly={priorityOnly}
+                onPriorityOnlyChange={setPriorityOnly}
                 canFilterUnread={folder !== "Sent" && folder !== "Drafts"}
                 sortOrder={sortOrder}
                 onSortChange={setSortOrder}
@@ -934,9 +999,25 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                   message={message}
                   folder={folder}
                   selected={selectedId === message.providerMessageId}
+                  learningRule={microsoftFiltering.rules[normalizeSenderLearningKey(message.from)]}
                   disabled={mutationBusy}
                   dateLabel={readableTime(message.createdAt)}
-                  onOpenMessage={(providerMessageId) => void openMessage(providerMessageId)}
+                  onOpenMessage={(providerMessageId) => {
+                    setFullMessageTargetId(null);
+                    setLearningRequestId(null);
+                    void openMessage(providerMessageId);
+                  }}
+                  onOpenContextMenu={(providerMessageId, x, y) => {
+                    setRowContext({
+                      id: providerMessageId,
+                      x: Math.max(8, Math.min(x, window.innerWidth - 232)),
+                      y: Math.max(8, Math.min(y, window.innerHeight - 150)),
+                    });
+                  }}
+                  onOpenFullMessage={(providerMessageId) => {
+                    setFullMessageTargetId(providerMessageId);
+                    if (selectedIdRef.current !== providerMessageId) void openMessage(providerMessageId);
+                  }}
                 />
               ))}
               <nav aria-label={"Microsoft " + folder + " pages"} className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--workspace-border-soft)] p-3">
@@ -974,7 +1055,20 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
             {selectedId && messageError && <div role="alert" className="rounded-xl border border-[var(--workspace-border)] p-4 text-sm">{messageError}</div>}
             {selectedId && selectedMessage && !messageBusy && (
               <article className="max-w-3xl">
-                <h2 className="text-xl font-semibold">{selectedMessage.subject || "(No subject)"}</h2>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <h2 className="min-w-0 flex-1 text-xl font-semibold">{selectedMessage.subject || "(No subject)"}</h2>
+                  {(folder === "Inbox" || folder === "Filtered") && (
+                    <MicrosoftLearningControls
+                      key={selectedMessage.providerMessageId}
+                      from={selectedMessage.from}
+                      rule={microsoftFiltering.rules[normalizeSenderLearningKey(selectedMessage.from)]}
+                      disabled={!microsoftFiltering.ready || mutationBusy}
+                      canShowLess={!isMicrosoftFilteredProtectionActive(selectedMessage)}
+                      onSave={saveSenderLearning}
+                      openOnRequest={learningRequestId === selectedMessage.providerMessageId}
+                    />
+                  )}
+                </div>
                 <div className="mt-4 border-b border-[var(--workspace-border-soft)] pb-4 text-sm">
                   <p className="font-medium">
                     {folder === "Sent" || folder === "Drafts"
@@ -992,17 +1086,6 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                     {folder === "Deleted" ? "Last changed: " : ""}{readableTime(selectedMessage.createdAt)}
                   </p>
                 </div>
-                {(folder === "Inbox" || folder === "Filtered") && (
-                  <MicrosoftFilteredSenderAction
-                    folder={folder}
-                    disabled={
-                      !microsoftFiltering.ready || mutationBusy ||
-                      !selectedMessage.providerMessageId ||
-                      (folder === "Inbox" && isMicrosoftFilteredProtectionActive(selectedMessage))
-                    }
-                    onChange={changeSenderPlacement}
-                  />
-                )}
                 {isMicrosoftInboxProjection(folder) && (
                   <>
                 <div className="mt-4 flex flex-wrap items-center gap-3">
@@ -1146,6 +1229,51 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           </div>
         </div>
       )}
+      {connected && rowContext && (
+        <div role="menu" aria-label="Microsoft message context menu"
+          className="fixed z-[330] min-w-[205px] rounded-[14px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-1.5 shadow-[0_16px_36px_rgba(20,18,16,0.28)]"
+          style={{ left: rowContext.x, top: rowContext.y }}>
+          {([
+            { label: "Open message", mode: "open" },
+            { label: "Open full message", mode: "full" },
+            { label: "Learning", mode: "learning" },
+          ] as const).map((option) => (
+            <button key={option.mode} role="menuitem" type="button"
+              className="block w-full rounded-lg px-3 py-2 text-left text-xs text-[var(--workspace-text)] hover:bg-[var(--workspace-hover-surface)]"
+              onClick={() => {
+                const targetId = rowContext.id;
+                setRowContext(null);
+                if (option.mode === "full") {
+                  setFullMessageTargetId(targetId);
+                } else if (option.mode === "learning") {
+                  setLearningRequestId(targetId);
+                  setFullMessageTargetId(null);
+                } else {
+                  setFullMessageTargetId(null);
+                  setLearningRequestId(null);
+                }
+                if (selectedIdRef.current !== targetId) void openMessage(targetId);
+              }}>
+              {option.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {connected && fullMessageTargetId && selectedId === fullMessageTargetId &&
+        selectedMessage?.providerMessageId === fullMessageTargetId && !messageBusy && (
+          <MicrosoftFullMessageModal
+            message={selectedMessage}
+            mailboxId={mailbox.id}
+            folder={folder}
+            attachments={attachmentRows}
+            attachmentsBusy={attachmentBusy}
+            learningRule={microsoftFiltering.rules[normalizeSenderLearningKey(selectedMessage.from)]}
+            learningDisabled={!microsoftFiltering.ready || mutationBusy}
+            canShowLess={!isMicrosoftFilteredProtectionActive(selectedMessage)}
+            onSaveLearning={saveSenderLearning}
+            onClose={() => setFullMessageTargetId(null)}
+          />
+        )}
       {MICROSOFT_READ_ONLY_PILOT && connected && composeDesignPreviewOpen && (
         <MicrosoftComposeDesignPreview
           mailboxEmail={mailbox.email}

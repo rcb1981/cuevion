@@ -12,6 +12,8 @@ export function MicrosoftMessageListControls({
   onSearchChange,
   unreadOnly,
   onUnreadOnlyChange,
+  priorityOnly = false,
+  onPriorityOnlyChange = () => {},
   canFilterUnread,
   sortOrder,
   onSortChange,
@@ -25,6 +27,8 @@ export function MicrosoftMessageListControls({
   onSearchChange: (value: string) => void;
   unreadOnly: boolean;
   onUnreadOnlyChange: (value: boolean) => void;
+  priorityOnly?: boolean;
+  onPriorityOnlyChange?: (value: boolean) => void;
   canFilterUnread: boolean;
   sortOrder: MicrosoftMessageSortOrder;
   onSortChange: (value: MicrosoftMessageSortOrder) => void;
@@ -76,8 +80,8 @@ export function MicrosoftMessageListControls({
         <div className="flex shrink-0 flex-wrap items-center gap-1.5" role="group" aria-label="Filter loaded messages">
           <button
             type="button"
-            aria-pressed={!unreadOnly}
-            onClick={() => onUnreadOnlyChange(false)}
+            aria-pressed={!unreadOnly && !priorityOnly}
+            onClick={() => { onUnreadOnlyChange(false); onPriorityOnlyChange(false); }}
             className={pillBase + " " + (!unreadOnly ? selectedPill : unselectedPill)}
           >
             All
@@ -86,7 +90,7 @@ export function MicrosoftMessageListControls({
             type="button"
             disabled={!canFilterUnread}
             aria-pressed={canFilterUnread && unreadOnly}
-            onClick={() => onUnreadOnlyChange(true)}
+            onClick={() => { onUnreadOnlyChange(true); onPriorityOnlyChange(false); }}
             title={canFilterUnread ? "Show unread messages on this loaded page" : "Unread filtering is not available in this folder"}
             className={pillBase + " " + (canFilterUnread && unreadOnly ? selectedPill : unselectedPill) + " disabled:cursor-not-allowed disabled:opacity-45"}
           >
@@ -94,10 +98,10 @@ export function MicrosoftMessageListControls({
           </button>
           <button
             type="button"
-            disabled
-            aria-pressed={false}
-            title="Priority filtering for Microsoft is not available yet"
-            className={pillBase + " " + unselectedPill + " cursor-not-allowed opacity-55"}
+            aria-pressed={priorityOnly}
+            title="Show confirmed important messages on this loaded page"
+            onClick={() => { onPriorityOnlyChange(!priorityOnly); onUnreadOnlyChange(false); }}
+            className={pillBase + " " + (priorityOnly ? selectedPill : unselectedPill)}
           >
             Priority
           </button>
@@ -142,7 +146,7 @@ export function MicrosoftMessageListControls({
         </div>
       </div>
       <span className="sr-only">
-        Search, All, Unread and sorting affect only this loaded page. Priority is not implemented for Microsoft.
+        Search, All, Unread, Priority and sorting affect only this loaded page. Priority includes learned important senders and confirmed message signals.
       </span>
     </div>
   );

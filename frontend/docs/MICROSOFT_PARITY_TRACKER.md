@@ -372,3 +372,12 @@ behavior. Correct in the existing shared MailboxView:
 - Gmail/IMAP full-message modal defaults become narrower (max 850 px, width 56vw) and shorter (62dvh), retaining keyboard and pointer resize.
 - Build and focused Microsoft/Gmail/IMAP contracts passed locally. Full npm test baseline has two pre-existing failures in different environments: replyQuote timezone sensitivity (UTC) and gmailOwnership extra knownBodyProviderMessageIds field (Europe/Amsterdam).
 - **Pending after deployment:** real-browser acceptance of Microsoft visuals, CID PNG test mail, previously blank HTML newsletter, and subsequent functional Microsoft parity rollout (Collaboration, threads, pop-up, Graph writes).
+
+## 2026-10-20 — Microsoft functional parity increment (local, not yet deployed)
+- Real Microsoft sender Learning replaces the ad hoc Show Less button in Inbox/Filtered. Menu offers Important / Normal / Show Less and Demo, Promo, Business, Finance, Update, Reply, Other categories. Saving persists only within authenticated workspace-user-mailbox scope; the Gmail/IMAP learning store is not mutated by these new actions.
+- Priority filter is now live for loaded Microsoft rows, based on explicit Important sender rules and available trusted message-priority fields; it does not claim provider-wide Priority analysis or full Gmail/IMAP classifier parity.
+- Learning routing preserves protected/uncertain messages. When learning changes the current folder partition, stale selected-message and attachment requests are revoked, with informative feedback.
+- Microsoft now supports double-click to open a modal for the exact selected message, retaining scriptless HTML, image consent and CID metadata. A non-mutating right-click menu opens messages, the full-message modal, or Learning.
+- No new Graph writes, permissions, or mailbox mutations were enabled. Compose/reply/forward/delete/archive/move remain disabled in Production. Collaboration, full thread grouping, comprehensive priority intelligence and background sync still require dedicated implementation.
+- Focused Microsoft and Gmail/IMAP source/regression tests passed. Frontend TypeScript/Vite builds passed. Full npm test baseline still fails on pre-existing Gmail ownership DTO expectation (Europe/Amsterdam timezone); the UTC reply-quote expectation also remains timezone-sensitive.
+- Real Microsoft-browser acceptance is required after a separately approved production deployment.

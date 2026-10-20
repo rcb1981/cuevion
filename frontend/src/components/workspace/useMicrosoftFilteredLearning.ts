@@ -1,4 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
+import {
+  microsoftLearningRulesStorageKey,
+  parseMicrosoftLearningRules,
+  saveMicrosoftLearningRule,
+  type MicrosoftLearningRule,
+  type MicrosoftLearningRuleStore,
+} from "./microsoftLearningRules";
 import { loadStartupSession } from "../../lib/authApi";
 import {
   buildLearningStorageKey,
@@ -20,9 +27,11 @@ type ScopedMicrosoftLearning = {
   learningKey: string;
   learned: SenderCategoryLearningStore;
   placements: MicrosoftSenderPlacementStore;
+  rules: MicrosoftLearningRuleStore;
 };
 const EMPTY_LEARNING: SenderCategoryLearningStore = {};
 const EMPTY_PLACEMENTS: MicrosoftSenderPlacementStore = {};
+const EMPTY_RULES: MicrosoftLearningRuleStore = {};
 
 /**
  * Read existing Cuevion sender learning WITHOUT changing Gmail/IMAP.
@@ -69,7 +78,8 @@ export function useMicrosoftFilteredLearning(mailboxId: string, connected: boole
             learningKey,
           );
           const placements = parseMicrosoftSenderPlacements(storage.getItem(key));
-          setScoped({ mailboxId, storageKey: key, learningKey, learned, placements });
+          const rules = parseMicrosoftLearningRules(storage.getItem(key + ":learning-v1"));
+          setScoped({ mailboxId, storageKey: key, learningKey, learned, placements, rules });
           setError(null);
         } catch {
           setScoped(null);
@@ -78,7 +88,8 @@ export function useMicrosoftFilteredLearning(mailboxId: string, connected: boole
       };
       reload();
       const onStorage = (event: StorageEvent) => {
-        if (event.key === null || event.key === key || event.key === learningKey) reload();
+        if (event.key === null || event.key === key || event.key === learningKey ||
+            event.key === microsoftLearningRulesStorageKey(key)) reload();
       };
       const onFocus = () => reload();
       window.addEventListener("storage", onStorage);
@@ -121,7 +132,28 @@ export function useMicrosoftFilteredLearning(mailboxId: string, connected: boole
     }
   }, [current]);
 
+  const saveRule = useCallback((sender: string, rule: MicrosoftLearningRule): boolean => {
+    if (!current) return false;
+    const next = saveMicrosoftLearningRule(current.rules, sender, rule);
+    const key = microsoftLearningRulesStorageKey(current.storageKey);
+    if (!next || !key) {
+      setError("This sender cannot be saved to Microsoft Learning.");
+      return false;
+    }
+    try {
+      window.localStorage.setItem(key, JSON.stringify(next));
+      setScoped({ ...current, rules: next });
+      setError(null);
+      return true;
+    } catch {
+      setError("The Microsoft Learning rule could not be saved.");
+      return false;
+    }
+  }, [current]);
+
   return {
+    rules: current?.rules ?? EMPTY_RULES,
+    saveRule,
     ready: Boolean(current),
     learned: current?.learned ?? EMPTY_LEARNING,
     placements: current?.placements ?? EMPTY_PLACEMENTS,

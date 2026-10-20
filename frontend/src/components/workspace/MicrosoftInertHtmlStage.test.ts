@@ -124,7 +124,7 @@ assert.ok(stageSource.includes('loadMicrosoftInlineCidImages('));
 // string. Cutting it to MAX_HTML corrupts the img element in Chromium.
 assert.ok(stageSource.includes('const renderedHtml = parsed.body.innerHTML'));
 assert.ok(stageSource.includes('restoreMicrosoftEmailTextContrast(parsed.body)'));
-assert.ok(stageSource.includes('if (!hasText && !hasImages)'));
+assert.ok(stageSource.includes('if (!hasText && !hasImages && remoteImageCount === 0)'));
 assert.ok(stageSource.includes('Loading inline images'));
 
 assert.ok(!stageSource.includes('parsed.body.innerHTML.slice(0, MAX_HTML)'));

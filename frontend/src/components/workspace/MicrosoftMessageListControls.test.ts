@@ -30,8 +30,8 @@ assert.match(html, /Search loaded Microsoft messages/);
 assert.match(html, /aria-label="Filter loaded messages"/);
 assert.match(html, /aria-pressed="true"[^>]*>All<\/button>/);
 assert.match(html, /aria-pressed="false"[^>]*>Unread<\/button>/);
-assert.match(html, /disabled=""[^>]*aria-pressed="false"[^>]*>Priority<\/button>/);
-assert.match(html, /Priority filtering for Microsoft is not available yet/);
+assert.match(html, /aria-pressed="false"[^>]*>Priority<\/button>/);
+assert.match(html, /Show confirmed important messages on this loaded page/);
 assert.match(html, /Refresh Microsoft messages/);
 assert.match(html, /Newest first/);
 assert.match(html, /Oldest first/);
@@ -61,4 +61,4 @@ assert.match(src, /onSortChange\(event.target.value as MicrosoftMessageSortOrder
 assert.match(src, /onClick=\{onRefresh\}/);
 assert.doesNotMatch(src, /\bfetch\(|sendMicrosoft|setMicrosoftMessageUnread|localStorage|sessionStorage|Mail.Send|Mail.ReadWrite/);
 
-console.log("Microsoft list actions: real All/Unread/sort/read-only refresh, Priority preview disabled PASS");
+console.log("Microsoft list actions: real All/Unread/Priority/sort/read-only refresh PASS");
