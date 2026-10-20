@@ -388,3 +388,12 @@ behavior. Correct in the existing shared MailboxView:
 - Microsoft security notification sender domain safeguards prevent outdated Show Less preferences from hiding account-security mail.
 - This menu no longer exposes a new Show Less selection. Previously saved Show Less rules still apply; full cross-provider Show Less flow requires a follow-up design/behavior decision.
 - Local frontend build and focused Learning/Filtered/Microsoft/Gmail/IMAP contracts passed. A live Microsoft browser acceptance check remains pending after a separately approved deploy.
+
+
+## 2026-10-20 — Microsoft provider-ID conversation navigation (local checkpoint)
+- A selected Microsoft message can display other messages from the **same Graph providerThreadId**, but only when both are present in the currently loaded, visible folder page (max 25). The projection requires the same serverMailboxId and providerFolder; it never infers threads from subjects, senders or quoted body text.
+- The right-side Microsoft reader and full-message modal show a compact oldest-first conversation navigator when two or more matching messages are present. Selecting another item calls the existing exact-message read path with current selection/cancellation guards; no bulk fetch, send or Graph mutation is introduced.
+- This is **page-scoped conversation navigation**, not cross-page/full-history thread parity. Gmail/Custom IMAP code and persistence are unchanged.
+- Microsoft Learning chooser now matches Gmail/IMAP category order (Promo, Update, Finance, Business, Demo, Other), removes the unnecessary expand caret, and retains the legacy Reply category in stored rule validation so previous preferences remain readable.
+- New tests cover cross-owner, cross-folder, duplicate provider IDs, invalid/missing thread IDs, 25-message bound, chronological order, single-message state, modal integration, and maintained read-only guards.
+- Production is **not** updated until a separate approved deployment. A real Microsoft mailbox/browser check must confirm behavior with an actual two-message Graph conversation.

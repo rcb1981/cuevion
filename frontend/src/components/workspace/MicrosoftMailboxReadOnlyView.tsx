@@ -29,6 +29,8 @@ import { MicrosoftComposePanel } from "./MicrosoftComposePanel";
 import { MicrosoftComposeDesignPreview } from "./MicrosoftComposeDesignPreview";
 import { MicrosoftMessageListRow } from "./MicrosoftMessageListRow";
 import { MicrosoftFullMessageModal } from "./MicrosoftFullMessageModal";
+import { MicrosoftConversationNav } from "./MicrosoftConversationNav";
+import { getMicrosoftConversationRows } from "./microsoftConversationRows";
 import { MicrosoftPlannedMessageActions } from "./MicrosoftPlannedMessageActions";
 import { MicrosoftMailboxFolderRail } from "./MicrosoftMailboxFolderRail";
 import { MicrosoftMessageListControls } from "./MicrosoftMessageListControls";
@@ -169,6 +171,10 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       { folder, search: searchQuery, unreadOnly, sortOrder },
     ),
     [folderRows, folder, searchQuery, unreadOnly, sortOrder, priorityOnly, microsoftFiltering.rules],
+  );
+  const conversationRows = useMemo(
+    () => getMicrosoftConversationRows(folderRows, selectedId, mailbox.id),
+    [folderRows, selectedId, mailbox.id],
   );
   const hasActiveListFilter = priorityOnly || Boolean(searchQuery.trim()) || ((folder === "Inbox" || folder === "Filtered" || folder === "Archive" || folder === "Deleted" || folder === "Junk") && unreadOnly);
 
@@ -1069,6 +1075,18 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                     />
                   )}
                 </div>
+                <MicrosoftConversationNav
+                  messages={conversationRows}
+                  selectedId={selectedMessage.providerMessageId ?? ""}
+                  disabled={mutationBusy || listBusy}
+                  onSelect={(id) => {
+                    if (conversationRows.some((row) => row.providerMessageId === id)) {
+                      setFullMessageTargetId(null);
+                      setLearningRequestId(null);
+                      void openMessage(id);
+                    }
+                  }}
+                />
                 <div className="mt-4 border-b border-[var(--workspace-border-soft)] pb-4 text-sm">
                   <p className="font-medium">
                     {folder === "Sent" || folder === "Drafts"
@@ -1271,6 +1289,13 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
             learningDisabled={!microsoftFiltering.ready || mutationBusy}
             canShowLess={!isMicrosoftFilteredProtectionActive(selectedMessage)}
             onSaveLearning={saveSenderLearning}
+            conversationRows={conversationRows}
+            onSelectConversationMessage={(id) => {
+              if (conversationRows.some((row) => row.providerMessageId === id)) {
+                setFullMessageTargetId(id);
+                void openMessage(id);
+              }
+            }}
             onClose={() => setFullMessageTargetId(null)}
           />
         )}

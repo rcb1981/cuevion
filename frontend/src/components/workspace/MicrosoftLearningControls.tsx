@@ -6,7 +6,7 @@ import type {
 } from "./microsoftLearningRules";
 
 const labels: MicrosoftLearningLabel[] = [
-  "Demo", "Promo", "Business", "Finance", "Update", "Reply", "Other",
+  "Promo", "Update", "Finance", "Business", "Demo", "Other",
 ];
 
 const menuItemClass =
@@ -98,7 +98,6 @@ export function MicrosoftLearningControls({
               className={menuItemClass}
               onClick={() => setShowLabels((current) => !current)}>
               <span>Change label...</span>
-              <span aria-hidden="true">{showLabels ? "⌃" : "⌄"}</span>
             </button>
             {showLabels && (
               <div aria-label="Label choices" className="space-y-1 border-l border-[var(--workspace-divider)] pl-2">

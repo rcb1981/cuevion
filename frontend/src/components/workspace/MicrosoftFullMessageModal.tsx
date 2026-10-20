@@ -4,11 +4,13 @@ import type { LiveInboxMessageSnapshot, MicrosoftAttachmentMetadata } from "../.
 import { MicrosoftInertHtmlStage } from "./MicrosoftInertHtmlStage";
 import { MicrosoftLinkifiedText } from "./MicrosoftLinkifiedText";
 import { MicrosoftLearningControls } from "./MicrosoftLearningControls";
+import { MicrosoftConversationNav } from "./MicrosoftConversationNav";
 import type { MicrosoftLearningRule } from "./microsoftLearningRules";
 
 export function MicrosoftFullMessageModal({
   message, mailboxId, folder, attachments, attachmentsBusy, learningRule,
-  learningDisabled = false, canShowLess = false, onSaveLearning, onClose,
+  learningDisabled = false, canShowLess = false, onSaveLearning,
+  conversationRows = [], onSelectConversationMessage, onClose,
 }: {
   message: LiveInboxMessageSnapshot;
   mailboxId: string;
@@ -19,6 +21,8 @@ export function MicrosoftFullMessageModal({
   learningDisabled?: boolean;
   canShowLess?: boolean;
   onSaveLearning?: (rule: MicrosoftLearningRule) => boolean;
+  conversationRows?: ReadonlyArray<LiveInboxMessageSnapshot>;
+  onSelectConversationMessage?: (id: string) => void;
   onClose: () => void;
 }) {
   const closeRef = useRef<HTMLButtonElement | null>(null);
@@ -61,6 +65,14 @@ export function MicrosoftFullMessageModal({
           </div>
           <div className="min-h-0 flex-1 overflow-auto px-5 py-5 text-[var(--workspace-text)]">
             <p className="mb-4 text-xs text-[var(--workspace-text-muted)]">{new Date(message.createdAt).toLocaleString()}</p>
+            {onSelectConversationMessage && (
+              <MicrosoftConversationNav
+                messages={conversationRows}
+                selectedId={message.providerMessageId ?? ""}
+                disabled={false}
+                onSelect={onSelectConversationMessage}
+              />
+            )}
             {message.bodyHtml && folder !== "Junk" ? (
               <MicrosoftInertHtmlStage
                 key={mailboxId + ":" + message.providerMessageId + ":modal"}

@@ -27,6 +27,10 @@ for (const action of ["Mark as important", "Mark as not important", "Change labe
 }
 assert.match(menuSource, /role="menu"/);
 assert.match(menuSource, /showLabels &&/);
+assert.match(menuSource, /"Promo", "Update", "Finance", "Business", "Demo", "Other"/);
+assert.doesNotMatch(menuSource, /"Reply", "Other"/);
+assert.doesNotMatch(menuSource, /⌄|⌃/);
+
 assert.match(menuSource, /if \(onSave\(next\)\)/);
 assert.match(menuSource, /type="button" role="menuitem" disabled/);
 assert.doesNotMatch(menuSource, /Save Learning|input type="radio"|<select/);
