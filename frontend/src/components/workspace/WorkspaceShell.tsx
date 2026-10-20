@@ -6683,7 +6683,11 @@ function EmailHtmlStage({
       onLoad={applyRuntimeEmailStageCorrections}
       className={`${stageClassName} block border-0`}
       style={{
-        height: "clamp(320px, 50dvh, 600px)",
+        // Fill the available reader height instead of ending at half the
+        // viewport and leaving a large empty area underneath the email.
+        // The iframe remains opaque/scriptless; very long messages retain
+        // their own native scrolling without exposing email DOM to the app.
+        height: "max(320px, calc(100dvh - 250px))",
         maxHeight: "calc(100dvh - 96px)",
         ...(isExternalHtml ? { colorScheme: "light" } : {}),
         ...(isProviderHtml ? { backgroundColor: "#ffffff" } : {}),
@@ -19636,6 +19640,15 @@ function MailboxView({
       ? secondTime - firstTime
       : firstTime - secondTime;
   });
+  // Shown counts: actual filtered, thread-deduplicated conversation rows.
+  // Never present these as the provider's entire mailbox totals.
+  const displayedConversationCount = sortedMessages.length;
+  const displayedUnreadConversationCount = sortedMessages.filter(
+    (message) => message.unread === true,
+  ).length;
+  const displayedFolderTitle = activeSmartFolder?.name ??
+    (isSharedView ? "Shared" : activeFolder);
+
   const getCurrentMessageSourceMailboxId = (message: MailMessage) =>
     currentMessageLocationByMessage.get(message)?.mailboxId ??
     (message.threadIdentityContext?.mailboxId as InboxId | undefined) ??
@@ -28069,7 +28082,7 @@ function MailboxView({
             Compose
           </button>
           </div>
-          <div data-mailbox-toolbar-sync className="flex min-h-[60px] flex-wrap items-center gap-2 border-r border-[var(--workspace-border-soft)] px-3">
+          <div data-mailbox-toolbar-sync className="flex min-h-[60px] min-w-0 items-center gap-3 border-r border-[var(--workspace-border-soft)] px-3">
           <MailToolbarIconButton
             label={mailboxSyncPresentation.inboxRefreshing ? "Syncing…" : "Sync"}
             onClick={onSyncMailbox}
@@ -28091,11 +28104,19 @@ function MailboxView({
               <path d="M12.5 13.5v-2h-2" />
             </svg>
           </MailToolbarIconButton>
-          {mailboxSyncPresentation.message ? (
-            <span role="status" className="text-xs text-[var(--workspace-text-faint)]">
-              {mailboxSyncPresentation.message}
-            </span>
-          ) : null}
+          <div className="min-w-0 flex-1">
+            <h2 className="truncate text-[0.8rem] font-semibold text-[var(--workspace-text)]">
+              {displayedFolderTitle}{" "}
+              <span className="font-normal text-[var(--workspace-text-muted)]">
+                ({displayedConversationCount}, {displayedUnreadConversationCount} unread shown)
+              </span>
+            </h2>
+            {mailboxSyncPresentation.message ? (
+              <span role="status" className="block truncate text-[0.67rem] text-[var(--workspace-text-faint)]">
+                {mailboxSyncPresentation.message}
+              </span>
+            ) : null}
+          </div>
           </div>
           <div data-mailbox-toolbar-actions className="relative z-20 flex min-h-[60px] flex-wrap items-center justify-end gap-2 px-4 sm:px-6">
           <MailToolbarIconButton
@@ -28927,18 +28948,18 @@ function MailboxView({
                                   handleDropToTarget({ type: "folder", folder: "Filtered" });
                                 }}
                                 onClick={() => switchToFolder("Filtered")}
-                                className={`flex w-full items-center justify-between rounded-[14px] py-2 pl-5 pr-3 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
+                                className={`flex w-full items-center justify-between rounded-[12px] border-l-2 py-2.5 pl-3 pr-3 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
                                   !isSharedView &&
                                   !activeSmartFolder &&
                                   activeFolder === "Filtered"
-                                    ? "bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] text-[var(--workspace-text)]"
+                                    ? "border-l-[var(--workspace-accent-border)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text)]"
                                     : dragTargetKey === "folder-Filtered"
-                                      ? "border border-[var(--workspace-border-hover)] bg-[linear-gradient(180deg,var(--workspace-selected-surface-start),var(--workspace-selected-surface-end))] text-[var(--workspace-text)] shadow-[0_10px_24px_rgba(31,42,36,0.08),inset_0_1px_0_rgba(255,255,255,0.08)]"
-                                      : "text-[color:rgba(108,99,89,0.92)] hover:bg-[var(--workspace-card-subtle)] hover:text-[var(--workspace-text)]"
+                                      ? "border-l-[var(--workspace-border-hover)] bg-[var(--workspace-hover-surface)] text-[var(--workspace-text)]"
+                                      : "border-l-transparent text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-card-subtle)] hover:text-[var(--workspace-text)]"
                                 } focus-visible:outline-none`}
                               >
                                 <span
-                                  className={`text-[0.75rem] font-medium uppercase tracking-[0.1em] ${
+                                  className={`text-[0.77rem] font-medium ${
                                     !isSharedView &&
                                     !activeSmartFolder &&
                                     activeFolder === "Filtered"
@@ -28965,13 +28986,13 @@ function MailboxView({
                               <button
                                 type="button"
                                 onClick={switchToSharedView}
-                                className={`flex w-full items-center justify-between rounded-[14px] px-3 py-2 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
+                                className={`flex w-full items-center justify-between rounded-[12px] border-l-2 px-3 py-2.5 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
                                   isSharedView
-                                    ? "bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] text-[var(--workspace-text)]"
-                                    : "text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-card-subtle)]"
+                                    ? "border-l-[var(--workspace-accent-border)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text)]"
+                                    : "border-l-transparent text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-card-subtle)]"
                                 } focus-visible:outline-none`}
                               >
-                                <span className="text-[0.75rem] font-medium uppercase tracking-[0.1em]">
+                                <span className="text-[0.77rem] font-medium">
                                   Shared
                                 </span>
                                 {sharedMessageCount > 0 ? (

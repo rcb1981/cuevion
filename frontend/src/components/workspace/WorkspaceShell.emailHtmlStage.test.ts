@@ -15,8 +15,8 @@ const emailHtmlStageSource = workspaceShellSource.slice(
 assert.ok(emailHtmlStageSource.length > 0, "EmailHtmlStage source must be present");
 assert.match(
   emailHtmlStageSource,
-  /height:\s*"clamp\(320px, 50dvh, 600px\)"/,
-  "rich external HTML must use the bounded responsive stage height",
+  /height:\s*"max\(320px, calc\(100dvh - 250px\)\)"/,
+  "rich external HTML must fill the reader viewport rather than stop at 50dvh",
 );
 assert.match(
   emailHtmlStageSource,
@@ -45,13 +45,13 @@ assert.ok(!sandboxTokens.includes("allow-same-origin"));
 assert.ok(!sandboxTokens.includes("allow-scripts"));
 
 const resolveStageHeight = (viewportHeight: number) =>
-  Math.min(Math.min(600, Math.max(320, viewportHeight * 0.5)), viewportHeight - 96);
+  Math.min(Math.max(320, viewportHeight - 250), viewportHeight - 96);
 
 [
-  { viewport: "1920x1080", viewportHeight: 1080, expected: 540 },
-  { viewport: "1440x900", viewportHeight: 900, expected: 450 },
-  { viewport: "1280x720", viewportHeight: 720, expected: 360 },
-  { viewport: "1024x700", viewportHeight: 700, expected: 350 },
+  { viewport: "1920x1080", viewportHeight: 1080, expected: 830 },
+  { viewport: "1440x900", viewportHeight: 900, expected: 650 },
+  { viewport: "1280x720", viewportHeight: 720, expected: 470 },
+  { viewport: "1024x700", viewportHeight: 700, expected: 450 },
   { viewport: "480x360", viewportHeight: 360, expected: 264 },
 ].forEach(({ viewport, viewportHeight, expected }) => {
   assert.equal(

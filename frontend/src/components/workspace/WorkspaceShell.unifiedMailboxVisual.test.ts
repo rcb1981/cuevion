@@ -17,6 +17,36 @@ assert.match(source, /<MicrosoftMailboxReadOnlyView/);
 assert.match(source, /<MailboxView/);
 assert.match(view, /data-cuevion-mailbox-visual="unified"/);
 assert.match(view, /data-mailbox-toolbar="unified"/);
+// Keep Gmail/IMAP Sync at the left of their header; actual shown counts
+// are based on the rendered filtered and thread-deduplicated rows.
+assert.match(view, /const displayedConversationCount = sortedMessages\.length;/);
+assert.match(view, /const displayedUnreadConversationCount = sortedMessages\.filter\([\s\S]*?message\.unread === true/);
+const summaryRegion = view.slice(
+  view.indexOf("data-mailbox-toolbar-sync"),
+  view.indexOf("data-mailbox-toolbar-actions"),
+);
+assert.ok(
+  summaryRegion.indexOf('label={mailboxSyncPresentation.inboxRefreshing') <
+  summaryRegion.indexOf('displayedConversationCount'),
+  "Sync should stay to the left of the counts",
+);
+assert.match(summaryRegion, /displayedUnreadConversationCount/);
+assert.match(summaryRegion, /border-r border-\[var\(--workspace-border-soft\)\]/);
+const filteredRegion = view.slice(
+  view.indexOf('onClick={() => switchToFolder("Filtered")}'),
+  view.indexOf("onClick={switchToSharedView}"),
+);
+assert.match(filteredRegion, /border-l-\[var\(--workspace-accent-border\)\]/);
+assert.match(filteredRegion, /activeFolder === "Filtered"/);
+assert.match(filteredRegion, /dragTargetKey === "folder-Filtered"/);
+const sharedRegion = view.slice(
+  view.indexOf("onClick={switchToSharedView}"),
+  view.indexOf("</button>", view.indexOf("onClick={switchToSharedView}")),
+);
+assert.match(sharedRegion, /border-l-\[var\(--workspace-accent-border\)\]/);
+assert.match(sharedRegion, /isSharedView/);
+
+
 for (const region of [
   "data-mailbox-toolbar-compose",
   "data-mailbox-toolbar-sync",

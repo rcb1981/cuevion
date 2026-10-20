@@ -320,3 +320,43 @@ behavior. Correct in the existing shared MailboxView:
   guards, original thread structure/full-message contracts and Chromium
   grid/single-vs-thread CSS. No new Production build until the user approves
   the final locally tested candidate.
+
+
+## 2026-10-20 Gmail/IMAP HTML reader viewport-height correction (LOCAL ONLY)
+
+- User's live Gmail screenshot showed a tall invoice/message cut short at an
+  iframe stage only ~half the viewport high, leaving a large unused dark area
+  below it in the right reader.
+- Root cause: EmailHtmlStage height was limited to
+  clamp(320px, 50dvh, 600px); the HTML itself was not proven missing.
+- Keep Gmail/IMAP provider functionality, remote-image opt-in, sanitization,
+  link policy and the secure iframe sandbox unchanged. Do not enable
+  allow-scripts or allow-same-origin and do not expose HTML to parent DOM.
+- Set the iframe stage to fill nearly all available reading height:
+  max(320px, calc(100dvh - 250px)) with existing viewport safety cap.
+  Long messages retain safe internal scrolling; this is NOT content-aware
+  full-document auto-height and must not be represented as such.
+- Chromium smoke: sandbox remains opaque, scriptless, stage heights:
+  1046px viewport => 796px, 900=>650, 720=>470, 360=>264.
+- Do not deploy until user separately approves another Production build,
+  given near-exhausted Vercel on-demand budget.
+
+
+## 2026-10-20 final header-detail local batch (NOT DEPLOYED)
+
+- User's side-by-side Gmail/Microsoft screenshots: keep Gmail/IMAP's more
+  clearly placed Sync icon at the left of the message-list toolbar; add
+  Microsoft-style folder heading and visible conversation/unread counts.
+- Counts are sourced from sortedMessages (post-search, active filter,
+  thread-deduplicated rows), not inferred provider-wide total counts.
+  The displayed text explicitly identifies these as shown.
+- Preserve existing shared-mailbox sync feedback: ephemeral Updated or
+  Syncing continues via mailboxSyncPresentation.message. No timestamp
+  is invented; Microsoft's real last-updated clock is not available here.
+- Keep header separators aligned with the three visual columns using
+  existing border-b/border-r classes. Do not change split resizing.
+- Filtered and Shared have the same selected green border/background as
+  ordinary folders; click/drag/drop/state actions are unchanged.
+- User-approved visual changes are separate from Production release approval.
+  Bundle this with the local HTML-height fix and do not deploy without a
+  separate explicit Production approval, given Vercel usage limits.
