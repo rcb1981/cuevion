@@ -236,7 +236,7 @@ export function sanitizeMicrosoftInertHtmlForStage(
   // Gmail/IMAP renderer also falls back when sanitization leaves no content.
   const hasText = Boolean(parsed.body.textContent?.replace(/\s+/g, ""));
   const hasImages = Boolean(parsed.body.querySelector('img[src]'));
-  if (!hasText && !hasImages) {
+  if (!hasText && !hasImages && remoteImageCount === 0) {
     return {html: null, remoteImageCount, cidImageCount, blockedReason: "unavailable"};
   }
 
@@ -262,11 +262,10 @@ function escapeHtml(value: string): string {
     .replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function buildStageDocument(bodyHtml: string): string {
-  // Microsoft-only product choice: display HTTPS remote images automatically.
-  // Unlike Gmail's image proxy, this exposes the open to remote image hosts.
-  // Scripts, HTTP images, forms, frames and network JS remain blocked.
-  const imgPolicy = "img-src https: data:;";
+function buildStageDocument(bodyHtml: string, allowRemoteImages: boolean): string {
+  // External remote hosts are disabled until the reader explicitly opts in.
+  // Opaque, scriptless iframe remains in force in both states.
+  const imgPolicy = allowRemoteImages ? "img-src https: data:;" : "img-src data:;";
   const csp = [
     "default-src 'none';",
     "script-src 'none';",
@@ -301,6 +300,7 @@ export function MicrosoftInertHtmlStage({
   attachments?: MicrosoftAttachmentMetadata[];
   attachmentsBusy?: boolean;
 }) {
+  const [showRemoteImages, setShowRemoteImages] = useState(false);
   const [cidResult, setCidResult] = useState<{
     html: string;
     attachments: MicrosoftAttachmentMetadata[];
@@ -332,8 +332,8 @@ export function MicrosoftInertHtmlStage({
   // image iframe. Otherwise a CID result changes srcDoc and requests HTTPS
   // tracking images a second time for the same message.
   const rendered = useMemo(
-    () => waitingForCid ? null : sanitizeMicrosoftInertHtmlForStage(html, true, cidImages),
-    [html, cidImages, waitingForCid],
+    () => waitingForCid ? null : sanitizeMicrosoftInertHtmlForStage(html, showRemoteImages, cidImages),
+    [html, cidImages, showRemoteImages, waitingForCid],
   );
   const unresolvedCidCount = expectedCids.filter((cid) =>
     !Object.prototype.hasOwnProperty.call(cidImages, cid)
@@ -369,13 +369,22 @@ export function MicrosoftInertHtmlStage({
           Some inline images could not be displayed securely.
         </p>
       )}
+      {rendered.remoteImageCount > 0 && !showRemoteImages && (
+        <div className="mb-1 flex min-h-10 items-center justify-between gap-3 rounded-xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-2 text-[0.73rem] text-[var(--workspace-text-muted)]">
+          <span>This email contains {rendered.remoteImageCount} remote image{rendered.remoteImageCount === 1 ? "" : "s"}.</span>
+          <button type="button" onClick={() => setShowRemoteImages(true)}
+            className="shrink-0 rounded-full border border-[var(--workspace-border-soft)] px-3 py-1.5 text-[0.66rem] font-semibold uppercase tracking-[0.12em] text-[var(--workspace-text)] hover:bg-[var(--workspace-hover-surface)]">
+            Show images
+          </button>
+        </div>
+      )}
       <iframe
         title="Microsoft HTML email content"
         sandbox="allow-popups allow-popups-to-escape-sandbox"
         referrerPolicy="no-referrer"
-        srcDoc={buildStageDocument(rendered.html)}
+        srcDoc={buildStageDocument(rendered.html, showRemoteImages)}
         className="block w-full border-0 bg-white"
-        style={{ height: "clamp(320px, 50dvh, 600px)", maxHeight: "calc(100dvh - 96px)" }}
+        style={{ height: "max(320px, calc(100dvh - 250px))", maxHeight: "calc(100dvh - 96px)" }}
       />
     </section>
   );

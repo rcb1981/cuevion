@@ -18,6 +18,7 @@ export function MicrosoftMessageListControls({
   refreshBusy,
   refreshDisabled,
   onRefresh,
+  hideRefreshButton = false,
 }: {
   mailboxId: string;
   searchQuery: string;
@@ -30,6 +31,7 @@ export function MicrosoftMessageListControls({
   refreshBusy: boolean;
   refreshDisabled: boolean;
   onRefresh: () => void;
+  hideRefreshButton?: boolean;
 }) {
   const pillBase =
     "inline-flex h-8 shrink-0 items-center justify-center rounded-full border px-3 text-[0.73rem] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]";
@@ -113,7 +115,7 @@ export function MicrosoftMessageListControls({
               <option value="oldest">Oldest first</option>
             </select>
           </label>
-          <button
+          {!hideRefreshButton && <button
             type="button"
             aria-label={refreshBusy ? "Refreshing Microsoft messages" : "Refresh Microsoft messages"}
             title="Refresh loaded Microsoft messages (read-only)"
@@ -136,7 +138,7 @@ export function MicrosoftMessageListControls({
               <path d="M3 10.5A5 5 0 0 0 11.5 13L13 11.5" />
               <path d="M12.5 13.5v-2h-2" />
             </svg>
-          </button>
+          </button>}
         </div>
       </div>
       <span className="sr-only">

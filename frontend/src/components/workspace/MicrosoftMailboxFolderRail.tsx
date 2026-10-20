@@ -31,8 +31,8 @@ export function MicrosoftMailboxFolderRail({
   composeAction?: React.ReactNode;
 }) {
   const containerClass = compact
-    ? "flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--workspace-border-soft)] px-3 py-2 lg:hidden"
-    : "hidden min-h-0 shrink-0 flex-col gap-1 border-r border-[var(--workspace-border-soft)] px-3 py-5 lg:flex";
+    ? "flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--workspace-border-soft)] px-3 py-2 xl:hidden"
+    : "hidden min-h-0 shrink-0 flex-col gap-1 border-r border-[var(--workspace-border-soft)] px-3 py-5 xl:flex";
 
   return (
     <nav
@@ -61,7 +61,7 @@ export function MicrosoftMailboxFolderRail({
             className={
               (compact
                 ? "shrink-0 rounded-full px-3 py-2 text-[0.73rem] "
-                : "w-full rounded-[12px] border-l-2 px-3 py-2.5 text-left text-[0.77rem] ") +
+                : "w-full rounded-[12px] border-l-2 pr-3 py-2.5 text-left text-[0.77rem] " + (item.id === "Filtered" ? "pl-7 " : "pl-3 ")) +
               "font-medium transition-[background-color,color,border-color] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:cursor-not-allowed disabled:opacity-45 " +
               (selected
                 ? compact

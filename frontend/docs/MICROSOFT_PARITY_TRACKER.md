@@ -360,3 +360,15 @@ behavior. Correct in the existing shared MailboxView:
 - User-approved visual changes are separate from Production release approval.
   Bundle this with the local HTML-height fix and do not deploy without a
   separate explicit Production approval, given Vercel usage limits.
+
+
+## 2026-10-20 — unified mailbox visual parity candidate
+
+- Microsoft desktop uses the same 152 px folder / 37% message list / reader grid and full-width Compose / Sync / guarded message-action toolbar as Gmail/Custom IMAP; redundant refresh in the Microsoft list controls is hidden.
+- The existing Microsoft folder selection, list fetching, sort, pagination, sender learning, and server-confirmed auto-read remain untouched. Microsoft write operations remain read-only gated and nonfunctional actions stay disabled.
+- Microsoft HTTPS remote images now require explicit **Show images** consent, with the iframe CSP blocking remote images beforehand. Authenticated CID images remain separately bounded and supported, including remote-image-only HTML bodies.
+- Microsoft HTML iframe height now matches the Gmail/IMAP viewport height. The existing scriptless opaque iframe, server HTML trust checks, and attachment owner gating remain in force.
+- The **Filtered** child folder gains an extra 16 px indent in Gmail/IMAP and Microsoft, preserving the green active border.
+- Gmail/IMAP full-message modal defaults become narrower (max 850 px, width 56vw) and shorter (62dvh), retaining keyboard and pointer resize.
+- Build and focused Microsoft/Gmail/IMAP contracts passed locally. Full npm test baseline has two pre-existing failures in different environments: replyQuote timezone sensitivity (UTC) and gmailOwnership extra knownBodyProviderMessageIds field (Europe/Amsterdam).
+- **Pending after deployment:** real-browser acceptance of Microsoft visuals, CID PNG test mail, previously blank HTML newsletter, and subsequent functional Microsoft parity rollout (Collaboration, threads, pop-up, Graph writes).

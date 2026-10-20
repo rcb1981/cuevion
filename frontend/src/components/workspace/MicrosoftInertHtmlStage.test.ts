@@ -85,15 +85,17 @@ assert.match(source, /connect-src 'none'/);
 assert.match(source, /form-action 'none'/);
 assert.match(source, /base-uri 'none'/);
 assert.match(source, /<iframe/);
-assert.match(source, /sanitizeMicrosoftInertHtmlForStage\(html, true, cidImages\)/);
+assert.match(source, /sanitizeMicrosoftInertHtmlForStage\(html, showRemoteImages, cidImages\)/);
 assert.match(source, /waitingForCid \? null : sanitizeMicrosoftInertHtmlForStage/);
-assert.match(source, /const imgPolicy = "img-src https: data:;"/);
+assert.match(source, /allowRemoteImages \? "img-src https: data:;" : "img-src data:;"/);
 assert.match(source, /attachmentsBusy \|\| \(Boolean\(attachments\?\.length\) && !currentCidResult\)/);
 assert.match(source, /Loading inline images/);
 
-assert.doesNotMatch(source, /Show images|Hide images|setShowImages|setShowImages/);
+assert.match(source, /Show images/);
+assert.match(source, /useState\(false\)/);
+assert.match(source, /onClick=\{\(\) => setShowRemoteImages\(true\)\}/);
 assert.match(source, /data-microsoft-remote-src/);
-assert.match(source, /srcDoc=\{buildStageDocument\(rendered.html\)\}/);
+assert.match(source, /srcDoc=\{buildStageDocument\(rendered.html, showRemoteImages\)\}/);
 assert.doesNotMatch(source, /dangerouslySetInnerHTML|fetch\(|localStorage|sessionStorage|window\.location\.assign/);
 
 // The production reader remains plain text while the exact Graph contract
@@ -107,7 +109,7 @@ assert.match(view, /key=\{mailbox.id \+ ":" \+ folder \+ ":" \+ selectedMessage.
 const api = readFileSync(resolve(process.cwd(), "src/lib/inboxConnectionApi.ts"), "utf8");
 assert.match(api, /isTrustedMicrosoftInertHtmlTransport\(message.bodyHtml\)/);
 
-console.log("Microsoft HTML iframe foundation: isolated sandbox, HTTPS auto-images, CID owner gate, SSR fallback PASS");
+console.log("Microsoft HTML iframe foundation: isolated sandbox, HTTPS opt-in images, CID owner gate, SSR fallback PASS");
 
 
 // The CID bridge must never dereference raw cid: references, and can only add

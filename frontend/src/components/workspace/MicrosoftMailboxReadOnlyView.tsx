@@ -793,7 +793,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           Back
         </button>
         <div className="min-w-0 text-right">
-          <h1 className="truncate text-lg font-semibold">{mailbox.title}</h1>
+          <h1 className="truncate text-sm font-semibold">{mailbox.title}</h1>
           <p className="truncate text-xs text-[var(--workspace-text-muted)]">{mailbox.email}</p>
         </div>
       </header>
@@ -823,37 +823,57 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
         />
       ) : (
         <div className="flex min-h-0 flex-1 flex-col">
+          <div data-microsoft-mailbox-toolbar="unified" className="flex shrink-0 flex-wrap gap-2 border-b border-[var(--workspace-border-soft)] px-3 py-2 xl:grid xl:grid-cols-[152px_minmax(275px,37%)_minmax(0,1fr)] xl:gap-0 xl:px-0 xl:py-0">
+            <div data-microsoft-toolbar-compose className="flex min-h-[60px] items-center border-r border-[var(--workspace-border-soft)] px-3">
+              {composeAction}
+            </div>
+            <div data-microsoft-toolbar-sync className="flex min-h-[60px] min-w-0 items-center gap-3 border-r border-[var(--workspace-border-soft)] px-3">
+              <button type="button"
+                aria-label={listBusy ? "Syncing…" : "Sync"}
+                title="Sync Microsoft messages"
+                disabled={!connected || composer !== null || listBusy || mutationBusy}
+                onClick={() => void refresh()}
+                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-soft)] transition hover:bg-[var(--workspace-hover-surface)] disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                <svg aria-hidden="true" viewBox="0 0 16 16" className={"h-4 w-4 " + (listBusy ? "animate-spin" : "")}
+                  fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M13 5.5A5 5 0 0 0 4.5 3L3 4.5" />
+                  <path d="M3.5 2.5v2h2" />
+                  <path d="M3 10.5A5 5 0 0 0 11.5 13L13 11.5" />
+                  <path d="M12.5 13.5v-2h-2" />
+                </svg>
+              </button>
+              <div className="min-w-0 flex-1">
+                <h2 className="truncate text-[0.8rem] font-semibold">
+                  {folder} <span className="font-normal text-[var(--workspace-text-muted)]">
+                    ({visibleRows.length}, {visibleRows.filter((row) => row.unread).length} unread shown)
+                  </span>
+                </h2>
+                {lastUpdated && <span role="status" className="block truncate text-[0.67rem] text-[var(--workspace-text-faint)]">Updated {readableTime(lastUpdated)}</span>}
+              </div>
+            </div>
+            <div data-microsoft-toolbar-actions className="relative z-20 flex min-h-[60px] items-center justify-end px-4 sm:px-6">
+              {MICROSOFT_READ_ONLY_PILOT && (
+                <MicrosoftPlannedMessageActions
+                  unread={selectedMessage?.unread === true}
+                  hasMessage={Boolean(selectedId && selectedMessage && !messageBusy)}
+                />
+              )}
+            </div>
+          </div>
           <MicrosoftMailboxFolderRail
             folder={folder}
             disabled={!connected || composer !== null || mutationBusy}
             onSelectFolder={selectFolder}
-            composeAction={composeAction}
             compact
           />
-          <div className="grid min-h-0 flex-1 grid-cols-1 gap-0 md:grid-cols-[minmax(245px,37%)_minmax(0,1fr)] lg:grid-cols-[152px_minmax(275px,37%)_minmax(0,1fr)]">
+          <div className="grid h-0 min-h-0 flex-1 grid-cols-1 gap-0 md:grid-cols-[minmax(245px,37%)_minmax(0,1fr)] xl:grid-cols-[152px_minmax(275px,37%)_minmax(0,1fr)]">
             <MicrosoftMailboxFolderRail
               folder={folder}
               disabled={!connected || composer !== null || mutationBusy}
               onSelectFolder={selectFolder}
-              composeAction={composeAction}
             />
           <section aria-label={"Microsoft " + folder + " messages"} className="flex min-h-0 flex-col border-b border-[var(--workspace-border-soft)] md:border-b-0 md:border-r">
-            <div className="flex shrink-0 items-center justify-between border-b border-[var(--workspace-border-soft)] px-4 py-3">
-              <h2 className="text-sm font-semibold">
-                {folder} <span className="font-normal text-[var(--workspace-text-muted)]">
-                  ({folder === "Filtered" || folder === "Inbox" ? folderRows.length : rows.length}{folder === "Sent"
-                    ? " sent shown"
-                    : folder === "Drafts"
-                      ? " drafts shown"
-                      : folder === "Deleted"
-                        ? " deleted items shown"
-                        : folder === "Junk"
-                          ? " junk messages shown"
-                          : ", " + folderRows.filter((row) => row.unread).length + " unread shown"})
-                </span>
-              </h2>
-              {lastUpdated && <span className="text-[0.7rem] text-[var(--workspace-text-faint)]">Updated {readableTime(lastUpdated)}</span>}
-            </div>
             <div className="shrink-0 space-y-2 border-b border-[var(--workspace-border-soft)] px-3 py-3">
               <MicrosoftMessageListControls
                 mailboxId={mailbox.id}
@@ -867,6 +887,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                 refreshBusy={listBusy}
                 refreshDisabled={!connected || composer !== null || listBusy || mutationBusy}
                 onRefresh={() => void refresh()}
+                hideRefreshButton
               />
               {(folder === "Inbox" || folder === "Filtered") && (
                 <p className="text-[0.68rem] text-[var(--workspace-text-muted)]">
@@ -947,17 +968,6 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
             </div>
           </section>
           <div className="flex min-h-0 flex-col">
-            <div
-              aria-label="Microsoft selected message actions"
-              className="relative z-20 flex min-h-[60px] shrink-0 items-center justify-end border-b border-[var(--workspace-border-soft)] px-4 py-2 sm:px-6"
-            >
-              {MICROSOFT_READ_ONLY_PILOT && (
-                <MicrosoftPlannedMessageActions
-                  unread={selectedMessage?.unread === true}
-                  hasMessage={Boolean(selectedId && selectedMessage && !messageBusy)}
-                />
-              )}
-            </div>
             <section aria-label="Selected Microsoft message" className="min-h-0 flex-1 overflow-y-auto p-5 sm:p-7">
             {!selectedId && <p className="text-sm text-[var(--workspace-text-muted)]">Select a message to read it.</p>}
             {selectedId && messageBusy && <p role="status" className="text-sm text-[var(--workspace-text-muted)]">Opening message…</p>}

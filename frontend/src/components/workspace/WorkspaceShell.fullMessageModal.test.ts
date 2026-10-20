@@ -240,18 +240,18 @@ recordCorrectionExpectation("modal compose return target", () => {
 
 recordCorrectionExpectation("default modal width contract", () => {
   assert.deepEqual(FULL_MESSAGE_MODAL_VIEWPORT, {
-    height: "66dvh",
+    height: "62dvh",
     maxHeight: "calc(100dvh - 2rem)",
-    maxWidth: "min(1040px, calc(100vw - 2rem))",
-    width: "60vw",
+    maxWidth: "min(850px, calc(100vw - 2rem))",
+    width: "min(850px, 56vw)",
   });
   assert.deepEqual(createDefaultFullMessageModalSize({ width: 1440, height: 900 }), {
-    width: 864,
-    height: 594,
+    width: 806.4000000000001,
+    height: 558,
   });
   assert.deepEqual(createDefaultFullMessageModalSize({ width: 1920, height: 1080 }), {
-    width: 1040,
-    height: 712.8000000000001,
+    width: 850,
+    height: 669.6,
   });
   assert.deepEqual(createDefaultFullMessageModalSize({ width: 1024, height: 700 }), {
     width: 720,
@@ -312,7 +312,7 @@ recordCorrectionExpectation("user resize geometry contract", () => {
   );
   assert.deepEqual(
     createDefaultFullMessageModalSize(viewport),
-    { width: 768, height: 480 },
+    { width: 720, height: 480 },
     "a fresh opening must reset rather than reuse custom geometry",
   );
 });

@@ -28948,7 +28948,7 @@ function MailboxView({
                                   handleDropToTarget({ type: "folder", folder: "Filtered" });
                                 }}
                                 onClick={() => switchToFolder("Filtered")}
-                                className={`flex w-full items-center justify-between rounded-[12px] border-l-2 py-2.5 pl-3 pr-3 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
+                                className={`flex w-full items-center justify-between rounded-[12px] border-l-2 py-2.5 pl-7 pr-3 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
                                   !isSharedView &&
                                   !activeSmartFolder &&
                                   activeFolder === "Filtered"
