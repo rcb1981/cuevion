@@ -20618,7 +20618,13 @@ function MailboxView({
       <section
         aria-labelledby={labelledById}
         data-thread-conversation
-        className="space-y-3.5"
+        data-single-message={threadMessages.length === 1 && density === "split"}
+        className={
+          "space-y-3.5 " +
+          (threadMessages.length === 1 && density === "split"
+            ? "[&_[data-thread-message-id]]:rounded-none [&_[data-thread-message-id]]:border-0 [&_[data-thread-message-id]]:bg-transparent [&_[data-thread-message-id]]:p-0 [&_[data-thread-message-actions]]:hidden"
+            : "")
+        }
       >
         {displayThreadMessages.map((threadMessage) => {
           const isLatestThreadMessage =
@@ -28040,7 +28046,8 @@ function MailboxView({
       </header>
 
       <section className="relative flex h-0 min-h-0 flex-1 flex-col overflow-hidden bg-transparent">
-        <div className="flex flex-none flex-wrap items-center justify-end gap-2 border-b border-[var(--workspace-border-soft)] px-4 py-3 sm:px-6">
+        <div data-mailbox-toolbar="unified" className="flex shrink-0 flex-wrap gap-2 border-b border-[var(--workspace-border-soft)] px-3 py-2 xl:grid xl:grid-cols-[152px_minmax(275px,37%)_minmax(0,1fr)] xl:gap-0 xl:px-0 xl:py-0">
+          <div data-mailbox-toolbar-compose className="flex min-h-[60px] items-center border-r border-[var(--workspace-border-soft)] px-3">
           <button
             type="button"
             className={mailboxComposeActionButtonClass}
@@ -28061,6 +28068,8 @@ function MailboxView({
             </svg>
             Compose
           </button>
+          </div>
+          <div data-mailbox-toolbar-sync className="flex min-h-[60px] flex-wrap items-center gap-2 border-r border-[var(--workspace-border-soft)] px-3">
           <MailToolbarIconButton
             label={mailboxSyncPresentation.inboxRefreshing ? "Syncing…" : "Sync"}
             onClick={onSyncMailbox}
@@ -28087,6 +28096,8 @@ function MailboxView({
               {mailboxSyncPresentation.message}
             </span>
           ) : null}
+          </div>
+          <div data-mailbox-toolbar-actions className="relative z-20 flex min-h-[60px] flex-wrap items-center justify-end gap-2 px-4 sm:px-6">
           <MailToolbarIconButton
             label="Reply"
             disabled={!hasSingleSelection}
@@ -28406,6 +28417,7 @@ function MailboxView({
                 ))}
               </div>
             ) : null}
+          </div>
           </div>
         </div>
 
@@ -28877,12 +28889,12 @@ function MailboxView({
                               handleDropToTarget({ type: "folder", folder });
                             }}
                             onClick={() => switchToFolder(folder)}
-                            className={`flex w-full items-center justify-between rounded-[10px] px-3 py-2 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
+                            className={`flex w-full items-center justify-between rounded-[12px] border-l-2 px-3 py-2.5 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
                               active
-                                ? "bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] text-[var(--workspace-text)]"
+                                ? "border-l-[var(--workspace-accent-border)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text)]"
                                 : isDragTargetActive
                                   ? "border border-[var(--workspace-border-hover)] bg-[linear-gradient(180deg,var(--workspace-selected-surface-start),var(--workspace-selected-surface-end))] text-[var(--workspace-text)] shadow-[0_10px_24px_rgba(31,42,36,0.08),inset_0_1px_0_rgba(255,255,255,0.08)]"
-                                  : "text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-card-subtle)]"
+                                  : "border-l-transparent text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-card-subtle)]"
                             } focus-visible:outline-none`}
                           >
                             <span className="block min-w-0 truncate text-[0.79rem] font-medium">
@@ -29626,7 +29638,7 @@ function MailboxView({
                             <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
 	                          <h2
                                 id="conversation-title"
-                                className="min-w-0 break-words text-[1.3rem] font-medium tracking-tight text-[var(--workspace-text)] md:text-[1.45rem]"
+                                className="min-w-0 break-words text-xl font-semibold tracking-tight text-[var(--workspace-text)]"
                               >
 	                            {selectedConversationTitle}
 	                          </h2>
@@ -29691,11 +29703,13 @@ function MailboxView({
                       </div>
                     ) : null}
 
-                    {renderThreadTimeline(
-                      selectedMessage,
-                      "split",
-                      fullWidthMessage ?? selectedMessage,
-                    )}
+                    <div className={selectedMessageThreadMessages.length === 1 ? "max-w-3xl" : undefined}>
+                      {renderThreadTimeline(
+                        selectedMessage,
+                        "split",
+                        fullWidthMessage ?? selectedMessage,
+                      )}
+                    </div>
                   </div>
                   {selectedMessage.id === "main-1" ? (
                     <div className="grid gap-4 md:grid-cols-2">

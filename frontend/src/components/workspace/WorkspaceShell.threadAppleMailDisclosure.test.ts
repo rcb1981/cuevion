@@ -213,7 +213,8 @@ expectContract(
   "split and full must mutate one shared disclosure state inside MailboxView",
 );
 expectContract(
-  /className="space-y-3\.5"/.test(threadTimelineSource) &&
+  /"space-y-3\.5 " \+/.test(threadTimelineSource) &&
+    /threadMessages\.length === 1 && density === "split"/.test(threadTimelineSource) &&
     !/data-thread-message-divider|role="separator"/.test(threadTimelineSource),
   "disclosure must use message-block spacing without cross-member dividers",
 );

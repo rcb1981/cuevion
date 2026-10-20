@@ -16,6 +16,19 @@ assert.match(source, /activeMicrosoftReadMailbox \? \(/);
 assert.match(source, /<MicrosoftMailboxReadOnlyView/);
 assert.match(source, /<MailboxView/);
 assert.match(view, /data-cuevion-mailbox-visual="unified"/);
+assert.match(view, /data-mailbox-toolbar="unified"/);
+for (const region of [
+  "data-mailbox-toolbar-compose",
+  "data-mailbox-toolbar-sync",
+  "data-mailbox-toolbar-actions",
+]) assert.ok(view.includes(region), "Missing unified toolbar region: " + region);
+assert.match(view, /xl:grid-cols-\[152px_minmax\(275px,37%\)_minmax\(0,1fr\)\]/);
+assert.match(view, /border-l-\[var\(--workspace-accent-border\)\] bg-\[var\(--workspace-card-subtle\)\]/);
+assert.match(view, /data-single-message=\{threadMessages\.length === 1 && density === "split"\}/);
+assert.match(view, /\[&_\[data-thread-message-id\]\]:rounded-none/);
+assert.match(view, /\[&_\[data-thread-message-actions\]\]:hidden/);
+assert.match(view, /text-xl font-semibold tracking-tight text-\[var\(--workspace-text\)\]/);
+
 assert.match(view, /<header[^>]*>[\s\S]*?onClick=\{handleMailboxBack\}[\s\S]*?Back[\s\S]*?className="flex min-w-0 items-center gap-3 text-right"/);
 assert.match(view, /<MailboxTitleEditor[\s\S]*?onCommit=\{\(nextTitle\) =>[\s\S]*?onRenameMailbox/);
 assert.match(view, /<MailboxConnectionState[\s\S]*?onActionRequired=\{onOpenConnectionSettings\}/);

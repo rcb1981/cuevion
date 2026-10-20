@@ -294,3 +294,29 @@ Gmail/IMAP implementation remains untouched throughout Microsoft completion.
   This is strong static preservation evidence, not real account E2E proof.
 - No new deployment without explicit user approval. Do NOT describe Microsoft
   as fully functional until real Graph actions are separately enabled/tested.
+
+
+## 2026-10-19 post-Production visual QA follow-up (LOCAL ONLY)
+
+The user inspected Gmail and Microsoft live and found that the initial shared
+styling pass was incomplete. The follow-up must not reimplement Gmail/IMAP
+behavior. Correct in the existing shared MailboxView:
+- Align Compose with the left folder column; Sync in the list column;
+  message actions above the right reader, preserving original callbacks.
+- Match Microsoft's accent-lined selected Inbox/folder presentation and
+  reduce its heavier Gmail styling and oversized title.
+- Render **one-message threads** without an outer rounded/bordered article
+  while keeping the remote-image "Show images" behavior unchanged.
+- For conversations of two or more messages, preserve each separately boxed
+  member, expand/collapse/quote behavior and per-message controls.
+- Hide only the duplicate lower reply/action strip in the *single-message
+  split reader*. It remains present in source for the original behavior and
+  available through the established toolbar; multiple-message threads and
+  the full-message modal retain their original action presentation.
+- Preserve all DoubleClick, context menu, Collaboration, Learning,
+  ownership/send/delete/archive guards, drag/drop, mail transport and sync
+  from Gmail/IMAP. Never infer correctness from visual appearance alone.
+- Tests: source AST regression hashes for 195 event bindings and 26 action
+  guards, original thread structure/full-message contracts and Chromium
+  grid/single-vs-thread CSS. No new Production build until the user approves
+  the final locally tested candidate.

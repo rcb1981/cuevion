@@ -141,7 +141,7 @@ expectContract(
 );
 
 expectContract(
-  /<section\s+aria-labelledby=\{labelledById\}[\s\S]*className="space-y-3\.5"/.test(
+  /<section\s+aria-labelledby=\{labelledById\}[\s\S]*data-thread-conversation[\s\S]*data-single-message=\{threadMessages\.length === 1 && density === "split"\}[\s\S]*className=\{/.test(
     threadTimelineSource,
   ),
   "the shared conversation timeline must be an accessible labelled section",
