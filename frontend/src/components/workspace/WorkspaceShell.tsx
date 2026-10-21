@@ -21,6 +21,7 @@ import {
 import { createPortal, flushSync } from "react-dom";
 import { ServerNotifications, type ServerNotificationsProps } from "./ServerNotifications";
 import { MicrosoftMailboxReadOnlyView } from "./MicrosoftMailboxReadOnlyView";
+import { MicrosoftConnectionState, describeMicrosoftConnectionStatus, type MicrosoftConnectionStatus } from "./MicrosoftConnectionState";
 import { MicrosoftReconnectConsentButton } from "./MicrosoftReconnectConsentButton";
 import { getPersistedMicrosoftReconnectTarget, hasRecordedMicrosoftOAuthConnection, type PersistedMicrosoftReconnectTarget } from "./microsoftReconnectSettings";
 import { useWorkspaceNotifications } from "../../lib/useWorkspaceNotifications";
@@ -17014,11 +17015,15 @@ function InboxesView({
   filter,
   orderedMailboxes,
   mailboxHealthById,
+  microsoftConnectionStatuses,
+  microsoftLinkedMailboxIds,
   onOpenMailbox,
 }: {
   filter: InboxFilter;
   orderedMailboxes: OrderedMailbox[];
   mailboxHealthById: MailboxHealthStore;
+  microsoftConnectionStatuses: Readonly<Record<string, MicrosoftConnectionStatus>>;
+  microsoftLinkedMailboxIds: ReadonlySet<string>;
   onOpenMailbox: (mailbox: OrderedMailbox) => void;
 }) {
   return (
@@ -17064,10 +17069,20 @@ function InboxesView({
                   ? getMailboxHealthPresentation(
                       mailboxHealthById[inbox.id].status,
                     ).description
-                  : "Provider connection is not configured."}
+                  : microsoftConnectionStatuses[inbox.id]
+                    ? describeMicrosoftConnectionStatus(microsoftConnectionStatuses[inbox.id])
+                    : microsoftLinkedMailboxIds.has(inbox.id)
+                      ? "Microsoft account linked. Open the mailbox to verify its connection."
+                      : "Provider connection is not configured."}
               </div>
               <div className="justify-self-end">
-                <MailboxConnectionState health={mailboxHealthById[inbox.id]} />
+                {mailboxHealthById[inbox.id] ? (
+                  <MailboxConnectionState health={mailboxHealthById[inbox.id]} />
+                ) : microsoftConnectionStatuses[inbox.id] ? (
+                  <MicrosoftConnectionState status={microsoftConnectionStatuses[inbox.id]} />
+                ) : microsoftLinkedMailboxIds.has(inbox.id) ? (
+                  <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">ACCOUNT LINKED</span>
+                ) : null}
               </div>
             </button>
           ))}
@@ -43109,6 +43124,12 @@ export function WorkspaceShell({
     () => reconcileMailboxHealthStore(mailboxHealthStateById, mailboxHealthSeeds),
     [mailboxHealthSeeds, mailboxHealthStateById],
   );
+  // Microsoft health is evidenced by actual Graph folder-list responses, not
+  // by a stored OAuth record or Gmail/IMAP's separate health operation clock.
+  const [microsoftConnectionState, setMicrosoftConnectionState] = useState<
+    Record<string, { viewerScope: string; status: MicrosoftConnectionStatus }>
+  >({});
+
   const auth0WorkspaceStorageScope =
     authenticationContext === "auth0"
       ? normalizeSenderLearningKey(
@@ -43121,6 +43142,20 @@ export function WorkspaceShell({
           getSessionViewerStorageKey(authenticationContext, authenticatedUser),
         ) || "auth0-viewer"
       : "";
+  const microsoftLinkedMailboxIds = useMemo(() => new Set(
+    savedManagedInboxes.filter(hasRecordedMicrosoftOAuthConnection).map((mailbox) => mailbox.id)
+  ), [savedManagedInboxes]);
+  const microsoftConnectionStatuses = useMemo(() => {
+    const statuses: Record<string, MicrosoftConnectionStatus> = {};
+    for (const [id, record] of Object.entries(microsoftConnectionState)) {
+      if (auth0ViewerStorageScope &&
+          record.viewerScope === auth0ViewerStorageScope &&
+          (microsoftLinkedMailboxIds.has(id) || record.status === "action_required")) {
+        statuses[id] = record.status;
+      }
+    }
+    return statuses;
+  }, [auth0ViewerStorageScope, microsoftConnectionState, microsoftLinkedMailboxIds]);
   const primaryManagedInboxStorageOwnerKey =
     auth0WorkspaceStorageScope ||
     (authenticatedUser?.email?.trim()
@@ -56885,6 +56920,19 @@ export function WorkspaceShell({
                     onOpenConnectionSettings={() =>
                       openMailboxConnectionSettings(activeMailbox.id)
                     }
+                    onConnectionStatusChange={(status) => {
+                      if (!auth0ViewerStorageScope) return;
+                      const id = activeMailbox.id;
+                      setMicrosoftConnectionState((current) => {
+                        const existing = current[id];
+                        if (existing?.viewerScope === auth0ViewerStorageScope &&
+                            existing.status === status) return current;
+                        return {
+                          ...current,
+                          [id]: {viewerScope: auth0ViewerStorageScope, status},
+                        };
+                      });
+                    }}
                   />
                 ) : (
 	                <MailboxView
@@ -57105,6 +57153,8 @@ export function WorkspaceShell({
                 filter={inboxFilter}
                 orderedMailboxes={orderedMailboxes}
                 mailboxHealthById={mailboxHealthById}
+                microsoftConnectionStatuses={microsoftConnectionStatuses}
+                microsoftLinkedMailboxIds={microsoftLinkedMailboxIds}
                 onOpenMailbox={openMailboxFromContext}
               />
             ) : activeSection === "Organizer" && productAccess === "bundle" ? (

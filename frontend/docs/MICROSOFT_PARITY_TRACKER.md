@@ -461,3 +461,9 @@ behavior. Correct in the existing shared MailboxView:
 - The Microsoft HTML reader independently validates the HTTPS candidate and only sets a live src after the user explicitly selects **Show images**. It retains the scriptless sandbox iframe, HTTPS-only CSP and no-referrer behavior. Images without a working HTTPS host may remain unavailable.
 - Missing or unsupported image sources still display clear inert placeholders. No HTTP fallback or proxy, no automatic request, no credential or mailbox mutation.
 - Gmail/IMAP UI and provider pipelines were not modified. A real browser acceptance test is still required to confirm the old newsletter can load its image; no claim is made that the D.Trance original URL is confirmed to be HTTP.
+
+## 2026-10-21 — Graph-backed Microsoft connection status parity (local only)
+- Microsoft mailbox header now shows Gmail/IMAP-style connection labels and corresponding dots: Checking during a real Graph folder refresh, Connected only after an exact owned folder response succeeds, Temporary Issue for a failed check, and Action Required for a reconnect/authorization error. Action Required opens the existing connection settings.
+- The same verified Microsoft status is reported to the WorkspaceShell Connected inbox overview for the current authenticated viewer and mailbox, without entering the Google/Custom IMAP health-operation clock.
+- Before a first Microsoft Graph check in this viewer session, a recorded OAuth link appears neutrally as Account linked, not a fabricated green Connected and not the incorrect Provider connection is not configured message. Disconnected Microsoft accounts cannot retain a stale green Connected status on the overview.
+- Results are in-memory and viewer-scoped; no new background polling, Graph calls, shared Gmail/IMAP persistence, mailbox mutations or permissions are introduced. An actual Microsoft mailbox browser test remains required after a separately approved Production release.

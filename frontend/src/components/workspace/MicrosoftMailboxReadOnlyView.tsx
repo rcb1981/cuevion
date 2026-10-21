@@ -35,6 +35,7 @@ import { MicrosoftConversationNav } from "./MicrosoftConversationNav";
 import { getMicrosoftConversationRows } from "./microsoftConversationRows";
 import { MicrosoftPlannedMessageActions } from "./MicrosoftPlannedMessageActions";
 import { MicrosoftMailboxFolderRail } from "./MicrosoftMailboxFolderRail";
+import { MicrosoftConnectionState, type MicrosoftConnectionStatus } from "./MicrosoftConnectionState";
 import { MicrosoftMessageListControls } from "./MicrosoftMessageListControls";
 import { MicrosoftLinkifiedText } from "./MicrosoftLinkifiedText";
 import { MicrosoftInertHtmlStage } from "./MicrosoftInertHtmlStage";
@@ -71,6 +72,7 @@ type MicrosoftMailboxReadOnlyViewProps = {
   connected: boolean;
   onBack: () => void;
   onOpenConnectionSettings: () => void;
+  onConnectionStatusChange?: (status: MicrosoftConnectionStatus) => void;
 };
 
 function readableTime(isoValue: string) {
@@ -108,7 +110,17 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   connected,
   onBack,
   onOpenConnectionSettings,
+  onConnectionStatusChange,
 }: MicrosoftMailboxReadOnlyViewProps) {
+  const [connectionStatus, setConnectionStatus] = useState<MicrosoftConnectionStatus>(
+    connected ? "checking" : "action_required"
+  );
+  const statusCallbackRef = React.useRef(onConnectionStatusChange);
+  useEffect(() => { statusCallbackRef.current = onConnectionStatusChange; }, [onConnectionStatusChange]);
+  const reportGraphStatus = useCallback((status: MicrosoftConnectionStatus) => {
+    setConnectionStatus(status);
+    statusCallbackRef.current?.(status);
+  }, []);
   const inboxTicket = React.useRef(0);
   const messageTicket = React.useRef(0);
   const attachmentTicket = React.useRef(0);
@@ -203,6 +215,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       return;
     }
     const ticket = ++inboxTicket.current;
+    reportGraphStatus("checking");
     setListBusy(true);
     setListError(null);
     try {
@@ -237,6 +250,11 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
         return;
       }
       if (!response.ok || !Array.isArray(response.messages)) {
+        reportGraphStatus(
+          response.error?.code === "microsoft_reconnect_required" ||
+          response.error?.code === "microsoft_unauthorized"
+            ? "action_required" : "temporary_issue"
+        );
         if (
           response.error?.code === "microsoft_reconnect_required" ||
           response.error?.code === "microsoft_unauthorized"
@@ -270,8 +288,10 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       setRows(incoming);
       setHasMore(response.hasMore === true);
       setLastUpdated(new Date().toISOString());
+      reportGraphStatus("connected");
     } catch {
       if (ticket === inboxTicket.current) {
+        reportGraphStatus("temporary_issue");
         setListError("The Microsoft " + folder + " could not be refreshed.");
       }
     } finally {
@@ -279,7 +299,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
         setListBusy(false);
       }
     }
-  }, [connected, mailbox.id, folder, composer, page]);
+  }, [connected, mailbox.id, folder, composer, page, reportGraphStatus]);
 
   useEffect(() => {
     if (!connected) {
@@ -995,9 +1015,15 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           </svg>
           Back
         </button>
-        <div className="min-w-0 text-right">
-          <h1 className="truncate text-sm font-semibold">{mailbox.title}</h1>
-          <p className="truncate text-xs text-[var(--workspace-text-muted)]">{mailbox.email}</p>
+        <div className="ml-auto flex min-w-0 items-center gap-3 sm:gap-4">
+          <div className="min-w-0 text-right">
+            <h1 className="truncate text-sm font-semibold">{mailbox.title}</h1>
+            <p className="truncate text-xs text-[var(--workspace-text-muted)]">{mailbox.email}</p>
+          </div>
+          <MicrosoftConnectionState
+            status={connectionStatus}
+            onActionRequired={onOpenConnectionSettings}
+          />
         </div>
       </header>
 
