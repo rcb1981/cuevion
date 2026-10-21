@@ -13,7 +13,8 @@ from __future__ import annotations
 import re
 from html import escape
 from html.parser import HTMLParser
-from urllib.parse import urlsplit
+import ipaddress
+from urllib.parse import urlsplit, urlunsplit
 
 MAX_INPUT_CHARACTERS = 262_144
 MAX_OUTPUT_CHARACTERS = 294_912
@@ -77,6 +78,45 @@ def _safe_https_url(value: object) -> str | None:
     return value
 
 
+def _safe_legacy_https_candidate(value: object) -> str | None:
+    """Prepare HTTPS-only candidate for a legacy HTTP image; never fetch HTTP.
+
+    The candidate remains inert until the reader opts in and the browser is
+    restricted by a HTTPS-only iframe CSP. No server-side network requests.
+    """
+    if not isinstance(value, str) or not 1 <= len(value) <= 2048:
+        return None
+    if value != value.strip() or _CONTROL_OR_SPACE.search(value) or "\\" in value:
+        return None
+    try:
+        url = urlsplit(value)
+        hostname = url.hostname
+        if (
+            url.scheme.lower() != "http" or not hostname
+            or url.username is not None or url.password is not None
+            or url.fragment or url.port not in (None, 80)
+            or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", hostname)
+            or not re.search(r"\.[a-z]{2,63}$", hostname)
+        ):
+            return None
+        if ".." in hostname or any(
+            not item or item[0] == "-" or item[-1] == "-"
+            for item in hostname.split(".")
+        ):
+            return None
+        try:
+            ipaddress.ip_address(hostname)
+            return None
+        except ValueError:
+            pass
+        if hostname.endswith((".local", ".localhost", ".internal", ".invalid", ".test", ".example", ".onion", ".lan")):
+            return None
+        upgraded = urlunsplit(("https", hostname, url.path or "/", url.query, ""))
+        return upgraded if _safe_https_url(upgraded) else None
+    except (ValueError, UnicodeError):
+        return None
+
+
 def _safe_inline_style(style: object) -> str:
     """Small presentational subset; no CSS functions or external resources."""
     if not isinstance(style, str) or len(style) > 2000:
@@ -113,6 +153,7 @@ class _MicrosoftInertHtml(HTMLParser):
         self.tags: list[str] = []
         self.drop_depth = 0
         self.remote_image_count = 0
+        self.legacy_upgrade_count = 0
         self.cid_image_count = 0
         self.invalid_image_count = 0
         self.link_count = 0
@@ -160,6 +201,11 @@ class _MicrosoftInertHtml(HTMLParser):
                     self.remote_image_count += 1
                     # NO src attribute: image stays inert until explicit consent.
                     attr_parts.append(f' data-microsoft-remote-src="{escape(remote, quote=True)}"')
+                elif (candidate := _safe_legacy_https_candidate(image)):
+                    self.remote_image_count += 1
+                    self.legacy_upgrade_count += 1
+                    # Only a candidate: no http requests and no live src.
+                    attr_parts.append(f' data-microsoft-legacy-https-src="{escape(candidate, quote=True)}"')
                 elif image.lower().startswith("cid:") and _SAFE_CID.fullmatch(image[4:]):
                     self.cid_image_count += 1
                     attr_parts.append(f' data-microsoft-cid="{escape(image[4:], quote=True)}"')
@@ -222,6 +268,7 @@ class _MicrosoftInertHtml(HTMLParser):
         return {
             "html": "".join(self.parts),
             "remoteImageCount": self.remote_image_count,
+            "legacyUpgradeCount": self.legacy_upgrade_count,
             "cidImageCount": self.cid_image_count,
             "invalidImageCount": self.invalid_image_count,
         }

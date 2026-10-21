@@ -59,6 +59,22 @@ export function isSafeMicrosoftRemoteImageUrl(value: string): boolean {
   }
 }
 
+/** A second, stricter validator for candidates derived from old HTTP URLs. */
+export function isSafeMicrosoftLegacyHttpsCandidate(value: string): boolean {
+  if (!isSafeMicrosoftRemoteImageUrl(value)) return false;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    if (!/^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/.test(host) ||
+        !/\.[a-z]{2,63}$/.test(host) ||
+        /(?:^|\.)\./.test(host) ||
+        /\.(?:local|localhost|internal|invalid|test|example|onion|lan)$/.test(host)) return false;
+    return !/^(?:\d{1,3}\.){3}\d{1,3}$/.test(host);
+  } catch {
+    return false;
+  }
+}
+
 function sanitizeInlineStyle(style: string): string {
   if (!style || style.length > 2000 || /\/\*|\*\/|\\|@|[{}<>]/.test(style)) return "";
   const parts: string[] = [];
@@ -79,9 +95,11 @@ function sanitizeInlineStyle(style: string): string {
 export type MicrosoftSafeHtmlResult = {
   html: string | null;
   remoteImageCount: number;
+  legacySecureAttemptCount?: number;
   cidImageCount: number;
   blockedReason?: "invalid" | "unavailable";
   suppressedCidImages?: number;
+  unavailableImageCount?: number;
 };
 
 function isSafeMicrosoftCidDataUrl(value: unknown): value is string {
@@ -165,7 +183,9 @@ export function sanitizeMicrosoftInertHtmlForStage(
     return { html: null, remoteImageCount: 0, cidImageCount: 0, blockedReason: "invalid" };
   }
   let remoteImageCount = 0;
+  let legacySecureAttemptCount = 0;
   let cidImageCount = 0;
+  let unavailableImageCount = 0;
   let suppressedCidImages = 0;
   let embeddedImageChars = 0;
   const maxEmbeddedImageChars =
@@ -173,6 +193,8 @@ export function sanitizeMicrosoftInertHtmlForStage(
   const cidUrlValidationCache = new Map<string, boolean>();
   for (const el of all) {
     const tag = el.tagName.toLowerCase();
+    let imageHasSupportedSource = false;
+    let imageWasCid = false;
     if (!TAGS.has(tag)) {
       el.replaceWith(...Array.from(el.childNodes));
       continue;
@@ -191,6 +213,8 @@ export function sanitizeMicrosoftInertHtmlForStage(
         el.setAttribute("alt", value.slice(0, 180));
       } else if (tag === "img" && key === "data-microsoft-cid") {
         if (SAFE_CID.test(value)) {
+          imageHasSupportedSource = true;
+          imageWasCid = true;
           cidImageCount += 1;
           // Only authenticated, size-bounded PNG/JPEG/GIF/WebP bytes may enter
           // the opaque iframe. Never resolve a raw cid: URL in the browser.
@@ -211,8 +235,21 @@ export function sanitizeMicrosoftInertHtmlForStage(
           }
         } else el.removeAttribute(key);
         el.removeAttribute(key);
+      } else if (tag === "img" && key === "data-microsoft-legacy-https-src") {
+        if (isSafeMicrosoftLegacyHttpsCandidate(value) && remoteImageCount < MAX_IMAGES) {
+          imageHasSupportedSource = true;
+          remoteImageCount += 1;
+          legacySecureAttemptCount += 1;
+          if (showRemoteImages) {
+            el.setAttribute("src", value);
+            el.setAttribute("referrerpolicy", "no-referrer");
+            el.setAttribute("loading", "lazy");
+          }
+        }
+        el.removeAttribute(key);
       } else if (tag === "img" && key === "data-microsoft-remote-src") {
         if (isSafeMicrosoftRemoteImageUrl(value) && remoteImageCount < MAX_IMAGES) {
+          imageHasSupportedSource = true;
           remoteImageCount += 1;
           if (showRemoteImages) {
             el.setAttribute("src", value);
@@ -224,6 +261,21 @@ export function sanitizeMicrosoftInertHtmlForStage(
       } else {
         el.removeAttribute(attr.name);
       }
+    }
+    // Never leave an image tag without src: browsers display a broken icon.
+    // Supported remote images remain opt-in; invalid images stay inert.
+    if (tag === "img" && !el.hasAttribute("src")) {
+      if (!imageHasSupportedSource) unavailableImageCount += 1;
+      const alt = el.getAttribute("alt")?.trim() || "Image";
+      const placeholder = parsed.createElement("span");
+      placeholder.setAttribute("class", "cuevion-image-placeholder");
+      placeholder.textContent = imageWasCid
+        ? alt + " (inline image unavailable)"
+        : imageHasSupportedSource
+          ? alt + " (select Show images above to display)"
+          : alt + " (image source unavailable)";
+      el.replaceWith(placeholder);
+      continue;
     }
     if (tag === "a" && el.hasAttribute("href")) {
       el.setAttribute("target", "_blank");
@@ -252,8 +304,10 @@ export function sanitizeMicrosoftInertHtmlForStage(
   return {
     html: renderedHtml,
     remoteImageCount,
+    legacySecureAttemptCount,
     cidImageCount,
     suppressedCidImages,
+    unavailableImageCount,
   };
 }
 
@@ -287,6 +341,9 @@ function buildStageDocument(bodyHtml: string, allowRemoteImages: boolean): strin
     'font:14px/1.55 Arial,Helvetica,sans-serif;overflow-x:auto;overflow-y:auto}' +
     'body{padding:12px 6px 18px}table{max-width:100%;border-collapse:collapse}' +
     'img{max-width:100%;height:auto}a{color:#286a52;overflow-wrap:anywhere}' +
+    '.cuevion-image-placeholder{display:inline-block;background:#f3f3f3;' +
+    'border:1px solid #ddd;color:#555;font:12px/1.5 Arial,sans-serif;' +
+    'padding:5px 9px;max-width:100%;overflow-wrap:anywhere}' +
     'pre{white-space:pre-wrap}</style></head><body>' + bodyHtml + '</body></html>'
   );
 }
@@ -367,6 +424,19 @@ export function MicrosoftInertHtmlStage({
         (unresolvedCidCount > 0 || (rendered.suppressedCidImages ?? 0) > 0) && (
         <p className="mb-3 text-xs text-[var(--workspace-text-muted)]" role="status">
           Some inline images could not be displayed securely.
+        </p>
+      )}
+      {(rendered.unavailableImageCount ?? 0) > 0 && (
+        <p className="mb-3 text-xs text-[var(--workspace-text-muted)]" role="status">
+          {rendered.unavailableImageCount} image{rendered.unavailableImageCount === 1 ? "" : "s"} cannot be loaded because the source is missing or unsupported.
+          Show images is available only for supported HTTPS images.
+        </p>
+      )}
+      {(rendered.legacySecureAttemptCount ?? 0) > 0 && (
+        <p className="mb-2 text-xs text-[var(--workspace-text-muted)]" role="status">
+          {showRemoteImages
+            ? "Secure HTTPS image loading was requested for older links; some images may remain unavailable."
+            : "This email contains older image links. Cuevion will only try HTTPS after you select Show images; some images may remain unavailable."}
         </p>
       )}
       {rendered.remoteImageCount > 0 && !showRemoteImages && (

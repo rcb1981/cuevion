@@ -445,3 +445,19 @@ behavior. Correct in the existing shared MailboxView:
 - Incomplete or ambiguous Graph results remain unconfirmed and never trigger an automatic retry or a false successful Inbox removal.
 - Production tests check valid owner-scoped endpoint handoff, foreign and missing Origin, spoofed host, unexpected target/folder fields, and source revocation despite environment variables. The generic Production Microsoft write block remains enabled.
 - Frontend and backend local suites passed. Live acceptance on a test Inbox message must still be performed by the sole Production tester.
+
+
+## 2026-10-21 — Microsoft HTML image-placeholder improvement (local only)
+- A user-confirmed Inbox to Deleted Items move was successful and the deleted email remained readable. A newsletter HTML image displayed the browser's broken-image icon, without a Show images control.
+- Root cause identified in the renderer: unsupported image URLs are intentionally removed server-side for safety, leaving an inert img with alt text. The client previously left this source-less img in the iframe, triggering a broken-image icon. This does not establish the exact original URL scheme of that particular newsletter.
+- Client sanitizer now replaces img elements lacking usable src with inert text placeholders, tracking unsupported/missing image sources separately. It shows a clear explanatory status without an inert or misleading Show images button.
+- Valid HTTPS remote sources still require explicit Show images permission and remain blocked in the sandboxed iframe until consent. Trusted CID data URLs remain subject to the original authenticated attachment controls.
+- Gmail/IMAP and Microsoft mailbox mutations are unchanged. Local frontend/backend tests and browser acceptance remain necessary before Production publication.
+
+
+## 2026-10-21 — legacy HTTP image upgrade, secure opt-in (local only)
+- Some older email newsletters reference HTTP images. Raw HTTP loading remains forbidden: the server recognizes well-formed public-domain legacy HTTP image links, derives inert HTTPS-only candidate URLs (no server fetching), and emits a separate data attribute with no live src.
+- Candidates exclude IP addresses, localhost/internal/reserved hostnames, credentials, fragments, invalid hostnames, unsafe port numbers, whitespace or backslashes.
+- The Microsoft HTML reader independently validates the HTTPS candidate and only sets a live src after the user explicitly selects **Show images**. It retains the scriptless sandbox iframe, HTTPS-only CSP and no-referrer behavior. Images without a working HTTPS host may remain unavailable.
+- Missing or unsupported image sources still display clear inert placeholders. No HTTP fallback or proxy, no automatic request, no credential or mailbox mutation.
+- Gmail/IMAP UI and provider pipelines were not modified. A real browser acceptance test is still required to confirm the old newsletter can load its image; no claim is made that the D.Trance original URL is confirmed to be HTTP.

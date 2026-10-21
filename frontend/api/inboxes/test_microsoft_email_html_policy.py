@@ -100,6 +100,64 @@ class MicrosoftInertHtmlPolicyTests(unittest.TestCase):
         self.assertNotIn("javascript:", result["html"])
         self.assertNotIn("src=", result["html"])
 
+    def test_unsupported_image_source_keeps_no_loadable_url(self):
+        bad = project_inert_microsoft_html(
+            '<h2>Mail</h2><img alt="Image" src="http://example.test/image.jpg">'
+        )
+        self.assertEqual(bad["remoteImageCount"], 0)
+        self.assertEqual(bad["invalidImageCount"], 1)
+        self.assertIn('<img alt="Image">', bad["html"])
+        self.assertNotIn('src=', bad["html"])
+        good = project_inert_microsoft_html(
+            '<h2>Mail</h2><img alt="Image" src="https://example.test/image.jpg">'
+        )
+        self.assertEqual(good["remoteImageCount"], 1)
+        self.assertEqual(good["invalidImageCount"], 0)
+        self.assertIn('data-microsoft-remote-src="https://example.test/image.jpg"', good["html"])
+        self.assertNotIn(' src="https:', good["html"])
+
+    def test_legacy_http_image_is_only_an_inert_secure_candidate(self):
+        from api.inboxes.microsoft_email_html_policy import _safe_legacy_https_candidate
+        original = "http://images.musicpartner.com:80/cover.jpg?ref=mail"
+        expected = "https://images.musicpartner.com/cover.jpg?ref=mail"
+        self.assertEqual(_safe_legacy_https_candidate(original), expected)
+        result = project_inert_microsoft_html(
+            '<p>Promo</p><img alt="Cover" src="' + original + '">'
+        )
+        self.assertEqual(result["remoteImageCount"], 1)
+        self.assertEqual(result["legacyUpgradeCount"], 1)
+        self.assertEqual(result["invalidImageCount"], 0)
+        self.assertIn('data-microsoft-legacy-https-src="' + expected + '"', result["html"])
+        self.assertNotIn(' src="http:', result["html"])
+        self.assertNotIn(' src="https:', result["html"])
+        self.assertNotIn("http://", result["html"])
+
+    def test_legacy_candidates_do_not_include_unsafe_hosts_or_ports(self):
+        from api.inboxes.microsoft_email_html_policy import _safe_legacy_https_candidate
+        for url in (
+            "http://127.0.0.1/photo.jpg",
+            "http://localhost/photo.jpg",
+            "http://company.internal/image.png",
+            "http://user:password@cdn.example.com/cover.png",
+            "http://cdn.example.com:8080/cover.jpg",
+            "http://cdn.example.com/img#fragment",
+            "http://host..com/image.jpg",
+            "http://local.test/img",
+            "http://cdn.example.com\\bad.jpg",
+            "//cdn.example.com/picture.jpg",
+            "https://cdn.example.com/picture.jpg",
+            "http://cdn.example.com/pic with space.jpg",
+        ):
+            with self.subTest(value=url):
+                self.assertIsNone(_safe_legacy_https_candidate(url))
+        result = project_inert_microsoft_html(
+            '<img alt="No source" src="http://127.0.0.1/image.png">'
+        )
+        self.assertEqual(result["legacyUpgradeCount"], 0)
+        self.assertEqual(result["remoteImageCount"], 0)
+        self.assertEqual(result["invalidImageCount"], 1)
+        self.assertIn('<img alt="No source">', result["html"])
+
     def test_rejects_credentials_control_chars_relative_and_script_links(self):
         for url in (
             "//example.com/pixel", "/photo", "javascript:alert(1)",

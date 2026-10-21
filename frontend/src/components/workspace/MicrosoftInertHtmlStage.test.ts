@@ -8,6 +8,7 @@ import "sucrase/register/tsx.js";
 const {
   MicrosoftInertHtmlStage,
   isSafeMicrosoftRemoteImageUrl,
+  isSafeMicrosoftLegacyHttpsCandidate,
   sanitizeMicrosoftInertHtmlForStage,
 } = require(
   resolve(process.cwd(), "src/components/workspace/MicrosoftInertHtmlStage.tsx"),
@@ -137,3 +138,44 @@ assert.ok(stageSource.includes('isMicrosoftInlineCidFolder(folder)'));
 assert.ok(mailboxSource.includes('response.message.bodyHtml.includes("data-microsoft-cid=")'));
 assert.ok(mailboxSource.includes("attachments={attachmentRows}"));
 assert.ok(mailboxSource.includes('folder={folder === "Filtered" ? "Inbox" : folder}'));
+
+// Invalid or absent image sources are rendered as inert placeholders; a
+// disabled source never becomes a misleading Show images control.
+assert.ok(stageSource.includes('unavailableImageCount += 1'));
+assert.ok(stageSource.includes('tag === "img" && !el.hasAttribute("src")'));
+assert.ok(stageSource.includes('placeholder.textContent = imageWasCid'));
+assert.ok(stageSource.includes('el.replaceWith(placeholder)'));
+assert.ok(stageSource.includes('image source unavailable'));
+assert.ok(stageSource.includes('Show images is available only for supported HTTPS images.'));
+assert.ok(stageSource.includes('imageHasSupportedSource = true'));
+assert.ok(stageSource.includes('if (showRemoteImages) {'));
+
+// Legacy HTTP images are never rendered over HTTP. Only an HTTPS candidate
+// validated independently by the client can be used after explicit consent.
+for (const url of [
+  "https://cdn.publisher.com/cover.jpg",
+  "https://cdn.publisher.com:443/pic.jpg?id=100",
+]) assert.equal(isSafeMicrosoftLegacyHttpsCandidate(url), true);
+for (const url of [
+  "http://cdn.publisher.com/cover.jpg",
+  "https://127.0.0.1/cover.png",
+  "https://localhost/cover.png",
+  "https://internal.local/cover.png",
+  "https://files.internal/cover.png",
+  "https://cdn.publisher.com:8443/cover.png",
+  "https://user:pw@cdn.publisher.com/cover.png",
+  "https://site..com/cover.png",
+  "https://site.test/cover.png",
+  "javascript:alert(1)",
+]) assert.equal(isSafeMicrosoftLegacyHttpsCandidate(url), false, url);
+
+assert.match(stageSource, /data-microsoft-legacy-https-src/);
+assert.match(stageSource, /legacySecureAttemptCount \+= 1/);
+assert.match(stageSource, /isSafeMicrosoftLegacyHttpsCandidate\(value\)/);
+assert.match(stageSource, /if \(showRemoteImages\) \{/);
+assert.match(stageSource, /el\.setAttribute\("referrerpolicy", "no-referrer"\)/);
+assert.match(stageSource, /Show images/);
+assert.match(stageSource, /only try HTTPS/);
+assert.match(stageSource, /Secure HTTPS image loading was requested/);
+assert.match(stageSource, /"img-src https: data:;"/);
+assert.doesNotMatch(stageSource, /img-src http:/);

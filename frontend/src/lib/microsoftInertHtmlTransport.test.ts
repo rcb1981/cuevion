@@ -5,6 +5,7 @@ const valid = [
   '<p>Hello <b>world</b></p>',
   '<table><tr><td style="color: red">News</td></tr></table>',
   '<img alt="Cover" data-microsoft-remote-src="https://cdn.example.com/cover.jpg">',
+  '<img alt="Older image" data-microsoft-legacy-https-src="https://cdn.publisher.com/image.png">',
   '<img alt="Artwork" data-microsoft-cid="image.123@example.com">',
 ];
 for (const source of valid) {
