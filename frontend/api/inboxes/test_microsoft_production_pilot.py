@@ -38,6 +38,7 @@ class MicrosoftReadOnlyProductionPilotTests(unittest.TestCase):
                 os.environ, {"VERCEL_ENV": "production", **options}, clear=True,
             ):
                 self.assertTrue(policy.production_pilot_writes_blocked())
+                self.assertFalse(policy.production_pilot_archive_blocked())
 
     def test_send_denied_before_input_read_or_any_service(self):
         with patch.dict(os.environ, {"VERCEL_ENV": "production"}, clear=True):

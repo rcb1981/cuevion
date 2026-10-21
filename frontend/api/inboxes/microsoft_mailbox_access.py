@@ -283,6 +283,54 @@ def mark_owned_microsoft_inbox_read(
 
 
 
+def archive_owned_microsoft_inbox_message(headers, mailbox_id: object, message_id: str) -> dict:
+    """One owner-bound Inbox -> Archive move under the shared mutation lease."""
+    from api.inboxes import microsoft_graph, microsoft_archive_move
+
+    microsoft_graph._required_message_id(message_id)
+    captured = resolve_owned_microsoft_mailbox(headers, mailbox_id)
+    try:
+        lease = acquire_mailbox_mutation_lease(
+            captured.owner_email, captured.mailbox_id,
+        )
+    except Exception:
+        raise MicrosoftMailboxAccessError("microsoft_mailbox_unavailable") from None
+    if not isinstance(lease, dict):
+        raise MicrosoftMailboxAccessError("microsoft_mailbox_unavailable")
+    if lease.get("status") != "acquired":
+        if lease.get("status") == "held":
+            raise MicrosoftMailboxAccessError("microsoft_mutation_in_progress")
+        raise MicrosoftMailboxAccessError("microsoft_mailbox_unavailable")
+    lease_token = lease.get("token")
+    if type(lease_token) is not str or not lease_token:
+        raise MicrosoftMailboxAccessError("microsoft_mailbox_unavailable")
+    succeeded = False
+    try:
+        token, checked = _owned_token(headers, mailbox_id, require_read_write=True)
+        if checked != captured:
+            raise MicrosoftMailboxAccessError("microsoft_reconnect_required")
+        result = microsoft_archive_move.move_exact_microsoft_inbox_to_archive(
+            token, message_id,
+            before_write=lambda: _verify_unchanged_owned_mailbox(
+                headers, mailbox_id, captured,
+            ),
+        )
+        _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+        succeeded = True
+        return result
+    finally:
+        released = False
+        try:
+            release = release_mailbox_mutation_lease(
+                captured.owner_email, captured.mailbox_id, lease_token,
+            )
+            released = isinstance(release, dict) and release.get("status") == "released"
+        except Exception:
+            pass
+        if succeeded and not released:
+            raise MicrosoftMailboxAccessError("microsoft_mutation_unconfirmed")
+
+
 def list_owned_microsoft_sent(
     headers, mailbox_id: object, *, page_size: int = 20, page: int = 1,
 ) -> dict:

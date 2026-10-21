@@ -412,3 +412,19 @@ behavior. Correct in the existing shared MailboxView:
 - Production generic Microsoft mail mutations (send/reply/draft/move/archive/delete) remain fail-closed via `production_pilot_writes_blocked`, and other folders cannot be mutated through this flag endpoint.
 - Production policy unit tests now prove both bool flag actions, cross-origin denial and ability to source-revoke `unread=True` without any environment variable override.
 - A browser-only acceptance test with an actual owned Microsoft Inbox message remains required after deploy. The user is the sole acceptance tester.
+
+## 2026-10-21 — Microsoft Inbox to Archive (local sandbox only)
+- New exact owner-bound Microsoft Inbox to Archive action via fixed POST /api/inboxes/archive-microsoft. The client cannot supply a destination, Graph path, or alternate source folder.
+- Graph uses an immutable message ID, Inbox-scoped preflight, fixed Archive destination, a single move request and independent Archive membership confirmation. An uncertain response does not trigger a retry.
+- Existing mailbox ownership, generation checks and per-mailbox mutation lease are reused. The UI removes the selected Inbox message only following an exact matching confirmed result, and retains a visible status.
+- Archive is available in the local Microsoft toolbar only for an exact currently selected Inbox message. Virtual Filtered, Sent, other folders, Gmail and IMAP are untouched.
+- **Production is still denied** by the generic source-only Microsoft writes block, before parsing request data or loading mailbox credentials. Do not publish this checkpoint as a working Production Archive action until a separately approved Archive-only exception, security tests, and browser acceptance.
+- Validation: local build, targeted frontend tests, backend route/Graph/authority tests; pending final checkpoint.
+
+
+## 2026-10-21 — Microsoft exact Inbox Archive Production release
+- Explicit source-gated Production exception `_PRODUCTION_INBOX_ARCHIVE_RELEASED` authorizes **only** the fixed `archive_move` route. The catch-all `production_pilot_writes_blocked` continues to deny other Microsoft writes, including Send, Reply, Delete, and arbitrary Move.
+- The Archive route still enforces exact canonical host and same-origin POST in Production, accepts only the owned mailbox ID + exact provider ID, and delegates to owner/credential generation verification, Mail.ReadWrite and shared mailbox mutation lease.
+- Graph move uses the real Inbox path, immutable ID preference, one fixed Archive destination, one POST and independent GET in Archive. An indeterminate result cannot be retried automatically and cannot cause a confirmed UI removal.
+- Tests prove Production release, malicious origin rejection, invalid folder/destination data rejection, source-only revocation despite environment flags, and unchanged generic write restrictions.
+- Local backend/frontend suites passed. Pending user-run live acceptance against a real Microsoft Inbox message after deployment.

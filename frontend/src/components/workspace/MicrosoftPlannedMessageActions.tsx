@@ -40,12 +40,16 @@ const actions = [
 export function MicrosoftPlannedMessageActions({
   unread, hasMessage = true, canChangeReadState = false,
   changeReadStateBusy = false, onChangeReadState,
+  canArchive = false, archiveBusy = false, onArchive,
 }: {
   unread: boolean;
   hasMessage?: boolean;
   canChangeReadState?: boolean;
   changeReadStateBusy?: boolean;
   onChangeReadState?: (nextUnread: boolean) => void;
+  canArchive?: boolean;
+  archiveBusy?: boolean;
+  onArchive?: () => void;
 }) {
   const [moreOpen, setMoreOpen] = useState(false);
   const moreId = useId();
@@ -54,8 +58,14 @@ export function MicrosoftPlannedMessageActions({
     <div aria-label="Microsoft message actions" className="flex flex-wrap items-center justify-end gap-1.5">
       {actions.map(({ name, label }) => (
         <button
-          key={name} type="button" aria-label={label} disabled
-          title={label + " requires separate Microsoft action approval"}
+          key={name} type="button" aria-label={label}
+          disabled={name !== "archive" || !canArchive || archiveBusy || !onArchive}
+          title={name === "archive" && canArchive
+            ? "Move the selected Microsoft Inbox message to Archive after Graph confirmation"
+            : label + " requires separate Microsoft action approval"}
+          onClick={() => {
+            if (name === "archive" && canArchive && !archiveBusy && onArchive) onArchive();
+          }}
           className={iconButton}
         >
           <ActionGlyph name={name} />

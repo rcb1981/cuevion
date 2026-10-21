@@ -1,9 +1,9 @@
 """Microsoft Production policy: only owner-scoped, verified Inbox read flags.
 
-Production cannot send, reply, create drafts, move, delete or mutate other
-folders. Only exact-message Inbox read/unread changes are authorized.
-These narrow source-only permissions are NOT overridable through an
-environment variable or browser input. Any broader mutation needs review.
+Production cannot send, reply, create drafts, delete or move to arbitrary
+folders. Only exact-message Inbox read/unread and Inbox -> Archive moves are
+authorized. These narrow source-only permissions cannot be enabled through
+an environment variable or browser input. Any broader mutation needs review.
 
 This policy affects only Microsoft message mutations, not OAuth token/config
 persistence required to connect and read a mailbox; it never affects Gmail,
@@ -17,6 +17,8 @@ import os
 # Neither toggle authorizes any other Microsoft Graph mailbox mutation.
 _PRODUCTION_READ_FLAGS_RELEASED = True
 _PRODUCTION_MANUAL_INBOX_MARK_UNREAD_RELEASED = True
+# Exactly one Inbox -> Archive action, never a generic move or other write.
+_PRODUCTION_INBOX_ARCHIVE_RELEASED = True
 
 
 def production_pilot_read_flags_blocked() -> bool:
@@ -32,6 +34,14 @@ def production_pilot_mark_unread_blocked() -> bool:
     return (
         os.getenv("VERCEL_ENV", "").strip().lower() == "production"
         and not _PRODUCTION_MANUAL_INBOX_MARK_UNREAD_RELEASED
+    )
+
+
+def production_pilot_archive_blocked() -> bool:
+    """Deny all Production Archive moves unless this source-only exception is enabled."""
+    return (
+        os.getenv("VERCEL_ENV", "").strip().lower() == "production"
+        and not _PRODUCTION_INBOX_ARCHIVE_RELEASED
     )
 
 

@@ -21,6 +21,7 @@ import {
   fetchMicrosoftAttachments,
   downloadMicrosoftAttachmentFile,
   setMicrosoftMessageUnread,
+  archiveMicrosoftInboxMessage,
   type LiveInboxMessageSnapshot,
   type MicrosoftAttachmentMetadata,
 } from "../../lib/inboxConnectionApi";
@@ -827,6 +828,70 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     }
   }, [connected, mailbox.id, selectedMessage]);
 
+  // Inbox -> Archive is the only authorized move. The Production endpoint
+  // has a dedicated source-only release gate; other Microsoft writes stay denied.
+  const archiveSelectedMessage = useCallback(async () => {
+    const targetId = selectedMessage?.providerMessageId;
+    if (!connected || folderRef.current !== "Inbox" || mutationInFlight.current ||
+        !targetId || selectedIdRef.current !== targetId ||
+        selectedMessage?.serverMailboxId !== mailbox.id ||
+        selectedMessage?.providerFolder !== "INBOX") return;
+
+    mutationInFlight.current = true;
+    const ticket = ++mutationTicket.current;
+    inboxTicket.current += 1;
+    setListBusy(false);
+    setMutationBusy(true);
+    setMutationError(null);
+    setMutationConfirmation(null);
+    try {
+      const result = await archiveMicrosoftInboxMessage({
+        mailboxId: mailbox.id, providerMessageId: targetId,
+      });
+      if (ticket !== mutationTicket.current ||
+          folderRef.current !== "Inbox" ||
+          selectedIdRef.current !== targetId) return;
+      if (!result.ok || result.providerMessageId !== targetId || result.archived !== true) {
+        setMutationError(
+          !result.ok && result.error?.code === "microsoft_write_permission_required"
+            ? "Reconnect Microsoft to grant permission to archive messages."
+            : !result.ok && result.error?.code === "microsoft_pilot_read_only"
+              ? "Microsoft Archive is not enabled on Production yet."
+              : "Archive could not be confirmed. Refresh Inbox before trying again.",
+        );
+        return;
+      }
+
+      // Only a confirmed Archive result may remove the exact message from the
+      // current Inbox. Never imply success based on a sent/uncertain request.
+      messageTicket.current += 1;
+      attachmentTicket.current += 1;
+      attachmentDownloadTicket.current += 1;
+      selectedIdRef.current = null;
+      setFullMessageTargetId(null);
+      setLearningRequestId(null);
+      setRowContext(null);
+      setAttachmentRows([]);
+      setAttachmentBusy(false);
+      setAttachmentError(null);
+      setSelectedId(null);
+      setSelectedMessage(null);
+      setRows((current) => current.filter((message) =>
+        message.providerMessageId !== targetId
+      ));
+      setMutationConfirmation("Archived. The message is now in Archive.");
+    } catch {
+      if (ticket === mutationTicket.current) {
+        setMutationError("Archive could not be confirmed. Refresh Inbox before trying again.");
+      }
+    } finally {
+      if (ticket === mutationTicket.current) {
+        mutationInFlight.current = false;
+        setMutationBusy(false);
+      }
+    }
+  }, [connected, mailbox.id, selectedMessage]);
+
   // Compose belongs to the folder rail and never invokes a send during the pilot.
   const composeAction = (
         <button
@@ -923,6 +988,11 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                   </span>
                 </h2>
                 {lastUpdated && <span role="status" className="block truncate text-[0.67rem] text-[var(--workspace-text-faint)]">Updated {readableTime(lastUpdated)}</span>}
+                {mutationConfirmation && !selectedId && (
+                  <span role="status" className="block text-[0.72rem] text-[var(--workspace-accent-text)]">
+                    {mutationConfirmation}
+                  </span>
+                )}
               </div>
             </div>
             <div data-microsoft-toolbar-actions className="relative z-20 flex min-h-[60px] items-center justify-end px-4 sm:px-6">
@@ -938,6 +1008,14 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                   )}
                   changeReadStateBusy={mutationBusy}
                   onChangeReadState={(nextUnread) => { void changeReadState(nextUnread); }}
+                  canArchive={Boolean(
+                    connected && folder === "Inbox" && selectedId && !messageBusy &&
+                    selectedMessage?.serverMailboxId === mailbox.id &&
+                    selectedMessage?.providerFolder === "INBOX" &&
+                    selectedMessage.providerMessageId === selectedId
+                  )}
+                  archiveBusy={mutationBusy}
+                  onArchive={() => { void archiveSelectedMessage(); }}
                 />
               )}
             </div>

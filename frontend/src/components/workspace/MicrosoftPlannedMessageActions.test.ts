@@ -65,3 +65,12 @@ assert.match(source, /onChangeReadState\?: \(nextUnread: boolean\) => void/);
 assert.match(source, /key !== "read" \|\| !canChangeReadState \|\| changeReadStateBusy \|\| !onChangeReadState/);
 assert.match(source, /onChangeReadState\(!unread\)/);
 assert.match(source, /disabled=\{key !== "read"/);
+
+
+// The Archive button may invoke one approved exact-Id action; all other
+// transport/mutation icons remain disabled.
+assert.match(source, /canArchive = false/);
+assert.match(source, /archiveBusy = false/);
+assert.match(source, /onArchive\?: \(\) => void/);
+assert.match(source, /name !== "archive" \|\| !canArchive \|\| archiveBusy \|\| !onArchive/);
+assert.match(source, /name === "archive" && canArchive && !archiveBusy && onArchive/);

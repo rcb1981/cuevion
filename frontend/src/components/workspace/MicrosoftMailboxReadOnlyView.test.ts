@@ -182,3 +182,15 @@ assert.match(viewSource, /mutationInFlight\.current/);
 assert.match(viewSource, /setMicrosoftMessageUnread\(\{/);
 assert.match(viewSource, /applyConfirmedMicrosoftUnread\(message, targetId, nextUnread\)/);
 assert.match(viewSource, /if \(!result\.ok\)/);
+
+
+// A Microsoft Archive action stays isolated to an exact, selected Inbox ID.
+// Only server-confirmed moves remove the message from the list.
+assert.match(viewSource, /const archiveSelectedMessage = useCallback\(async/);
+assert.match(viewSource, /selectedMessage\?\.providerFolder !== "INBOX"/);
+assert.match(viewSource, /selectedMessage\?\.serverMailboxId !== mailbox\.id/);
+assert.match(viewSource, /selectedIdRef\.current !== targetId/);
+assert.match(viewSource, /const result = await archiveMicrosoftInboxMessage/);
+assert.match(viewSource, /if \(!result\.ok \|\| result\.providerMessageId !== targetId \|\| result\.archived !== true\)/);
+assert.match(viewSource, /setRows\(\(current\) => current\.filter/);
+assert.match(viewSource, /onArchive=\{\(\) => \{ void archiveSelectedMessage\(\); \}\}/);
