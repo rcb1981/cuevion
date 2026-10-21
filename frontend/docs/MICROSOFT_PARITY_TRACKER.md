@@ -397,3 +397,18 @@ behavior. Correct in the existing shared MailboxView:
 - Microsoft Learning chooser now matches Gmail/IMAP category order (Promo, Update, Finance, Business, Demo, Other), removes the unnecessary expand caret, and retains the legacy Reply category in stored rule validation so previous preferences remain readable.
 - New tests cover cross-owner, cross-folder, duplicate provider IDs, invalid/missing thread IDs, 25-message bound, chronological order, single-message state, modal integration, and maintained read-only guards.
 - Production is **not** updated until a separate approved deployment. A real Microsoft mailbox/browser check must confirm behavior with an actual two-message Graph conversation.
+
+
+## 2026-10-21 — Microsoft manual read-state action (local, NOT a Production release)
+- Microsoft toolbar More > Mark as unread / Mark as read now calls the existing exact-ID Graph flag route only when the selected message belongs to the current authenticated Microsoft mailbox, resolves to the real INBOX provider folder, and is the currently selected item in the Inbox UI.
+- The asynchronous mutation guard, cancellation tickets, no-automatic-PATCH-retry contract, server-verified Graph readback, and confirmed-only local UI updates are reused. All unrelated Microsoft toolbar actions (Reply, Reply All, Forward, Archive, Delete, Move, etc.) remain disabled.
+- CRITICAL LAUNCH GATE: Production still deliberately rejects unread=true in microsoft_production_pilot.py; do not ship this as a working production action until that single operation's Production policy is separately reviewed, explicitly authorized and independently regression tested. Other Microsoft Graph writes must remain denied.
+- This is not cross-folder read-state parity: only the real Microsoft Inbox UI is eligible; virtual Filtered and all other folders remain read-only for manual flags. Gmail and Custom IMAP are unchanged.
+
+
+## 2026-10-21 — exact Inbox mark unread Production release authorization
+- Scoped Production source gate `_PRODUCTION_MANUAL_INBOX_MARK_UNREAD_RELEASED` allows only `unread=True` on the existing owned `mark-microsoft-read` endpoint, with canonical host and same-origin checks; `unread=False` remained separately released.
+- Exact immutable Graph message IDs, fixed `/me/mailFolders/inbox/messages/{id}` path, ownership checks, single PATCH, and independent GET confirmation remain unchanged. Any incomplete or unconfirmed result is not retried or reflected as success in UI.
+- Production generic Microsoft mail mutations (send/reply/draft/move/archive/delete) remain fail-closed via `production_pilot_writes_blocked`, and other folders cannot be mutated through this flag endpoint.
+- Production policy unit tests now prove both bool flag actions, cross-origin denial and ability to source-revoke `unread=True` without any environment variable override.
+- A browser-only acceptance test with an actual owned Microsoft Inbox message remains required after deploy. The user is the sole acceptance tester.

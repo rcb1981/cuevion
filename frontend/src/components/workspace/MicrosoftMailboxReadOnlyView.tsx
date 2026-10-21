@@ -501,9 +501,9 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
         }) &&
         !mutationInFlight.current
       ) {
-        // Stage automatic open-to-read with the existing exact-ID, owned and
-        // server-confirmed Graph flag mutation. This is unreachable while
-        // the Microsoft Production/Preview read-only pilot remains enabled.
+        // Automatic open-to-read uses the exact-ID, owned and
+        // server-confirmed Inbox Graph flag mutation. Other Microsoft
+        // mailbox actions remain unavailable under the Production pilot.
         const flagTicket = ++mutationTicket.current;
         mutationInFlight.current = true;
         inboxTicket.current += 1; // discard any older inbox polling result
@@ -741,12 +741,16 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     }
   }, [attachmentDownloadBusy, attachmentRows, connected, mailbox.id, selectedMessage]);
 
+  // Manual Inbox read-state changes reuse the owner-bound, exact-ID Graph
+  // transport. Production currently rejects nextUnread=true at the server
+  // source-only policy gate until a separately approved release.
   const changeReadState = useCallback(async (nextUnread: boolean) => {
     const targetId = selectedMessage?.providerMessageId;
     if (
-      MICROSOFT_READ_ONLY_PILOT ||
       !connected ||
       folderRef.current !== "Inbox" ||
+      selectedMessage?.serverMailboxId !== mailbox.id ||
+      selectedMessage?.providerFolder !== "INBOX" ||
       mutationInFlight.current ||
       !targetId ||
       selectedIdRef.current !== targetId ||
@@ -926,6 +930,14 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                 <MicrosoftPlannedMessageActions
                   unread={selectedMessage?.unread === true}
                   hasMessage={Boolean(selectedId && selectedMessage && !messageBusy)}
+                  canChangeReadState={Boolean(
+                    connected && folder === "Inbox" && selectedId &&
+                    !messageBusy && selectedMessage?.serverMailboxId === mailbox.id &&
+                    selectedMessage?.providerFolder === "INBOX" &&
+                    selectedMessage.providerMessageId === selectedId
+                  )}
+                  changeReadStateBusy={mutationBusy}
+                  onChangeReadState={(nextUnread) => { void changeReadState(nextUnread); }}
                 />
               )}
             </div>

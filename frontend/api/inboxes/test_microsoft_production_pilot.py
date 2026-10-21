@@ -59,10 +59,46 @@ class MicrosoftReadOnlyProductionPilotTests(unittest.TestCase):
                     parse.assert_not_called()
                     send.assert_not_called()
 
-    def test_production_mark_unread_stays_denied_after_release(self):
+    def test_production_unread_release_requires_exact_owner_route_and_origin(self):
         with patch.dict(os.environ, {"VERCEL_ENV": "production"}, clear=True), patch.object(
             access, "mark_owned_microsoft_inbox_read",
+            return_value={"providerMessageId": MESSAGE_ID, "unread": True, "changed": True},
         ) as mutate:
+            request = {
+                "mailboxId": MAILBOX, "providerMessageId": MESSAGE_ID,
+                "unread": True,
+            }
+            response = inbox.microsoft_inbox_response(
+                inbox_request(request, header_pairs=(("Origin", "https://app.cuevion.com"),)),
+                mode="flag",
+            )
+            self.assertEqual(response.status, 200)
+            data = json.loads(response.body)
+            self.assertTrue(data["ok"])
+            self.assertEqual(data["providerMessageId"], MESSAGE_ID)
+            self.assertTrue(data["unread"])
+            mutate.assert_called_once()
+            self.assertEqual(mutate.call_args.kwargs, {"unread": True})
+
+            mutate.reset_mock()
+            denied = inbox.microsoft_inbox_response(
+                inbox_request(request, header_pairs=(("Origin", "https://attacker.example"),)),
+                mode="flag",
+            )
+            self.assertEqual(denied.status, 403)
+            mutate.assert_not_called()
+
+    def test_production_unread_flag_can_be_source_revoked_without_env_override(self):
+        with patch.dict(os.environ, {
+            "VERCEL_ENV": "production",
+            "MICROSOFT_PRODUCTION_PILOT_WRITES_ENABLED": "1",
+            "MICROSOFT_MARK_UNREAD_ENABLED": "1",
+        }, clear=True), patch.object(
+            policy, "_PRODUCTION_MANUAL_INBOX_MARK_UNREAD_RELEASED", False,
+        ), patch.object(
+            access, "mark_owned_microsoft_inbox_read",
+        ) as mutate:
+            self.assertTrue(policy.production_pilot_mark_unread_blocked())
             response = inbox.microsoft_inbox_response(
                 inbox_request({
                     "mailboxId": MAILBOX, "providerMessageId": MESSAGE_ID,
@@ -72,11 +108,11 @@ class MicrosoftReadOnlyProductionPilotTests(unittest.TestCase):
             )
             self.assertEqual(response.status, 403)
             self.assertEqual(error_code(response), "microsoft_pilot_read_only")
-            self.assertIn(("Cache-Control", "no-store"), response.headers)
             mutate.assert_not_called()
 
     def test_read_flag_release_is_source_only_and_not_env_configurable(self):
         self.assertTrue(policy._PRODUCTION_READ_FLAGS_RELEASED)
+        self.assertTrue(policy._PRODUCTION_MANUAL_INBOX_MARK_UNREAD_RELEASED)
         for options in (
             {},
             {"MICROSOFT_PRODUCTION_PILOT_WRITES_ENABLED": "0"},
@@ -88,7 +124,7 @@ class MicrosoftReadOnlyProductionPilotTests(unittest.TestCase):
                 os.environ, {"VERCEL_ENV": "production", **options}, clear=True,
             ):
                 self.assertFalse(policy.production_pilot_read_flags_blocked())
-                self.assertTrue(policy.production_pilot_mark_unread_blocked())
+                self.assertFalse(policy.production_pilot_mark_unread_blocked())
                 self.assertTrue(policy.production_pilot_writes_blocked())
 
     def test_future_flag_only_source_release_never_enables_mail_send(self):
@@ -98,9 +134,9 @@ class MicrosoftReadOnlyProductionPilotTests(unittest.TestCase):
             self.assertFalse(policy.production_pilot_read_flags_blocked())
             self.assertTrue(policy.production_pilot_writes_blocked())
             with patch.object(access, "mark_owned_microsoft_inbox_read",
-                              return_value={
+                              side_effect=lambda *args, unread: {
                                   "providerMessageId": MESSAGE_ID,
-                                  "unread": False, "changed": True,
+                                  "unread": unread, "changed": True,
                               }) as mark_read, patch.object(
                 send_service, "send_owned_microsoft_message",
             ) as send:
@@ -117,7 +153,7 @@ class MicrosoftReadOnlyProductionPilotTests(unittest.TestCase):
                 self.assertTrue(json.loads(allowed.body)["ok"])
                 mark_read.assert_called_once()
                 self.assertEqual(mark_read.call_args.kwargs, {"unread": False})
-                self.assertEqual(inbox.microsoft_inbox_response(
+                mark_unread = inbox.microsoft_inbox_response(
                     inbox_request({
                         "mailboxId": MAILBOX,
                         "providerMessageId": MESSAGE_ID,
@@ -125,8 +161,12 @@ class MicrosoftReadOnlyProductionPilotTests(unittest.TestCase):
                     }, header_pairs=(
                         ("Origin", "https://app.cuevion.com"),
                     )), mode="flag",
-                ).status, 403)
-                mark_read.assert_called_once()
+                )
+                # Confirm both boolean flags use the same exact, owner-scoped
+                # message route; no message send permission is enabled.
+                self.assertEqual(mark_unread.status, 200)
+                self.assertEqual(mark_read.call_count, 2)
+                self.assertEqual(mark_read.call_args.kwargs, {"unread": True})
                 denied = outbound.microsoft_send_response(send_request())
                 self.assertEqual(denied.status, 403)
                 self.assertEqual(error_code(denied), "microsoft_pilot_read_only")

@@ -165,3 +165,20 @@ const viewExecutableSource = viewSource.replace(/\/\*[\s\S]*?\*\//g, "").replace
 assert.doesNotMatch(viewExecutableSource, /\b(?:setMailboxStore|saveLiveInboxSnapshot|sendGmailMessage|mutateInboxMessageAction|localStorage)\s*(?:\(|\[|\.)/);
 
 console.log("✓ Microsoft read-only workspace render and authority-isolation tests passed.");
+
+
+// Manual read/unread uses only a currently selected exact Microsoft Inbox ID.
+// It must not unlock Compose, Reply, Delete, Archive or other Graph writes.
+assert.match(viewSource, /onChangeReadState=\{\(nextUnread\) => \{ void changeReadState\(nextUnread\); \}\}/);
+assert.match(viewSource, /canChangeReadState=\{Boolean\(/);
+assert.match(viewSource, /selectedMessage\?\.serverMailboxId === mailbox\.id/);
+assert.match(viewSource, /selectedMessage\?\.providerFolder === "INBOX"/);
+assert.match(viewSource, /selectedMessage\.providerMessageId === selectedId/);
+assert.match(viewSource, /const changeReadState = useCallback\(async \(nextUnread: boolean\)/);
+assert.match(viewSource, /selectedMessage\?\.serverMailboxId !== mailbox\.id/);
+assert.match(viewSource, /selectedMessage\?\.providerFolder !== "INBOX"/);
+assert.match(viewSource, /selectedIdRef\.current !== targetId/);
+assert.match(viewSource, /mutationInFlight\.current/);
+assert.match(viewSource, /setMicrosoftMessageUnread\(\{/);
+assert.match(viewSource, /applyConfirmedMicrosoftUnread\(message, targetId, nextUnread\)/);
+assert.match(viewSource, /if \(!result\.ok\)/);

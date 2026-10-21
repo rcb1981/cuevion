@@ -10,7 +10,7 @@ const { MicrosoftPlannedMessageActions } = require(
 ) as typeof import("./MicrosoftPlannedMessageActions");
 
 const markup = renderToStaticMarkup(createElement(MicrosoftPlannedMessageActions, {unread: true}));
-assert.match(markup, /Microsoft message actions preview/);
+assert.match(markup, /Microsoft message actions/);
 for (const name of ["Reply", "Reply All", "Forward"]) {
   assert.match(markup, new RegExp(name));
 }
@@ -27,7 +27,7 @@ const withoutMessage = renderToStaticMarkup(createElement(
 ));
 assert.match(withoutMessage, /aria-label="More"[^>]*disabled=""/,
   "More must be disabled until a message is selected");
-assert.match(markup, /Preview only/);
+assert.match(markup, /Most Microsoft actions are not yet available/);
 assert.doesNotMatch(markup, /href=|contentEditable|mailto:/);
 for (const name of ["Archive", "Attachments", "Delete", "Bookmark"]) {
   assert.match(markup, new RegExp('aria-label="' + name + '"'));
@@ -55,3 +55,13 @@ assert.match(view, /selectedIdRef\.current !== providerMessageId/);
 assert.match(view, /applyConfirmedMicrosoftUnread\(item, providerMessageId, false\)/);
 assert.match(view, /setMicrosoftMessageUnread\(\{/);
 console.log("Microsoft future action bar and safeguarded auto-read wiring tests: PASS");
+
+
+// The Microsoft toolbar exposes one real, exact-ID mutation from More.
+// Other preview actions must remain disabled until individually approved.
+assert.match(source, /canChangeReadState = false/);
+assert.match(source, /changeReadStateBusy = false/);
+assert.match(source, /onChangeReadState\?: \(nextUnread: boolean\) => void/);
+assert.match(source, /key !== "read" \|\| !canChangeReadState \|\| changeReadStateBusy \|\| !onChangeReadState/);
+assert.match(source, /onChangeReadState\(!unread\)/);
+assert.match(source, /disabled=\{key !== "read"/);

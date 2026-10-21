@@ -1,6 +1,6 @@
 import React, { useId, useState } from "react";
 
-/** Microsoft-only Gmail/IMAP-style icon preview. No Graph writes or mailbox changes. */
+/** Microsoft-only actions: read-state callback may be enabled; all other writes remain disabled. */
 type GlyphName =
   | "reply" | "reply-all" | "forward" | "archive" | "attach"
   | "delete" | "bookmark" | "more" | "mail" | "move";
@@ -37,12 +37,21 @@ const actions = [
   { name: "bookmark", label: "Bookmark" },
 ] as const;
 
-export function MicrosoftPlannedMessageActions({ unread, hasMessage = true }: { unread: boolean; hasMessage?: boolean }) {
+export function MicrosoftPlannedMessageActions({
+  unread, hasMessage = true, canChangeReadState = false,
+  changeReadStateBusy = false, onChangeReadState,
+}: {
+  unread: boolean;
+  hasMessage?: boolean;
+  canChangeReadState?: boolean;
+  changeReadStateBusy?: boolean;
+  onChangeReadState?: (nextUnread: boolean) => void;
+}) {
   const [moreOpen, setMoreOpen] = useState(false);
   const moreId = useId();
 
   return (
-    <div aria-label="Microsoft message actions preview" className="flex flex-wrap items-center justify-end gap-1.5">
+    <div aria-label="Microsoft message actions" className="flex flex-wrap items-center justify-end gap-1.5">
       {actions.map(({ name, label }) => (
         <button
           key={name} type="button" aria-label={label} disabled
@@ -55,26 +64,38 @@ export function MicrosoftPlannedMessageActions({ unread, hasMessage = true }: { 
       <div className="relative">
         <button type="button" aria-label="More" aria-expanded={moreOpen}
           aria-controls={moreId} disabled={!hasMessage} onClick={() => setMoreOpen((open) => !open)}
-          title="Preview more planned Microsoft actions" className={iconButton}>
+          title="More Microsoft message actions" className={iconButton}>
           <ActionGlyph name="more" />
         </button>
         {moreOpen && hasMessage && (
-          <div id={moreId} aria-label="Other planned Microsoft message actions"
+          <div id={moreId} aria-label="More Microsoft message actions"
             className="absolute right-0 top-full z-40 mt-2 min-w-[190px] rounded-[18px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-[0_14px_32px_rgba(20,18,16,0.25)]">
             {([
               { key: "read", label: unread ? "Mark as read" : "Mark as unread", icon: "mail" },
               { key: "move", label: "Move to folder", icon: "move" },
             ] as const).map(({ key, label, icon }) => (
-              <button key={key} type="button" disabled title="Planned action; not enabled for Microsoft"
-                className="flex w-full cursor-not-allowed items-center gap-2.5 rounded-[12px] px-3 py-2 text-left text-[0.79rem] text-[var(--workspace-text-soft)] opacity-55">
+              <button key={key} type="button"
+                disabled={key !== "read" || !canChangeReadState || changeReadStateBusy || !onChangeReadState}
+                title={key === "read" && canChangeReadState
+                  ? "Update this exact Microsoft Inbox message and confirm the status"
+                  : "Planned action; not enabled for Microsoft"}
+                onClick={() => {
+                  if (key !== "read" || !canChangeReadState || changeReadStateBusy || !onChangeReadState) return;
+                  setMoreOpen(false);
+                  onChangeReadState(!unread);
+                }}
+                className={"flex w-full items-center gap-2.5 rounded-[12px] px-3 py-2 text-left text-[0.79rem] text-[var(--workspace-text-soft)] " +
+                  (key === "read" && canChangeReadState && !changeReadStateBusy && onChangeReadState
+                    ? "hover:bg-[var(--workspace-hover-surface)]"
+                    : "cursor-not-allowed opacity-55")}>
                 <ActionGlyph name={icon} />
-                {label}
+                {key === "read" && changeReadStateBusy ? "Updating…" : label}
               </button>
             ))}
           </div>
         )}
       </div>
-      <span className="sr-only">Preview only — Microsoft message actions are disabled.</span>
+      <span className="sr-only">Most Microsoft actions are not yet available. Read status can be changed for eligible Inbox messages.</span>
     </div>
   );
 }
