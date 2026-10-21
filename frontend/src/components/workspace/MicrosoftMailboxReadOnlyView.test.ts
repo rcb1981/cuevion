@@ -194,3 +194,14 @@ assert.match(viewSource, /const result = await archiveMicrosoftInboxMessage/);
 assert.match(viewSource, /if \(!result\.ok \|\| result\.providerMessageId !== targetId \|\| result\.archived !== true\)/);
 assert.match(viewSource, /setRows\(\(current\) => current\.filter/);
 assert.match(viewSource, /onArchive=\{\(\) => \{ void archiveSelectedMessage\(\); \}\}/);
+
+// Soft Delete never acts on Filtered, Sent, Archive or Deleted Items.
+assert.match(viewSource, /const deleteSelectedMessage = useCallback\(async/);
+assert.match(viewSource, /folderRef\.current !== "Inbox"/);
+assert.match(viewSource, /selectedMessage\?\.serverMailboxId !== mailbox\.id/);
+assert.match(viewSource, /selectedMessage\?\.providerFolder !== "INBOX"/);
+assert.match(viewSource, /await deleteMicrosoftInboxMessage/);
+assert.match(viewSource, /result\.providerMessageId !== targetId \|\| result\.deleted !== true/);
+assert.match(viewSource, /setRows\(\(current\) => current\.filter/);
+assert.match(viewSource, /onDelete=\{\(\) => \{ void deleteSelectedMessage\(\); \}\}/);
+assert.match(viewSource, /"Moved to Deleted Items\."/);

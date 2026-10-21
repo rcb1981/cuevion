@@ -22,6 +22,7 @@ import {
   downloadMicrosoftAttachmentFile,
   setMicrosoftMessageUnread,
   archiveMicrosoftInboxMessage,
+  deleteMicrosoftInboxMessage,
   type LiveInboxMessageSnapshot,
   type MicrosoftAttachmentMetadata,
 } from "../../lib/inboxConnectionApi";
@@ -892,6 +893,70 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     }
   }, [connected, mailbox.id, selectedMessage]);
 
+  // Soft-delete moves only the selected real Inbox item into Deleted Items.
+  // Production denies this new mutation independently of released Archive.
+  const deleteSelectedMessage = useCallback(async () => {
+    const targetId = selectedMessage?.providerMessageId;
+    if (!connected || folderRef.current !== "Inbox" || mutationInFlight.current ||
+        !targetId || selectedIdRef.current !== targetId ||
+        selectedMessage?.serverMailboxId !== mailbox.id ||
+        selectedMessage?.providerFolder !== "INBOX") return;
+
+    mutationInFlight.current = true;
+    const ticket = ++mutationTicket.current;
+    inboxTicket.current += 1;
+    setListBusy(false);
+    setMutationBusy(true);
+    setMutationError(null);
+    setMutationConfirmation(null);
+    try {
+      const result = await deleteMicrosoftInboxMessage({
+        mailboxId: mailbox.id, providerMessageId: targetId,
+      });
+      if (ticket !== mutationTicket.current ||
+          folderRef.current !== "Inbox" ||
+          selectedIdRef.current !== targetId) return;
+      if (!result.ok || result.providerMessageId !== targetId || result.deleted !== true) {
+        setMutationError(
+          !result.ok && result.error?.code === "microsoft_write_permission_required"
+            ? "Reconnect Microsoft to grant permission to move messages to Deleted Items."
+            : !result.ok && result.error?.code === "microsoft_pilot_read_only"
+              ? "Microsoft Delete is not enabled on Production yet."
+              : "Delete could not be confirmed. Refresh Inbox before trying again.",
+        );
+        return;
+      }
+
+      // Only a confirmed Deleted Items result may remove the exact message from the
+      // current Inbox. Never imply success based on a sent/uncertain request.
+      messageTicket.current += 1;
+      attachmentTicket.current += 1;
+      attachmentDownloadTicket.current += 1;
+      selectedIdRef.current = null;
+      setFullMessageTargetId(null);
+      setLearningRequestId(null);
+      setRowContext(null);
+      setAttachmentRows([]);
+      setAttachmentBusy(false);
+      setAttachmentError(null);
+      setSelectedId(null);
+      setSelectedMessage(null);
+      setRows((current) => current.filter((message) =>
+        message.providerMessageId !== targetId
+      ));
+      setMutationConfirmation("Moved to Deleted Items.");
+    } catch {
+      if (ticket === mutationTicket.current) {
+        setMutationError("Delete could not be confirmed. Refresh Inbox before trying again.");
+      }
+    } finally {
+      if (ticket === mutationTicket.current) {
+        mutationInFlight.current = false;
+        setMutationBusy(false);
+      }
+    }
+  }, [connected, mailbox.id, selectedMessage]);
+
   // Compose belongs to the folder rail and never invokes a send during the pilot.
   const composeAction = (
         <button
@@ -1016,6 +1081,14 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                   )}
                   archiveBusy={mutationBusy}
                   onArchive={() => { void archiveSelectedMessage(); }}
+                  canDelete={Boolean(
+                    connected && folder === "Inbox" && selectedId && !messageBusy &&
+                    selectedMessage?.serverMailboxId === mailbox.id &&
+                    selectedMessage?.providerFolder === "INBOX" &&
+                    selectedMessage.providerMessageId === selectedId
+                  )}
+                  deleteBusy={mutationBusy}
+                  onDelete={() => { void deleteSelectedMessage(); }}
                 />
               )}
             </div>

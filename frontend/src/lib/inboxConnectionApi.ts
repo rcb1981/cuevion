@@ -4765,6 +4765,58 @@ export async function archiveMicrosoftInboxMessage(request: {
   }
 }
 
+export type MicrosoftDeletedMoveResponse =
+  | { ok: true; providerMessageId: string; deleted: true }
+  | { ok: false; error: { code: string; message: string } };
+
+/** A non-repeatable Graph move: never retry a timed-out or uncertain request. */
+export async function deleteMicrosoftInboxMessage(request: {
+  mailboxId: string;
+  providerMessageId: string;
+}): Promise<MicrosoftDeletedMoveResponse> {
+  if (
+    typeof request?.mailboxId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
+    typeof request.providerMessageId !== "string" ||
+    !/^[^\x00-\x20\x7f-\x9f?#]{1,512}$/.test(request.providerMessageId) ||
+    new TextEncoder().encode(request.providerMessageId).byteLength > 512 ||
+    request.providerMessageId === "." ||
+    request.providerMessageId.includes("..")
+  ) return { ok: false, error: { code: "invalid_request", message: "Invalid Microsoft message." } };
+
+  try {
+    const response = await fetchProtectedApi("/api/inboxes/delete-microsoft", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mailboxId: request.mailboxId,
+        providerMessageId: request.providerMessageId,
+      }),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) return { ok: false, error: safeMicrosoftFetchError(payload) };
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error("invalid_response");
+    }
+    const record = payload as Record<string, unknown>;
+    if (record.ok !== true || record.deleted !== true ||
+        record.providerMessageId !== request.providerMessageId ||
+        Object.keys(record).length !== 3) {
+      throw new Error("invalid_confirmation");
+    }
+    return { ok: true, providerMessageId: request.providerMessageId, deleted: true };
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: "microsoft_mutation_unconfirmed",
+        message: "Move to Deleted Items could not be confirmed. Refresh before trying again.",
+      },
+    };
+  }
+}
+
 export async function setMicrosoftMessageUnread(
   request: MicrosoftReadFlagRequest,
 ): Promise<MicrosoftReadFlagResponse> {

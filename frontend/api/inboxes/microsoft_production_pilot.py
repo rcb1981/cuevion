@@ -1,8 +1,8 @@
 """Microsoft Production policy: only owner-scoped, verified Inbox read flags.
 
-Production cannot send, reply, create drafts, delete or move to arbitrary
-folders. Only exact-message Inbox read/unread and Inbox -> Archive moves are
-authorized. These narrow source-only permissions cannot be enabled through
+Production cannot send, reply, create drafts, permanently delete or move to arbitrary
+folders. Only exact-message Inbox read/unread, Inbox -> Archive and Inbox ->
+Deleted Items moves are authorized. These narrow source-only permissions cannot be enabled through
 an environment variable or browser input. Any broader mutation needs review.
 
 This policy affects only Microsoft message mutations, not OAuth token/config
@@ -19,6 +19,8 @@ _PRODUCTION_READ_FLAGS_RELEASED = True
 _PRODUCTION_MANUAL_INBOX_MARK_UNREAD_RELEASED = True
 # Exactly one Inbox -> Archive action, never a generic move or other write.
 _PRODUCTION_INBOX_ARCHIVE_RELEASED = True
+# Exactly one Inbox -> Deleted Items soft deletion; never permanent delete.
+_PRODUCTION_INBOX_SOFT_DELETE_RELEASED = True
 
 
 def production_pilot_read_flags_blocked() -> bool:
@@ -43,6 +45,11 @@ def production_pilot_archive_blocked() -> bool:
         os.getenv("VERCEL_ENV", "").strip().lower() == "production"
         and not _PRODUCTION_INBOX_ARCHIVE_RELEASED
     )
+
+
+def production_pilot_delete_blocked() -> bool:
+    """Source-only gate for exact Inbox -> Deleted Items soft delete."""
+    return os.getenv("VERCEL_ENV", "").strip().lower() == "production" and not _PRODUCTION_INBOX_SOFT_DELETE_RELEASED
 
 
 def production_pilot_writes_blocked() -> bool:

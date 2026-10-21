@@ -428,3 +428,20 @@ behavior. Correct in the existing shared MailboxView:
 - Graph move uses the real Inbox path, immutable ID preference, one fixed Archive destination, one POST and independent GET in Archive. An indeterminate result cannot be retried automatically and cannot cause a confirmed UI removal.
 - Tests prove Production release, malicious origin rejection, invalid folder/destination data rejection, source-only revocation despite environment flags, and unchanged generic write restrictions.
 - Local backend/frontend suites passed. Pending user-run live acceptance against a real Microsoft Inbox message after deployment.
+
+
+## 2026-10-21 — Microsoft soft Delete (local-only checkpoint; not Production)
+- Microsoft toolbar Delete moves an exact selected, owner-bound Inbox message to Graph's real Deleted Items; no permanent delete operation or arbitrary target is allowed.
+- Graph transport uses the existing safe JSON Graph helper, immutable ID preference, fixed Inbox preflight, one POST /move with destinationId=deleteditems, and independent exact Deleted Items GET confirmation.
+- Owner and credential-generation proof plus the shared mailbox mutation lease are reused from the approved Archive implementation. The client removes a message and displays "Moved to Deleted Items." only after the exact provider ID is confirmed.
+- The new /api/inboxes/delete-microsoft endpoint is fail-closed on Production before request-body parsing, owner resolution or Graph operations. Environment flags do not override the block. Gmail, IMAP, Archive and manual read-status behavior are unchanged.
+- Scope: selected real Inbox messages only; virtual Filtered, other Microsoft folders, permanent deletion and restore are out of scope.
+- Before Production publication, a dedicated source-only Delete release gate needs explicit approval, security tests and a real user acceptance test.
+
+
+## 2026-10-21 — Microsoft soft Delete Production authorization
+- A dedicated source-only gate releases only the existing exact owned Inbox -> Deleted Items soft move. No permanent deletion, arbitrary folder move, or other Microsoft mutation is authorized by this exception.
+- The fixed POST endpoint requires canonical host and same-origin in Vercel Production, exact mailbox/message identity, Mail.ReadWrite, owner/generation revalidation, shared mutation lease, one Microsoft Graph move and independent Deleted Items confirmation.
+- Incomplete or ambiguous Graph results remain unconfirmed and never trigger an automatic retry or a false successful Inbox removal.
+- Production tests check valid owner-scoped endpoint handoff, foreign and missing Origin, spoofed host, unexpected target/folder fields, and source revocation despite environment variables. The generic Production Microsoft write block remains enabled.
+- Frontend and backend local suites passed. Live acceptance on a test Inbox message must still be performed by the sole Production tester.

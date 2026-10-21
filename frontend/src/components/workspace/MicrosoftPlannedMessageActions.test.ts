@@ -72,5 +72,13 @@ assert.match(source, /disabled=\{key !== "read"/);
 assert.match(source, /canArchive = false/);
 assert.match(source, /archiveBusy = false/);
 assert.match(source, /onArchive\?: \(\) => void/);
-assert.match(source, /name !== "archive" \|\| !canArchive \|\| archiveBusy \|\| !onArchive/);
+assert.match(source, /name === "archive" \? \(!canArchive \|\| archiveBusy \|\| !onArchive\)/);
 assert.match(source, /name === "archive" && canArchive && !archiveBusy && onArchive/);
+
+// Inbox-only Microsoft Delete routes through one explicit callback;
+// it does not unlock any unrelated toolbar actions or a hard delete.
+assert.match(source, /canDelete = false/);
+assert.match(source, /deleteBusy = false/);
+assert.match(source, /onDelete\?: \(\) => void/);
+assert.match(source, /name === "delete" \? \(!canDelete \|\| deleteBusy \|\| !onDelete\)/);
+assert.match(source, /name === "delete" && canDelete && !deleteBusy && onDelete/);

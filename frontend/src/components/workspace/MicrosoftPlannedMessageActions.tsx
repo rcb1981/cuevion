@@ -1,6 +1,7 @@
 import React, { useId, useState } from "react";
 
-/** Microsoft-only actions: read-state callback may be enabled; all other writes remain disabled. */
+/** Microsoft-only action bar: exact Inbox read flag, Archive and soft Delete.
+ * Unreleased actions remain disabled and all permissions are enforced server-side. */
 type GlyphName =
   | "reply" | "reply-all" | "forward" | "archive" | "attach"
   | "delete" | "bookmark" | "more" | "mail" | "move";
@@ -41,6 +42,7 @@ export function MicrosoftPlannedMessageActions({
   unread, hasMessage = true, canChangeReadState = false,
   changeReadStateBusy = false, onChangeReadState,
   canArchive = false, archiveBusy = false, onArchive,
+  canDelete = false, deleteBusy = false, onDelete,
 }: {
   unread: boolean;
   hasMessage?: boolean;
@@ -50,6 +52,9 @@ export function MicrosoftPlannedMessageActions({
   canArchive?: boolean;
   archiveBusy?: boolean;
   onArchive?: () => void;
+  canDelete?: boolean;
+  deleteBusy?: boolean;
+  onDelete?: () => void;
 }) {
   const [moreOpen, setMoreOpen] = useState(false);
   const moreId = useId();
@@ -59,12 +64,19 @@ export function MicrosoftPlannedMessageActions({
       {actions.map(({ name, label }) => (
         <button
           key={name} type="button" aria-label={label}
-          disabled={name !== "archive" || !canArchive || archiveBusy || !onArchive}
+          disabled={
+            name === "archive" ? (!canArchive || archiveBusy || !onArchive)
+            : name === "delete" ? (!canDelete || deleteBusy || !onDelete)
+            : true
+          }
           title={name === "archive" && canArchive
-            ? "Move the selected Microsoft Inbox message to Archive after Graph confirmation"
-            : label + " requires separate Microsoft action approval"}
+            ? "Move this exact Microsoft Inbox message to Archive after Graph confirmation"
+            : name === "delete" && canDelete
+              ? "Move this exact Microsoft Inbox message to Deleted Items (not permanently deleted)"
+              : label + " requires separate Microsoft action approval"}
           onClick={() => {
             if (name === "archive" && canArchive && !archiveBusy && onArchive) onArchive();
+            if (name === "delete" && canDelete && !deleteBusy && onDelete) onDelete();
           }}
           className={iconButton}
         >

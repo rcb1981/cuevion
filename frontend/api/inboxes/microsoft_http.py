@@ -21,6 +21,7 @@ from api.inboxes.microsoft_production_pilot import (
     production_pilot_read_flags_blocked,
     production_pilot_mark_unread_blocked,
     production_pilot_archive_blocked,
+    production_pilot_delete_blocked,
     production_pilot_writes_blocked,
 )
 from api.inboxes.microsoft_graph import MicrosoftGraphError
@@ -109,7 +110,7 @@ def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dic
         if type(page) is not int or not 1 <= page <= 4:
             raise ValueError("invalid")
         return mailbox, limit if page == 1 else {"limit": limit, "page": page}
-    if mode in {"exact", "sent_exact", "archive_exact", "archive_move", "draft_exact", "deleted_exact", "junk_exact", "attachments", "download"}:
+    if mode in {"exact", "sent_exact", "archive_exact", "archive_move", "delete_move", "draft_exact", "deleted_exact", "junk_exact", "attachments", "download"}:
         message_id = payload.get("providerMessageId")
         if (
             type(message_id) is not str
@@ -156,6 +157,9 @@ def microsoft_inbox_response(request, *, mode: str):
     method = getattr(request, "command", "")
     if method != "POST":
         return _error(405, "method_not_allowed")
+    if mode == "delete_move" and production_pilot_delete_blocked():
+        # Denied before reading any request body or resolving owner credentials.
+        return _error(403, "microsoft_pilot_read_only")
     if mode == "archive_move" and production_pilot_archive_blocked():
         # Source-only permission gate before body, owner or Graph I/O.
         return _error(403, "microsoft_pilot_read_only")
@@ -166,7 +170,7 @@ def microsoft_inbox_response(request, *, mode: str):
 
     try:
         headers = snapshot_request_headers(request)
-        if mode in {"flag", "archive_move"} and production_pilot_writes_blocked():
+        if mode in {"flag", "archive_move", "delete_move"} and production_pilot_writes_blocked():
             # This future Production mutation requires exact canonical host
             # and same-origin POST, even for an already owned mailbox.
             require_canonical_host(headers)
@@ -348,6 +352,17 @@ def microsoft_inbox_response(request, *, mode: str):
                     message, mailbox_id, exact_body=True,
                 )},
             )
+        if mode == "delete_move":
+            assert type(selector) is str
+            confirmation = owned.delete_owned_microsoft_inbox_message(
+                headers, mailbox_id, selector,
+            )
+            if (type(confirmation) is not dict
+                or confirmation.get("providerMessageId") != selector
+                or confirmation.get("deleted") is not True
+                or set(confirmation) != {"providerMessageId", "deleted"}):
+                raise MicrosoftGraphError("microsoft_mutation_unconfirmed")
+            return json_response(200, {"ok": True, **confirmation})
         if mode == "archive_move":
             assert type(selector) is str
             confirmation = owned.archive_owned_microsoft_inbox_message(
