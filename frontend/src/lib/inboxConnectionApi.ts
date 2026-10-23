@@ -4504,6 +4504,11 @@ const MICROSOFT_INBOX_SAFE_ERRORS: Record<string, string> = {
   microsoft_mutation_conflict: "Microsoft message changed. Refresh Inbox and try again.",
   microsoft_mutation_unconfirmed: "The message change could not be confirmed. Refresh Inbox.",
   microsoft_message_not_found: "The message is no longer in this Inbox.",
+  microsoft_pilot_read_only: "Microsoft Drafts editing is not enabled yet.",
+  microsoft_draft_edit_invalid: "Check your draft recipients, subject and message.",
+  microsoft_draft_edit_unsupported: "This draft has formatting or attachments that cannot be edited safely yet.",
+  microsoft_draft_edit_conflict: "The draft changed in Outlook. Reopen it before editing.",
+  microsoft_draft_edit_unconfirmed: "Save status is uncertain. Reopen Drafts before saving again.",
 };
 
 function safeMicrosoftFetchError(payload: unknown): { code: string; message: string } {
@@ -5059,7 +5064,8 @@ export async function fetchMicrosoftSentMessage(
 
 export type MicrosoftOutboundCompose =
   | { mode: "new"; to: string[]; cc?: string[]; subject: string; body: string }
-  | { mode: "reply" | "reply_all"; sourceProviderMessageId: string; body: string };
+  | { mode: "reply" | "reply_all"; sourceProviderMessageId: string; body: string }
+  | { mode: "forward"; sourceProviderMessageId: string; to: string[]; cc?: string[]; body: string };
 
 export type MicrosoftSendRequest = {
   mailboxId: string;
@@ -5123,7 +5129,7 @@ function validMicrosoftCompose(value: MicrosoftOutboundCompose): boolean {
   if (value.mode === "new") {
     if (
       !Array.isArray(value.to) || value.to.length < 1 ||
-      !Array.isArray(value.cc ?? []) || value.to.length + (value.cc ?? []).length > 20 ||
+      (value.cc !== undefined && !Array.isArray(value.cc)) || value.to.length + (value.cc ?? []).length > 20 ||
       typeof value.subject !== "string" ||
       !value.subject.trim() || value.subject.length > 250 ||
       /[\r\n\x00-\x1f\x7f]/.test(value.subject)
@@ -5135,6 +5141,21 @@ function validMicrosoftCompose(value: MicrosoftOutboundCompose): boolean {
       address === address.toLowerCase()
     ) && new Set(all).size === all.length;
   }
+  if (value.mode === "forward") {
+    if (!Array.isArray(value.to) || (value.cc !== undefined && !Array.isArray(value.cc))) return false;
+    const all = [...value.to, ...(value.cc ?? [])];
+    return (
+      typeof value.sourceProviderMessageId === "string" &&
+      /^[^\x00-\x20\x7f-\x9f?#]{1,512}$/.test(value.sourceProviderMessageId) &&
+      value.sourceProviderMessageId !== "." && !value.sourceProviderMessageId.includes("..") &&
+      Array.isArray(value.to) && value.to.length > 0 &&
+      Array.isArray(value.cc ?? []) && all.length <= 20 &&
+      all.every(address => typeof address === "string" &&
+        /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(address) &&
+        address === address.toLowerCase()) &&
+      new Set(all).size === all.length
+    );
+  }
   if (value.mode === "reply" || value.mode === "reply_all") {
     return (
       typeof value.sourceProviderMessageId === "string" &&
@@ -5144,6 +5165,149 @@ function validMicrosoftCompose(value: MicrosoftOutboundCompose): boolean {
     );
   }
   return false;
+}
+
+export type MicrosoftDraftDiscardResponse =
+  | { ok: true; providerMessageId: string; discarded: true }
+  | { ok: false; outcome: "not_performed" | "uncertain"; error: { code: string; message: string } };
+
+const MICROSOFT_DISCARD_UNCERTAIN_MESSAGE =
+  "Discard status is uncertain. Check Drafts and Deleted Items in Outlook. This draft will not be moved again here during this session.";
+
+/** One exact Drafts-to-Deleted-Items move. Never retry an uncertain request. */
+export async function discardMicrosoftDraft(request: {
+  mailboxId: string;
+  providerMessageId: string;
+}): Promise<MicrosoftDraftDiscardResponse> {
+  if (
+    typeof request?.mailboxId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
+    typeof request.providerMessageId !== "string" ||
+    !/^[^\x00-\x20\x7f-\x9f?#]{1,512}$/.test(request.providerMessageId) ||
+    new TextEncoder().encode(request.providerMessageId).byteLength > 512 ||
+    request.providerMessageId === "." || request.providerMessageId.includes("..")
+  ) return { ok: false, outcome: "not_performed", error: { code: "invalid_request", message: "Invalid Microsoft draft." } };
+
+  try {
+    const response = await fetchProtectedApi("/api/inboxes/discard-microsoft-draft", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mailboxId: request.mailboxId,
+        providerMessageId: request.providerMessageId,
+      }),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      const rawCode = payload && typeof payload === "object" && "error" in payload &&
+        payload.error && typeof payload.error === "object" && "code" in payload.error
+        ? payload.error.code : undefined;
+      const notPerformed = response.status >= 400 && response.status < 500 && [
+        "microsoft_draft_discard_not_performed", "invalid_request", "request_too_large",
+        "microsoft_pilot_read_only", "microsoft_unauthorized", "microsoft_mailbox_not_found",
+        "microsoft_reconnect_required", "microsoft_write_permission_required",
+        "microsoft_mutation_in_progress", "microsoft_mutation_conflict", "microsoft_message_not_found",
+        "microsoft_graph_rate_limited",
+      ].includes(typeof rawCode === "string" ? rawCode : "");
+      return notPerformed
+        ? { ok: false, outcome: "not_performed", error: {
+            code: String(rawCode), message: "Microsoft did not discard the draft. Refresh Drafts before trying again.",
+          } }
+        : { ok: false, outcome: "uncertain", error: {
+            code: "microsoft_mutation_unconfirmed", message: MICROSOFT_DISCARD_UNCERTAIN_MESSAGE,
+          } };
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error("invalid_response");
+    }
+    const record = payload as Record<string, unknown>;
+    if (
+      record.ok !== true || record.discarded !== true ||
+      record.providerMessageId !== request.providerMessageId ||
+      Object.keys(record).length !== 3
+    ) throw new Error("invalid_confirmation");
+    return { ok: true, providerMessageId: request.providerMessageId, discarded: true };
+  } catch {
+    return {
+      ok: false,
+      outcome: "uncertain",
+      error: {
+        code: "microsoft_mutation_unconfirmed",
+        message: MICROSOFT_DISCARD_UNCERTAIN_MESSAGE,
+      },
+    };
+  }
+}
+
+/** Existing Microsoft HTML Drafts: metadata only. Never send edited HTML. */
+export type MicrosoftRichDraftMetadata = { subject: string; to: string[]; cc: string[] };
+export type MicrosoftRichDraftResponse =
+  | ({ ok: true; providerMessageId: string; etag: string; metadata: MicrosoftRichDraftMetadata;
+       bodyPreview: string; changed?: boolean })
+  | { ok: false; error: { code: string; message: string } };
+
+export function validMicrosoftRichDraftMetadata(value: unknown): value is MicrosoftRichDraftMetadata {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  return Object.keys(item).sort().join("|") === "cc|subject|to" &&
+    validMicrosoftDraftEdit({ ...item, body: "" });
+}
+
+export async function updateMicrosoftRichDraftMetadata(request: {
+  action: "load_rich" | "save_rich";
+  mailboxId: string;
+  providerMessageId: string;
+  etag?: string;
+  metadata?: MicrosoftRichDraftMetadata;
+}): Promise<MicrosoftRichDraftResponse> {
+  const source = request?.providerMessageId;
+  const sourceValid = typeof source === "string" &&
+    /^[^\x00-\x20\x7f-\x9f?#]{1,512}$/.test(source) &&
+    source !== "." && !source.includes("..") &&
+    new TextEncoder().encode(source).byteLength <= 512;
+  if (!sourceValid || typeof request.mailboxId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
+    !(request.action === "load_rich" || request.action === "save_rich") ||
+    (request.action === "save_rich" &&
+      (!request.etag || !microsoftDraftEtag.test(request.etag) ||
+       !validMicrosoftRichDraftMetadata(request.metadata)))) {
+    return { ok: false, error: { code: "invalid_request", message: "Invalid Microsoft HTML Draft request." } };
+  }
+  const payload = request.action === "load_rich"
+    ? { action: "load_rich", mailboxId: request.mailboxId, providerMessageId: source }
+    : { action: "save_rich", mailboxId: request.mailboxId, providerMessageId: source,
+        etag: request.etag, edit: request.metadata };
+  try {
+    const response = await fetchProtectedApi("/api/inboxes/edit-microsoft-draft", {
+      method: "POST", credentials: "include",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    const data: unknown = await response.json();
+    if (!response.ok) return { ok: false, error: safeMicrosoftFetchError(data) };
+    if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("invalid_response");
+    const record = data as Record<string, unknown>;
+    if (record.ok !== true || !Object.keys(record).every(k =>
+      ["ok", "providerMessageId", "etag", "metadata", "bodyPreview",
+       ...(request.action === "save_rich" ? ["changed"] : [])].includes(k)) ||
+      record.providerMessageId !== source || typeof record.etag !== "string" ||
+      !microsoftDraftEtag.test(record.etag) ||
+      !validMicrosoftRichDraftMetadata(record.metadata) ||
+      typeof record.bodyPreview !== "string" || record.bodyPreview.length > 4000 ||
+      (request.action === "save_rich"
+        ? typeof record.changed !== "boolean"
+        : record.changed !== undefined)) throw new Error("invalid_response");
+    return { ok: true, providerMessageId: source, etag: record.etag,
+      metadata: record.metadata, bodyPreview: record.bodyPreview,
+      ...(request.action === "save_rich" ? { changed: record.changed as boolean } : {}) };
+  } catch {
+    return { ok: false, error: {
+      code: "microsoft_draft_edit_unconfirmed",
+      message: request.action === "save_rich"
+        ? "Save status is uncertain. Reopen Drafts before trying again."
+        : "The HTML draft could not be safely opened for editing.",
+    } };
+  }
 }
 
 export async function sendMicrosoftMessage(
@@ -5602,6 +5766,93 @@ function isTrustedMicrosoftDraft(
     typeof value.to === "string" && value.to.length > 0 &&
     typeof value.sender === "string" && value.sender === "To: " + value.to &&
     value.from === "";
+}
+
+/** Microsoft-only conditional edit of an existing plain-text Drafts message.
+ * The server owns Graph paths and enforces the independent Production gate.
+ */
+export type MicrosoftDraftEdit = { subject: string; to: string[]; cc: string[]; body: string };
+export type MicrosoftEditableDraft = {
+  providerMessageId: string;
+  etag: string;
+  edit: MicrosoftDraftEdit;
+  changed?: boolean;
+};
+export type MicrosoftDraftEditorResponse =
+  | ({ ok: true } & MicrosoftEditableDraft)
+  | { ok: false; error: { code: string; message: string } };
+
+const microsoftDraftEtag = /^(?:W\/)?"[\x21\x23-\x7e]{1,256}"$/;
+
+export function validMicrosoftDraftEdit(value: unknown): value is MicrosoftDraftEdit {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const edit = value as Record<string, unknown>;
+  if (Object.keys(edit).sort().join("|") !== "body|cc|subject|to") return false;
+  if (typeof edit.subject !== "string" || edit.subject.length > 250 ||
+    /[\x00-\x1f\x7f]/.test(edit.subject) ||
+    typeof edit.body !== "string" || edit.body.length > 32000 || edit.body.includes("\0") ||
+    !Array.isArray(edit.to) || !Array.isArray(edit.cc) ||
+    edit.to.length + edit.cc.length > 20) return false;
+  const addresses: unknown[] = [...edit.to, ...edit.cc];
+  return addresses.every((v) => typeof v === "string" &&
+    /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(v) && v === v.toLowerCase() && v.length <= 320) &&
+    new Set(addresses).size === addresses.length;
+}
+
+function validMicrosoftEditableDraft(value: unknown, sourceId: string, isSave: boolean): value is MicrosoftEditableDraft {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (record.providerMessageId !== sourceId || typeof record.etag !== "string" ||
+    !microsoftDraftEtag.test(record.etag) || !validMicrosoftDraftEdit(record.edit)) return false;
+  if (isSave) return typeof record.changed === "boolean";
+  return record.changed === undefined;
+}
+
+export async function updateMicrosoftEditableDraft(request: {
+  action: "load" | "save";
+  mailboxId: string;
+  providerMessageId: string;
+  etag?: string;
+  edit?: MicrosoftDraftEdit;
+}): Promise<MicrosoftDraftEditorResponse> {
+  const source = request?.providerMessageId;
+  const validId = typeof source === "string" &&
+    /^[^\x00-\x20\x7f-\x9f?#]{1,512}$/.test(source) &&
+    source !== "." && !source.includes("..") &&
+    new TextEncoder().encode(source).byteLength <= 512;
+  if (!validId || typeof request.mailboxId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(request.mailboxId) ||
+    !(request.action === "load" || request.action === "save") ||
+    (request.action === "save" && (!request.etag || !microsoftDraftEtag.test(request.etag) || !validMicrosoftDraftEdit(request.edit)))) {
+    return { ok: false, error: { code: "invalid_request", message: "Invalid Microsoft draft edit." } };
+  }
+  const payload = request.action === "load"
+    ? { action: "load", mailboxId: request.mailboxId, providerMessageId: source }
+    : { action: "save", mailboxId: request.mailboxId, providerMessageId: source, etag: request.etag, edit: request.edit };
+  try {
+    const response = await fetchProtectedApi("/api/inboxes/edit-microsoft-draft", {
+      method: "POST", credentials: "include",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    const data: unknown = await response.json();
+    if (!response.ok) return { ok: false, error: safeMicrosoftFetchError(data) };
+    if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("invalid_response");
+    const record = data as Record<string, unknown>;
+    if (record.ok !== true || !Object.keys(record).every(k =>
+      ["ok", "providerMessageId", "etag", "edit", ...(request.action === "save" ? ["changed"] : [])].includes(k)) ||
+      !validMicrosoftEditableDraft(record, source, request.action === "save")) {
+      throw new Error("invalid_response");
+    }
+    return { ok: true, providerMessageId: source, etag: record.etag, edit: record.edit,
+      ...(request.action === "save" ? { changed: record.changed } : {}) };
+  } catch {
+    return { ok: false, error: {
+      code: "microsoft_draft_edit_unconfirmed",
+      message: request.action === "save"
+        ? "Save status is uncertain. Reopen Drafts before saving again."
+        : "The editable draft could not be opened.",
+    } };
+  }
 }
 
 /** Bounded, owner-authorized Drafts listing; never modify or send draft content. */

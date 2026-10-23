@@ -379,6 +379,59 @@ def delete_owned_microsoft_inbox_message(headers, mailbox_id: object, message_id
             raise MicrosoftMailboxAccessError("microsoft_mutation_unconfirmed")
 
 
+def discard_owned_microsoft_draft(headers, mailbox_id: object, message_id: str) -> dict:
+    """Owner-bound, leased exact Drafts -> Deleted Items soft move."""
+    from api.inboxes import microsoft_graph, microsoft_draft_discard
+
+    microsoft_graph._required_message_id(message_id)
+    captured = resolve_owned_microsoft_mailbox(headers, mailbox_id)
+    try:
+        lease = acquire_mailbox_mutation_lease(
+            captured.owner_email, captured.mailbox_id,
+        )
+    except Exception:
+        raise MicrosoftMailboxAccessError("microsoft_mailbox_unavailable") from None
+    if not isinstance(lease, dict):
+        raise MicrosoftMailboxAccessError("microsoft_mailbox_unavailable")
+    if lease.get("status") != "acquired":
+        if lease.get("status") == "held":
+            raise MicrosoftMailboxAccessError("microsoft_mutation_in_progress")
+        raise MicrosoftMailboxAccessError("microsoft_mailbox_unavailable")
+    lease_token = lease.get("token")
+    if type(lease_token) is not str or not lease_token:
+        raise MicrosoftMailboxAccessError("microsoft_mailbox_unavailable")
+    succeeded = False
+    try:
+        token, checked = _owned_token(headers, mailbox_id, require_read_write=True)
+        if checked != captured:
+            raise MicrosoftMailboxAccessError("microsoft_reconnect_required")
+        result = microsoft_draft_discard.discard_exact_microsoft_draft_to_deleted(
+            token, message_id,
+            before_write=lambda: _verify_unchanged_owned_mailbox(
+                headers, mailbox_id, captured,
+            ),
+        )
+        try:
+            _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+        except Exception:
+            # The move has already happened; a revoked session is not proof
+            # that it was rejected. Do not invite another move.
+            raise MicrosoftMailboxAccessError("microsoft_mutation_unconfirmed") from None
+        succeeded = True
+        return result
+    finally:
+        released = False
+        try:
+            release = release_mailbox_mutation_lease(
+                captured.owner_email, captured.mailbox_id, lease_token,
+            )
+            released = isinstance(release, dict) and release.get("status") == "released"
+        except Exception:
+            pass
+        if succeeded and not released:
+            raise MicrosoftMailboxAccessError("microsoft_mutation_unconfirmed")
+
+
 def list_owned_microsoft_sent(
     headers, mailbox_id: object, *, page_size: int = 20, page: int = 1,
 ) -> dict:
@@ -543,3 +596,82 @@ def read_owned_microsoft_junk_message(
     message = microsoft_graph.get_microsoft_junk_message(token, message_id)
     _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
     return message
+
+
+def read_owned_microsoft_editable_draft(headers, mailbox_id: object, message_id: str) -> dict:
+    """Only a strict, source-folder-qualified plain-text Drafts read."""
+    from api.inboxes import microsoft_draft_editor
+    token, captured = _owned_token(headers, mailbox_id)
+    result = microsoft_draft_editor.read_editable_microsoft_draft(token, message_id)
+    _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+    return result
+
+
+def read_owned_microsoft_rich_draft_metadata(headers, mailbox_id: object, message_id: str) -> dict:
+    """Exact Drafts HTML metadata read; never returns raw HTML to this editor."""
+    from api.inboxes import microsoft_rich_draft
+    token, captured = _owned_token(headers, mailbox_id)
+    result = microsoft_rich_draft.read_rich_draft_metadata(token, message_id)
+    _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+    return result
+
+
+def save_owned_microsoft_editable_draft(
+    headers, mailbox_id: object, message_id: str, *, etag: str, edit: object,
+    metadata_only: bool = False,
+) -> dict:
+    """Authorize one optimistic, exact-Drafts edit under mailbox mutation lease."""
+    from api.inboxes import microsoft_draft_editor, microsoft_rich_draft
+    from api.inboxes.microsoft_graph import MicrosoftGraphError, _required_message_id
+    _required_message_id(message_id)
+    if type(metadata_only) is not bool:
+        raise MicrosoftGraphError('microsoft_draft_edit_invalid')
+    if metadata_only:
+        microsoft_rich_draft.validate_metadata(edit)
+    else:
+        microsoft_draft_editor.validate_edit(edit)
+    captured = resolve_owned_microsoft_mailbox(headers, mailbox_id)
+    try:
+        lease = acquire_mailbox_mutation_lease(captured.owner_email, captured.mailbox_id)
+    except Exception:
+        raise MicrosoftMailboxAccessError('microsoft_mailbox_unavailable') from None
+    if type(lease) is not dict:
+        raise MicrosoftMailboxAccessError('microsoft_mailbox_unavailable')
+    if lease.get('status') != 'acquired':
+        raise MicrosoftMailboxAccessError(
+            'microsoft_mutation_in_progress' if lease.get('status') == 'held'
+            else 'microsoft_mailbox_unavailable'
+        )
+    lease_token = lease.get('token')
+    if type(lease_token) is not str or not lease_token:
+        raise MicrosoftMailboxAccessError('microsoft_mailbox_unavailable')
+    succeeded=False
+    try:
+        token, checked = _owned_token(headers, mailbox_id, require_read_write=True)
+        if checked != captured:
+            raise MicrosoftMailboxAccessError('microsoft_reconnect_required')
+        save_operation = (
+            microsoft_rich_draft.save_rich_draft_metadata if metadata_only
+            else microsoft_draft_editor.save_exact_microsoft_draft
+        )
+        result = save_operation(
+            token, message_id, etag=etag,
+            **({'metadata': edit} if metadata_only else {'edit': edit}),
+            before_write=lambda: _verify_unchanged_owned_mailbox(
+                headers, mailbox_id, captured,
+            ),
+        )
+        _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+        succeeded=True
+        return result
+    finally:
+        released=False
+        try:
+            release=release_mailbox_mutation_lease(
+                captured.owner_email, captured.mailbox_id, lease_token,
+            )
+            released=type(release) is dict and release.get('status') == 'released'
+        except Exception:
+            pass
+        if succeeded and not released:
+            raise MicrosoftMailboxAccessError('microsoft_mutation_unconfirmed')

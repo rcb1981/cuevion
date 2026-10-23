@@ -13,6 +13,7 @@ TOKEN = "microsoft-test-access-token-12345"
 DRAFT = "draft-ABC"
 SOURCE = "source-XYZ"
 THREAD = "conversation-123"
+ORIGINAL = "This is the original message which must remain quoted in the reply."
 
 
 class FakeResponse:
@@ -48,7 +49,7 @@ class StubGraph:
         path = request.full_url.removeprefix(GRAPH_ROOT)
         method = request.get_method()
         if path.startswith("/me/mailFolders/inbox/messages/") and method == "GET":
-            return FakeResponse({"id": SOURCE, "conversationId": THREAD})
+            return FakeResponse({"id": SOURCE, "conversationId": THREAD, "bodyPreview": ORIGINAL})
         if method == "POST" and (path == "/me/messages" or path.endswith("/createReply") or path.endswith("/createReplyAll")):
             return FakeResponse(
                 {"id": DRAFT, "isDraft": True, "conversationId": THREAD}, status=201
@@ -60,7 +61,11 @@ class StubGraph:
                 "id": DRAFT, "isDraft": True, "conversationId": THREAD,
                 "subject": "My subject", "toRecipients": [{"emailAddress":{"address":"test@example.com"}}],
                 "ccRecipients": [],
-                "body": {"contentType":"text", "content":self.body},
+                "body": (
+                    {"contentType":"html", "content": "<div>Hello from Cuevion</div><blockquote>" + ORIGINAL + "</blockquote>"}
+                    if self.mode in ("reply", "reply_all") else
+                    {"contentType":"text", "content": self.body}
+                ),
             })
         if method == "POST" and path == "/me/messages/" + DRAFT + "/send":
             return FakeResponse(None, status=202)
@@ -100,7 +105,7 @@ class OutboundGraphTests(unittest.TestCase):
             payload = {"mode":mode, "sourceProviderMessageId":SOURCE, "body":"Hello from Cuevion"}
             draft = graph.prepare_microsoft_draft(TOKEN, payload, opener=fake)
             self.assertEqual(draft["conversationId"], THREAD)
-            self.assertEqual([x.get_method() for x, _ in fake.calls], ["GET", "POST", "PATCH", "GET"])
+            self.assertEqual([x.get_method() for x, _ in fake.calls], ["GET", "POST", "GET"])
             self.assertTrue(fake.calls[0][0].full_url.startswith(
                 GRAPH_ROOT + "/me/mailFolders/inbox/messages/" + SOURCE
             ))
@@ -108,12 +113,50 @@ class OutboundGraphTests(unittest.TestCase):
                 fake.calls[1][0].full_url,
                 GRAPH_ROOT + "/me/mailFolders/inbox/messages/" + SOURCE + "/" + endpoint,
             )
-            self.assertEqual(json.loads(fake.calls[2][0].data), {
-                "body":{"contentType":"Text", "content":"Hello from Cuevion"}
+            self.assertEqual(json.loads(fake.calls[1][0].data), {
+                "comment": "Hello from Cuevion"
             })
-            self.assertNotIn("toRecipients", json.loads(fake.calls[2][0].data))
+            self.assertNotIn("toRecipients", json.loads(fake.calls[1][0].data))
             self.assertFalse(any(x.get_method() == "POST" and x.full_url.endswith("/send")
                                  for x, _ in fake.calls))
+
+    def test_reply_rejects_missing_or_html_hidden_original_quote(self):
+        for content in (
+            "<p>Hello from Cuevion</p>",
+            "<p>Hello from Cuevion</p><script>" + ORIGINAL + "</script>",
+            "<p>Hello from Cuevion</p><style>" + ORIGINAL + "</style>",
+        ):
+            fake = StubGraph(mode="reply")
+            class AlteredReply:
+                def __init__(self, delegate):
+                    self.delegate=delegate
+                def __call__(self, request, *, timeout):
+                    if request.get_method() == "GET" and "/me/messages/" + DRAFT in request.full_url:
+                        return FakeResponse({
+                            "id": DRAFT, "isDraft": True, "conversationId": THREAD,
+                            "subject": "Re: My subject",
+                            "toRecipients": [{"emailAddress":{"address":"test@example.com"}}],
+                            "ccRecipients": [],
+                            "body": {"contentType":"html","content":content},
+                        })
+                    return self.delegate(request, timeout=timeout)
+            with self.subTest(content=content), self.assertRaises(MicrosoftGraphError) as caught:
+                graph.prepare_microsoft_draft(
+                    TOKEN, {"mode":"reply","sourceProviderMessageId": SOURCE,"body":"Hello from Cuevion"},
+                    opener=AlteredReply(fake),
+                )
+            self.assertEqual(caught.exception.code,"microsoft_draft_unconfirmed")
+            self.assertEqual([x.get_method() for x,_ in fake.calls], ["GET", "POST"])
+
+    def test_reply_rejects_comment_forging_the_original_quote(self):
+        fake=StubGraph(mode="reply")
+        with self.assertRaises(MicrosoftGraphError) as caught:
+            graph.prepare_microsoft_draft(TOKEN, {
+                "mode":"reply","sourceProviderMessageId":SOURCE,
+                "body":"Hello " + ORIGINAL,
+            }, opener=fake)
+        self.assertEqual(caught.exception.code,"microsoft_compose_invalid")
+        self.assertEqual([x.get_method() for x,_ in fake.calls],["GET"])
 
     def test_submit_once_returns_accepted_not_delivery_claim(self):
         fake = StubGraph()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
 from http.client import IncompleteRead
 from urllib.parse import quote
@@ -24,7 +25,25 @@ MAX_SUBJECT_LENGTH = 250
 MAX_BODY_LENGTH = 64_000
 MAX_GRAPH_DRAFT_BYTES = 64 * 1024
 _REPLY_MODES = frozenset(("reply", "reply_all"))
-_MODES = frozenset(("new", "reply", "reply_all"))
+_MODES = frozenset(("new", "reply", "reply_all", "forward"))
+
+def _forward_source_excerpt(token: str, source_id: str, *, opener=urlopen) -> str:
+    exact_id = _required_message_id(source_id)
+    source = _graph_http(
+        token, "/me/mailFolders/inbox/messages/" + quote(exact_id, safe="")
+        + "?$select=id,conversationId,bodyPreview,hasAttachments",
+        method="GET", expected_status=200, opener=opener,
+    )
+    if (type(source) is not dict or source.get("id") != exact_id or
+            source.get("hasAttachments") is not False or
+            type(source.get("bodyPreview")) is not str):
+        raise MicrosoftGraphError("microsoft_reply_source_invalid")
+    excerpt = " ".join(source["bodyPreview"].split())[:96]
+    if len(excerpt) < 24:
+        raise MicrosoftGraphError("microsoft_reply_source_invalid")
+    return excerpt
+
+
 _HEADERS = frozenset(("Authorization", "Content-Type", "Accept", "Prefer"))
 
 
@@ -35,6 +54,9 @@ def _validated_compose(value: object) -> dict:
     required = {"mode", "body"}
     if mode == "new":
         required |= {"to", "subject"}
+        allowed = required | {"cc"}
+    elif mode == "forward":
+        required |= {"sourceProviderMessageId", "to"}
         allowed = required | {"cc"}
     else:
         required |= {"sourceProviderMessageId"}
@@ -51,14 +73,16 @@ def _validated_compose(value: object) -> dict:
         raise MicrosoftGraphError("microsoft_compose_invalid")
     if mode != "new":
         _required_message_id(value["sourceProviderMessageId"])
+    if mode in _REPLY_MODES:
         return {"mode": mode, "sourceProviderMessageId": value["sourceProviderMessageId"], "body": body}
-    subject = value["subject"]
-    if (
-        type(subject) is not str or not 1 <= len(subject.strip()) <= MAX_SUBJECT_LENGTH
-        or "\r" in subject or "\n" in subject
-        or any(ord(c) < 32 or ord(c) == 127 for c in subject)
-    ):
-        raise MicrosoftGraphError("microsoft_compose_invalid")
+    if mode == "new":
+        subject = value["subject"]
+        if (
+            type(subject) is not str or not 1 <= len(subject.strip()) <= MAX_SUBJECT_LENGTH
+            or "\r" in subject or "\n" in subject
+            or any(ord(c) < 32 or ord(c) == 127 for c in subject)
+        ):
+            raise MicrosoftGraphError("microsoft_compose_invalid")
     normalized = {}
     for key in ("to", "cc"):
         addresses = value.get(key, [] if key == "cc" else None)
@@ -79,6 +103,9 @@ def _validated_compose(value: object) -> dict:
         raise MicrosoftGraphError("microsoft_compose_invalid")
     if set(normalized["to"]) & set(normalized["cc"]):
         raise MicrosoftGraphError("microsoft_compose_invalid")
+    if mode == "forward":
+        return {"mode": "forward", "sourceProviderMessageId": value["sourceProviderMessageId"],
+                "body": body, **normalized}
     return {"mode": "new", "subject": subject, "body": body, **normalized}
 
 
@@ -169,12 +196,57 @@ def _required_draft(payload: object, *, original_conversation: str | None = None
     return {"draftId": draft_id, "conversationId": conversation}
 
 
-def _source_conversation(token: str, source_id: str, *, opener=urlopen) -> str:
+class _VisibleReplyText(HTMLParser):
+    """Text-only projection for draft verification, never render Graph HTML."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.hidden_depth = 0
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style", "head", "template", "svg"}:
+            self.hidden_depth += 1
+        elif not self.hidden_depth and tag in {"p", "br", "div", "li", "tr"}:
+            self.parts.append(" ")
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style", "head", "template", "svg"}:
+            self.hidden_depth = max(0, self.hidden_depth - 1)
+        elif not self.hidden_depth and tag in {"p", "div", "li", "tr"}:
+            self.parts.append(" ")
+
+    def handle_data(self, data):
+        if not self.hidden_depth:
+            self.parts.append(data)
+
+
+def _normalized_draft_visible_text(body: object) -> str:
+    if type(body) is not dict or type(body.get("content")) is not str:
+        raise MicrosoftGraphError("microsoft_draft_unconfirmed")
+    content = body["content"]
+    if len(content) > MAX_BODY_LENGTH * 4:
+        raise MicrosoftGraphError("microsoft_draft_unconfirmed")
+    kind = str(body.get("contentType", "")).lower()
+    if kind == "text":
+        return " ".join(content.split()).casefold()
+    if kind != "html":
+        raise MicrosoftGraphError("microsoft_draft_unconfirmed")
+    parser = _VisibleReplyText()
+    try:
+        parser.feed(content)
+        parser.close()
+    except (AssertionError, ValueError):
+        raise MicrosoftGraphError("microsoft_draft_unconfirmed") from None
+    return " ".join(" ".join(parser.parts).split()).casefold()
+
+
+def _source_reply_context(token: str, source_id: str, *, opener=urlopen) -> dict:
+    """Verify the exact Inbox source, conversation and an original body witness."""
     exact_source = _required_message_id(source_id)
     payload = _graph_http(
         token,
         "/me/mailFolders/inbox/messages/" + quote(exact_source, safe="")
-        + "?$select=id,conversationId",
+        + "?$select=id,conversationId,bodyPreview",
         method="GET", expected_status=200, opener=opener,
     )
     if type(payload) is not dict or payload.get("id") != source_id:
@@ -184,7 +256,15 @@ def _source_conversation(token: str, source_id: str, *, opener=urlopen) -> str:
         _required_message_id(conversation)
     except MicrosoftGraphError:
         raise MicrosoftGraphError("microsoft_reply_source_invalid") from None
-    return conversation
+    preview = payload.get("bodyPreview")
+    if type(preview) is not str:
+        raise MicrosoftGraphError("microsoft_reply_source_invalid")
+    # A short original message may be valid. Require at least a distinctive
+    # portion to verify that the quoted content remains in the reply draft.
+    excerpt = " ".join(preview.split())[:96].casefold()
+    if len(excerpt) < 12:
+        raise MicrosoftGraphError("microsoft_reply_source_invalid")
+    return {"conversationId": conversation, "excerpt": excerpt}
 
 
 def _recipients(value: list[str]) -> list[dict]:
@@ -193,6 +273,8 @@ def _recipients(value: list[str]) -> list[dict]:
 
 def _verify_draft(
     token: str, draft: dict, compose: dict, *, original_conversation: str | None = None,
+    forward_original_excerpt: str | None = None,
+    reply_original_excerpt: str | None = None,
     opener=urlopen,
 ) -> None:
     payload = _graph_http(
@@ -205,7 +287,23 @@ def _verify_draft(
     if payload["id"] != draft["draftId"]:
         raise MicrosoftGraphError("microsoft_draft_unconfirmed")
     body = payload.get("body")
-    if (
+    if compose["mode"] in _REPLY_MODES:
+        if not reply_original_excerpt:
+            raise MicrosoftGraphError("microsoft_draft_unconfirmed")
+        visible = _normalized_draft_visible_text(body)
+        # Graph created a reply with our comment. Neither the comment nor the
+        # old message may disappear when the reply draft is created.
+        comment = " ".join(compose["body"].split()).casefold()
+        if comment not in visible or reply_original_excerpt not in visible:
+            raise MicrosoftGraphError("microsoft_draft_unconfirmed")
+    elif compose["mode"] == "forward":
+        if not forward_original_excerpt:
+            raise MicrosoftGraphError("microsoft_draft_unconfirmed")
+        visible = _normalized_draft_visible_text(body)
+        if (" ".join(compose["body"].split()).casefold() not in visible or
+                " ".join(forward_original_excerpt.split()).casefold() not in visible):
+            raise MicrosoftGraphError("microsoft_draft_unconfirmed")
+    elif (
         type(body) is not dict
         or str(body.get("contentType", "")).lower() != "text"
         or body.get("content") != compose["body"]
@@ -214,8 +312,8 @@ def _verify_draft(
     recipients = payload.get("toRecipients")
     if type(recipients) is not list or not recipients:
         raise MicrosoftGraphError("microsoft_draft_unconfirmed")
-    if compose["mode"] == "new":
-        if payload.get("subject") != compose["subject"]:
+    if compose["mode"] in {"new", "forward"}:
+        if compose["mode"] == "new" and payload.get("subject") != compose["subject"]:
             raise MicrosoftGraphError("microsoft_draft_unconfirmed")
         actual = [
             (item.get("emailAddress") or {}).get("address")
@@ -241,6 +339,8 @@ def prepare_microsoft_draft(
     compose = _validated_compose(value)
     access = _required_access_token(token)
     original_conversation = None
+    forward_original_excerpt = None
+    reply_original_excerpt = None
     if compose["mode"] == "new":
         path = "/me/messages"
         payload = {
@@ -249,34 +349,50 @@ def prepare_microsoft_draft(
             "toRecipients": _recipients(compose["to"]),
             "ccRecipients": _recipients(compose["cc"]),
         }
-    else:
-        original_conversation = _source_conversation(
+    elif compose["mode"] == "forward":
+        # Exact original Inbox membership is independently confirmed. Forward
+        # recipients are explicitly selected by the user, never inferred.
+        forward_original_excerpt = _forward_source_excerpt(
             access, compose["sourceProviderMessageId"], opener=opener,
         )
+        # A user comment repeating the original preview cannot itself satisfy
+        # the proof that the Graph draft retained the original message.
+        if forward_original_excerpt.casefold() in " ".join(compose["body"].split()).casefold():
+            raise MicrosoftGraphError("microsoft_compose_invalid")
+        path = "/me/mailFolders/inbox/messages/" + quote(
+            compose["sourceProviderMessageId"], safe=""
+        ) + "/createForward"
+        payload = {
+            "message": {
+                "toRecipients": _recipients(compose["to"]),
+                "ccRecipients": _recipients(compose["cc"]),
+            },
+            "comment": compose["body"],
+        }
+    else:
+        source_context = _source_reply_context(
+            access, compose["sourceProviderMessageId"], opener=opener,
+        )
+        original_conversation = source_context["conversationId"]
+        reply_original_excerpt = source_context["excerpt"]
+        # Graph's comment field retains the original quoted message. Patching
+        # the draft body would replace that quote and break conversation parity.
+        if reply_original_excerpt in " ".join(compose["body"].split()).casefold():
+            raise MicrosoftGraphError("microsoft_compose_invalid")
         operation = "createReply" if compose["mode"] == "reply" else "createReplyAll"
         path = "/me/mailFolders/inbox/messages/" + quote(
             compose["sourceProviderMessageId"], safe=""
         ) + "/" + operation
-        payload = None
+        payload = {"comment": compose["body"]}
 
     created = _graph_http(
         access, path, method="POST", payload=payload, expected_status=201, opener=opener,
     )
     draft = _required_draft(created, original_conversation=original_conversation)
-    if compose["mode"] != "new":
-        updated = _graph_http(
-            access,
-            "/me/messages/" + quote(draft["draftId"], safe=""),
-            method="PATCH",
-            payload={"body": {"contentType": "Text", "content": compose["body"]}},
-            expected_status=200, opener=opener,
-        )
-        _required_draft(updated, original_conversation=original_conversation)
-        if updated["id"] != draft["draftId"]:
-            raise MicrosoftGraphError("microsoft_draft_unconfirmed")
     _verify_draft(
         access, draft, compose, original_conversation=original_conversation,
-        opener=opener,
+        forward_original_excerpt=forward_original_excerpt,
+        reply_original_excerpt=reply_original_excerpt, opener=opener,
     )
     return draft
 

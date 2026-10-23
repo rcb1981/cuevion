@@ -22,6 +22,7 @@ from api.inboxes.microsoft_production_pilot import (
     production_pilot_mark_unread_blocked,
     production_pilot_archive_blocked,
     production_pilot_delete_blocked,
+    production_pilot_draft_discard_blocked,
     production_pilot_writes_blocked,
 )
 from api.inboxes.microsoft_graph import MicrosoftGraphError
@@ -48,6 +49,7 @@ def _error(status: int, code: str):
         "microsoft_write_permission_required": "Reconnect Microsoft to approve message changes.",
         "microsoft_mutation_in_progress": "Another mailbox change is still in progress.",
         "microsoft_mutation_conflict": "Microsoft message changed. Refresh the Inbox and try again.",
+        "microsoft_draft_discard_not_performed": "Microsoft did not discard the draft. Refresh Drafts before trying again.",
         "microsoft_mutation_unconfirmed": "The message change could not be confirmed. Refresh Inbox.",
         "microsoft_message_not_found": "The message is no longer in this Inbox.",
         "microsoft_attachment_too_large": "This attachment exceeds the 2 MB read-only download limit.",
@@ -110,7 +112,7 @@ def _validate_payload(payload: dict, *, mode: str) -> tuple[str, int | str | dic
         if type(page) is not int or not 1 <= page <= 4:
             raise ValueError("invalid")
         return mailbox, limit if page == 1 else {"limit": limit, "page": page}
-    if mode in {"exact", "sent_exact", "archive_exact", "archive_move", "delete_move", "draft_exact", "deleted_exact", "junk_exact", "attachments", "download"}:
+    if mode in {"exact", "sent_exact", "archive_exact", "archive_move", "delete_move", "draft_discard", "draft_exact", "deleted_exact", "junk_exact", "attachments", "download"}:
         message_id = payload.get("providerMessageId")
         if (
             type(message_id) is not str
@@ -157,6 +159,9 @@ def microsoft_inbox_response(request, *, mode: str):
     method = getattr(request, "command", "")
     if method != "POST":
         return _error(405, "method_not_allowed")
+    if mode == "draft_discard" and production_pilot_draft_discard_blocked():
+        # Deny before body parsing, token resolution and all Graph traffic.
+        return _error(403, "microsoft_pilot_read_only")
     if mode == "delete_move" and production_pilot_delete_blocked():
         # Denied before reading any request body or resolving owner credentials.
         return _error(403, "microsoft_pilot_read_only")
@@ -170,7 +175,7 @@ def microsoft_inbox_response(request, *, mode: str):
 
     try:
         headers = snapshot_request_headers(request)
-        if mode in {"flag", "archive_move", "delete_move"} and production_pilot_writes_blocked():
+        if mode in {"flag", "archive_move", "delete_move", "draft_discard"} and production_pilot_writes_blocked():
             # This future Production mutation requires exact canonical host
             # and same-origin POST, even for an already owned mailbox.
             require_canonical_host(headers)
@@ -352,6 +357,19 @@ def microsoft_inbox_response(request, *, mode: str):
                     message, mailbox_id, exact_body=True,
                 )},
             )
+        if mode == "draft_discard":
+            assert type(selector) is str
+            confirmation = owned.discard_owned_microsoft_draft(
+                headers, mailbox_id, selector,
+            )
+            if (
+                type(confirmation) is not dict
+                or set(confirmation) != {"providerMessageId", "discarded"}
+                or confirmation.get("providerMessageId") != selector
+                or confirmation.get("discarded") is not True
+            ):
+                raise MicrosoftGraphError("microsoft_mutation_unconfirmed")
+            return json_response(200, {"ok": True, **confirmation})
         if mode == "delete_move":
             assert type(selector) is str
             confirmation = owned.delete_owned_microsoft_inbox_message(
@@ -418,6 +436,8 @@ def microsoft_inbox_response(request, *, mode: str):
             return _error(503, code)
         return _error(503, "microsoft_mailbox_unavailable")
     except MicrosoftGraphError as error:
+        if mode == "draft_discard" and error.code == "microsoft_draft_discard_not_performed":
+            return _error(409, error.code)
         if error.code == "microsoft_attachment_too_large":
             return _error(413, error.code)
         if error.code == "microsoft_graph_rate_limited":

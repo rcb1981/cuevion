@@ -21,6 +21,8 @@ _PRODUCTION_MANUAL_INBOX_MARK_UNREAD_RELEASED = True
 _PRODUCTION_INBOX_ARCHIVE_RELEASED = True
 # Exactly one Inbox -> Deleted Items soft deletion; never permanent delete.
 _PRODUCTION_INBOX_SOFT_DELETE_RELEASED = True
+# Deliberately NOT released in Production: Drafts -> Deleted Items.
+_PRODUCTION_DRAFT_DISCARD_RELEASED = False
 
 
 def production_pilot_read_flags_blocked() -> bool:
@@ -52,6 +54,19 @@ def production_pilot_delete_blocked() -> bool:
     return os.getenv("VERCEL_ENV", "").strip().lower() == "production" and not _PRODUCTION_INBOX_SOFT_DELETE_RELEASED
 
 
+def production_pilot_draft_discard_blocked() -> bool:
+    """Independent fail-closed gate for exact Drafts -> Deleted Items moves."""
+    return os.getenv("VERCEL_ENV", "").strip().lower() == "production" and not _PRODUCTION_DRAFT_DISCARD_RELEASED
+
+
 def production_pilot_writes_blocked() -> bool:
     """Fail closed for Microsoft mail mutations in Vercel Production."""
     return os.getenv("VERCEL_ENV", "").strip().lower() == "production"
+
+# Owner has not yet accepted real Drafts editing in Production.
+_PRODUCTION_DRAFT_EDIT_RELEASED = False
+
+
+def production_pilot_draft_edit_blocked() -> bool:
+    """Independent source-code gate: no env var can enable Drafts editing."""
+    return os.getenv("VERCEL_ENV", "").strip().lower() == "production" and not _PRODUCTION_DRAFT_EDIT_RELEASED

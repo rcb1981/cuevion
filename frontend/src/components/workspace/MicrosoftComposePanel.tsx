@@ -5,18 +5,24 @@ import {
   sendMicrosoftMessage,
   type MicrosoftOutboundCompose,
 } from "../../lib/inboxConnectionApi";
+import { prepareMicrosoftComposeRequest, type MicrosoftSelectedSource } from "../../lib/microsoftComposeRequest";
 
 type MicrosoftComposeProps = {
   mailboxId: string;
-  mode: "new" | "reply";
+  mode: "new" | "reply" | "reply_all" | "forward";
   sourceProviderMessageId?: string;
   sourceDisplay?: string;
+  source?: MicrosoftSelectedSource | null;
+  selectedProviderMessageId?: string | null;
+  sourceIsExact?: boolean;
+  connected: boolean;
   onClose: () => void;
   onOpenSent: () => void;
 };
 
 export function MicrosoftComposePanel({
   mailboxId, mode, sourceProviderMessageId, sourceDisplay,
+  source = null, selectedProviderMessageId = null, sourceIsExact = false, connected,
   onClose, onOpenSent,
 }: MicrosoftComposeProps) {
   const [to, setTo] = useState("");
@@ -98,34 +104,24 @@ export function MicrosoftComposePanel({
   };
 
   const send = async () => {
-    // A second click must not create a new operation ID or network request.
     if (pending.current || attempted || accepted) return;
+    // Reject invalid requests BEFORE assigning an attempt ID or disabling Send.
+    // Graph, not visible From text, remains authority for reply recipients.
+    const prepared = prepareMicrosoftComposeRequest({
+      mode, mailboxId, body, to, cc, subject, source,
+      selectedProviderMessageId, sourceIsExact, connected,
+      busy: sending || checkingSent,
+    });
+    if (!prepared.ok) {
+      setNotice("Please check the message and recipients (" + prepared.code + ").");
+      return;
+    }
+    const compose: MicrosoftOutboundCompose = prepared.compose;
     pending.current = true;
     setAttempted(true);
     setSending(true);
     setNotice(null);
     const ticket = ++liveTicket.current;
-    let compose: MicrosoftOutboundCompose;
-    if (mode === "reply") {
-      if (!sourceProviderMessageId) {
-        pending.current = false;
-        setSending(false);
-        setNotice("The original message cannot be verified.");
-        return;
-      }
-      compose = {
-        mode: "reply", sourceProviderMessageId, body,
-      };
-    } else {
-      const parse = (value: string) => value
-        .split(",")
-        .map((address) => address.trim().toLowerCase())
-        .filter(Boolean);
-      compose = {
-        mode: "new", to: parse(to), cc: parse(cc),
-        subject: subject.trim(), body,
-      };
-    }
     try {
       const id = createMicrosoftSendAttemptId();
       operationId.current = id;
@@ -174,12 +170,14 @@ export function MicrosoftComposePanel({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-xl font-semibold">
-              {mode === "reply" ? "Reply" : "New message"}
+              {mode === "reply" ? "Reply" : mode === "reply_all" ? "Reply All" : mode === "forward" ? "Forward" : "New message"}
             </h2>
             <p className="mt-1 text-xs text-[var(--workspace-text-muted)]">
-              {mode === "reply"
-                ? "Microsoft will determine the reply recipient and preserve the conversation."
-                : "Compose a new Microsoft 365 email. No attachments in this version."}
+              {mode === "reply" || mode === "reply_all"
+                ? "Microsoft determines reply recipients, including Reply-To, and preserves the conversation."
+                : mode === "forward"
+                  ? "Enter forwarding recipients. Microsoft will build the forwarded draft."
+                  : "Compose a new Microsoft 365 email. No new attachments in this version."}
             </p>
           </div>
           <button
@@ -192,9 +190,9 @@ export function MicrosoftComposePanel({
           </button>
         </div>
 
-        {mode === "reply" ? (
+        {(mode === "reply" || mode === "reply_all") ? (
           <div className="rounded-xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] p-4 text-sm">
-            Reply to: {sourceDisplay || "selected Inbox message"}
+            {mode === "reply_all" ? "Reply all to" : "Reply to"}: {sourceDisplay || "selected Inbox message"}
             <p className="mt-1 text-xs text-[var(--workspace-text-muted)]">
               The reply address is determined by Microsoft, including any Reply-To header.
             </p>
@@ -225,7 +223,7 @@ export function MicrosoftComposePanel({
                 className="w-full rounded-xl border border-[var(--workspace-border)] bg-transparent p-3 outline-none focus-visible:outline-2 disabled:opacity-50"
               />
             </label>
-            <label className="block space-y-2 text-sm">
+            {mode === "new" && <label className="block space-y-2 text-sm">
               <span className="font-medium">Subject</span>
               <input
                 value={subject}
@@ -236,7 +234,7 @@ export function MicrosoftComposePanel({
                 placeholder="Subject"
                 className="w-full rounded-xl border border-[var(--workspace-border)] bg-transparent p-3 outline-none focus-visible:outline-2 disabled:opacity-50"
               />
-            </label>
+            </label>}
           </>
         )}
 
@@ -283,7 +281,8 @@ export function MicrosoftComposePanel({
             <button
               type="button"
               disabled={attempted || !body.trim() ||
-                (mode === "new" && (!to.trim() || !subject.trim()))}
+                (mode === "new" && (!to.trim() || !subject.trim())) ||
+                (mode === "forward" && !to.trim())}
               onClick={() => { void send(); }}
               className="rounded-xl border border-[var(--workspace-border)] px-5 py-2.5 text-sm font-semibold disabled:opacity-45"
             >

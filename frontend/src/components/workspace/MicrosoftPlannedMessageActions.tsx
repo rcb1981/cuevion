@@ -43,6 +43,7 @@ export function MicrosoftPlannedMessageActions({
   changeReadStateBusy = false, onChangeReadState,
   canArchive = false, archiveBusy = false, onArchive,
   canDelete = false, deleteBusy = false, onDelete,
+  canCompose = false, onCompose,
 }: {
   unread: boolean;
   hasMessage?: boolean;
@@ -55,6 +56,8 @@ export function MicrosoftPlannedMessageActions({
   canDelete?: boolean;
   deleteBusy?: boolean;
   onDelete?: () => void;
+  canCompose?: boolean;
+  onCompose?: (mode: "reply" | "reply_all" | "forward") => void;
 }) {
   const [moreOpen, setMoreOpen] = useState(false);
   const moreId = useId();
@@ -67,6 +70,7 @@ export function MicrosoftPlannedMessageActions({
           disabled={
             name === "archive" ? (!canArchive || archiveBusy || !onArchive)
             : name === "delete" ? (!canDelete || deleteBusy || !onDelete)
+            : (name === "reply" || name === "reply-all" || name === "forward") ? (!canCompose || !onCompose)
             : true
           }
           title={name === "archive" && canArchive
@@ -77,6 +81,8 @@ export function MicrosoftPlannedMessageActions({
           onClick={() => {
             if (name === "archive" && canArchive && !archiveBusy && onArchive) onArchive();
             if (name === "delete" && canDelete && !deleteBusy && onDelete) onDelete();
+            if ((name === "reply" || name === "reply-all" || name === "forward") && canCompose && onCompose)
+              onCompose(name === "reply-all" ? "reply_all" : name);
           }}
           className={iconButton}
         >

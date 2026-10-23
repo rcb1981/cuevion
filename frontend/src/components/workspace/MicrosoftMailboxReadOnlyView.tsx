@@ -23,11 +23,14 @@ import {
   setMicrosoftMessageUnread,
   archiveMicrosoftInboxMessage,
   deleteMicrosoftInboxMessage,
+  discardMicrosoftDraft,
   type LiveInboxMessageSnapshot,
   type MicrosoftAttachmentMetadata,
 } from "../../lib/inboxConnectionApi";
 import { applyConfirmedMicrosoftUnread, isMicrosoftInboxProjection, shouldAutoMarkMicrosoftOpenedMessageRead } from "./microsoftReadState";
 import { MicrosoftComposePanel } from "./MicrosoftComposePanel";
+import { MicrosoftDraftEditor } from "./MicrosoftDraftEditor";
+import { MicrosoftRichDraftMetadataEditor } from "./MicrosoftRichDraftMetadataEditor";
 import { MicrosoftComposeDesignPreview } from "./MicrosoftComposeDesignPreview";
 import { MicrosoftMessageListRow } from "./MicrosoftMessageListRow";
 import { MicrosoftFullMessageModal } from "./MicrosoftFullMessageModal";
@@ -53,6 +56,12 @@ import type { MicrosoftLearningRule } from "./microsoftLearningRules";
 // UI convenience only. Real production write prevention is enforced before
 // any Graph mutation at the server boundary in microsoft_production_pilot.py.
 const MICROSOFT_READ_ONLY_PILOT = true;
+// Must remain false until the independently audited sender gate is released.
+const MICROSOFT_OUTBOUND_ACTIONS_RELEASED = false;
+// Separate release gate: exact Drafts -> Deleted Items is not owner-approved yet.
+const MICROSOFT_DRAFT_DISCARD_ACTIONS_RELEASED = false;
+// Independent owner approval is required before real Drafts edits.
+const MICROSOFT_DRAFT_EDIT_ACTIONS_RELEASED = false;
 // Separately approved, source-gated Inbox unread-to-read operation.
 // Reply, Forward, Archive, Delete, and Mail.Send remain disabled.
 const MICROSOFT_AUTO_MARK_READ_RELEASED = true;
@@ -129,14 +138,20 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const folderRef = React.useRef<MicrosoftFolder>("Inbox");
   const [folder, setFolder] = useState<MicrosoftFolder>("Inbox");
   const [composeDesignPreviewOpen, setComposeDesignPreviewOpen] = useState(false);
+  const [draftEditId, setDraftEditId] = useState<string | null>(null);
+  const [richDraftEditId, setRichDraftEditId] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [composer, setComposer] = useState<{
-    mode: "new" | "reply";
+    mode: "new" | "reply" | "reply_all" | "forward";
     sourceProviderMessageId?: string;
     sourceDisplay?: string;
+    source?: {serverMailboxId: string; providerMessageId: string; providerFolder: string} | null;
+    selectedProviderMessageId?: string | null;
+    sourceIsExact?: boolean;
   } | null>(null);
   const mutationTicket = React.useRef(0);
   const mutationInFlight = React.useRef(false);
+  const [uncertainDraftDiscards, setUncertainDraftDiscards] = useState<ReadonlySet<string>>(() => new Set());
   const [mutationBusy, setMutationBusy] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [mutationConfirmation, setMutationConfirmation] = useState<string | null>(null);
@@ -165,6 +180,8 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const [placementNotice, setPlacementNotice] = useState<string | null>(null);
   useEffect(() => {
     setComposeDesignPreviewOpen(false);
+    setDraftEditId(null);
+    setRichDraftEditId(null);
     setFullMessageTargetId(null);
     setLearningRequestId(null);
     setRowContext(null);
@@ -398,12 +415,14 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     setPage(nextPage);
   }, [connected, composer, listBusy, page, hasMore]);
 
-  const openComposer = useCallback((mode: "new" | "reply") => {
-    if (MICROSOFT_READ_ONLY_PILOT || !connected || composer !== null || mutationInFlight.current) return;
-    const source = mode === "reply" && folderRef.current === "Inbox"
+  const openComposer = useCallback((mode: "new" | "reply" | "reply_all" | "forward") => {
+    if (MICROSOFT_READ_ONLY_PILOT || !connected || !MICROSOFT_OUTBOUND_ACTIONS_RELEASED || composer !== null || mutationInFlight.current) return;
+    const source = mode !== "new" && folderRef.current === "Inbox"
       ? selectedMessage
       : null;
-    if (mode === "reply" && !source?.providerMessageId) return;
+    if (mode !== "new" && (!source?.providerMessageId ||
+      source.serverMailboxId !== mailbox.id || source.providerFolder !== "INBOX" ||
+      selectedIdRef.current !== source.providerMessageId)) return;
     inboxTicket.current += 1;
     messageTicket.current += 1;
     setListBusy(false);
@@ -412,8 +431,12 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       mode,
       sourceProviderMessageId: source?.providerMessageId,
       sourceDisplay: source?.from,
+      source: source?.providerMessageId ? {serverMailboxId: mailbox.id,
+        providerMessageId: source.providerMessageId, providerFolder: "INBOX"} : null,
+      selectedProviderMessageId: mode === "new" ? null : selectedIdRef.current,
+      sourceIsExact: mode === "new" ? false : Boolean(source?.providerMessageId),
     });
-  }, [connected, composer, selectedMessage]);
+  }, [connected, composer, selectedMessage, mailbox.id]);
 
   const openMessage = useCallback(async (providerMessageId: string) => {
     if (
@@ -620,6 +643,18 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       }
     }
   }, [connected, mailbox.id, rows, composer]);
+
+  const refreshSavedDraft = useCallback((providerMessageId: string) => {
+    setDraftEditId(null);
+    setRichDraftEditId(null);
+    if (!connected || folderRef.current !== "Drafts") return;
+    // The list refresh retains an existing selected body. Reload that exact
+    // draft after a confirmed save, without taking over a newer selection.
+    if (selectedIdRef.current === providerMessageId) {
+      void openMessage(providerMessageId);
+    }
+    void refresh();
+  }, [connected, openMessage, refresh]);
 
   const saveSenderLearning = useCallback((rule: MicrosoftLearningRule) => {
     const activeFolder = folderRef.current;
@@ -977,6 +1012,63 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     }
   }, [connected, mailbox.id, selectedMessage]);
 
+  // Draft discard is a distinct, unreleased Microsoft-only permission. Never
+  // remove the row until the owner-authorized Graph destination is verified.
+  const discardSelectedDraft = useCallback(async () => {
+    const targetId = selectedMessage?.providerMessageId;
+    if (!MICROSOFT_DRAFT_DISCARD_ACTIONS_RELEASED ||
+        !connected || folderRef.current !== "Drafts" || mutationInFlight.current ||
+        !targetId || selectedIdRef.current !== targetId ||
+        uncertainDraftDiscards.has(JSON.stringify([mailbox.id, targetId])) ||
+        selectedMessage?.serverMailboxId !== mailbox.id ||
+        selectedMessage?.providerFolder !== "DRAFTS") return;
+    mutationInFlight.current = true;
+    const ticket = ++mutationTicket.current;
+    inboxTicket.current += 1;
+    setListBusy(false);
+    setMutationBusy(true);
+    setMutationError(null);
+    setMutationConfirmation(null);
+    try {
+      const result = await discardMicrosoftDraft({
+        mailboxId: mailbox.id, providerMessageId: targetId,
+      });
+      if (!result.ok && result.outcome === "uncertain") {
+        setUncertainDraftDiscards(current => new Set(current).add(JSON.stringify([mailbox.id, targetId])));
+      }
+      if (ticket !== mutationTicket.current || folderRef.current !== "Drafts" ||
+          selectedIdRef.current !== targetId) return;
+      if (!result.ok) {
+        setMutationError(result.error.message);
+        return;
+      }
+      messageTicket.current += 1;
+      attachmentTicket.current += 1;
+      attachmentDownloadTicket.current += 1;
+      selectedIdRef.current = null;
+      setFullMessageTargetId(null);
+      setLearningRequestId(null);
+      setRowContext(null);
+      setAttachmentRows([]);
+      setAttachmentBusy(false);
+      setAttachmentError(null);
+      setSelectedId(null);
+      setSelectedMessage(null);
+      setRows((current) => current.filter((message) => message.providerMessageId !== targetId));
+      setMutationConfirmation("Draft moved to Deleted Items.");
+    } catch {
+      setUncertainDraftDiscards(current => new Set(current).add(JSON.stringify([mailbox.id, targetId])));
+      if (ticket === mutationTicket.current && folderRef.current === "Drafts" && selectedIdRef.current === targetId) {
+        setMutationError("Discard status is uncertain. Check Drafts and Deleted Items in Outlook. No further move will be attempted here during this session.");
+      }
+    } finally {
+      if (ticket === mutationTicket.current) {
+        mutationInFlight.current = false;
+        setMutationBusy(false);
+      }
+    }
+  }, [connected, mailbox.id, selectedMessage, uncertainDraftDiscards]);
+
   // Compose belongs to the folder rail and never invokes a send during the pilot.
   const composeAction = (
         <button
@@ -1044,6 +1136,10 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           mode={composer.mode}
           sourceProviderMessageId={composer.sourceProviderMessageId}
           sourceDisplay={composer.sourceDisplay}
+          source={composer.source}
+          selectedProviderMessageId={composer.selectedProviderMessageId}
+          sourceIsExact={composer.sourceIsExact}
+          connected={connected}
           onClose={() => setComposer(null)}
           onOpenSent={() => {
             setComposer(null);
@@ -1115,6 +1211,12 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                   )}
                   deleteBusy={mutationBusy}
                   onDelete={() => { void deleteSelectedMessage(); }}
+                  canCompose={Boolean(MICROSOFT_OUTBOUND_ACTIONS_RELEASED &&
+                    connected && folder === "Inbox" && selectedMessage &&
+                    selectedMessage.providerFolder === "INBOX" &&
+                    selectedMessage.serverMailboxId === mailbox.id &&
+                    selectedId === selectedMessage.providerMessageId && !messageBusy && !mutationBusy)}
+                  onCompose={(mode) => { openComposer(mode); }}
                 />
               )}
             </div>
@@ -1284,6 +1386,11 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                         ? (selectedMessage.from || selectedMessage.sender)
                         : selectedMessage.from}
                   </p>
+                  {folder === "Drafts" && selectedMessage.cc?.trim() && (
+                    <p className="mt-1 break-words text-xs text-[var(--workspace-text-muted)]">
+                      Cc: {selectedMessage.cc}
+                    </p>
+                  )}
                   {folder === "Sent" && (
                     <p className="mt-1 text-xs text-[var(--workspace-text-muted)]">
                       From: {selectedMessage.from}
@@ -1293,6 +1400,43 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                     {folder === "Deleted" ? "Last changed: " : ""}{readableTime(selectedMessage.createdAt)}
                   </p>
                 </div>
+                {folder === "Drafts" && MICROSOFT_DRAFT_EDIT_ACTIONS_RELEASED &&
+                  selectedMessage.providerFolder === "DRAFTS" && (
+                  <div className="mt-4">
+                    {selectedMessage.hasAttachments ? (
+                      <p className="text-xs text-[var(--workspace-text-muted)]">
+                        Drafts with attachments cannot be edited here yet.
+                      </p>
+                    ) : selectedMessage.bodyHtml ? (
+                      <button type="button" onClick={() => setRichDraftEditId(selectedMessage.providerMessageId ?? null)}
+                        disabled={mutationBusy || !connected || !selectedMessage.providerMessageId}
+                        className="rounded-xl border border-[var(--workspace-border)] px-4 py-2 text-xs font-semibold disabled:opacity-50">
+                        Edit subject and recipients
+                      </button>
+                    ) : (
+                      <button type="button" onClick={() => setDraftEditId(selectedMessage.providerMessageId ?? null)}
+                        disabled={mutationBusy || !connected || !selectedMessage.providerMessageId}
+                        className="rounded-xl border border-[var(--workspace-border)] px-4 py-2 text-xs font-semibold disabled:opacity-50">
+                        Edit draft
+                      </button>
+                    )}
+                  </div>
+                )}
+                {folder === "Drafts" && MICROSOFT_DRAFT_DISCARD_ACTIONS_RELEASED && (
+                  <div className="mt-4 flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      disabled={mutationBusy || !connected || selectedMessage.providerFolder !== "DRAFTS" || uncertainDraftDiscards.has(JSON.stringify([mailbox.id, selectedMessage.providerMessageId]))}
+                      onClick={() => { void discardSelectedDraft(); }}
+                      className="rounded-xl border border-[var(--workspace-border)] px-4 py-2 text-xs font-semibold disabled:opacity-50"
+                    >
+                      {mutationBusy ? "Discarding…" : "Discard draft"}
+                    </button>
+                    {uncertainDraftDiscards.has(JSON.stringify([mailbox.id, selectedMessage.providerMessageId])) ? (
+                      <p role="alert" className="text-xs">Discard status is uncertain. Check Drafts and Deleted Items in Outlook. This draft will not be moved again here during this session.</p>
+                    ) : mutationError && <p role="alert" className="text-xs">{mutationError}</p>}
+                  </div>
+                )}
                 {isMicrosoftInboxProjection(folder) && (
                   <>
                 <div className="mt-4 flex flex-wrap items-center gap-3">
@@ -1433,6 +1577,24 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
             )}
             </section>
           </div>
+          </div>
+        </div>
+      )}
+      {connected && draftEditId && MICROSOFT_DRAFT_EDIT_ACTIONS_RELEASED && folder === "Drafts" && (
+        <div className="fixed inset-0 z-[350] bg-black/60 p-4 sm:p-8" role="presentation">
+          <div className="mx-auto h-full max-w-3xl overflow-hidden rounded-2xl bg-[var(--workspace-card)] shadow-xl">
+            <MicrosoftDraftEditor mailboxId={mailbox.id} providerMessageId={draftEditId}
+              onClose={() => setDraftEditId(null)}
+              onSaved={() => refreshSavedDraft(draftEditId)} />
+          </div>
+        </div>
+      )}
+      {connected && richDraftEditId && MICROSOFT_DRAFT_EDIT_ACTIONS_RELEASED && folder === "Drafts" && (
+        <div className="fixed inset-0 z-[350] bg-black/60 p-4 sm:p-8" role="presentation">
+          <div className="mx-auto h-full max-w-3xl overflow-hidden rounded-2xl bg-[var(--workspace-card)] shadow-xl">
+            <MicrosoftRichDraftMetadataEditor mailboxId={mailbox.id} providerMessageId={richDraftEditId}
+              onClose={() => setRichDraftEditId(null)}
+              onSaved={() => refreshSavedDraft(richDraftEditId)} />
           </div>
         </div>
       )}
