@@ -122,14 +122,11 @@ class AttachmentGraphTests(unittest.TestCase):
                 opener=FakeOpener({"value": [file_row(), file_row()]}),
             )
 
-    def test_large_continuation_is_not_returned(self):
+    def test_unscoped_continuation_is_rejected_before_following(self):
         link = microsoft_graph.GRAPH_ROOT + "/me/messages/id/attachments?$skiptoken=opaque"
         opener = FakeOpener({"value": [file_row()], "@odata.nextLink": link})
-        result = attachments.list_microsoft_attachments(
-            TOKEN, MSG, folder="Inbox", opener=opener,
-        )
-        self.assertTrue(result["hasMore"])
-        self.assertNotIn("nextLink", str(result))
+        with self.assertRaises(microsoft_graph.MicrosoftGraphError):
+            attachments.list_microsoft_attachments(TOKEN, MSG, folder="Inbox", opener=opener)
         self.assertEqual(len(opener.calls), 1)
 
 

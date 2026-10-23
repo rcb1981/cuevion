@@ -18,8 +18,6 @@ import {
   fetchMicrosoftJunkMessage,
   fetchMicrosoftSent,
   fetchMicrosoftSentMessage,
-  fetchMicrosoftAttachments,
-  downloadMicrosoftAttachmentFile,
   setMicrosoftMessageUnread,
   archiveMicrosoftInboxMessage,
   deleteMicrosoftInboxMessage,
@@ -34,6 +32,8 @@ import { MicrosoftRichDraftMetadataEditor } from "./MicrosoftRichDraftMetadataEd
 import { MicrosoftComposeDesignPreview } from "./MicrosoftComposeDesignPreview";
 import { MicrosoftMessageListRow } from "./MicrosoftMessageListRow";
 import { MicrosoftFullMessageModal } from "./MicrosoftFullMessageModal";
+import { MicrosoftAttachmentList } from "./MicrosoftAttachmentList";
+import { fetchMicrosoftAttachments, downloadMicrosoftAttachmentFile } from "../../lib/microsoftAttachmentReadApi";
 import { MicrosoftConversationNav } from "./MicrosoftConversationNav";
 import { getMicrosoftConversationRows } from "./microsoftConversationRows";
 import { MicrosoftPlannedMessageActions } from "./MicrosoftPlannedMessageActions";
@@ -134,6 +134,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const messageTicket = React.useRef(0);
   const attachmentTicket = React.useRef(0);
   const attachmentDownloadTicket = React.useRef(0);
+  const attachmentDownloadInFlight = React.useRef<string | null>(null);
   const selectedIdRef = React.useRef<string | null>(null);
   const folderRef = React.useRef<MicrosoftFolder>("Inbox");
   const [folder, setFolder] = useState<MicrosoftFolder>("Inbox");
@@ -513,7 +514,8 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       if (
         !response.ok ||
         !response.message ||
-        response.message.providerMessageId !== providerMessageId
+        response.message.providerMessageId !== providerMessageId ||
+        response.message.serverMailboxId !== mailbox.id
       ) {
         if (
           response.error?.code === "microsoft_reconnect_required" ||
@@ -728,6 +730,8 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     if (
       !connected ||
       !messageId ||
+      selectedMessage?.serverMailboxId !== mailbox.id ||
+      attachmentDownloadInFlight.current === JSON.stringify([mailbox.id, messageId]) ||
       selectedIdRef.current !== messageId ||
       item.kind !== "file" ||
       folderRef.current === "Junk" ||
@@ -740,6 +744,11 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     const currentFolder = folderRef.current;
     const currentMessageTicket = messageTicket.current;
     const ticket = ++attachmentDownloadTicket.current;
+    attachmentDownloadInFlight.current = JSON.stringify([mailbox.id, messageId]);
+    const failDownload = (message: string) => {
+      setAttachmentDownloadError(message);
+      if (typeof window.alert === "function") window.alert(message);
+    };
     setAttachmentDownloadBusy(item.id);
     setAttachmentDownloadError(null);
     try {
@@ -756,9 +765,9 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
         folderRef.current !== currentFolder
       ) return;
       if (!result.ok || result.attachmentId !== item.id ||
-          typeof result.size !== "number" || result.size !== item.size ||
+          typeof result.size !== "number" || (result.size !== item.size && result.sizeVerifiedAsPng !== true) ||
           typeof result.base64 !== "string" || !result.fileName) {
-        setAttachmentDownloadError(
+        failDownload(
           result.error?.code === "microsoft_attachment_too_large"
             ? "This attachment exceeds the 2 MB download limit."
             : "This attachment could not be downloaded. Please try again.",
@@ -788,9 +797,14 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     } catch {
       if (ticket === attachmentDownloadTicket.current &&
           currentMessageTicket === messageTicket.current) {
-        setAttachmentDownloadError("This attachment could not be downloaded.");
+        failDownload("This attachment could not be downloaded.");
       }
     } finally {
+      // Release this request's synchronous lock even after navigation, while
+      // leaving any newer message's download lock and UI untouched.
+      if (attachmentDownloadInFlight.current === JSON.stringify([mailbox.id, messageId])) {
+        attachmentDownloadInFlight.current = null;
+      }
       if (ticket === attachmentDownloadTicket.current &&
           currentMessageTicket === messageTicket.current) {
         setAttachmentDownloadBusy(null);
@@ -1068,6 +1082,13 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       }
     }
   }, [connected, mailbox.id, selectedMessage, uncertainDraftDiscards]);
+
+  const attachmentList = selectedMessage?.serverMailboxId === mailbox.id ? (
+    <MicrosoftAttachmentList attachments={attachmentRows} busy={attachmentBusy}
+      error={attachmentError} hasMore={attachmentHasMore} folder={folder}
+      downloadBusy={attachmentDownloadBusy} downloadError={attachmentDownloadError}
+      onDownload={item => { void downloadAttachment(item); }} />
+  ) : null;
 
   // Compose belongs to the folder rail and never invokes a send during the pilot.
   const composeAction = (
@@ -1484,50 +1505,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                 )}
                   </>
                 )}
-                {selectedMessage.hasAttachments && (
-                  <section aria-label="Microsoft message attachments" className="mt-4 rounded-xl border border-[var(--workspace-border-soft)] p-4 text-xs text-[var(--workspace-text-muted)]">
-                    <h3 className="mb-2 text-sm font-semibold text-[var(--workspace-text)]">Attachments</h3>
-                    {attachmentBusy && <p role="status">Loading attachment details…</p>}
-                    {attachmentError && <p role="alert">{attachmentError}</p>}
-                    {!attachmentBusy && !attachmentError && attachmentRows.map((item) => (
-                      <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--workspace-border-soft)] py-2">
-                        <span className="min-w-0 break-words">
-                          {item.name}
-                          <span className="ml-2 text-[var(--workspace-text-faint)]">
-                            {item.size.toLocaleString()} bytes
-                          </span>
-                        </span>
-                        {folder !== "Junk" && item.kind === "file" && item.size <= 2 * 1024 * 1024 ? (
-                          <button type="button"
-                            disabled={attachmentDownloadBusy !== null}
-                            onClick={() => void downloadAttachment(item)}
-                            className="rounded-lg border border-[var(--workspace-border)] px-3 py-1.5 text-xs font-medium disabled:opacity-50"
-                            aria-label={"Download " + item.name}>
-                            {attachmentDownloadBusy === item.id ? "Downloading…" : "Download"}
-                          </button>
-                        ) : (
-                          <span className="text-[var(--workspace-text-faint)]">
-                            {folder === "Junk"
-                              ? "Download disabled for junk mail"
-                              : item.size > 2 * 1024 * 1024
-                                ? "Over 2 MB limit"
-                                : "Download not supported for this attachment type"}
-                          </span>
-                        )}
-                      </div>
-                    ))}
-                    {!attachmentBusy && !attachmentError && attachmentRows.length === 0 && (
-                      <p>No attachment details returned.</p>
-                    )}
-                    {attachmentHasMore && <p>Only the first 25 attachments are shown.</p>}
-                    {attachmentDownloadError && <p role="alert" className="mt-2">{attachmentDownloadError}</p>}
-                    <p className="mt-2">
-                      {folder === "Junk"
-                        ? "Attachments are listed for reference. Downloads are disabled for safety."
-                        : "Read-only downloads of file attachments up to 2 MB. No messages are changed."}
-                    </p>
-                  </section>
-                )}
+                {attachmentList}
                 {folder === "Junk" && (
                   <p role="note" className="mt-4 text-xs text-[var(--workspace-text-muted)]">
                     Links in junk mail are displayed as plain text and cannot be clicked here.
@@ -1632,6 +1610,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
         selectedMessage?.providerMessageId === fullMessageTargetId && !messageBusy && (
           <MicrosoftFullMessageModal
             message={selectedMessage}
+            attachmentList={attachmentList}
             mailboxId={mailbox.id}
             folder={folder}
             attachments={attachmentRows}

@@ -170,6 +170,7 @@ def _raw_verified_file_attachment(
         "attachmentId": attachment_id,
         "fileName": _download_filename(item["name"]),
         "size": len(data),
+        **({"sizeVerifiedAsPng": True} if len(data) != expected_size else {}),
         "base64": base64.b64encode(data).decode("ascii"),
     }
 

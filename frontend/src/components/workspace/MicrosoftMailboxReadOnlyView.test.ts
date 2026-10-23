@@ -48,6 +48,9 @@ assert.doesNotMatch(ready, /Send message|Reply all|Trash/);
 const microsoftSource = readFileSync(
   resolve(__dirname, "MicrosoftMailboxReadOnlyView.tsx"), "utf8",
 );
+const attachmentSource = readFileSync(resolve(__dirname, "MicrosoftAttachmentList.tsx"), "utf8");
+assert.match(microsoftSource, /<MicrosoftAttachmentList/);
+assert.match(microsoftSource, /attachmentList=\{attachmentList\}/);
 assert.match(microsoftSource, /fetchMicrosoftAttachments/);
 assert.match(microsoftSource, /fetchMicrosoftArchive/);
 assert.match(microsoftSource, /fetchMicrosoftArchiveMessage/);
@@ -59,7 +62,7 @@ assert.match(microsoftSource, /fetchMicrosoftJunk/);
 assert.match(microsoftSource, /fetchMicrosoftJunkMessage/);
 assert.match(microsoftSource, /folder === "Junk" \? part/);
 assert.match(microsoftSource, /folderRef.current === "Junk"/);
-assert.match(microsoftSource, /Download disabled for junk mail/);
+assert.match(attachmentSource, /Download disabled for junk mail/);
 assert.match(microsoftSource, /Junk Email is read-only/);
 assert.match(microsoftSource, /Links in junk mail are displayed as plain text/);
 assert.match(microsoftSource, /<MicrosoftMailboxFolderRail/);
@@ -92,12 +95,12 @@ assert.match(microsoftSource, /attachmentDownloadTicket\.current \+= 1/);
 assert.match(microsoftSource, /attachmentRequest !== attachmentTicket.current/);
 assert.match(microsoftSource, /selectedIdRef.current !== providerMessageId/);
 assert.match(microsoftSource, /downloadMicrosoftAttachmentFile/);
-assert.match(microsoftSource, /item\.kind === "file"/);
-assert.match(microsoftSource, /item\.size <= 2 \* 1024 \* 1024/);
+assert.match(microsoftSource, /item\.kind !== "file"/);
+assert.match(microsoftSource, /item\.size > 2 \* 1024 \* 1024/);
 assert.match(microsoftSource, /application\/octet-stream/);
 assert.match(microsoftSource, /link\.download = result\.fileName/);
 assert.match(microsoftSource, /currentMessageTicket !== messageTicket\.current/);
-assert.match(microsoftSource, /Read-only downloads of file attachments up to 2 MB/);
+assert.match(attachmentSource, /Read-only downloads of file attachments up to 2 MB/);
 assert.doesNotMatch(ready, /Download file|Download attachment/);
 
 const disconnected = renderToStaticMarkup(createElement(MicrosoftMailboxReadOnlyView, {

@@ -7,7 +7,7 @@ import {
   downloadMicrosoftAttachmentFile,
   type MicrosoftAttachmentMetadata,
   type MicrosoftAttachmentFileResponse,
-} from "./inboxConnectionApi";
+} from "./microsoftAttachmentReadApi";
 import { isTrustedMicrosoftInertHtmlTransport } from "./microsoftInertHtmlTransport";
 
 // Reuse the exact, authenticated download limit instead of rejecting normal

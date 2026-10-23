@@ -8,7 +8,7 @@ import { MicrosoftConversationNav } from "./MicrosoftConversationNav";
 import type { MicrosoftLearningRule } from "./microsoftLearningRules";
 
 export function MicrosoftFullMessageModal({
-  message, mailboxId, folder, attachments, attachmentsBusy, learningRule,
+  message, mailboxId, folder, attachments, attachmentsBusy, attachmentList, learningRule,
   learningDisabled = false, canShowLess = false, onSaveLearning,
   conversationRows = [], onSelectConversationMessage, onClose,
 }: {
@@ -17,6 +17,7 @@ export function MicrosoftFullMessageModal({
   folder: "Inbox" | "Filtered" | "Sent" | "Archive" | "Drafts" | "Deleted" | "Junk";
   attachments?: MicrosoftAttachmentMetadata[];
   attachmentsBusy?: boolean;
+  attachmentList?: React.ReactNode;
   learningRule?: MicrosoftLearningRule;
   learningDisabled?: boolean;
   canShowLess?: boolean;
@@ -73,6 +74,7 @@ export function MicrosoftFullMessageModal({
                 onSelect={onSelectConversationMessage}
               />
             )}
+            {attachmentList}
             {message.bodyHtml && folder !== "Junk" ? (
               <MicrosoftInertHtmlStage
                 key={mailboxId + ":" + message.providerMessageId + ":modal"}

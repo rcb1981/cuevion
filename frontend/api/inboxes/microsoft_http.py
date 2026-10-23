@@ -249,11 +249,30 @@ def microsoft_inbox_response(request, *, mode: str):
                 or type(record.get("size")) is not int
             ):
                 raise MicrosoftGraphError("microsoft_graph_invalid_response")
+            # The exceptional size proof must survive the HTTP projection,
+            # but never accept a claimed proof for arbitrary or truncated bytes.
+            proof = {}
+            if "sizeVerifiedAsPng" in record:
+                import base64
+                import binascii
+                from api.inboxes.microsoft_attachment_download import _complete_png, MAX_FILE_BYTES
+                if (record["sizeVerifiedAsPng"] is not True
+                        or not 0 <= record["size"] <= MAX_FILE_BYTES
+                        or len(record["base64"]) > 4 * ((MAX_FILE_BYTES + 2) // 3)):
+                    raise MicrosoftGraphError("microsoft_graph_invalid_response")
+                try:
+                    contents = base64.b64decode(record["base64"], validate=True)
+                except (ValueError, binascii.Error):
+                    raise MicrosoftGraphError("microsoft_graph_invalid_response") from None
+                if len(contents) != record["size"] or not _complete_png(contents):
+                    raise MicrosoftGraphError("microsoft_graph_invalid_response")
+                proof = {"sizeVerifiedAsPng": True}
             # Explicit output projection: never pass Graph JSON or tokens through.
             return json_response(200, {
                 "ok": True,
                 "attachmentId": record["attachmentId"],
                 "fileName": record["fileName"],
+                **proof,
                 "size": record["size"],
                 "base64": record["base64"],
             })
