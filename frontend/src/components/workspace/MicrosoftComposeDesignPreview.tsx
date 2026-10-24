@@ -8,7 +8,7 @@ import { createPortal } from "react-dom";
  */
 type PreviewGlyph = "close" | "send" | "attach" | "link" | "format" | "smile" | "discard";
 
-function Glyph({ name }: { name: PreviewGlyph }) {
+export function Glyph({ name }: { name: PreviewGlyph }) {
   return (
     <svg
       aria-hidden="true"

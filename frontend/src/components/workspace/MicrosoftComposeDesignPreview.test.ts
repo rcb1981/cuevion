@@ -58,6 +58,6 @@ assert.match(view, /MICROSOFT_READ_ONLY_PILOT = true/);
 assert.match(view, /setComposeDesignPreviewOpen\(true\)/);
 assert.match(view, /MICROSOFT_READ_ONLY_PILOT && connected && composeDesignPreviewOpen && \(/);
 assert.match(view, /<MicrosoftComposeDesignPreview/);
-assert.match(view, /aria-label=\{MICROSOFT_READ_ONLY_PILOT \? "Compose message \(design preview only\)"/);
-assert.match(view, /onClick=\{\(\) => \{\s*if \(MICROSOFT_READ_ONLY_PILOT\)/);
+assert.match(view, /aria-label=\{MICROSOFT_READ_ONLY_PILOT && !MICROSOFT_COMPOSE_DRAFTS_RELEASED \? "Compose message \(design preview only\)"/);
+assert.match(view, /onClick=\{\(\) => \{\s*if \(MICROSOFT_COMPOSE_DRAFTS_RELEASED\)/);
 console.log("Microsoft compose design: visual-only, never sends/saves, keyboard safe PASS");

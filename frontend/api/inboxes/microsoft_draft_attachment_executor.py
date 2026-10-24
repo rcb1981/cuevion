@@ -61,6 +61,10 @@ def execute_owned_attachment_request(headers, mailbox_id, message_id, request_id
     deadline = lease_started + config_store.MAILBOX_MUTATION_LEASE_TTL_MILLISECONDS / 1000
     reserved, completed, child, may_have_started = None, 0, None, False
     try:
+        from api.inboxes import microsoft_compose_draft_policy as compose_policy
+        if not compose_policy.blocked():
+            from api.inboxes import microsoft_compose_draft_ledger as compose_ledger
+            compose_ledger.assert_unblocked(captured, message_id)
         token = _fresh_token(headers, mailbox_id, captured)
         current = snapshots.read_draft_attachment_snapshot(token, captured, message_id, opener=opener)
         owned._verify_unchanged_owned_mailbox(headers, mailbox_id, captured)

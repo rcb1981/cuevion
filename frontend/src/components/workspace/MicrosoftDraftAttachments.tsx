@@ -17,6 +17,7 @@ type Props = {
   onConfirmed: () => void;
   onOperationStart?: () => void;
   hasUnsavedChanges?: boolean;
+  hideSelection?: boolean;
   editorPending: React.MutableRefObject<boolean>;
 };
 type Phase = "loading" | "ready" | "preparing" | "uploading" | "removing" | "checking" | "blocked";
@@ -32,7 +33,7 @@ export function MicrosoftDraftAttachments(props: Props) {
     ? <DraftAttachmentSession key={JSON.stringify([props.mailboxId, props.providerMessageId])} {...props} /> : null;
 }
 
-function DraftAttachmentSession({ mailboxId, providerMessageId, disabled, onBlockedChange, onConfirmed, editorPending, onOperationStart, hasUnsavedChanges }: Props) {
+function DraftAttachmentSession({ mailboxId, providerMessageId, disabled, onBlockedChange, onConfirmed, editorPending, onOperationStart, hasUnsavedChanges, hideSelection }: Props) {
   const [phase, setPhase] = useState<Phase>("loading");
   const [snapshot, setSnapshot] = useState<MicrosoftDraftAttachmentSnapshot | null>(null);
   const [files, setFiles] = useState<File[]>([]);
@@ -155,6 +156,7 @@ function DraftAttachmentSession({ mailboxId, providerMessageId, disabled, onBloc
       <h3 className="text-sm font-semibold">Attachments</h3>
       <p className="text-xs text-[var(--workspace-text-muted)]">Save text or recipient changes first. Confirmed attachment changes reload this draft.</p>
       <p className="text-xs text-[var(--workspace-text-muted)]">Up to 10 new files, 2 MiB per file and 8 MiB per selection. Inline images are protected.</p>
+      {!hideSelection && <>
       <input ref={input} type="file" multiple hidden aria-label="Choose draft attachments" disabled={locked}
         onChange={event => { select(Array.from(event.currentTarget.files ?? [])); event.currentTarget.value = ""; }} />
       {hasUnsavedChanges && <p role="status" className="text-xs text-[var(--workspace-text-muted)]">Save your draft changes before changing attachments.</p>}
@@ -162,6 +164,7 @@ function DraftAttachmentSession({ mailboxId, providerMessageId, disabled, onBloc
         <button type="button" className={actionStyle} disabled={locked} onClick={() => input.current?.click()}>Add attachments</button>
         <span className="ml-3 text-xs text-[var(--workspace-text-muted)]">or drop files here</span>
       </div>
+      </>}
       {!!ordinary.length && <div className="flex flex-wrap gap-3">{ordinary.map(item => {
         const { name, label, icon, size } = microsoftAttachmentPresentation(item);
         return <div key={item.id} className={cardStyle}>

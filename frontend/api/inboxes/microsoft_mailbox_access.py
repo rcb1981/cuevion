@@ -655,6 +655,10 @@ def save_owned_microsoft_editable_draft(
             from api.inboxes import microsoft_draft_attachment_requests as attachment_requests
             if any(item['blocked'] for item in attachment_requests.inspect_draft(captured, message_id)):
                 raise MicrosoftGraphError('microsoft_draft_edit_unconfirmed')
+        from api.inboxes import microsoft_compose_draft_policy as compose_policy
+        if not compose_policy.blocked():
+            from api.inboxes import microsoft_compose_draft_ledger as compose_ledger
+            compose_ledger.assert_unblocked(captured, message_id)
         save_operation = (
             microsoft_rich_draft.save_rich_draft_metadata if metadata_only
             else microsoft_draft_editor.save_exact_microsoft_draft
