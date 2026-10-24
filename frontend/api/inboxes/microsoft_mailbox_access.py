@@ -650,6 +650,11 @@ def save_owned_microsoft_editable_draft(
         token, checked = _owned_token(headers, mailbox_id, require_read_write=True)
         if checked != captured:
             raise MicrosoftMailboxAccessError('microsoft_reconnect_required')
+        from api.inboxes import microsoft_draft_attachment_policy as attachment_policy
+        if not attachment_policy.writes_blocked():
+            from api.inboxes import microsoft_draft_attachment_requests as attachment_requests
+            if any(item['blocked'] for item in attachment_requests.inspect_draft(captured, message_id)):
+                raise MicrosoftGraphError('microsoft_draft_edit_unconfirmed')
         save_operation = (
             microsoft_rich_draft.save_rich_draft_metadata if metadata_only
             else microsoft_draft_editor.save_exact_microsoft_draft

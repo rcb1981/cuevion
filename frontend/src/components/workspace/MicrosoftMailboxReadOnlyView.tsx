@@ -27,6 +27,7 @@ import {
 } from "../../lib/inboxConnectionApi";
 import { applyConfirmedMicrosoftUnread, isMicrosoftInboxProjection, shouldAutoMarkMicrosoftOpenedMessageRead } from "./microsoftReadState";
 import { MicrosoftComposePanel } from "./MicrosoftComposePanel";
+import { MICROSOFT_DRAFT_ATTACHMENTS_RELEASED } from "../../lib/microsoftDraftAttachmentPolicy";
 import { MicrosoftDraftEditor } from "./MicrosoftDraftEditor";
 import { MicrosoftRichDraftMetadataEditor } from "./MicrosoftRichDraftMetadataEditor";
 import { MicrosoftComposeDesignPreview } from "./MicrosoftComposeDesignPreview";
@@ -645,6 +646,19 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       }
     }
   }, [connected, mailbox.id, rows, composer]);
+
+  const invalidateDraftAttachments = useCallback((providerMessageId: string) => {
+    if (selectedIdRef.current !== providerMessageId || folderRef.current !== "Drafts") return;
+    messageTicket.current += 1;
+    attachmentTicket.current += 1;
+    attachmentDownloadTicket.current += 1;
+    setSelectedMessage(null);
+    setAttachmentRows([]);
+    setMessageBusy(false);
+    setAttachmentBusy(false);
+    setFullMessageTargetId(null);
+    setMessageError("Attachment status needs verification. Reopen this draft to check its status.");
+  }, []);
 
   const refreshSavedDraft = useCallback((providerMessageId: string) => {
     setDraftEditId(null);
@@ -1424,7 +1438,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                 {folder === "Drafts" && MICROSOFT_DRAFT_EDIT_ACTIONS_RELEASED &&
                   selectedMessage.providerFolder === "DRAFTS" && (
                   <div className="mt-4">
-                    {selectedMessage.hasAttachments ? (
+                    {selectedMessage.hasAttachments && !MICROSOFT_DRAFT_ATTACHMENTS_RELEASED ? (
                       <p className="text-xs text-[var(--workspace-text-muted)]">
                         Drafts with attachments cannot be edited here yet.
                       </p>
@@ -1561,7 +1575,8 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       {connected && draftEditId && MICROSOFT_DRAFT_EDIT_ACTIONS_RELEASED && folder === "Drafts" && (
         <div className="fixed inset-0 z-[350] bg-black/60 p-4 sm:p-8" role="presentation">
           <div className="mx-auto h-full max-w-3xl overflow-hidden rounded-2xl bg-[var(--workspace-card)] shadow-xl">
-            <MicrosoftDraftEditor mailboxId={mailbox.id} providerMessageId={draftEditId}
+            <MicrosoftDraftEditor key={JSON.stringify([mailbox.id, draftEditId])} mailboxId={mailbox.id} providerMessageId={draftEditId}
+              onAttachmentStart={() => invalidateDraftAttachments(draftEditId)}
               onClose={() => setDraftEditId(null)}
               onSaved={() => refreshSavedDraft(draftEditId)} />
           </div>
@@ -1570,7 +1585,8 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       {connected && richDraftEditId && MICROSOFT_DRAFT_EDIT_ACTIONS_RELEASED && folder === "Drafts" && (
         <div className="fixed inset-0 z-[350] bg-black/60 p-4 sm:p-8" role="presentation">
           <div className="mx-auto h-full max-w-3xl overflow-hidden rounded-2xl bg-[var(--workspace-card)] shadow-xl">
-            <MicrosoftRichDraftMetadataEditor mailboxId={mailbox.id} providerMessageId={richDraftEditId}
+            <MicrosoftRichDraftMetadataEditor key={JSON.stringify([mailbox.id, richDraftEditId])} mailboxId={mailbox.id} providerMessageId={richDraftEditId}
+              onAttachmentStart={() => invalidateDraftAttachments(richDraftEditId)}
               onClose={() => setRichDraftEditId(null)}
               onSaved={() => refreshSavedDraft(richDraftEditId)} />
           </div>

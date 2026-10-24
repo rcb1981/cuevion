@@ -1,6 +1,6 @@
 """Exact-folder, conditional, single-PATCH editor for plain-text Microsoft Drafts.
 
-No HTML rewrites, no attachments, no sending, no automatic retry. The browser
+No HTML rewrites, no sending, no automatic retry. Attachments are preserved. The browser
 never supplies a Graph URL or authoritative folder, recipient identity or token.
 """
 from __future__ import annotations
@@ -88,7 +88,9 @@ def _current(token: str, message_id: str, *, opener=None) -> dict:
     )
     if type(data) is not dict or data.get('id') != exact or data.get('isDraft') is not True:
         raise MicrosoftGraphError('microsoft_draft_edit_unsupported')
-    if data.get('hasAttachments') is not False:
+    from api.inboxes import microsoft_draft_attachment_policy as attachment_policy
+    attachment_support = not attachment_policy.writes_blocked()
+    if type(data.get('hasAttachments')) is not bool or data['hasAttachments'] and not attachment_support:
         raise MicrosoftGraphError('microsoft_draft_edit_unsupported')
     folder=_json_graph(token, '/me/mailFolders/drafts?$select=id', opener=opener)
     folder_id=_required_message_id(folder.get('id'))
@@ -112,12 +114,13 @@ def _current(token: str, message_id: str, *, opener=None) -> dict:
         edit=validate_edit(raw)
     except MicrosoftGraphError:
         raise MicrosoftGraphError('microsoft_draft_edit_unsupported') from None
-    return {'providerMessageId':exact,'etag':etag,'edit':edit}
+    proof = _attachment_proof(token, exact, opener=opener, expected_attachments=data['hasAttachments']) if attachment_support else None
+    return {'providerMessageId':exact,'etag':etag,'edit':edit, '_attachments': proof}
 
 
 def read_editable_microsoft_draft(token: str, message_id: str, *, opener=None) -> dict:
-    """Strict read. Returns unsupported for rich-content/attachment drafts."""
-    return _current(token,message_id,opener=opener)
+    """Strict text read; attachment support stays behind its source release gate."""
+    return _public(_current(token,message_id,opener=opener))
 
 
 def save_exact_microsoft_draft(token: str, message_id: str, *, etag: str,
@@ -134,7 +137,7 @@ def save_exact_microsoft_draft(token: str, message_id: str, *, etag: str,
         raise MicrosoftGraphError('microsoft_draft_edit_conflict')
     if proposed == prior['edit']:
         if before_write is not None: before_write()
-        return {**prior,'changed':False}
+        return {**_public(prior),'changed':False}
     if before_write is not None: before_write()
     path='/me/mailFolders/drafts/messages/' + quote(exact,safe='')
     def mapped(items):return [{'emailAddress':{'address':v}} for v in items]
@@ -166,6 +169,19 @@ def save_exact_microsoft_draft(token: str, message_id: str, *, etag: str,
         confirmed=_current(token,exact,opener=opener)
     except MicrosoftGraphError:
         raise MicrosoftGraphError('microsoft_draft_edit_unconfirmed') from None
-    if confirmed['edit'] != proposed or confirmed['etag']==etag:
+    if confirmed['edit'] != proposed or confirmed['etag']==etag or confirmed['_attachments'] != prior['_attachments']:
         raise MicrosoftGraphError('microsoft_draft_edit_unconfirmed')
-    return {**confirmed,'changed':True}
+    return {**_public(confirmed),'changed':True}
+
+
+def _public(record):
+    return {k: v for k, v in record.items() if not k.startswith('_')}
+
+
+def _attachment_proof(token, message_id, *, opener, expected_attachments):
+    # Full bounded inventory, including inline attachments; never delete/recreate.
+    from api.inboxes.microsoft_draft_attachment_snapshot import _inventory
+    inventory = _inventory(token, message_id, opener)
+    if len(inventory) > 100 or expected_attachments and not inventory:
+        raise MicrosoftGraphError('microsoft_draft_edit_unsupported')
+    return tuple((a.id, a.metadata_hash) for a in inventory)

@@ -2,7 +2,7 @@
 
 This module is NOT a sending or HTML editing route. It changes only subject,
 To and Cc, and proves the original HTML body remained byte-identical after
-one conditional Graph PATCH. Attachments and Bcc are deliberately unsupported.
+one conditional Graph PATCH. Bcc and CID body editing remain deliberately unsupported.
 """
 from __future__ import annotations
 
@@ -76,7 +76,10 @@ def _current(token: str, message_id: str, *, opener=None) -> dict:
     )
     if type(data) is not dict or data.get('id') != exact or data.get('isDraft') is not True:
         raise MicrosoftGraphError('microsoft_draft_edit_unsupported')
-    if data.get('hasAttachments') is not False or data.get('bccRecipients') != []:
+    from api.inboxes import microsoft_draft_attachment_policy as attachment_policy
+    attachment_support = not attachment_policy.writes_blocked()
+    if (type(data.get('hasAttachments')) is not bool or data['hasAttachments'] and not attachment_support
+            or data.get('bccRecipients') != []):
         raise MicrosoftGraphError('microsoft_draft_edit_unsupported')
     folder = _json_graph(access, '/me/mailFolders/drafts?$select=id', opener=opener)
     folder_id = _required_message_id(folder.get('id'))
@@ -112,6 +115,7 @@ def _current(token: str, message_id: str, *, opener=None) -> dict:
         'metadata': metadata,
         'bodyPreview': preview.preview(),
         '_bodyHash': hashlib.sha256(html.encode('utf-8')).hexdigest(),
+        '_attachments': plain._attachment_proof(token, exact, opener=opener, expected_attachments=data['hasAttachments']) if attachment_support else None,
     }
 
 
@@ -174,6 +178,6 @@ def save_rich_draft_metadata(token: str, message_id: str, *, etag: str,
     except MicrosoftGraphError:
         raise MicrosoftGraphError('microsoft_draft_edit_unconfirmed') from None
     if (confirmed['metadata'] != edit or confirmed['_bodyHash'] != prior['_bodyHash']
-            or confirmed['etag'] == prior['etag']):
+            or confirmed['etag'] == prior['etag'] or confirmed['_attachments'] != prior['_attachments']):
         raise MicrosoftGraphError('microsoft_draft_edit_unconfirmed')
     return {**{k: v for k, v in confirmed.items() if not k.startswith('_')}, 'changed': True}

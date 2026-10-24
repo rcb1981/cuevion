@@ -12,6 +12,7 @@ import hmac
 import json
 import re
 import secrets
+import unicodedata
 
 from api.inboxes import oauth_token_store as store
 from api.inboxes.microsoft_draft_attachment_snapshot import (
@@ -87,7 +88,7 @@ def _intent(snapshot, action, *, attachment_id=None, name=None, content_type=Non
     if action != 'add' or attachment_id is not None:
         fail('intent_invalid')
     if (type(name) is not str or not 1 <= len(name) <= 255
-            or name in {'.', '..'} or any(ord(c) < 32 or ord(c) == 127 or c in '/\\' for c in name)
+            or name in {'.', '..'} or any(unicodedata.category(c) in {'Cc', 'Cf', 'Cs'} or c in '/\\' for c in name)
             or any('\u202a' <= c <= '\u202e' or '\u2066' <= c <= '\u2069' for c in name)
             or type(content_type) is not str or not re.fullmatch(r'[a-z0-9][a-z0-9!#$&^_.+\-]*/[a-z0-9][a-z0-9!#$&^_.+\-]*', content_type)
             or len(content_type) > 128 or type(content) is not bytes
@@ -301,7 +302,8 @@ def reconcile_attachment_operation(snapshot, operation_id, *, new_attachment_id=
                   and set(after) == set(before) | {item.id} and all(after.get(k) == v for k, v in before.items())
                   and type(downloaded_content) is bytes and len(downloaded_content) <= SMALL_UPLOAD_BYTES
                   and digest([item.name, item.content_type, len(downloaded_content)]) == intent['fileHash']
-                  and item.size == len(downloaded_content)
+                  # Exact SHA-256 of independently fetched bytes is authoritative;
+                  # Graph size metadata may include provider-specific overhead.
                   and hashlib.sha256(downloaded_content).hexdigest() == intent['contentHash'])
     if not proven:
         return _receipt(operation_id, op)  # uncertain remains durable and blocked
