@@ -16,6 +16,7 @@ from api.auth.http import (
 from api.inboxes.microsoft_preview_origin import require_microsoft_request_origin
 from api.inboxes.microsoft_production_pilot import production_pilot_writes_blocked
 from api.inboxes.microsoft_graph import MicrosoftGraphError
+from api.inboxes import microsoft_legacy_send_policy as policy
 from api.inboxes import microsoft_outbound_service
 from api.inboxes import microsoft_outbound_ledger
 from api.inboxes import microsoft_outbound_graph
@@ -24,6 +25,7 @@ from api.inboxes.microsoft_mailbox_access import MicrosoftMailboxAccessError
 MAX_REQUEST_BYTES = 128 * 1024
 _MAILBOX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$")
 _ERROR_DESCRIPTIONS = {
+    "microsoft_legacy_send_disabled": "Legacy Microsoft sending is not enabled.",
     "invalid_request": "Invalid Microsoft message request.",
     "request_too_large": "Message request exceeds the allowed size.",
     "method_not_allowed": "Use POST to send Microsoft messages.",
@@ -100,6 +102,8 @@ def microsoft_send_response(request):
         # MUST precede headers, parsing, owner/token lookups, ledger creation,
         # Graph draft/send, and any other business-side effects.
         return _error(403, "microsoft_pilot_read_only")
+    if policy.blocked():
+        return _error(403, "microsoft_legacy_send_disabled")
     try:
         headers = snapshot_request_headers(request)
         # Sending is state changing; byte-exact canonical Origin/Host are

@@ -24,6 +24,16 @@ HEADERS = (("Cookie", "test-session"),)
 
 class FlagAuthorityTests(unittest.TestCase):
     def setUp(self):
+        from api.inboxes import microsoft_draft_attachment_executor
+        lease_check = patch.object(microsoft_draft_attachment_executor, '_assert_lease')
+        lease_check.start(); self.addCleanup(lease_check.stop)
+        # Lease-only unit fixtures; real Compose/Send CAS barriers are exercised
+        # in test_microsoft_release_blockers and test_microsoft_security_fixes4.
+        compose_barrier = patch('api.inboxes.microsoft_compose_draft_ledger.assert_unblocked')
+        compose_barrier.start(); self.addCleanup(compose_barrier.stop)
+        from api.inboxes import microsoft_draft_send_index
+        p = patch.object(microsoft_draft_send_index, 'assert_mutable')
+        p.start(); self.addCleanup(p.stop)
         self.authority = AUTHORITY
         self.resolved = []
         self.lease_calls = []
@@ -81,7 +91,7 @@ class FlagAuthorityTests(unittest.TestCase):
         self.assertEqual(self.lease_calls, [(AUTHORITY.owner_email, BOX)])
         self.assertEqual(self.release_calls, [(AUTHORITY.owner_email, BOX, "l" * 43)])
         self.assertEqual(self.graph_calls, [(TOKEN, ID, True)])
-        self.assertEqual(len(self.resolved), 4)  # initial, credential, pre-PATCH, after readback
+        self.assertEqual(len(self.resolved), 9)  # initial/token; Send + Compose authority checks twice; postwrite
 
     def test_missing_write_scope_rejected_and_lease_released(self):
         for scope in (

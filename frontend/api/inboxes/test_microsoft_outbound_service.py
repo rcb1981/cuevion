@@ -37,6 +37,10 @@ class MemoryCAS:
 
 class OutboundSagaTests(unittest.TestCase):
     def setUp(self):
+        # Exercise the existing lower-level contract in an isolated fake-service
+        # test; source release remains OFF and separate negative tests cover it.
+        gate = patch('api.inboxes.microsoft_legacy_send_policy.blocked', return_value=False)
+        gate.start(); self.addCleanup(gate.stop)
         self.db=MemoryCAS()
         self.events=[]
         self.active=AUTH

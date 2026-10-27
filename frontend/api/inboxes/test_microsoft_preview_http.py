@@ -27,6 +27,10 @@ def _on_preview(request):
 
 class PreviewSendStatusRequestTests(unittest.TestCase):
     def setUp(self):
+        # Exercise the existing lower-level contract in an isolated fake-service
+        # test; source release remains OFF and separate negative tests cover it.
+        gate = patch('api.inboxes.microsoft_legacy_send_policy.blocked', return_value=False)
+        gate.start(); self.addCleanup(gate.stop)
         scoped = patch.dict(os.environ, PREVIEW, clear=True)
         scoped.start()
         self.addCleanup(scoped.stop)

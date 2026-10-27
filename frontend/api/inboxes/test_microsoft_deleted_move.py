@@ -188,6 +188,16 @@ class DeleteMoveAuthorityTests(unittest.TestCase):
     def test_owner_bound_lease_and_postwrite_confirmation(self):
         from api.inboxes.test_microsoft_flag_authority import AUTHORITY, HEADERS
         from api.inboxes import microsoft_mailbox_access as access
+        from api.inboxes import microsoft_draft_attachment_executor
+        lease_check = patch.object(microsoft_draft_attachment_executor, '_assert_lease')
+        lease_check.start(); self.addCleanup(lease_check.stop)
+        # Lease-only unit fixtures; real Compose/Send CAS barriers are exercised
+        # in test_microsoft_release_blockers and test_microsoft_security_fixes4.
+        compose_barrier = patch('api.inboxes.microsoft_compose_draft_ledger.assert_unblocked')
+        compose_barrier.start(); self.addCleanup(compose_barrier.stop)
+        from api.inboxes import microsoft_draft_send_index
+        p = patch.object(microsoft_draft_send_index, 'assert_mutable')
+        p.start(); self.addCleanup(p.stop)
         checks = []
         def graph(token, message_id, *, before_write):
             checks.append((token, message_id))

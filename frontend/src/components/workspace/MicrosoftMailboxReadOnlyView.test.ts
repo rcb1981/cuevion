@@ -122,7 +122,9 @@ assert.match(shellSource, /\{activeMicrosoftReadMailbox \? \([\s\S]*?<MicrosoftM
 const viewSource = readFileSync(resolve(__dirname, "MicrosoftMailboxReadOnlyView.tsx"), "utf8");
 assert.match(viewSource, /const MICROSOFT_READ_ONLY_PILOT = true/);
 assert.match(viewSource, /const MICROSOFT_AUTO_MARK_READ_RELEASED = true/);
-assert.match(viewSource, /MICROSOFT_READ_ONLY_PILOT \|\| !connected/);
+assert.match(viewSource, /!connected \|\| composer !== null \|\| composeDraftTarget !== null/);
+assert.match(viewSource, /!MICROSOFT_COMPOSE_DRAFTS_RELEASED \|\| !MICROSOFT_RESPONSE_DRAFTS_RELEASED/);
+assert.match(viewSource, /MICROSOFT_READ_ONLY_PILOT \|\| !MICROSOFT_OUTBOUND_ACTIONS_RELEASED/);
 assert.match(viewSource, /<MicrosoftComposeDesignPreview/);
 assert.match(viewSource, /setComposeDesignPreviewOpen\(true\)/);
 assert.match(viewSource, /!MICROSOFT_READ_ONLY_PILOT && composer !== null/);
@@ -208,3 +210,7 @@ assert.match(viewSource, /result\.providerMessageId !== targetId \|\| result\.de
 assert.match(viewSource, /setRows\(\(current\) => current\.filter/);
 assert.match(viewSource, /onDelete=\{\(\) => \{ void deleteSelectedMessage\(\); \}\}/);
 assert.match(viewSource, /"Moved to Deleted Items\."/);
+
+// Formatted standalone drafts reopen independently of the Reply/Forward release gate.
+assert.match(viewSource, /composeAvailable && selectedMessage.bodyHtml &&/);
+assert.match(viewSource, /Edit in Compose/);

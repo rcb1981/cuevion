@@ -17,7 +17,7 @@ def require_release():
 
 def validate_edit(value):
     # Drafts can intentionally have empty fields, unlike a send request.
-    if type(value) is not dict or set(value) != {'subject', 'to', 'cc', 'bcc', 'body'}:
+    if type(value) is not dict or set(value) not in ({'subject', 'to', 'cc', 'bcc', 'body'}, {'subject', 'to', 'cc', 'bcc', 'body', 'bodyType'}) or ('bodyType' in value and value['bodyType'] != 'html'):
         raise MicrosoftGraphError('microsoft_compose_invalid')
     try:
         base = plain.validate_edit({k: value[k] for k in ('subject', 'to', 'cc', 'body')})
@@ -27,4 +27,7 @@ def validate_edit(value):
     addresses = base['to'] + base['cc'] + bcc
     if len(addresses) > plain.MAX_RECIPIENTS or len(set(addresses)) != len(addresses):
         raise MicrosoftGraphError('microsoft_compose_invalid')
+    if value.get('bodyType') == 'html':
+        from api.inboxes.microsoft_compose_html import canonical
+        return {**base, 'bcc': bcc, 'body': canonical(base['body']), 'bodyType': 'html'}
     return {**base, 'bcc': bcc}

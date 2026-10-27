@@ -256,6 +256,16 @@ class DraftDiscardHttpTests(unittest.TestCase):
 
 
 class DraftDiscardOwnerTests(unittest.TestCase):
+    def setUp(self):
+        # Lease-only unit fixtures; real Compose/Send CAS barriers are exercised
+        # in test_microsoft_release_blockers and test_microsoft_security_fixes4.
+        compose_barrier = patch('api.inboxes.microsoft_compose_draft_ledger.assert_unblocked')
+        compose_barrier.start(); self.addCleanup(compose_barrier.stop)
+        # These lease-only doubles predate the durable send index. Full index
+        # enforcement is covered by test_microsoft_send_security_fixes.
+        barrier = patch('api.inboxes.microsoft_draft_send_index.assert_mutable')
+        barrier.start(); self.addCleanup(barrier.stop)
+
     def test_authorized_lease_and_recheck(self):
         authority = type("FakeAuthority", (), {"owner_email": "user@example.com", "mailbox_id": MAILBOX})()
         with patch.object(access, "resolve_owned_microsoft_mailbox", return_value=authority), patch.object(
@@ -276,7 +286,7 @@ class DraftDiscardOwnerTests(unittest.TestCase):
             token.assert_called_once_with((), MAILBOX, require_read_write=True)
             move.assert_called_once()
             move.call_args.kwargs["before_write"]()
-            self.assertEqual(check.call_count, 2)
+            self.assertEqual(check.call_count, 7)  # Send and Compose authority rechecks
             release.assert_called_once()
 
     def test_lease_held_prevents_graph(self):

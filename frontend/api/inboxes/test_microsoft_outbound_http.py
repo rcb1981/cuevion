@@ -42,6 +42,10 @@ PROOF={"attemptId":ID,"status":"accepted_by_microsoft",
 
 class HTTPOutboundTests(unittest.TestCase):
     def setUp(self):
+        # Exercise the existing lower-level contract in an isolated fake-service
+        # test; source release remains OFF and separate negative tests cover it.
+        gate = patch('api.inboxes.microsoft_legacy_send_policy.blocked', return_value=False)
+        gate.start(); self.addCleanup(gate.stop)
         # Exercise the pre-existing outbound validation/service contract
         # independently of the newly hard-disabled Production pilot boundary.
         # Real Production does NOT have this test-only mock.

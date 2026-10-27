@@ -43,7 +43,7 @@ export function MicrosoftPlannedMessageActions({
   changeReadStateBusy = false, onChangeReadState,
   canArchive = false, archiveBusy = false, onArchive,
   canDelete = false, deleteBusy = false, onDelete,
-  canCompose = false, onCompose,
+  canCompose = false, canReplyAll = true, onCompose,
 }: {
   unread: boolean;
   hasMessage?: boolean;
@@ -57,6 +57,7 @@ export function MicrosoftPlannedMessageActions({
   deleteBusy?: boolean;
   onDelete?: () => void;
   canCompose?: boolean;
+  canReplyAll?: boolean;
   onCompose?: (mode: "reply" | "reply_all" | "forward") => void;
 }) {
   const [moreOpen, setMoreOpen] = useState(false);
@@ -70,18 +71,20 @@ export function MicrosoftPlannedMessageActions({
           disabled={
             name === "archive" ? (!canArchive || archiveBusy || !onArchive)
             : name === "delete" ? (!canDelete || deleteBusy || !onDelete)
-            : (name === "reply" || name === "reply-all" || name === "forward") ? (!canCompose || !onCompose)
+            : (name === "reply" || name === "reply-all" || name === "forward") ? (!canCompose || !onCompose || name === "reply-all" && !canReplyAll)
             : true
           }
           title={name === "archive" && canArchive
             ? "Move this exact Microsoft Inbox message to Archive after Graph confirmation"
             : name === "delete" && canDelete
               ? "Move this exact Microsoft Inbox message to Deleted Items (not permanently deleted)"
-              : label + " requires separate Microsoft action approval"}
+              : canCompose && ["reply", "reply-all", "forward"].includes(name)
+                ? label + " — save a Microsoft draft without sending"
+                : label + " requires separate Microsoft action approval"}
           onClick={() => {
             if (name === "archive" && canArchive && !archiveBusy && onArchive) onArchive();
             if (name === "delete" && canDelete && !deleteBusy && onDelete) onDelete();
-            if ((name === "reply" || name === "reply-all" || name === "forward") && canCompose && onCompose)
+            if ((name === "reply" || name === "reply-all" || name === "forward") && canCompose && onCompose && (name !== "reply-all" || canReplyAll))
               onCompose(name === "reply-all" ? "reply_all" : name);
           }}
           className={iconButton}

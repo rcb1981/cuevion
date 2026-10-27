@@ -16,6 +16,16 @@ class MicrosoftSentStatusError(Exception):
         self.code = code
 
 
+def verify_owned_sent_copy(headers, mailbox_id, captured, draft_id):
+    """Current credentials authorize only exact-ID GETs, never historical sends."""
+    token, checked = owned._owned_token(headers, mailbox_id)
+    if checked != captured:
+        raise owned.MicrosoftMailboxAccessError("microsoft_reconnect_required")
+    found = graph.verify_microsoft_sent_copy(token, draft_id)
+    owned._verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+    return found
+
+
 def check_owned_microsoft_sent_status(
     headers, mailbox_id: str, *, attempt_id: str,
 ) -> dict:
@@ -32,6 +42,11 @@ def check_owned_microsoft_sent_status(
 
     phase = record["phase"]
     draft_id = record["draftId"]
+    if phase == "sent_copy_confirmed":
+        # Persisted only after the same immutable-ID/Sent-folder proof below.
+        owned._verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+        return {"attemptId": attempt_id, "status": "sent_copy_confirmed",
+                "sentCopyConfirmed": True, "deliveryConfirmed": False}
     if phase not in {"send_started", "accepted_by_microsoft"}:
         owned._verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
         return {
@@ -43,13 +58,7 @@ def check_owned_microsoft_sent_status(
     if not isinstance(draft_id, str) or not draft_id:
         raise MicrosoftSentStatusError("microsoft_send_attempt_conflict")
 
-    token, checked = owned._owned_token(headers, mailbox_id)
-    if checked != captured:
-        raise owned.MicrosoftMailboxAccessError("microsoft_reconnect_required")
-    found = graph.verify_microsoft_sent_copy(token, draft_id)
-    # Graph I/O can overlap a user logging out or reconnecting; revalidate
-    # the exact owner/account and token generation before publishing proof.
-    owned._verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+    found = verify_owned_sent_copy(headers, mailbox_id, captured, draft_id)
     return {
         "attemptId": attempt_id,
         "status": "sent_copy_confirmed" if found else "sent_copy_pending",

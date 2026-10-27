@@ -24,7 +24,7 @@ function fixture(options={}){
  const calls=[],operations=new Map(),attachments=new Map(),drafts=new Map();
  if(options.existing)drafts.set('draft-1',{edit:{...original},version:1,rows:[metadata('existing','existing.txt')]});
  let pendingSave,pendingUpload,created=0;
- function current(id){const d=drafts.get(id);assert.ok(d,'known exact draft');return {providerMessageId:id,etag:'W/"v'+d.version+'"',snapshotHash:'a'.repeat(64),edit:{subject:d.edit.subject,to:d.edit.to,cc:d.edit.cc,body:d.edit.body,bcc:d.edit.bcc}};}
+ function current(id){const d=drafts.get(id);assert.ok(d,'known exact draft');return {providerMessageId:id,etag:'W/"v'+d.version+'"',snapshotHash:'a'.repeat(64),edit:{subject:d.edit.subject,to:d.edit.to,cc:d.edit.cc,body:d.edit.body,bcc:d.edit.bcc,...(d.edit.bodyType?{bodyType:d.edit.bodyType}:{})}};}
  function finishSave(outcome='confirmed_performed'){
   const {p,wait}=pendingSave;let id=p.action==='update'?p.providerMessageId:null;
   if(outcome==='confirmed_performed'){
@@ -44,6 +44,7 @@ function fixture(options={}){
  }
  const fetch=async(url,init)=>{
   const p=JSON.parse(init.body);calls.push({url,p});assert.equal(init.method,'POST');assert.equal(init.credentials,'include');
+  if(url.endsWith('/send-microsoft-draft')){assert.equal(p.action,'history');return response({ok:true,mailboxId:p.mailboxId,entries:[],nextCursor:null,currentDraft:null});}
   assert.ok(!url.includes('send-microsoft'));
   const message=(id,full)=>{const d=drafts.get(id);return {id,providerMessageId:id,providerThreadId:id+'thread',serverMailboxId:p.mailboxId,providerFolder:'DRAFTS',labelIds:['DRAFTS'],sender:'To: '+d.edit.to.join(', '),from:'',to:d.edit.to.join(', '),cc:d.edit.cc.join(', '),subject:d.edit.subject,snippet:'',timestamp:'October 24 at 12:00',createdAt:'2026-10-24T12:00:00+00:00',body:full?[d.edit.body]:[],unread:false,flagged:false,attachments:[],hasAttachments:d.rows.length>0};};
   if(url.endsWith('/fetch-microsoft'))return response({ok:true,messages:[],inboxUidSet:[],uidValidity:'microsoft-graph-immutable',hasMore:false});
@@ -204,7 +205,7 @@ test('mailbox switch ignores late save and load results and never targets the ne
   assert.equal(label(h.tree,'Compose subject').props.value,'');
  }finally{await h.close();}
 });
-for(const code of ['microsoft_reconnect_required','microsoft_unauthorized','microsoft_compose_store_unavailable'])test('safe error and disabled controls for '+code,async()=>{
+for(const code of ['microsoft_reconnect_required','microsoft_unauthorized','microsoft_compose_store_unavailable','microsoft_compose_body_unverifiable','microsoft_compose_body_unconfirmed'])test('safe error and disabled controls for '+code,async()=>{
  const s=await setup({statusError:code});try{assert.equal(button(s.tree,'Save draft').props.disabled,true);assert.doesNotMatch(shown(s.tree),/private provider text/);assert.equal(s.f.saves().length,0);}finally{await s.close();}
 });
 test('source gates remain disabled on disk; disabled component issues no requests and no browser persistence',async()=>{
@@ -249,4 +250,99 @@ test('lost upload response does not turn local files back into a new selection o
   assert.doesNotMatch(shown(s.tree),/Not uploaded/);assert.equal(button(s.tree,'Save draft').props.disabled,true);
   await act(async()=>button(s.tree,'Check draft status').props.onClick());assert.equal(s.f.created,1);assert.equal(s.f.uploads().length,1);
  }finally{await s.close();}
+});
+
+const {MicrosoftComposeBodyEditor}=require('./MicrosoftComposeBodyEditor');
+const htmlPolicy=require('../../lib/microsoftComposeHtml');
+test('formatting converts legacy plain text safely, saves HTML and reopens rich text with Send disabled',async()=>{
+ const s=await setup({autoSave:true});try{
+  await fill(s.tree);await act(async()=>button(s.tree,'Formatting').props.onClick());
+  assert.equal(s.tree.root.findAllByType('textarea').length,0);
+  const editor=s.tree.root.findByType(MicrosoftComposeBodyEditor);
+  assert.equal(editor.props.value,'<div>Text<br>&lt;literal&gt; body</div>');
+  await act(async()=>editor.props.onChange('<div>Hello <strong>world</strong></div>'));
+  await save(s.tree);
+  assert.equal(s.f.saves()[0].p.edit.bodyType,'html');
+  assert.equal(s.tree.root.findByType(MicrosoftComposeBodyEditor).props.value,'<div>Hello <strong>world</strong></div>');
+  assert.equal(button(s.tree,'Send').props.disabled,true);
+  await act(async()=>s.tree.unmount());await s.mount({...s.props,providerMessageId:'created-1'});
+  assert.equal(s.tree.root.findByType(MicrosoftComposeBodyEditor).props.value,'<div>Hello <strong>world</strong></div>');
+  assert.equal(s.f.saves().length,1,'reload does not mutate');
+ }finally{await s.close();}
+});
+test('unsafe rich markup disables saving and never reaches the fake server',async()=>{
+ const s=await setup();try{
+  await act(async()=>button(s.tree,'Formatting').props.onClick());
+  await act(async()=>s.tree.root.findByType(MicrosoftComposeBodyEditor).props.onChange('<img src="x" onerror="alert(1)">'));
+  assert.equal(button(s.tree,'Save draft').props.disabled,true);
+  await save(s.tree);assert.equal(s.f.saves().length,0);
+ }finally{await s.close();}
+});
+test('rich fragment policy rejects active HTML, CSS, CID and unsafe links; retains semantic formatting',()=>{
+ for(const bad of ['<script>x</script>','<img src="cid:x">','<svg></svg>','<p onclick="x">x</p>',
+ '<div style="color:red">x</div>','<a href="javascript:x">x</a>','<a href="&#106;avascript:x">x</a>',
+ '<!--x-->','<div><p>x</div>'])assert.equal(htmlPolicy.canonicalMicrosoftComposeHtml(bad),null,bad);
+ assert.equal(htmlPolicy.canonicalMicrosoftComposeHtml('<div><b>B</b><i>I</i><u>U</u><br></div>'),'<div><strong>B</strong><em>I</em><u>U</u><br></div>');
+ assert.equal(htmlPolicy.canonicalMicrosoftComposeHtml('<a href="https://example.com/path">Link</a>'),'<a href="https://example.com/path">Link</a>');
+});
+test('rich editor prevents rich paste/drop and limits toolbar commands to its own selection',async()=>{
+ let tree,node={innerHTML:'',focus(){},contains:n=>n==='inside'},changes=[];
+ const oldDocument=global.document,oldWindow=global.window;const commands=[];
+ global.document={execCommand:(...args)=>commands.push(args)};global.window={getSelection:()=>({anchorNode:'outside',focusNode:'outside'})};
+ try{
+  await act(async()=>{tree=create(React.createElement(MicrosoftComposeBodyEditor,{value:'<div>safe</div>',disabled:false,onChange:v=>changes.push(v)}),{createNodeMock:()=>node});});
+  assert.equal(node.innerHTML,'<div>safe</div>');
+  const editor=label(tree,'Compose formatted message body');let prevented=0;
+  await act(async()=>editor.props.onPaste({preventDefault(){prevented++;},clipboardData:{getData:type=>{assert.equal(type,'text/plain');return 'plain';}}}));
+  assert.equal(prevented,1);assert.equal(commands.length,0);
+  global.window.getSelection=()=>({anchorNode:'inside',focusNode:'inside'});
+  await act(async()=>editor.props.onPaste({preventDefault(){},clipboardData:{getData:()=>'<script>literal</script>'}}));
+  assert.deepEqual(commands[0],['insertText',false,'<script>literal</script>']);
+  await act(async()=>label(tree,'Bold').props.onClick());assert.equal(commands[1][0],'bold');
+  await act(async()=>tree.update(React.createElement(MicrosoftComposeBodyEditor,{value:'<div>safe</div>',disabled:true,onChange:v=>changes.push(v)})));
+  assert.equal(label(tree,'Compose formatted message body').props.contentEditable,false);
+ }finally{await act(async()=>tree?.unmount());global.document=oldDocument;global.window=oldWindow;}
+});
+test('paged status retains an older active blocker even outside the latest page',async()=>{
+ const oldFetch=global.fetch;
+ const blocker={requestId:'b'.repeat(43),action:'update',providerMessageId:'draft-old',outcome:'uncertain',blocked:true};
+ global.fetch=async(_url,init)=>{
+  const p=JSON.parse(init.body);assert.equal(p.providerMessageId,'draft-old');
+  return response({ok:true,mailboxId:BOX,nextCursor:90,operations:[blocker,...Array.from({length:32},(_,i)=>({requestId:String(i).padEnd(43,'x'),action:'create',providerMessageId:'draft-'+i,outcome:'confirmed_performed',blocked:false}))]});
+ };
+ try{const result=await api.inspectMicrosoftComposeDrafts({mailboxId:BOX,providerMessageId:'draft-old'});assert.equal(result.ok,true);assert.equal(result.nextCursor,90);assert.deepEqual(result.operations[0],blocker);}finally{global.fetch=oldFetch;}
+});
+
+test('HTML entity and alias canonicalization agrees with saved body representation',()=>{
+ assert.equal(htmlPolicy.canonicalMicrosoftComposeHtml('<p>A&nbsp;B &amp; &lt;literal&gt; &#169;</p>'),'<p>A\u00a0B &amp; &lt;literal&gt; ©</p>');
+ assert.equal(htmlPolicy.canonicalMicrosoftComposeHtml('<a href="https://example.com/a&#x27;b?x=1&amp;y=2">link</a>'),'<a href="https://example.com/a&#x27;b?x=1&amp;y=2">link</a>');
+ assert.equal(htmlPolicy.canonicalMicrosoftComposeHtml('<a href="https://example.com/&#10;x">bad</a>'),null);
+ const edit=api.prepareMicrosoftComposeDraftEdit('Subject','<b>A&nbsp;B</b>','artist@example.com','','','html');
+ assert.equal(edit.body,'<strong>A\u00a0B</strong>');
+});
+
+test('account-bound draft acceptance works with source gates OFF; no attachment or Send mutation is available',async()=>{
+ api.MICROSOFT_COMPOSE_DRAFTS_RELEASED=false;attachmentPolicy.MICROSOFT_DRAFT_ATTACHMENTS_RELEASED=false;
+ const s=await setup({autoSave:true},{acceptance:{canWrite:true}});
+ try{
+  await fill(s.tree);await save(s.tree);
+  assert.equal(s.f.saves().length,1);assert.equal('acceptance' in s.f.saves()[0].p,false,'client hint is never server authority');
+  assert.equal(button(s.tree,'Send').props.disabled,true);
+  assert.equal(label(s.tree,'Add Compose attachments').props.disabled,true);
+  assert.equal(s.f.uploads().length,0);
+  await act(async()=>s.tree.unmount());await s.mount({...s.props,providerMessageId:'created-1',acceptance:{canWrite:false}});
+  assert.equal(label(s.tree,'Compose message body').props.value,'Text\n<literal> body');
+  assert.equal(button(s.tree,'Save draft').props.disabled,true);
+  await save(s.tree);assert.equal(s.f.saves().length,1,'stopped session is read-only');
+ }finally{await s.close();api.MICROSOFT_COMPOSE_DRAFTS_RELEASED=true;attachmentPolicy.MICROSOFT_DRAFT_ATTACHMENTS_RELEASED=true;}
+});
+test('permission diagnosis is read-only, works with source gates OFF and rejects a Send grant',async()=>{
+ const old=global.fetch;api.MICROSOFT_COMPOSE_DRAFTS_RELEASED=false;
+ let count=0;
+ const data={ok:true,mailboxId:BOX,canInspect:false,canWrite:false,mailReadWrite:true,tokenExpired:true,reason:'not_configured',send:false,attachments:false,replyAll:false};
+ global.fetch=async(url,init)=>{const p=JSON.parse(init.body);assert.deepEqual(p,{action:'capabilities',mailboxId:BOX});count++;return response(data);};
+ try{
+  const result=await api.inspectMicrosoftDraftAcceptance(BOX);assert.equal(result.mailReadWrite,true);assert.equal(result.canWrite,false);assert.equal(count,1);
+  data.send=true;assert.equal(await api.inspectMicrosoftDraftAcceptance(BOX),null);
+ }finally{global.fetch=old;api.MICROSOFT_COMPOSE_DRAFTS_RELEASED=true;}
 });

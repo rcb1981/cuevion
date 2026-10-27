@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   MICROSOFT_COMPOSE_DRAFTS_RELEASED, createMicrosoftComposeDraftRequestId,
   inspectMicrosoftComposeDrafts, loadMicrosoftComposeDraft, saveMicrosoftComposeDraft,
-  prepareMicrosoftComposeDraftEdit,
+  prepareMicrosoftComposeDraftEdit, prepareMicrosoftResponseDraft, createMicrosoftResponseDraft,
+  MICROSOFT_RESPONSE_DRAFTS_RELEASED, type MicrosoftResponseMode, type MicrosoftResponseContext,
   type MicrosoftComposeDraftEdit, type MicrosoftComposeDraftRecord, type MicrosoftComposeDraftReceipt,
 } from "../../lib/microsoftComposeDraftApi";
 import {
@@ -10,17 +11,24 @@ import {
   MICROSOFT_ATTACHMENT_MAX_FILE_BYTES, MICROSOFT_ATTACHMENT_MAX_FILES, MICROSOFT_ATTACHMENT_MAX_TOTAL_BYTES,
 } from "../../lib/microsoftDraftAttachmentPolicy";
 import { mutateMicrosoftDraftAttachments, inspectMicrosoftDraftAttachmentRequest } from "../../lib/microsoftDraftAttachmentApi";
+import { MICROSOFT_DRAFT_SEND_RELEASED } from "../../lib/microsoftDraftSendApi";
+import { MicrosoftDraftSendControls } from "./MicrosoftDraftSendControls";
 import { MicrosoftDraftAttachments } from "./MicrosoftDraftAttachments";
 import { microsoftAttachmentPresentation } from "./MicrosoftAttachmentList";
+import { MicrosoftComposeBodyEditor } from "./MicrosoftComposeBodyEditor";
+import { microsoftPlainToHtml } from "../../lib/microsoftComposeHtml";
 import { Glyph } from "./MicrosoftComposeDesignPreview";
 
 type Props = {
+  acceptance?: { canWrite: boolean };
   mailboxId: string; mailboxEmail: string; connected: boolean; providerMessageId?: string;
+  responseMode?: MicrosoftResponseMode; sourceProviderMessageId?: string;
   onClose: () => void; onSaved: (providerMessageId: string) => void; onOpenDrafts: () => void;
   onOperationStart?: (providerMessageId: string | null) => void;
+  onSent?: (providerMessageId: string) => void;
 };
 type Phase = "loading" | "ready" | "preparing" | "saving" | "uploading" | "checking" | "blocked";
-const sameEdit = (a: MicrosoftComposeDraftEdit, b: MicrosoftComposeDraftEdit) => JSON.stringify([a.subject, a.body, a.to, a.cc, a.bcc]) === JSON.stringify([b.subject, b.body, b.to, b.cc, b.bcc]);
+const sameEdit = (a: MicrosoftComposeDraftEdit, b: MicrosoftComposeDraftEdit) => JSON.stringify([a.subject, a.body, a.bodyType, a.to, a.cc, a.bcc]) === JSON.stringify([b.subject, b.body, b.bodyType, b.to, b.cc, b.bcc]);
 const empty: MicrosoftComposeDraftEdit = { subject: "", body: "", to: [], cc: [], bcc: [] };
 const inputStyle = "min-w-0 flex-1 bg-transparent py-3 text-sm text-[var(--workspace-text)] placeholder:text-[var(--workspace-text-faint)] outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--workspace-accent-border)] disabled:opacity-50";
 const iconStyle = "inline-flex h-9 w-9 items-center justify-center rounded-full text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-hover-surface)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:opacity-50";
@@ -28,13 +36,15 @@ const buttonStyle = "rounded-full border border-[var(--workspace-border)] px-4 p
 const uncertain = "The draft result is uncertain. Check status before creating or saving it again.";
 const fileError = "Select at most 10 files, 2 MiB each and 8 MiB in total, with valid names and types.";
 
-/** Separate from outbound sending. The source gate is OFF and Send has no handler. */
+/** Separate from outbound sending. Draft and Send release gates remain independently OFF. */
 export function MicrosoftComposeDraftPanel(props: Props) {
-  return MICROSOFT_COMPOSE_DRAFTS_RELEASED
-    ? <ComposeDraftSession key={JSON.stringify([props.mailboxId, props.providerMessageId ?? null])} {...props} /> : null;
+  return MICROSOFT_COMPOSE_DRAFTS_RELEASED || props.acceptance
+    ? <ComposeDraftSession key={JSON.stringify([props.mailboxId, props.providerMessageId ?? null, props.responseMode, props.sourceProviderMessageId])} {...props} /> : null;
 }
 
-function ComposeDraftSession({ mailboxId, mailboxEmail, connected, providerMessageId, onClose, onSaved, onOpenDrafts, onOperationStart }: Props) {
+function ComposeDraftSession({ acceptance, mailboxId, mailboxEmail, connected, providerMessageId, responseMode, sourceProviderMessageId, onClose, onSaved, onOpenDrafts, onOperationStart, onSent }: Props) {
+  const [responseInfo, setResponseInfo] = useState<MicrosoftResponseContext | null>(null);
+  const sourceHash = useRef<string | null>(null);
   const [phase, setPhase] = useState<Phase>("loading");
   const [savedId, setSavedId] = useState<string | null>(providerMessageId ?? null);
   const [record, setRecord] = useState<MicrosoftComposeDraftRecord | null>(null);
@@ -45,8 +55,12 @@ function ComposeDraftSession({ mailboxId, mailboxEmail, connected, providerMessa
   const [showCc, setShowCc] = useState(false);
   const [showBcc, setShowBcc] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
+  const [historyCursor, setHistoryCursor] = useState<number | null>(null);
   const [operations, setOperations] = useState<MicrosoftComposeDraftReceipt[]>([]);
-  const [attachmentLocked, setAttachmentLocked] = useState(Boolean(providerMessageId));
+  const [attachmentLocked, setAttachmentLocked] = useState(Boolean(providerMessageId) && !acceptance);
+  const [sendLocked, setSendLocked] = useState(false);
+  const sendBlocked = useRef(false);
+  const onSendLocked = useCallback((value: boolean) => { sendBlocked.current = value; setSendLocked(value); }, []);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -55,7 +69,7 @@ function ComposeDraftSession({ mailboxId, mailboxEmail, connected, providerMessa
   const alive = useRef(false);
   const submission = useRef<string | null>(null);
   const attachmentRequest = useRef<{ requestId: string; providerMessageId: string } | null>(null);
-  const attachmentBlocked = useRef(Boolean(providerMessageId));
+  const attachmentBlocked = useRef(Boolean(providerMessageId) && !acceptance);
   const picker = useRef<HTMLInputElement>(null);
   const dialog = useRef<HTMLElement>(null);
   const toField = useRef<HTMLInputElement>(null);
@@ -63,8 +77,8 @@ function ComposeDraftSession({ mailboxId, mailboxEmail, connected, providerMessa
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
   const busy = ["loading", "preparing", "saving", "uploading", "checking"].includes(phase);
-  const locked = !connected || phase !== "ready" || attachmentLocked;
-  const proposed = prepareMicrosoftComposeDraftEdit(edit.subject, edit.body, to, cc, bcc);
+  const locked = !connected || Boolean(acceptance && !acceptance.canWrite) || phase !== "ready" || attachmentLocked || sendLocked;
+  const proposed = prepareMicrosoftComposeDraftEdit(edit.subject, edit.body, to, cc, bcc, edit.bodyType);
   const dirty = record !== null && (!proposed || !sameEdit(proposed, record.edit));
 
   const onAttachmentBlocked = useCallback((blocked: boolean) => {
@@ -75,10 +89,11 @@ function ComposeDraftSession({ mailboxId, mailboxEmail, connected, providerMessa
   const loadFresh = async (id: string, publish: boolean) => {
     setRecord(null); // No stale editable content or attachment inventory during readback.
     setEdit(empty); setTo(""); setCc(""); setBcc("");
-    const result = await loadMicrosoftComposeDraft({ mailboxId, providerMessageId: id });
+    const result = await loadMicrosoftComposeDraft({ mailboxId, acceptance: Boolean(acceptance), providerMessageId: id });
     if (!alive.current) return false;
     if (!result.ok) { setError(result.error.message); setPhase("blocked"); return false; }
     setSavedId(id); setRecord(result.draft); setEdit(result.draft.edit);
+    setResponseInfo(result.draft.response ?? null);
     setTo(result.draft.edit.to.join(", ")); setCc(result.draft.edit.cc.join(", ")); setBcc(result.draft.edit.bcc.join(", "));
     setShowCc(result.draft.edit.cc.length > 0); setShowBcc(result.draft.edit.bcc.length > 0);
     ready.current = true; setPhase("ready");
@@ -92,10 +107,10 @@ function ComposeDraftSession({ mailboxId, mailboxEmail, connected, providerMessa
     pending.current = true; ready.current = false;
     setPhase("checking"); setError(null);
     try {
-      const status = await inspectMicrosoftComposeDrafts({ mailboxId });
+      const status = await inspectMicrosoftComposeDrafts({ mailboxId, acceptance: Boolean(acceptance), ...(target ? { providerMessageId: target } : {}), ...(submission.current ? { requestId: submission.current } : {}) });
       if (!alive.current) return;
       if (!status.ok) { setPhase("blocked"); setError(status.error.message); return; }
-      setOperations(status.operations);
+      setOperations(status.operations); setHistoryCursor(status.nextCursor ?? null);
       const current = submission.current ? status.operations.find(r => r.requestId === submission.current) : null;
       if (submission.current && !current) { setPhase("blocked"); setError(uncertain); return; }
       if (current?.blocked || status.operations.some(r => r.blocked && (target ? r.providerMessageId === target : r.action === "create"))) {
@@ -112,7 +127,21 @@ function ComposeDraftSession({ mailboxId, mailboxEmail, connected, providerMessa
       }
       submission.current = null;
       if (target) await loadFresh(target, current?.outcome === "confirmed_performed");
-      else { ready.current = true; setPhase("ready"); }
+      else if (responseMode) {
+        if (!sourceProviderMessageId || !MICROSOFT_RESPONSE_DRAFTS_RELEASED && !acceptance) { setError("Reply and forward drafts are not enabled."); setPhase("blocked"); return; }
+        const prepared = await prepareMicrosoftResponseDraft({ mailboxId, acceptance: Boolean(acceptance), mode: responseMode, sourceProviderMessageId });
+        if (!alive.current) return;
+        if (!prepared.ok) { setError(prepared.error.message); setPhase("blocked"); return; }
+        if (sourceHash.current && sourceHash.current !== prepared.sourceHash) {
+          setError("The original message changed. Close and reopen this response before saving."); setPhase("blocked"); return;
+        }
+        if (!sourceHash.current) {
+          setEdit(prepared.edit); setTo(prepared.edit.to.join(", ")); setCc(prepared.edit.cc.join(", "));
+          setBcc(""); setShowCc(prepared.edit.cc.length > 0); setResponseInfo(prepared.response);
+          sourceHash.current = prepared.sourceHash;
+        }
+        ready.current = true; setPhase("ready");
+      } else { ready.current = true; setPhase("ready"); }
     } catch {
       if (alive.current) { setError(uncertain); setPhase("blocked"); }
     } finally { pending.current = false; }
@@ -126,10 +155,11 @@ function ComposeDraftSession({ mailboxId, mailboxEmail, connected, providerMessa
 
   useEffect(() => {
     if (phase === "ready" && !focused.current && typeof document !== "undefined") {
-      toField.current?.focus();
+      if (responseMode === "reply" || responseMode === "reply_all") dialog.current?.querySelector<HTMLElement>('textarea, [contenteditable="true"]')?.focus();
+      else toField.current?.focus();
       focused.current = true;
     }
-  }, [phase]);
+  }, [phase, responseMode]);
 
   useEffect(() => {
     if (typeof document === "undefined") return;
@@ -138,7 +168,7 @@ function ComposeDraftSession({ mailboxId, mailboxEmail, connected, providerMessa
     const keydown = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !pending.current) { event.preventDefault(); closeRef.current(); }
       if (event.key !== "Tab") return;
-      const controls = Array.from(dialog.current?.querySelectorAll<HTMLElement>("button:not([disabled]), input:not([disabled]):not([hidden]), textarea:not([disabled])") ?? []);
+      const controls = Array.from(dialog.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]):not([hidden]), textarea:not([disabled]), [contenteditable="true"]') ?? []);
       const first = controls[0], last = controls[controls.length - 1];
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
@@ -148,7 +178,7 @@ function ComposeDraftSession({ mailboxId, mailboxEmail, connected, providerMessa
   }, []);
 
   const selectFiles = (incoming: File[]) => {
-    if (!connected || !ready.current || pending.current || attachmentBlocked.current) return;
+    if (acceptance || !connected || sendBlocked.current || !ready.current || pending.current || attachmentBlocked.current) return;
     const next = [...files, ...incoming];
     if (!incoming.length) return;
     const identity = (file: File) => JSON.stringify([file.name, file.size, file.type, file.lastModified ?? 0]);
@@ -165,7 +195,7 @@ function ComposeDraftSession({ mailboxId, mailboxEmail, connected, providerMessa
   };
 
   const save = async () => {
-    if (!connected || !ready.current || pending.current || attachmentBlocked.current || (savedId && !record)) return;
+    if (acceptance && !acceptance.canWrite || !connected || sendBlocked.current || !ready.current || pending.current || attachmentBlocked.current || (savedId && !record)) return;
     if (!proposed) { setError("Check To, Cc and Bcc, the subject and message. Use at most 20 distinct recipients and 32000 message characters."); return; }
     pending.current = true; ready.current = false;
     setPhase("preparing"); setError(null); setNotice(null);
@@ -183,7 +213,13 @@ function ComposeDraftSession({ mailboxId, mailboxEmail, connected, providerMessa
       submission.current = requestId;
       setPhase("saving");
       onOperationStart?.(savedId);
-      const result = await saveMicrosoftComposeDraft({ mailboxId, requestId, edit: proposed,
+      if (responseMode && !savedId && (!sourceProviderMessageId || !sourceHash.current)) {
+        setPhase("blocked"); setError("Reload the original message before saving."); return;
+      }
+      const result = responseMode && !savedId
+        ? await createMicrosoftResponseDraft({ mailboxId, acceptance: Boolean(acceptance), requestId, edit: proposed, mode: responseMode,
+            sourceProviderMessageId: sourceProviderMessageId!, sourceHash: sourceHash.current! })
+        : await saveMicrosoftComposeDraft({ mailboxId, acceptance: Boolean(acceptance), requestId, edit: proposed,
         ...(savedId && record ? { action: "update", providerMessageId: savedId, etag: record.etag } : { action: "create" }) });
       if (!alive.current) return;
       if (!result.ok) { setPhase("blocked"); setError(result.error.message); return; }
@@ -194,7 +230,7 @@ function ComposeDraftSession({ mailboxId, mailboxEmail, connected, providerMessa
       const id = result.receipt.providerMessageId;
       setSavedId(id); setRecord(null);
       if (prepared.length) {
-        const loaded = await loadMicrosoftComposeDraft({ mailboxId, providerMessageId: id });
+        const loaded = await loadMicrosoftComposeDraft({ mailboxId, acceptance: Boolean(acceptance), providerMessageId: id });
         if (!alive.current) return;
         if (!loaded.ok || !sameEdit(loaded.draft.edit, proposed)) {
           setPhase("blocked"); setError("The saved draft changed before upload. Reopen it before selecting attachments again."); return;
@@ -217,6 +253,18 @@ function ComposeDraftSession({ mailboxId, mailboxEmail, connected, providerMessa
     } finally { pending.current = false; }
   };
 
+  const loadOlder = async () => {
+    if (!historyCursor || pending.current || !connected) return;
+    pending.current = true;
+    try {
+      const result = await inspectMicrosoftComposeDrafts({ mailboxId, acceptance: Boolean(acceptance), before: historyCursor, ...(savedId ? { providerMessageId: savedId } : {}) });
+      if (!alive.current) return;
+      if (!result.ok) { setError(result.error.message); ready.current = false; setPhase("blocked"); return; }
+      setOperations(current => [...result.operations, ...current.filter(x => !result.operations.some(y => x.requestId === y.requestId))]);
+      setHistoryCursor(result.nextCursor ?? null);
+    } finally { pending.current = false; }
+  };
+
   const attachmentChanged = () => {
     if (!savedId || pending.current) return;
     pending.current = true; ready.current = false; setPhase("loading");
@@ -232,8 +280,8 @@ function ComposeDraftSession({ mailboxId, mailboxEmail, connected, providerMessa
         onDragOver={event => { event.preventDefault(); if (!locked) setDragging(true); }} onDragLeave={() => setDragging(false)}
         onDrop={event => { event.preventDefault(); setDragging(false); selectFiles(Array.from(event.dataTransfer.files)); }}>
         <header className="flex shrink-0 items-center justify-between gap-4 border-b border-[var(--workspace-border-soft)] px-5 py-4 sm:px-6">
-          <div><h2 className="text-[1.1rem] font-semibold tracking-tight">{savedId ? "Edit draft" : "New message"}</h2>
-            <p className="mt-1 text-xs text-[var(--workspace-text-muted)]">Save to Microsoft Drafts. Sending is not enabled.</p></div>
+          <div><h2 className="text-[1.1rem] font-semibold tracking-tight">{savedId ? "Edit draft" : responseMode === "reply" ? "Reply" : responseMode === "reply_all" ? "Reply All" : responseMode === "forward" ? "Forward" : "New message"}</h2>
+            <p className="mt-1 text-xs text-[var(--workspace-text-muted)]">{MICROSOFT_DRAFT_SEND_RELEASED ? "Review the saved draft before sending. Recipient delivery requires separate confirmation." : "Save to Microsoft Drafts. Sending is not enabled."}</p></div>
           <button type="button" aria-label="Close Microsoft composer" className={iconStyle} disabled={busy} onClick={onClose}><Glyph name="close" /></button>
         </header>
         <div className={`min-h-0 flex-1 overflow-y-auto px-5 sm:px-6 ${dragging ? "ring-2 ring-inset ring-[var(--workspace-accent-border)]" : ""}`}>
@@ -247,9 +295,16 @@ function ComposeDraftSession({ mailboxId, mailboxEmail, connected, providerMessa
           {showCc && <div className="flex min-h-[48px] items-center gap-2 border-b border-[var(--workspace-border-soft)] py-1"><label htmlFor="ms-compose-cc" className="w-14 shrink-0 text-sm text-[var(--workspace-text-faint)]">Cc</label><input id="ms-compose-cc" aria-label="Compose Cc" inputMode="email" autoComplete="off" className={inputStyle} disabled={locked} value={cc} onChange={e => setCc(e.target.value)} /></div>}
           {showBcc && <div className="flex min-h-[48px] items-center gap-2 border-b border-[var(--workspace-border-soft)] py-1"><label htmlFor="ms-compose-bcc" className="w-14 shrink-0 text-sm text-[var(--workspace-text-faint)]">Bcc</label><input id="ms-compose-bcc" aria-label="Compose Bcc" inputMode="email" autoComplete="off" className={inputStyle} disabled={locked} value={bcc} onChange={e => setBcc(e.target.value)} /></div>}
           <div className="border-b border-[var(--workspace-border-soft)] py-1"><label htmlFor="ms-compose-subject" className="sr-only">Subject</label><input id="ms-compose-subject" aria-label="Compose subject" autoComplete="off" className={"w-full " + inputStyle} disabled={locked} value={edit.subject} maxLength={250} onChange={e => setEdit({ ...edit, subject: e.target.value })} placeholder="Subject" /></div>
-          <label htmlFor="ms-compose-body" className="sr-only">Message</label><textarea id="ms-compose-body" aria-label="Compose message body" className="min-h-[230px] w-full resize-none bg-transparent py-5 text-[0.92rem] leading-7 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--workspace-accent-border)] disabled:opacity-50" disabled={locked} value={edit.body} maxLength={32000} onChange={e => setEdit({ ...edit, body: e.target.value })} placeholder="Write your message…" spellCheck />
-          <input ref={picker} type="file" multiple hidden aria-label="Choose Compose attachments" disabled={locked} onChange={event => { selectFiles(Array.from(event.currentTarget.files ?? [])); event.currentTarget.value = ""; }} />
-          <p className="text-xs text-[var(--workspace-text-muted)]">Plain text. Drop up to 10 files here: 2 MiB per file, 8 MiB total. Selected files are uploaded when you save.</p>
+          {edit.bodyType === "html" ? <MicrosoftComposeBodyEditor value={edit.body} disabled={locked} onChange={body => setEdit(current => ({ ...current, body }))} /> : <>
+          <button type="button" className={buttonStyle} disabled={locked} onClick={() => setEdit(current => ({ ...current, body: microsoftPlainToHtml(current.body), bodyType: "html" }))}>Formatting</button>
+          <label htmlFor="ms-compose-body" className="sr-only">Message</label><textarea id="ms-compose-body" aria-label="Compose message body" className="min-h-[230px] w-full resize-none bg-transparent py-5 text-[0.92rem] leading-7 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--workspace-accent-border)] disabled:opacity-50" disabled={locked} value={edit.body} maxLength={32000} onChange={e => setEdit({ ...edit, body: e.target.value })} placeholder="Write your message…" spellCheck /></>}
+          {responseInfo && <details className="my-3 rounded-xl border border-[var(--workspace-border-soft)] p-3">
+            <summary className="cursor-pointer text-sm">Original message — preserved in the draft</summary>
+            <pre className="mt-3 whitespace-pre-wrap break-words text-xs">{responseInfo.quotePreview}</pre>
+            <p className="mt-2 text-xs">Text preview. View Drafts for the full message and formatting. Editing your message above preserves the original quote.</p>
+          </details>}
+          <input ref={picker} type="file" multiple hidden aria-label="Choose Compose attachments" disabled={locked || Boolean(acceptance)} onChange={event => { selectFiles(Array.from(event.currentTarget.files ?? [])); event.currentTarget.value = ""; }} />
+          <p className="text-xs text-[var(--workspace-text-muted)]">{acceptance ? "Controlled draft test. Attachments and sending are disabled." : "Drop up to 10 files here: 2 MiB per file, 8 MiB total. Selected files are uploaded when you save."}</p>
           {!!files.length && <div aria-label="Local Compose attachments" className="my-3 flex flex-wrap gap-3">{files.map((file, index) => {
             const p = microsoftAttachmentPresentation({ id: String(index), name: file.name, size: file.size, contentType: file.type || "application/octet-stream", kind: "file", isInline: false });
             return <div key={index} className="group relative flex min-w-[168px] max-w-full items-center gap-3 rounded-[18px] border border-[var(--workspace-border)] bg-[var(--workspace-card-subtle)] py-3 pl-3.5 pr-11">
@@ -258,8 +313,8 @@ function ComposeDraftSession({ mailboxId, mailboxEmail, connected, providerMessa
               <button type="button" disabled={locked} aria-label={`Remove local ${p.name}`} className="absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] disabled:opacity-50" onClick={() => { if (ready.current && !pending.current) setFiles(current => current.filter((_, i) => i !== index)); }}>×</button>
             </div>;
           })}</div>}
-          {savedId && record && <div className="my-4"><p className="mb-2 text-xs font-medium">Saved Graph attachments</p><MicrosoftDraftAttachments
-            key={record.etag} mailboxId={mailboxId} providerMessageId={savedId} disabled={busy || !connected} editorPending={pending}
+          {!acceptance && savedId && record && <div className="my-4"><p className="mb-2 text-xs font-medium">Saved Graph attachments</p><MicrosoftDraftAttachments
+            key={record.etag} mailboxId={mailboxId} providerMessageId={savedId} disabled={busy || !connected || sendLocked} editorPending={pending}
             hasUnsavedChanges={dirty} hideSelection onBlockedChange={onAttachmentBlocked} onConfirmed={attachmentChanged}
             onOperationStart={() => onOperationStart?.(savedId)} /></div>}
           <div aria-live="polite" className="space-y-2 py-3">
@@ -267,13 +322,18 @@ function ComposeDraftSession({ mailboxId, mailboxEmail, connected, providerMessa
             {error && <p role="alert" className="text-sm">{error}</p>}{notice && <p role="status" className="text-sm">{notice}</p>}
             {phase === "blocked" && <button type="button" className={buttonStyle} disabled={busy || !connected} onClick={() => { void recover(); }}>Check draft status</button>}
           </div>
-          {!savedId && operations.filter(r => r.action === "create" && r.outcome === "confirmed_performed" && r.providerMessageId).slice(-3).map(r => <button key={r.requestId} type="button" className={buttonStyle} disabled={busy || phase === "blocked"} onClick={() => { if (!pending.current) void recover(r.providerMessageId); }}>Open saved draft</button>)}
+          {!savedId && operations.filter(r => r.action === "create" && r.outcome === "confirmed_performed" && r.providerMessageId).map(r => <button key={r.requestId} type="button" className={buttonStyle} disabled={busy || phase === "blocked"} onClick={() => { if (!pending.current) void recover(r.providerMessageId); }}>Open saved draft</button>)}
+          {historyCursor && <button type="button" className={buttonStyle} disabled={busy || !connected} onClick={() => { void loadOlder(); }}>Load older draft operations</button>}
         </div>
         <footer className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-[var(--workspace-border-soft)] px-5 py-4 sm:px-6">
           <div className="flex items-center gap-2">
-            <button type="button" disabled title="Sending will be handled in a separate phase" className="inline-flex h-9 items-center gap-2 rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] px-5 text-xs font-semibold text-[var(--workspace-accent-text)] disabled:cursor-not-allowed disabled:opacity-55"><Glyph name="send" />Send</button>
-            <button type="button" aria-label="Add Compose attachments" className={iconStyle} disabled={locked} onClick={() => picker.current?.click()}><Glyph name="attach" /></button>
-            <button type="button" className={buttonStyle} disabled={locked} onClick={() => { void save(); }}>Save draft</button>
+            <MicrosoftDraftSendControls mailboxId={mailboxId} providerMessageId={savedId} connected={connected}
+              record={record} dirty={dirty} selectedFileCount={files.length} blocked={Boolean(acceptance) || busy || phase !== "ready" || attachmentLocked || Boolean(responseInfo) || edit.bodyType === "html"}
+              pending={pending} onLockedChange={onSendLocked} onOperationStart={() => onOperationStart?.(savedId)}
+              onConfirmed={id => onSent?.(id)} />
+            {(responseInfo || edit.bodyType === "html") && <span className="text-xs">Draft only. This formatted or response draft cannot be sent from Cuevion yet.</span>}
+            <button type="button" aria-label="Add Compose attachments" className={iconStyle} disabled={locked || Boolean(acceptance)} onClick={() => picker.current?.click()}><Glyph name="attach" /></button>
+            <button type="button" className={buttonStyle} disabled={locked || !proposed} onClick={() => { void save(); }}>Save draft</button>
           </div>
           <button type="button" className={buttonStyle} disabled={busy} onClick={onOpenDrafts}>View Drafts</button>
         </footer>

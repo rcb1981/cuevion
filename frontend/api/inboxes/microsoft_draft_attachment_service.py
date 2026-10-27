@@ -18,8 +18,10 @@ def _with_snapshot(headers, mailbox_id, message_id, callback, *, opener=None):
         token, checked = owned._owned_token(headers, mailbox_id, require_read_write=True)
         if checked != captured:
             ledger.fail('mailbox_conflict')
+        owned._assert_owned_draft_mutable(headers, mailbox_id, captured, message_id)
         snapshot = snapshots.read_draft_attachment_snapshot(token, checked, message_id, opener=opener)
         owned._verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+        owned._assert_owned_draft_mutable(headers, mailbox_id, captured, message_id)
         result = callback(snapshot)
         # A reconnect racing the ledger CAS must not return an execution claim.
         owned._verify_unchanged_owned_mailbox(headers, mailbox_id, captured)

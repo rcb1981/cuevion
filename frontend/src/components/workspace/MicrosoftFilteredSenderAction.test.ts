@@ -43,7 +43,10 @@ assert.match(view, /fetchMicrosoftInbox\(/);
 assert.match(view, /const attachmentFolder = requestedFolder === "Filtered" \? "Inbox" : requestedFolder/);
 assert.match(view, /folder: attachmentFolder/);
 assert.match(view, /folder: currentFolder === "Filtered" \? "Inbox" : currentFolder/);
-assert.match(view, /<MicrosoftFilteredSenderAction/);
+// The existing mailbox view now uses the unified Learning control. Keep the
+// folder reachability assertion against that actual integration, not the old tag.
+assert.match(view, /<MicrosoftLearningControls/);
+assert.match(view, /onSave=\{saveSenderLearning\}/);
 
 // Integration guard: the return-to-Inbox action must not be nested inside
 // an Inbox-only JSX guard. The component's own test cannot catch this.
@@ -54,7 +57,7 @@ const parsedView = ts.createSourceFile(
 const senderActionNodes: import("typescript").Node[] = [];
 function findSenderActions(node: import("typescript").Node): void {
   if (ts.isJsxSelfClosingElement(node) &&
-      node.tagName.getText(parsedView) === "MicrosoftFilteredSenderAction") {
+      node.tagName.getText(parsedView) === "MicrosoftLearningControls") {
     senderActionNodes.push(node);
   }
   ts.forEachChild(node, findSenderActions);

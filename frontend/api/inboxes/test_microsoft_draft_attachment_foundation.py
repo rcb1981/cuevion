@@ -29,6 +29,7 @@ def message(**kw):
     return {'id': 'draft-1', 'parentFolderId': 'drafts-folder', 'isDraft': True, 'hasAttachments': True,
             '@odata.etag': 'W/"version-1"', 'changeKey': 'version-1', 'subject': 'Keep this',
             'toRecipients': [{'emailAddress': {'address': 'receiver@example.com'}}],
+            'from': {'emailAddress': {'address': AUTH.email}}, 'sender': {'emailAddress': {'address': AUTH.email}}, 'replyTo': [],
             'ccRecipients': [], 'bccRecipients': [], 'body': {'contentType': 'html', 'content': '<p>Original</p>'}, **kw}
 
 class Graph:
@@ -520,7 +521,8 @@ class OwnerBoundaryTests(LedgerFixture):
 
     def test_owner_changes_after_cas_never_returns_claim(self):
         self.boundary()
-        owned._verify_unchanged_owned_mailbox.side_effect = [None, owned.MicrosoftMailboxAccessError('microsoft_reconnect_required')]
+        # Two barrier rechecks surround the snapshot; revoke after ledger CAS.
+        owned._verify_unchanged_owned_mailbox.side_effect = [None] * 5 + [owned.MicrosoftMailboxAccessError('microsoft_reconnect_required')]
         with self.assertRaises(owned.MicrosoftMailboxAccessError):
             self.prepare()
         self.assertNotIn('claim', self.reserve())

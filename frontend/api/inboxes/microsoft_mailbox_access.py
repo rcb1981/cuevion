@@ -9,6 +9,7 @@ No network endpoints / HTTP handlers are exported by this module.
 from __future__ import annotations
 
 import re
+import time
 
 from api.auth.email_address import is_valid_auth_email, normalize_auth_email
 from api.auth.runtime import AuthenticatedMemberContext
@@ -46,6 +47,10 @@ def resolve_owned_microsoft_mailbox(headers, mailbox_id: object) -> MicrosoftMai
         or MAILBOX_ID_PATTERN.fullmatch(mailbox_id) is None
     ):
         raise MicrosoftMailboxAccessError("microsoft_mailbox_id_invalid")
+
+    from api.inboxes import microsoft_local_test_policy as local_test
+    if local_test.is_context():
+        local_test.guard_environment(headers)
 
     try:
         resolved = resolve_owned_managed_inbox_record(
@@ -136,13 +141,16 @@ def resolve_owned_microsoft_mailbox(headers, mailbox_id: object) -> MicrosoftMai
     ):
         raise MicrosoftMailboxAccessError("microsoft_reconnect_required")
 
-    return MicrosoftMailboxAuthority(
+    authority = MicrosoftMailboxAuthority(
         owner_email=owner,
         mailbox_id=mailbox_id,
         email=email,
         account_id=account_id,
         credential_generation=generation,
     )
+    if local_test.is_context():
+        local_test.check_resolved(headers, authority, member)
+    return authority
 
 
 def _owned_token(
@@ -189,6 +197,41 @@ def _verify_unchanged_owned_mailbox(
         raise MicrosoftMailboxAccessError("microsoft_reconnect_required")
 
 
+def _assert_owned_draft_mutable(headers, mailbox_id, captured, message_id):
+    """Folder-independent send barriers survive feature shutdown and reconnect.
+
+    Call under the mailbox mutation lease, including immediately before writing.
+    An unreadable/mismatched index is never evidence that a draft is mutable.
+    """
+    from api.inboxes import microsoft_draft_send_index
+    _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+    microsoft_draft_send_index.assert_mutable(captured, message_id)
+    _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+
+
+def _assert_owned_message_mutable(headers, mailbox_id, captured, message_id):
+    """Map-independent Compose + Send barriers, irrespective of release flags.
+
+    Use under the mailbox lease for mutations outside the active Compose claim.
+    Compose's own writer checks its ledger before reserving; applying this guard
+    to its in-flight claim would incorrectly block that same operation.
+    """
+    from api.inboxes import microsoft_compose_draft_ledger
+    _assert_owned_draft_mutable(headers, mailbox_id, captured, message_id)
+    microsoft_compose_draft_ledger.assert_unblocked(captured, message_id)
+    _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
+
+
+def _assert_owned_inbox_mutable(headers, mailbox_id, captured, message_id, lease_token, deadline):
+    _assert_owned_message_mutable(headers, mailbox_id, captured, message_id)
+    # Storage checks must not let a stalled worker continue after its lease expires.
+    from api.inboxes import microsoft_draft_attachment_executor
+    try:
+        microsoft_draft_attachment_executor._assert_lease(captured, lease_token, deadline)
+    except Exception:
+        raise MicrosoftMailboxAccessError('microsoft_mutation_in_progress') from None
+
+
 def list_owned_microsoft_inbox(
     headers, mailbox_id: object, *, page_size: int = 20, page: int = 1,
 ) -> dict:
@@ -233,7 +276,9 @@ def mark_owned_microsoft_inbox_read(
     if type(unread) is not bool:
         raise MicrosoftMailboxAccessError("microsoft_mutation_invalid")
     microsoft_graph._required_message_id(message_id)
+    from api import user_config_store as config_store
     captured = resolve_owned_microsoft_mailbox(headers, mailbox_id)
+    deadline = time.monotonic() + config_store.MAILBOX_MUTATION_LEASE_TTL_MILLISECONDS / 1000
     try:
         lease = acquire_mailbox_mutation_lease(
             captured.owner_email, captured.mailbox_id,
@@ -257,10 +302,11 @@ def mark_owned_microsoft_inbox_read(
         )
         if checked != captured:
             raise MicrosoftMailboxAccessError("microsoft_reconnect_required")
+        _assert_owned_inbox_mutable(headers, mailbox_id, captured, message_id, lease_token, deadline)
         result = microsoft_message_flags.set_exact_microsoft_inbox_read(
             token, message_id, unread=unread,
-            before_write=lambda: _verify_unchanged_owned_mailbox(
-                headers, mailbox_id, captured,
+            before_write=lambda: _assert_owned_inbox_mutable(
+                headers, mailbox_id, captured, message_id, lease_token, deadline,
             ),
         )
         _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
@@ -288,7 +334,9 @@ def archive_owned_microsoft_inbox_message(headers, mailbox_id: object, message_i
     from api.inboxes import microsoft_graph, microsoft_archive_move
 
     microsoft_graph._required_message_id(message_id)
+    from api import user_config_store as config_store
     captured = resolve_owned_microsoft_mailbox(headers, mailbox_id)
+    deadline = time.monotonic() + config_store.MAILBOX_MUTATION_LEASE_TTL_MILLISECONDS / 1000
     try:
         lease = acquire_mailbox_mutation_lease(
             captured.owner_email, captured.mailbox_id,
@@ -309,10 +357,11 @@ def archive_owned_microsoft_inbox_message(headers, mailbox_id: object, message_i
         token, checked = _owned_token(headers, mailbox_id, require_read_write=True)
         if checked != captured:
             raise MicrosoftMailboxAccessError("microsoft_reconnect_required")
+        _assert_owned_inbox_mutable(headers, mailbox_id, captured, message_id, lease_token, deadline)
         result = microsoft_archive_move.move_exact_microsoft_inbox_to_archive(
             token, message_id,
-            before_write=lambda: _verify_unchanged_owned_mailbox(
-                headers, mailbox_id, captured,
+            before_write=lambda: _assert_owned_inbox_mutable(
+                headers, mailbox_id, captured, message_id, lease_token, deadline,
             ),
         )
         _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
@@ -336,7 +385,9 @@ def delete_owned_microsoft_inbox_message(headers, mailbox_id: object, message_id
     from api.inboxes import microsoft_graph, microsoft_deleted_move
 
     microsoft_graph._required_message_id(message_id)
+    from api import user_config_store as config_store
     captured = resolve_owned_microsoft_mailbox(headers, mailbox_id)
+    deadline = time.monotonic() + config_store.MAILBOX_MUTATION_LEASE_TTL_MILLISECONDS / 1000
     try:
         lease = acquire_mailbox_mutation_lease(
             captured.owner_email, captured.mailbox_id,
@@ -357,10 +408,11 @@ def delete_owned_microsoft_inbox_message(headers, mailbox_id: object, message_id
         token, checked = _owned_token(headers, mailbox_id, require_read_write=True)
         if checked != captured:
             raise MicrosoftMailboxAccessError("microsoft_reconnect_required")
+        _assert_owned_inbox_mutable(headers, mailbox_id, captured, message_id, lease_token, deadline)
         result = microsoft_deleted_move.move_exact_microsoft_inbox_to_deleted(
             token, message_id,
-            before_write=lambda: _verify_unchanged_owned_mailbox(
-                headers, mailbox_id, captured,
+            before_write=lambda: _assert_owned_inbox_mutable(
+                headers, mailbox_id, captured, message_id, lease_token, deadline,
             ),
         )
         _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
@@ -405,10 +457,11 @@ def discard_owned_microsoft_draft(headers, mailbox_id: object, message_id: str) 
         token, checked = _owned_token(headers, mailbox_id, require_read_write=True)
         if checked != captured:
             raise MicrosoftMailboxAccessError("microsoft_reconnect_required")
+        _assert_owned_message_mutable(headers, mailbox_id, captured, message_id)
         result = microsoft_draft_discard.discard_exact_microsoft_draft_to_deleted(
             token, message_id,
-            before_write=lambda: _verify_unchanged_owned_mailbox(
-                headers, mailbox_id, captured,
+            before_write=lambda: _assert_owned_message_mutable(
+                headers, mailbox_id, captured, message_id,
             ),
         )
         try:
@@ -655,10 +708,7 @@ def save_owned_microsoft_editable_draft(
             from api.inboxes import microsoft_draft_attachment_requests as attachment_requests
             if any(item['blocked'] for item in attachment_requests.inspect_draft(captured, message_id)):
                 raise MicrosoftGraphError('microsoft_draft_edit_unconfirmed')
-        from api.inboxes import microsoft_compose_draft_policy as compose_policy
-        if not compose_policy.blocked():
-            from api.inboxes import microsoft_compose_draft_ledger as compose_ledger
-            compose_ledger.assert_unblocked(captured, message_id)
+        _assert_owned_message_mutable(headers, mailbox_id, captured, message_id)
         save_operation = (
             microsoft_rich_draft.save_rich_draft_metadata if metadata_only
             else microsoft_draft_editor.save_exact_microsoft_draft
@@ -666,8 +716,8 @@ def save_owned_microsoft_editable_draft(
         result = save_operation(
             token, message_id, etag=etag,
             **({'metadata': edit} if metadata_only else {'edit': edit}),
-            before_write=lambda: _verify_unchanged_owned_mailbox(
-                headers, mailbox_id, captured,
+            before_write=lambda: _assert_owned_message_mutable(
+                headers, mailbox_id, captured, message_id,
             ),
         )
         _verify_unchanged_owned_mailbox(headers, mailbox_id, captured)

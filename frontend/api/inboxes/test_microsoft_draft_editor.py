@@ -151,6 +151,16 @@ class DraftEditorHttpTests(unittest.TestCase):
             saver.assert_not_called()
 
 class DraftEditorOwnedLeaseTests(unittest.TestCase):
+    def setUp(self):
+        # Lease-only unit fixtures; real Compose/Send CAS barriers are exercised
+        # in test_microsoft_release_blockers and test_microsoft_security_fixes4.
+        compose_barrier = patch('api.inboxes.microsoft_compose_draft_ledger.assert_unblocked')
+        compose_barrier.start(); self.addCleanup(compose_barrier.stop)
+        # These lease-only doubles predate the durable send index. Full index
+        # enforcement is covered by test_microsoft_send_security_fixes.
+        barrier = patch('api.inboxes.microsoft_draft_send_index.assert_mutable')
+        barrier.start(); self.addCleanup(barrier.stop)
+
     def test_invalid_metadata_only_types_reject_before_authority_lease_token_or_graph(self):
         class Truthy:
             def __bool__(self):
@@ -188,7 +198,7 @@ class DraftEditorOwnedLeaseTests(unittest.TestCase):
             self.assertEqual(token.call_args.kwargs['require_read_write'],True)
             self.assertEqual(action.call_args.kwargs['etag'],TAG)
             self.assertTrue(callable(action.call_args.kwargs['before_write']))
-            self.assertEqual(verify.call_count,1)
+            self.assertEqual(verify.call_count,4)  # Send and Compose authority rechecks
 
     def test_mutation_error_releases_lock_without_retry(self):
         from types import SimpleNamespace

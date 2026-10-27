@@ -36,8 +36,8 @@ for (const label of ["Inbox", "Filtered", "Sent", "Archive", "Drafts", "Deleted 
   assert.ok(rail.includes(">" + label + "</button>"), label);
 }
 assert.doesNotMatch(rail, /href=|type="submit"|mailto:/);
-assert.match(rail, /lg:flex/);
-assert.match(compact, /lg:hidden/);
+assert.match(rail, /xl:flex/);
+assert.match(compact, /xl:hidden/);
 const code = readFileSync(resolve(__dirname, "MicrosoftMailboxFolderRail.tsx"), "utf8");
 assert.match(code, /onClick=\{\(\) => onSelectFolder\(item\.id\)\}/);
 assert.doesNotMatch(code, /fetch\(|localStorage|sessionStorage|setMicrosoftMessageUnread|sendMicrosoft/);

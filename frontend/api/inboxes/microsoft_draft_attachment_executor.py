@@ -22,6 +22,9 @@ def _assert_lease(authority, token, deadline):
     if error or not store:
         ledger.fail('lease_unavailable')
     status, current = config_store._read_mailbox_mutation_lease(store, authority.owner_email, authority.mailbox_id)
+    # Even a valid token read can arrive after the local lease safety deadline.
+    if time.monotonic() + 2 * graph.GRAPH_TIMEOUT_SECONDS + 5 >= deadline:
+        ledger.fail('lease_unavailable')
     if status != 'present' or current != token:
         ledger.fail('lease_unavailable')
 
@@ -61,10 +64,7 @@ def execute_owned_attachment_request(headers, mailbox_id, message_id, request_id
     deadline = lease_started + config_store.MAILBOX_MUTATION_LEASE_TTL_MILLISECONDS / 1000
     reserved, completed, child, may_have_started = None, 0, None, False
     try:
-        from api.inboxes import microsoft_compose_draft_policy as compose_policy
-        if not compose_policy.blocked():
-            from api.inboxes import microsoft_compose_draft_ledger as compose_ledger
-            compose_ledger.assert_unblocked(captured, message_id)
+        owned._assert_owned_message_mutable(headers, mailbox_id, captured, message_id)
         token = _fresh_token(headers, mailbox_id, captured)
         current = snapshots.read_draft_attachment_snapshot(token, captured, message_id, opener=opener)
         owned._verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
@@ -92,6 +92,7 @@ def execute_owned_attachment_request(headers, mailbox_id, message_id, request_id
             token = _fresh_token(headers, mailbox_id, captured)
             def before_write():
                 nonlocal may_have_started
+                owned._assert_owned_message_mutable(headers, mailbox_id, captured, message_id)
                 _assert_lease(captured, lease['token'], deadline)
                 owned._verify_unchanged_owned_mailbox(headers, mailbox_id, captured)
                 may_have_started = True  # A lost CAS ACK may have persisted start.

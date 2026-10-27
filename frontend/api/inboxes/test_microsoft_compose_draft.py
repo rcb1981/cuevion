@@ -1,5 +1,9 @@
 """Offline fake Graph/CAS tests of the draft-only Compose flow."""
 import copy
+import base64
+import html
+import re
+from email.message import Message
 from dataclasses import replace
 from io import BytesIO
 import json
@@ -34,6 +38,24 @@ def response(data, status=200):
     return result
 
 
+def body_response(req, value):
+    value = copy.deepcopy(value)
+    native = value['body']
+    if req.full_url.endswith('/$value'):
+        subtype = 'plain' if native['contentType'].lower() == 'text' else 'html'
+        raw = ('MIME-Version: 1.0\r\nContent-Type: text/' + subtype + '; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n').encode() + base64.b64encode(native['content'].encode())
+        return response(raw)
+    prefer = req.get_header('Prefer')
+    if 'outlook.body-content-type="text"' in prefer:
+        value['body'] = {'contentType':'text', 'content':native['content'] if native['contentType'].lower() == 'text' else html.unescape(re.sub('<[^>]*>', '', native['content']))}
+        result = response(value); result.headers = Message()
+        result.headers['Preference-Applied'] = 'outlook.body-content-type="text"'
+        return result
+    if native['contentType'].lower() == 'text':
+        value['body'] = {'contentType':'html', 'content':'<html><body><pre>' + html.escape(native['content']) + '</pre></body></html>'}
+    return response(value)
+
+
 class FakeGraph:
     def __init__(self):
         self.messages = {'draft-1':message(body={'contentType':'text','content':'Old body'})}
@@ -48,7 +70,7 @@ class FakeGraph:
         self.created = 0
     def __call__(self, req, *, timeout):
         self.calls.append(req)
-        assert req.get_header('Prefer') == 'IdType="ImmutableId"'
+        assert req.get_header('Prefer') in {'IdType="ImmutableId"', 'IdType="ImmutableId", outlook.body-content-type="text"'}
         method, path = req.get_method(), unquote(urlsplit(req.full_url).path)
         assert '/send' not in path and '/inbox/' not in path
         if method in {'POST','PATCH'}:
@@ -79,8 +101,8 @@ class FakeGraph:
             identifier=path.split('/messages/')[1].split('/')[0]
             return response({'value':copy.deepcopy(self.rows[identifier])})
         assert '/mailFolders/drafts/messages/' in path
-        identifier=path.rsplit('/',1)[-1]
-        return response(copy.deepcopy(self.messages[identifier]))
+        identifier=path.split('/messages/')[1].split('/')[0]
+        return body_response(req, self.messages[identifier])
 
 
 class ComposeFixture(unittest.TestCase):
@@ -131,7 +153,7 @@ class ComposeServiceTests(ComposeFixture):
         real_write = self.cas.write
         def lose_final(config, key, expected, value):
             result = real_write(config, key, expected, value)
-            if any(x['phase'] == 'confirmed_performed' for x in value.get('operations', {}).values()):
+            if key == ledger.context(AUTH)[1] and value.get('v') == 2 and ledger.entry(AUTH, OP, value)['item']['phase'] == 'confirmed_performed':
                 return None, {'code': 'lost-ack'}
             return result
         with patch.object(ledger.base.store, '_write_google_durable_record_if_unchanged', side_effect=lose_final):
@@ -250,8 +272,8 @@ class ComposeServiceTests(ComposeFixture):
         self.assertEqual(caught.exception.code, 'microsoft_compose_blocked')
         self.assertEqual(self.graph.writes, [])
 
-    def test_ledger_saturation_fails_closed_without_eviction(self):
-        with patch.object(ledger,'MAX_OPERATIONS',0):
+    def test_segment_size_limit_fails_closed_without_eviction(self):
+        with patch.object(ledger.segments,'MAX_BYTES',100):
             with self.assertRaises(ledger.ComposeLedgerError):self.save()
         self.assertEqual(self.graph.created,0)
     def test_lease_loss_before_start_and_before_write_never_calls_graph(self):
@@ -302,7 +324,7 @@ class ComposeHTTPTests(ComposeFixture):
     def test_untrusted_provider_or_ledger_details_are_not_exposed(self):
         with patch.object(service,'save_owned',side_effect=RuntimeError('private-token contents')):
             result=_body(self.call(self.create_payload()));self.assertTrue(result['blocked']);self.assertNotIn('private-token',json.dumps(result))
-        with patch.object(service,'inspect_owned',return_value=[{'claim':'secret'}]):
+        with patch.object(service,'status_owned',return_value={'operations':[{'claim':'secret'}],'nextCursor':None}):
             result=_body(self.call({'action':'status','mailboxId':AUTH.mailbox_id}));self.assertFalse(result['ok']);self.assertNotIn('secret',json.dumps(result))
     def test_session_and_connection_expiry_remain_blocked(self):
         for code in ('microsoft_unauthorized','microsoft_reconnect_required'):

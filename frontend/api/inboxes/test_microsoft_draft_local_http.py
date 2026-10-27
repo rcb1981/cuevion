@@ -130,6 +130,15 @@ class _DraftGraph:
 
 class MicrosoftDraftLocalHttpTests(unittest.TestCase):
     def setUp(self):
+        from api.inboxes.test_microsoft_draft_attachment_foundation import CAS
+        from api.inboxes import oauth_token_store
+        self.send_cas = CAS()
+        for operation in (
+            patch.object(oauth_token_store, '_resolve_durable_store_config', return_value={'isolated': True}),
+            patch.object(oauth_token_store, '_read_durable_record_snapshot', side_effect=self.send_cas.read),
+            patch.object(oauth_token_store, '_write_google_durable_record_if_unchanged', side_effect=self.send_cas.write),
+        ):
+            operation.start(); self.addCleanup(operation.stop)
         self.graph = _DraftGraph()
         self.authority = resolved()
         self.resolutions = 0
@@ -199,7 +208,7 @@ class MicrosoftDraftLocalHttpTests(unittest.TestCase):
         self.assertNotEqual(saved["etag"], loaded["etag"])
         self.assertEqual([request.get_method() for request in self.graph.writes], ["PATCH"])
         self.assertEqual(self.lease_events, ["acquire", "release"])
-        self.assertEqual(self.resolutions, 6)  # Load before/after; save capture/token/before/after.
+        self.assertEqual(self.resolutions, 11)  # Send and Compose barrier authority rechecks.
 
     def test_html_metadata_save_keeps_exact_original_body_and_never_returns_html(self):
         self.graph = _DraftGraph(rich=True)
@@ -289,10 +298,10 @@ class MicrosoftDraftLocalHttpTests(unittest.TestCase):
         self.assertEqual(len(self.graph.writes), 1)
 
     def test_discard_authority_revoked_after_move_is_uncertain(self):
-        # First check occurs before POST; the second occurs after confirmation.
-        with patch.object(owned, "_verify_unchanged_owned_mailbox", side_effect=[
-            None, owned.MicrosoftMailboxAccessError("microsoft_unauthorized"),
-        ]):
+        def verify_after_move(*args):
+            if self.graph.writes:
+                raise owned.MicrosoftMailboxAccessError("microsoft_unauthorized")
+        with patch.object(owned, "_verify_unchanged_owned_mailbox", side_effect=verify_after_move):
             status, response = self.request(
                 {"mailboxId": MAILBOX_ID, "providerMessageId": MESSAGE_ID}, route=DISCARD_ROUTE)
         self.assertEqual(status, 503)

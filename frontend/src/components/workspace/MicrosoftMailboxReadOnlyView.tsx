@@ -28,7 +28,7 @@ import {
 import { applyConfirmedMicrosoftUnread, isMicrosoftInboxProjection, shouldAutoMarkMicrosoftOpenedMessageRead } from "./microsoftReadState";
 import { MicrosoftComposePanel } from "./MicrosoftComposePanel";
 import { MICROSOFT_DRAFT_ATTACHMENTS_RELEASED } from "../../lib/microsoftDraftAttachmentPolicy";
-import { MICROSOFT_COMPOSE_DRAFTS_RELEASED } from "../../lib/microsoftComposeDraftApi";
+import { MICROSOFT_COMPOSE_DRAFTS_RELEASED, MICROSOFT_RESPONSE_DRAFTS_RELEASED, type MicrosoftResponseMode, inspectMicrosoftDraftAcceptance, type MicrosoftDraftAcceptance } from "../../lib/microsoftComposeDraftApi";
 import { MicrosoftComposeDraftPanel } from "./MicrosoftComposeDraftPanel";
 import { MicrosoftDraftEditor } from "./MicrosoftDraftEditor";
 import { MicrosoftRichDraftMetadataEditor } from "./MicrosoftRichDraftMetadataEditor";
@@ -142,7 +142,25 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const folderRef = React.useRef<MicrosoftFolder>("Inbox");
   const [folder, setFolder] = useState<MicrosoftFolder>("Inbox");
   const [composeDesignPreviewOpen, setComposeDesignPreviewOpen] = useState(false);
-  const [composeDraftTarget, setComposeDraftTarget] = useState<{ providerMessageId?: string } | null>(null);
+  const [draftAcceptance, setDraftAcceptance] = useState<MicrosoftDraftAcceptance | null>(null);
+  const [permissionChecked, setPermissionChecked] = useState(false);
+  const acceptanceMailbox = React.useRef(mailbox.id);
+  const permissionTicket = React.useRef(0);
+  acceptanceMailbox.current = mailbox.id;
+  const checkDraftPermissions = async () => {
+    const id = mailbox.id, ticket = ++permissionTicket.current;
+    const result = await inspectMicrosoftDraftAcceptance(id);
+    if (acceptanceMailbox.current !== id || permissionTicket.current !== ticket) return;
+    setDraftAcceptance(result); setPermissionChecked(true);
+  };
+  useEffect(() => {
+    permissionTicket.current++; setDraftAcceptance(null); setPermissionChecked(false);
+    return () => { permissionTicket.current++; };
+  }, [mailbox.id, connected]);
+  const acceptance = draftAcceptance?.canInspect ? { canWrite: draftAcceptance.canWrite } : undefined;
+  const composeAvailable = MICROSOFT_COMPOSE_DRAFTS_RELEASED || Boolean(acceptance);
+  const responseAvailable = MICROSOFT_RESPONSE_DRAFTS_RELEASED && MICROSOFT_COMPOSE_DRAFTS_RELEASED || Boolean(acceptance?.canWrite);
+  const [composeDraftTarget, setComposeDraftTarget] = useState<{ providerMessageId?: string; responseMode?: MicrosoftResponseMode; sourceProviderMessageId?: string } | null>(null);
   const [draftEditId, setDraftEditId] = useState<string | null>(null);
   const [richDraftEditId, setRichDraftEditId] = useState<string | null>(null);
   const [page, setPage] = useState(1);
@@ -422,27 +440,19 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   }, [connected, composer, listBusy, page, hasMore]);
 
   const openComposer = useCallback((mode: "new" | "reply" | "reply_all" | "forward") => {
-    if (MICROSOFT_READ_ONLY_PILOT || !connected || !MICROSOFT_OUTBOUND_ACTIONS_RELEASED || composer !== null || mutationInFlight.current) return;
-    const source = mode !== "new" && folderRef.current === "Inbox"
-      ? selectedMessage
-      : null;
-    if (mode !== "new" && (!source?.providerMessageId ||
-      source.serverMailboxId !== mailbox.id || source.providerFolder !== "INBOX" ||
-      selectedIdRef.current !== source.providerMessageId)) return;
-    inboxTicket.current += 1;
-    messageTicket.current += 1;
-    setListBusy(false);
-    setMessageBusy(false);
-    setComposer({
-      mode,
-      sourceProviderMessageId: source?.providerMessageId,
-      sourceDisplay: source?.from,
-      source: source?.providerMessageId ? {serverMailboxId: mailbox.id,
-        providerMessageId: source.providerMessageId, providerFolder: "INBOX"} : null,
-      selectedProviderMessageId: mode === "new" ? null : selectedIdRef.current,
-      sourceIsExact: mode === "new" ? false : Boolean(source?.providerMessageId),
-    });
-  }, [connected, composer, selectedMessage, mailbox.id]);
+    if (!connected || composer !== null || composeDraftTarget !== null || mutationInFlight.current || messageBusy) return;
+    if (mode !== "new") {
+      if ((!MICROSOFT_COMPOSE_DRAFTS_RELEASED || !MICROSOFT_RESPONSE_DRAFTS_RELEASED) && !acceptance?.canWrite ||
+          acceptance && mode === "reply_all" ||
+          !["Inbox", "Filtered", "Archive", "Sent"].includes(folderRef.current) ||
+          !selectedMessage?.providerMessageId || selectedMessage.serverMailboxId !== mailbox.id ||
+          selectedIdRef.current !== selectedMessage.providerMessageId) return;
+      setComposeDraftTarget({ responseMode: mode, sourceProviderMessageId: selectedMessage.providerMessageId });
+      return;
+    }
+    if (MICROSOFT_READ_ONLY_PILOT || !MICROSOFT_OUTBOUND_ACTIONS_RELEASED) return;
+    setComposer({ mode: "new", source: null, selectedProviderMessageId: null, sourceIsExact: false });
+  }, [connected, composer, composeDraftTarget, selectedMessage, mailbox.id, messageBusy, acceptance?.canWrite]);
 
   const openMessage = useCallback(async (providerMessageId: string) => {
     if (
@@ -1110,14 +1120,15 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
 
   // Compose belongs to the folder rail and never invokes a send during the pilot.
   const composeAction = (
+    <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
-          aria-haspopup={MICROSOFT_READ_ONLY_PILOT || MICROSOFT_COMPOSE_DRAFTS_RELEASED ? "dialog" : undefined}
-          aria-label={MICROSOFT_READ_ONLY_PILOT && !MICROSOFT_COMPOSE_DRAFTS_RELEASED ? "Compose message (design preview only)" : "Compose message"}
-          title={MICROSOFT_READ_ONLY_PILOT && !MICROSOFT_COMPOSE_DRAFTS_RELEASED ? "Explore the new-message design. Nothing can be sent or saved." : "Compose new message"}
+          aria-haspopup={MICROSOFT_READ_ONLY_PILOT || composeAvailable ? "dialog" : undefined}
+          aria-label={MICROSOFT_READ_ONLY_PILOT && !composeAvailable ? "Compose message (design preview only)" : "Compose message"}
+          title={MICROSOFT_READ_ONLY_PILOT && !composeAvailable ? "Explore the new-message design. Nothing can be sent or saved." : "Compose new message"}
           disabled={!connected || composer !== null || mutationBusy || composeDesignPreviewOpen || composeDraftTarget !== null}
           onClick={() => {
-            if (MICROSOFT_COMPOSE_DRAFTS_RELEASED) {
+            if (composeAvailable) {
               setComposeDraftTarget({});
             } else if (MICROSOFT_READ_ONLY_PILOT) {
               setComposeDesignPreviewOpen(true);
@@ -1132,6 +1143,12 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           </svg>
           Compose
         </button>
+        <button type="button" className="text-xs underline" disabled={!connected}
+          onClick={() => { void checkDraftPermissions(); }}>Check Microsoft draft permissions</button>
+        {permissionChecked && <span role="status" className="text-xs">
+          {draftAcceptance ? `Stored Mail.ReadWrite: ${draftAcceptance.mailReadWrite ? "granted" : "not granted"}${draftAcceptance.tokenExpired ? " (token expired; connection must revalidate)" : ""}. Draft test: ${draftAcceptance.canWrite ? "authorized" : "off"}. Sending remains off.` : "Permissions could not be verified. Draft testing remains off."}
+        </span>}
+    </div>
   );
 
   return (
@@ -1252,9 +1269,9 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                   )}
                   deleteBusy={mutationBusy}
                   onDelete={() => { void deleteSelectedMessage(); }}
-                  canCompose={Boolean(MICROSOFT_OUTBOUND_ACTIONS_RELEASED &&
-                    connected && folder === "Inbox" && selectedMessage &&
-                    selectedMessage.providerFolder === "INBOX" &&
+                  canReplyAll={!acceptance}
+                  canCompose={Boolean(responseAvailable &&
+                    connected && ["Inbox", "Filtered", "Archive", "Sent"].includes(folder) && selectedMessage &&
                     selectedMessage.serverMailboxId === mailbox.id &&
                     selectedId === selectedMessage.providerMessageId && !messageBusy && !mutationBusy)}
                   onCompose={(mode) => { openComposer(mode); }}
@@ -1441,9 +1458,17 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                     {folder === "Deleted" ? "Last changed: " : ""}{readableTime(selectedMessage.createdAt)}
                   </p>
                 </div>
-                {folder === "Drafts" && (MICROSOFT_DRAFT_EDIT_ACTIONS_RELEASED || MICROSOFT_COMPOSE_DRAFTS_RELEASED) &&
+                {folder === "Drafts" && (MICROSOFT_DRAFT_EDIT_ACTIONS_RELEASED || composeAvailable) &&
                   selectedMessage.providerFolder === "DRAFTS" && (
                   <div className="mt-4">
+                    {composeAvailable && selectedMessage.bodyHtml && (
+                      <button type="button" onClick={() => setComposeDraftTarget({ providerMessageId: selectedMessage.providerMessageId })}
+                        title="Reopen a text draft or supported formatted draft created in Cuevion"
+                        disabled={mutationBusy || !connected || !selectedMessage.providerMessageId}
+                        className="mb-2 mr-2 rounded-xl border border-[var(--workspace-border)] px-4 py-2 text-xs font-semibold disabled:opacity-50">
+                        Edit in Compose
+                      </button>
+                    )}
                     {selectedMessage.hasAttachments && !MICROSOFT_DRAFT_ATTACHMENTS_RELEASED ? (
                       <p className="text-xs text-[var(--workspace-text-muted)]">
                         Drafts with attachments cannot be edited here yet.
@@ -1456,7 +1481,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                       </button>
                     ) : (
                       <button type="button" onClick={() => {
-                        if (MICROSOFT_COMPOSE_DRAFTS_RELEASED && selectedMessage.providerMessageId) setComposeDraftTarget({ providerMessageId: selectedMessage.providerMessageId });
+                        if (composeAvailable && selectedMessage.providerMessageId) setComposeDraftTarget({ providerMessageId: selectedMessage.providerMessageId });
                         else setDraftEditId(selectedMessage.providerMessageId ?? null);
                       }}
                         disabled={mutationBusy || !connected || !selectedMessage.providerMessageId}
@@ -1654,13 +1679,24 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
             onClose={() => setFullMessageTargetId(null)}
           />
         )}
-      {MICROSOFT_COMPOSE_DRAFTS_RELEASED && connected && composeDraftTarget !== null && (
-        <MicrosoftComposeDraftPanel key={JSON.stringify([mailbox.id, composeDraftTarget.providerMessageId ?? null])}
+      {composeAvailable && connected && composeDraftTarget !== null && (
+        <MicrosoftComposeDraftPanel acceptance={acceptance} key={JSON.stringify([mailbox.id, composeDraftTarget])}
           mailboxId={mailbox.id} mailboxEmail={mailbox.email} connected={connected}
           providerMessageId={composeDraftTarget.providerMessageId}
+          responseMode={composeDraftTarget.responseMode} sourceProviderMessageId={composeDraftTarget.sourceProviderMessageId}
           onClose={() => setComposeDraftTarget(null)}
           onOpenDrafts={() => { setComposeDraftTarget(null); selectFolder("Drafts"); }}
           onOperationStart={id => { if (id) invalidateDraftAttachments(id); }}
+          onSent={id => {
+            if (folderRef.current === "Drafts") {
+              setRows(current => current.filter(row => row.providerMessageId !== id));
+              if (selectedIdRef.current === id) {
+                invalidateDraftAttachments(id);
+                selectedIdRef.current = null; setSelectedId(null); setMessageError(null);
+              }
+              void refresh();
+            }
+          }}
           onSaved={id => {
             if (folderRef.current === "Drafts" && selectedIdRef.current === id) void openMessage(id);
             void refresh();

@@ -19,7 +19,7 @@ from api.inboxes.microsoft_token_authority import MicrosoftMailboxAuthority, _ca
 PREFIX = "cuevion:microsoft:outbound-attempt:v1:"
 ATTEMPT_ID = re.compile(r"^[A-Za-z0-9_-]{43}$")
 MAX_RECORD_BYTES = 4096
-_STATES = frozenset(("reserved", "draft_prepared", "send_started", "accepted_by_microsoft"))
+_STATES = frozenset(("reserved", "draft_prepared", "send_started", "accepted_by_microsoft", "send_not_started", "sent_copy_confirmed"))
 
 
 class OutboundLedgerError(Exception):
@@ -86,7 +86,7 @@ def _valid_record(value: object, *, scope: str, digest: str, attempt_id: str) ->
             and (type(value["draftId"]) is not str or len(value["draftId"]) > 512))
     ):
         raise OutboundLedgerError("microsoft_send_attempt_conflict")
-    if value["phase"] in {"draft_prepared","send_started","accepted_by_microsoft"} and not value["draftId"]:
+    if value["phase"] in {"draft_prepared","send_started","accepted_by_microsoft","sent_copy_confirmed","send_not_started"} and not value["draftId"]:
         raise OutboundLedgerError("microsoft_send_attempt_conflict")
     return value
 
@@ -195,3 +195,20 @@ def inspect_outbound_attempt(
         except MicrosoftGraphError:
             raise OutboundLedgerError("microsoft_send_attempt_conflict") from None
     return {"phase": record["phase"], "draftId": draft_id}
+
+
+def _mark_existing_draft_attempt(authority, attempt_id, draft_id, phase):
+    """Terminal evidence for an existing-draft attempt; no transport or retries."""
+    config = _storage()
+    key = _key(authority, attempt_id)
+    value, raw = _read(config, key)
+    digest = value.get('digest') if type(value) is dict else None
+    if type(digest) is not str or re.fullmatch(r'[a-f0-9]{64}', digest) is None:
+        raise OutboundLedgerError('microsoft_send_attempt_conflict')
+    value = _valid_record(value, scope=_scope_hash(authority), digest=digest, attempt_id=attempt_id)
+    permitted = {'reserved', 'draft_prepared'} if phase == 'send_not_started' else {'send_started', 'accepted_by_microsoft'}
+    if phase not in {'send_not_started', 'sent_copy_confirmed'} or value['phase'] not in permitted or value['draftId'] not in {None, draft_id}:
+        raise OutboundLedgerError('microsoft_send_attempt_conflict')
+    from api.inboxes.microsoft_graph import _required_message_id
+    _required_message_id(draft_id)
+    _write(config, key, raw, {**value, 'phase': phase, 'draftId': draft_id, 'updatedAt': _updated()})

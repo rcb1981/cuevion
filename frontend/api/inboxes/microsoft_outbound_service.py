@@ -6,6 +6,7 @@ ambiguous results. 202 means accepted by Graph, never delivered.
 """
 from __future__ import annotations
 
+from api.inboxes import microsoft_legacy_send_policy as policy
 from api.inboxes import microsoft_outbound_graph as graph
 from api.inboxes import microsoft_outbound_ledger as ledger
 from api.inboxes import microsoft_mailbox_access as owned
@@ -25,6 +26,7 @@ def send_owned_microsoft_message(
     attempt_id: str, compose: dict,
 ) -> dict:
     """One server-side operation per durable attempt ID, even on HTTP retries."""
+    policy.require_release()
     # Validate everything except owner authority before acquiring a write lease.
     validated = graph._validated_compose(compose)
     if type(attempt_id) is not str or ledger.ATTEMPT_ID.fullmatch(attempt_id) is None:

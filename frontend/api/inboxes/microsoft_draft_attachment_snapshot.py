@@ -25,7 +25,7 @@ from api.inboxes.microsoft_attachments_graph import (
 )
 from api.inboxes.microsoft_token_authority import MicrosoftMailboxAuthority, _canonical_authority
 
-SELECT = 'id,parentFolderId,isDraft,hasAttachments,changeKey,subject,toRecipients,ccRecipients,bccRecipients,body'
+SELECT = 'id,parentFolderId,isDraft,hasAttachments,changeKey,subject,toRecipients,ccRecipients,bccRecipients,body,from,sender,replyTo'
 
 
 def digest(value: object) -> str:
@@ -100,9 +100,9 @@ def _message(token, message_id, folder_id, opener):
                     or not 1 <= len(recipient['emailAddress']['address']) <= 320):
                 invalid()
     # Hash original, unnormalised metadata and HTML; never write it back.
-    return {field: value[field] for field in (
+    return {field: value.get(field) for field in (
         'id', 'parentFolderId', 'isDraft', 'hasAttachments', '@odata.etag', 'changeKey',
-        'subject', 'toRecipients', 'ccRecipients', 'bccRecipients', 'body')}
+        'subject', 'toRecipients', 'ccRecipients', 'bccRecipients', 'body', 'from', 'sender', 'replyTo')}
 
 
 def _inventory(token, message_id, opener):
@@ -167,7 +167,7 @@ def read_draft_attachment_snapshot(token, authority, message_id, *, opener=None)
     if len(refs) > 100 or any(not re.fullmatch(r'[a-zA-Z0-9_.@+%\-]{1,200}', cid) for cid in refs):
         invalid('cid_unsupported')
     links = tuple((cid, tuple(x.id for x in inventory if x.content_id == cid)) for cid in sorted(refs))
-    protected = digest({k: first[k] for k in ('subject', 'toRecipients', 'ccRecipients', 'bccRecipients', 'body')})
+    protected = digest({k: first[k] for k in ('subject', 'toRecipients', 'ccRecipients', 'bccRecipients', 'body', 'from', 'sender', 'replyTo')})
     inventory_hash = digest([(x.id, x.metadata_hash) for x in inventory])
     fingerprint = digest([authority_digest(a), first, inventory_hash, links])
     return DraftAttachmentSnapshot(a, identifier, folder_id, True, first['@odata.etag'], first['changeKey'],
