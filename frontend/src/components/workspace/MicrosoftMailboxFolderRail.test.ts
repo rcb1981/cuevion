@@ -32,9 +32,10 @@ assert.match(rail, /Microsoft mail folders/);
 assert.match(compact, /Microsoft mail folders \(compact\)/);
 assert.match(rail, /aria-pressed="true"[^>]*>Filtered<\/button>/);
 assert.match(compact, /aria-pressed="true"[^>]*>Inbox<\/button>/);
-for (const label of ["Inbox", "Filtered", "Sent", "Archive", "Drafts", "Deleted Items", "Junk Email"]) {
+for (const label of ["Inbox", "Filtered", "Sent", "Archive", "Drafts", "Trash", "Spam"]) {
   assert.ok(rail.includes(">" + label + "</button>"), label);
 }
+assert.deepEqual(microsoftVisualFolders.slice(-2).map(({ id }) => id), ["Deleted", "Junk"]);
 assert.doesNotMatch(rail, /href=|type="submit"|mailto:/);
 assert.match(rail, /xl:flex/);
 assert.match(compact, /xl:hidden/);

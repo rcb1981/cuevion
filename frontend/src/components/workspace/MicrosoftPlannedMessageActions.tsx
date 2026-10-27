@@ -44,6 +44,7 @@ export function MicrosoftPlannedMessageActions({
   canArchive = false, archiveBusy = false, onArchive,
   canDelete = false, deleteBusy = false, onDelete,
   canCompose = false, canReplyAll = true, onCompose,
+  onCheckDraftPermissions, draftPermissionStatus,
 }: {
   unread: boolean;
   hasMessage?: boolean;
@@ -59,6 +60,8 @@ export function MicrosoftPlannedMessageActions({
   canCompose?: boolean;
   canReplyAll?: boolean;
   onCompose?: (mode: "reply" | "reply_all" | "forward") => void;
+  onCheckDraftPermissions?: () => void;
+  draftPermissionStatus?: string | null;
 }) {
   const [moreOpen, setMoreOpen] = useState(false);
   const moreId = useId();
@@ -123,6 +126,13 @@ export function MicrosoftPlannedMessageActions({
                 {key === "read" && changeReadStateBusy ? "Updating…" : label}
               </button>
             ))}
+            {onCheckDraftPermissions ? (
+              <button type="button" onClick={() => { onCheckDraftPermissions(); }}
+                className="mt-1 w-full rounded-[12px] border-t border-[var(--workspace-border-soft)] px-3 py-2 text-left text-[0.72rem] text-[var(--workspace-text-muted)] hover:bg-[var(--workspace-hover-surface)]">
+                Check draft access
+              </button>
+            ) : null}
+            {draftPermissionStatus ? <p role="status" className="px-3 py-2 text-[0.68rem] leading-5 text-[var(--workspace-text-muted)]">{draftPermissionStatus}</p> : null}
           </div>
         )}
       </div>

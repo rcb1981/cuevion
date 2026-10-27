@@ -34,7 +34,8 @@ assert.match(html, /aria-pressed="false"[^>]*>Priority<\/button>/);
 assert.match(html, /Show confirmed important messages on this loaded page/);
 assert.match(html, /Refresh Microsoft messages/);
 assert.match(html, /Newest first/);
-assert.match(html, /Oldest first/);
+assert.match(html, /aria-label="Sort messages"/);
+assert.match(html, /aria-expanded="false"/);
 assert.match(html, /microsoft-list-search-microsoft-0123456789abcdefabcd12345678/);
 assert.doesNotMatch(html, /type="submit"|href=|mailto:/);
 
@@ -43,7 +44,13 @@ const unreadMarkup = renderToStaticMarkup(createElement(
 ));
 assert.match(unreadMarkup, /aria-pressed="true"[^>]*>Unread<\/button>/);
 assert.match(unreadMarkup, /aria-pressed="false"[^>]*>All<\/button>/);
-assert.match(unreadMarkup, /value="oldest"/);
+assert.match(unreadMarkup, /title="Oldest first"/);
+
+const priorityMarkup = renderToStaticMarkup(createElement(
+  MicrosoftMessageListControls, { ...defaults, priorityOnly: true },
+));
+assert.match(priorityMarkup, /aria-pressed="true"[^>]*>Priority<\/button>/);
+assert.match(priorityMarkup, /aria-pressed="false"[^>]*>All<\/button>/);
 
 const sentMarkup = renderToStaticMarkup(createElement(
   MicrosoftMessageListControls, { ...defaults, canFilterUnread: false, refreshBusy: true, refreshDisabled: true },
@@ -57,7 +64,8 @@ const src = readFileSync(
 );
 assert.match(src, /onUnreadOnlyChange\(false\)/);
 assert.match(src, /onUnreadOnlyChange\(true\)/);
-assert.match(src, /onSortChange\(event.target.value as MicrosoftMessageSortOrder\)/);
+assert.match(src, /onSortChange\(option.value\)/);
+assert.match(src, /onSearchChange\(""\)/);
 assert.match(src, /onClick=\{onRefresh\}/);
 assert.doesNotMatch(src, /\bfetch\(|sendMicrosoft|setMicrosoftMessageUnread|localStorage|sessionStorage|Mail.Send|Mail.ReadWrite/);
 

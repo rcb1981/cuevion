@@ -49,12 +49,18 @@ import { filterMicrosoftLoadedMessages, type MicrosoftMessageSortOrder } from ".
 import {
   microsoftVisibleFolderRows,
   isMicrosoftFilteredProtectionActive,
+  isMicrosoftPriorityUnderFocus,
+  type MicrosoftFocusPreferences,
 } from "./microsoftVirtualFiltered";
 import { useMicrosoftFilteredLearning } from "./useMicrosoftFilteredLearning";
 import { MicrosoftLearningControls } from "./MicrosoftLearningControls";
 import { normalizeSenderLearningKey } from "../../lib/learningEngine";
-import { isMicrosoftPriorityMessage } from "./microsoftLearningRules";
 import type { MicrosoftLearningRule } from "./microsoftLearningRules";
+import {
+  microsoftEffectiveListPaneWidth,
+  readMicrosoftMailListPaneWidth,
+  restoreMicrosoftMessageId,
+} from "./microsoftMailboxUiParity";
 
 // UI convenience only. Real production write prevention is enforced before
 // any Graph mutation at the server boundary in microsoft_production_pilot.py.
@@ -82,6 +88,9 @@ type MicrosoftReadOnlyMailbox = {
 type MicrosoftMailboxReadOnlyViewProps = {
   mailbox: MicrosoftReadOnlyMailbox;
   connected: boolean;
+  focusPreferences?: MicrosoftFocusPreferences;
+  initialSelectedMessageId?: string | null;
+  onMessageSelected?: (messageId: string) => void;
   onBack: () => void;
   onOpenConnectionSettings: () => void;
   onConnectionStatusChange?: (status: MicrosoftConnectionStatus) => void;
@@ -120,6 +129,9 @@ function safeErrorMessage(code: string | undefined, fallback: string) {
 export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOnlyView({
   mailbox,
   connected,
+  focusPreferences,
+  initialSelectedMessageId,
+  onMessageSelected,
   onBack,
   onOpenConnectionSettings,
   onConnectionStatusChange,
@@ -139,6 +151,14 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const attachmentDownloadTicket = React.useRef(0);
   const attachmentDownloadInFlight = React.useRef<string | null>(null);
   const selectedIdRef = React.useRef<string | null>(null);
+  // Keep selections scoped to this Microsoft mailbox and folder. The parent
+  // remembers only the Inbox selection across view unmounts, as it does for
+  // the existing Gmail/IMAP MailboxView.
+  const lastFolderSelectionRef = React.useRef<Partial<Record<MicrosoftFolder, string>>>({
+    Inbox: initialSelectedMessageId ?? undefined,
+  });
+  const selectedCallbackRef = React.useRef(onMessageSelected);
+  useEffect(() => { selectedCallbackRef.current = onMessageSelected; }, [onMessageSelected]);
   const folderRef = React.useRef<MicrosoftFolder>("Inbox");
   const [folder, setFolder] = useState<MicrosoftFolder>("Inbox");
   const [composeDesignPreviewOpen, setComposeDesignPreviewOpen] = useState(false);
@@ -201,6 +221,33 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const [priorityOnly, setPriorityOnly] = useState(false);
   const [sortOrder, setSortOrder] = useState<MicrosoftMessageSortOrder>("newest");
   const [placementNotice, setPlacementNotice] = useState<string | null>(null);
+  const microsoftSplitPaneRef = React.useRef<HTMLDivElement | null>(null);
+  const [preferredListPaneWidth] = useState(readMicrosoftMailListPaneWidth);
+  const [splitPaneWidth, setSplitPaneWidth] = useState(0);
+  const [isWideSplitView, setIsWideSplitView] = useState(() =>
+    typeof window !== "undefined" && window.matchMedia("(min-width: 1280px)").matches,
+  );
+  useEffect(() => {
+    const splitPane = microsoftSplitPaneRef.current;
+    if (!connected || !splitPane) return;
+    const updateWidth = () => {
+      setSplitPaneWidth(splitPane.getBoundingClientRect().width);
+      setIsWideSplitView(window.matchMedia("(min-width: 1280px)").matches);
+    };
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(splitPane);
+    window.addEventListener("resize", updateWidth);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updateWidth);
+    };
+  }, [connected]);
+  const matchingSplitGridStyle = isWideSplitView && splitPaneWidth > 0
+    ? {
+        gridTemplateColumns: `152px minmax(320px, ${microsoftEffectiveListPaneWidth(preferredListPaneWidth, splitPaneWidth)}px) minmax(400px, 1fr)`,
+      }
+    : undefined;
   useEffect(() => {
     setComposeDesignPreviewOpen(false);
     setComposeDraftTarget(null);
@@ -214,18 +261,18 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   const folderRows = useMemo(
     () => microsoftVisibleFolderRows(
       rows, folder, microsoftFiltering.learned, microsoftFiltering.placements,
-      microsoftFiltering.ready, microsoftFiltering.rules,
+      microsoftFiltering.ready, microsoftFiltering.rules, focusPreferences,
     ),
-    [rows, folder, microsoftFiltering.learned, microsoftFiltering.placements, microsoftFiltering.ready, microsoftFiltering.rules],
+    [rows, folder, microsoftFiltering.learned, microsoftFiltering.placements, microsoftFiltering.ready, microsoftFiltering.rules, focusPreferences],
   );
   const visibleRows = useMemo(
     () => filterMicrosoftLoadedMessages(
       priorityOnly
-        ? folderRows.filter((row) => isMicrosoftPriorityMessage(row, microsoftFiltering.rules))
+        ? folderRows.filter((row) => isMicrosoftPriorityUnderFocus(row, microsoftFiltering.rules, focusPreferences))
         : folderRows,
       { folder, search: searchQuery, unreadOnly, sortOrder },
     ),
-    [folderRows, folder, searchQuery, unreadOnly, sortOrder, priorityOnly, microsoftFiltering.rules],
+    [folderRows, folder, searchQuery, unreadOnly, sortOrder, priorityOnly, microsoftFiltering.rules, focusPreferences],
   );
   const conversationRows = useMemo(
     () => getMicrosoftConversationRows(folderRows, selectedId, mailbox.id),
@@ -401,6 +448,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     setLastUpdated(null);
     setSearchQuery("");
     setUnreadOnly(false);
+    setPriorityOnly(false);
     setPlacementNotice(null);
     setPage(1);
     setFolder(nextFolder);
@@ -454,7 +502,10 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     setComposer({ mode: "new", source: null, selectedProviderMessageId: null, sourceIsExact: false });
   }, [connected, composer, composeDraftTarget, selectedMessage, mailbox.id, messageBusy, acceptance?.canWrite]);
 
-  const openMessage = useCallback(async (providerMessageId: string) => {
+  const openMessage = useCallback(async (
+    providerMessageId: string,
+    autoMarkRead = true,
+  ) => {
     if (
       !connected ||
       composer !== null ||
@@ -466,6 +517,10 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     const ticket = ++messageTicket.current;
     const attachmentRequest = ++attachmentTicket.current;
     selectedIdRef.current = providerMessageId;
+    lastFolderSelectionRef.current[folderRef.current] = providerMessageId;
+    if (folderRef.current === "Inbox") {
+      selectedCallbackRef.current?.(providerMessageId);
+    }
     setSelectedId(providerMessageId);
     setSelectedMessage(null);
     setAttachmentRows([]);
@@ -555,6 +610,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       }
       setSelectedMessage(response.message);
       if (
+        autoMarkRead &&
         shouldAutoMarkMicrosoftOpenedMessageRead({
           readWriteEnabled: MICROSOFT_AUTO_MARK_READ_RELEASED,
           folder: requestedFolder,
@@ -660,6 +716,48 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       }
     }
   }, [connected, mailbox.id, rows, composer]);
+
+  useEffect(() => {
+    if (
+      !connected || listBusy || rows.length === 0 || visibleRows.length !== 0 ||
+      selectedIdRef.current === null || mutationInFlight.current || composer !== null
+    ) return;
+    // Search, an unread filter, or changed Learning rules must not leave a
+    // hidden message's Graph body in the reading pane. Revoke stale async work.
+    selectedIdRef.current = null;
+    messageTicket.current += 1;
+    attachmentTicket.current += 1;
+    attachmentDownloadTicket.current += 1;
+    setSelectedId(null);
+    setSelectedMessage(null);
+    setMessageError(null);
+    setMessageBusy(false);
+    setAttachmentRows([]);
+    setAttachmentBusy(false);
+    setAttachmentError(null);
+    setAttachmentHasMore(false);
+    setAttachmentDownloadBusy(null);
+    setAttachmentDownloadError(null);
+  }, [connected, listBusy, rows, visibleRows, composer]);
+
+  useEffect(() => {
+    if (
+      !connected || listBusy || rows.length === 0 || visibleRows.length === 0 ||
+      mutationInFlight.current || composer !== null
+    ) return;
+    if (visibleRows.some((item) => item.providerMessageId === selectedIdRef.current)) return;
+
+    // Gmail/IMAP reopen the last selected message for a view (or its first
+    // visible message). Microsoft may restore the same reading experience, but
+    // a background restoration must NOT cause the existing Graph mark-read
+    // mutation. Only a deliberate user open can auto-mark a message as read.
+    const candidateId = restoreMicrosoftMessageId(
+      visibleRows, lastFolderSelectionRef.current[folderRef.current],
+    );
+    if (candidateId) {
+      void openMessage(candidateId, false);
+    }
+  }, [connected, listBusy, rows, visibleRows, composer, openMessage]);
 
   const invalidateDraftAttachments = useCallback((providerMessageId: string) => {
     if (selectedIdRef.current !== providerMessageId || folderRef.current !== "Drafts") return;
@@ -1143,16 +1241,11 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           </svg>
           Compose
         </button>
-        <button type="button" className="text-xs underline" disabled={!connected}
-          onClick={() => { void checkDraftPermissions(); }}>Check Microsoft draft permissions</button>
-        {permissionChecked && <span role="status" className="text-xs">
-          {draftAcceptance ? `Stored Mail.ReadWrite: ${draftAcceptance.mailReadWrite ? "granted" : "not granted"}${draftAcceptance.tokenExpired ? " (token expired; connection must revalidate)" : ""}. Draft test: ${draftAcceptance.canWrite ? "authorized" : "off"}. Sending remains off.` : "Permissions could not be verified. Draft testing remains off."}
-        </span>}
     </div>
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden text-[var(--workspace-text)]">
+    <div data-cuevion-mailbox-visual="unified" className="flex h-full min-h-0 flex-col overflow-hidden text-[var(--workspace-text)]">
       <header className="flex shrink-0 items-center justify-between gap-4 border-b border-[var(--workspace-border-soft)] px-4 py-4 sm:px-6">
         <button
           type="button"
@@ -1206,7 +1299,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
         />
       ) : (
         <div className="flex min-h-0 flex-1 flex-col">
-          <div data-microsoft-mailbox-toolbar="unified" className="flex shrink-0 flex-wrap gap-2 border-b border-[var(--workspace-border-soft)] px-3 py-2 xl:grid xl:grid-cols-[152px_minmax(275px,37%)_minmax(0,1fr)] xl:gap-0 xl:px-0 xl:py-0">
+          <div data-mailbox-toolbar="unified" data-microsoft-mailbox-toolbar="unified" className="flex shrink-0 flex-wrap gap-2 border-b border-[var(--workspace-border-soft)] px-3 py-2 xl:grid xl:grid-cols-[152px_minmax(275px,37%)_minmax(0,1fr)] xl:gap-0 xl:px-0 xl:py-0" style={matchingSplitGridStyle}>
             <div data-microsoft-toolbar-compose className="flex min-h-[60px] items-center border-r border-[var(--workspace-border-soft)] px-3">
               {composeAction}
             </div>
@@ -1275,6 +1368,12 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                     selectedMessage.serverMailboxId === mailbox.id &&
                     selectedId === selectedMessage.providerMessageId && !messageBusy && !mutationBusy)}
                   onCompose={(mode) => { openComposer(mode); }}
+                  onCheckDraftPermissions={() => { void checkDraftPermissions(); }}
+                  draftPermissionStatus={permissionChecked
+                    ? draftAcceptance
+                      ? `Draft access ${draftAcceptance.canWrite ? "available" : "not available"}${draftAcceptance.tokenExpired ? "; reconnect required" : ""}. Sending remains disabled.`
+                      : "Draft access could not be verified."
+                    : null}
                 />
               )}
             </div>
@@ -1285,7 +1384,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
             onSelectFolder={selectFolder}
             compact
           />
-          <div className="grid h-0 min-h-0 flex-1 grid-cols-1 gap-0 md:grid-cols-[minmax(245px,37%)_minmax(0,1fr)] xl:grid-cols-[152px_minmax(275px,37%)_minmax(0,1fr)]">
+          <div ref={microsoftSplitPaneRef} className="grid h-0 min-h-0 flex-1 grid-cols-1 gap-0 md:grid-cols-[minmax(245px,37%)_minmax(0,1fr)] xl:grid-cols-[152px_minmax(275px,37%)_minmax(0,1fr)]" style={matchingSplitGridStyle}>
             <MicrosoftMailboxFolderRail
               folder={folder}
               disabled={!connected || composer !== null || mutationBusy}
@@ -1312,8 +1411,8 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
               {(folder === "Inbox" || folder === "Filtered") && (
                 <p className="text-[0.68rem] text-[var(--workspace-text-muted)]">
                   {folder === "Filtered"
-                    ? "Quiet view from your Outlook Inbox. Only the loaded page is checked; no messages are moved."
-                    : "Only messages in this loaded page are shown; quiet senders appear under Filtered."}
+                    ? "Newsletters, offers, Show less and categories set to Low in Settings. Only the loaded page is checked; no Outlook messages are moved."
+                    : "Newsletters, offers and categories set to Low appear under Filtered. Only the loaded page is checked."}
                 </p>
               )}
               {placementNotice && <p role="status" className="text-xs text-[var(--workspace-text-muted)]">{placementNotice}</p>}
@@ -1343,7 +1442,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                 <p className="p-5 text-sm text-[var(--workspace-text-muted)]" role="status">
                   {folder === "Filtered" && !searchQuery.trim() && !unreadOnly
                     ? microsoftFiltering.ready
-                      ? "No quiet messages on this page yet. Open an Inbox message and choose Show less from this sender."
+                      ? "No newsletters, offers or Low-priority messages on this page. You can also choose Show less for a sender in Inbox."
                       : "Loading your learned preferences. No Outlook messages are being moved."
                     : "No matching messages in this loaded set. Clear the search or unread filter."}
                 </p>
@@ -1355,6 +1454,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                   folder={folder}
                   selected={selectedId === message.providerMessageId}
                   learningRule={microsoftFiltering.rules[normalizeSenderLearningKey(message.from)]}
+                  focusPreferences={focusPreferences}
                   disabled={mutationBusy}
                   dateLabel={readableTime(message.createdAt)}
                   onOpenMessage={(providerMessageId) => {

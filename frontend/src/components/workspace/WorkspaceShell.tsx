@@ -56916,6 +56916,11 @@ export function WorkspaceShell({
                       activeMicrosoftReadMailbox.connected === true &&
                       activeMicrosoftReadMailbox.connectionStatus === "connected"
                     }
+                    focusPreferences={activeFocusPreferences}
+                    initialSelectedMessageId={lastMailboxSelectionRef.current[activeMailbox.id] ?? null}
+                    onMessageSelected={(messageId) => {
+                      lastMailboxSelectionRef.current[activeMailbox.id] = messageId;
+                    }}
                     onBack={handleReturnFromMailbox}
                     onOpenConnectionSettings={() =>
                       openMailboxConnectionSettings(activeMailbox.id)

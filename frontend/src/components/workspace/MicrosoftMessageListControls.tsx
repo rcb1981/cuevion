@@ -1,10 +1,10 @@
-import React from "react";
+import React, { useEffect, useRef, useState } from "react";
 import type { MicrosoftMessageSortOrder } from "./microsoftMailboxListFilters";
 
 /**
  * Microsoft-only, view-level controls. Search and filters affect only the
- * currently loaded page. Priority intentionally stays unavailable until
- * Microsoft's trusted classification path has parity with Gmail/IMAP.
+ * currently loaded page. The chrome follows the fixed Gmail/IMAP reference;
+ * Graph querying and classification continue to use guarded Microsoft logic.
  */
 export function MicrosoftMessageListControls({
   mailboxId,
@@ -37,24 +37,41 @@ export function MicrosoftMessageListControls({
   onRefresh: () => void;
   hideRefreshButton?: boolean;
 }) {
+  const [sortOpen, setSortOpen] = useState(false);
+  const sortRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!sortOpen) return;
+    const closeOnOutside = (event: PointerEvent) => {
+      if (!sortRef.current?.contains(event.target as Node)) setSortOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSortOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [sortOpen]);
   const pillBase =
-    "inline-flex h-8 shrink-0 items-center justify-center rounded-full border px-3 text-[0.73rem] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]";
+    "inline-flex h-8 items-center justify-center rounded-full px-3.5 text-[0.66rem] font-medium uppercase tracking-[0.14em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]";
   const selectedPill =
-    "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)]";
+    "bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] text-[var(--workspace-text)]";
   const unselectedPill =
-    "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-muted)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)]";
+    "border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)]";
   const searchId = "microsoft-list-search-" + mailboxId;
 
   return (
-    <div className="space-y-2.5" aria-label="Microsoft loaded message controls">
+    <div className="space-y-3" aria-label="Microsoft loaded message controls">
       <label htmlFor={searchId} className="sr-only">
         Search loaded Microsoft messages
       </label>
-      <div className="relative">
+      <div className="flex h-10 items-center gap-3 rounded-xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 focus-within:border-[var(--workspace-border)] focus-within:bg-[var(--workspace-hover-surface)]">
         <svg
           aria-hidden="true"
           viewBox="0 0 16 16"
-          className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--workspace-text-faint)]"
+          className="h-3.5 w-3.5 flex-none"
           fill="none"
           stroke="currentColor"
           strokeWidth="1.65"
@@ -73,16 +90,26 @@ export function MicrosoftMessageListControls({
           onChange={(event) => onSearchChange(event.target.value)}
           placeholder="Search mail"
           aria-label="Search loaded Microsoft messages"
-          className="w-full rounded-xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] py-2 pl-9 pr-3 text-sm text-[var(--workspace-text)] placeholder:text-[var(--workspace-text-faint)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]"
+          className="w-full min-w-0 bg-transparent text-[0.88rem] text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
         />
+        {searchQuery ? <button
+          type="button"
+          aria-label="Clear search"
+          onClick={() => onSearchChange("")}
+          className="inline-flex h-6 w-6 flex-none items-center justify-center rounded-full text-[var(--workspace-text-faint)] hover:bg-[var(--workspace-card)] hover:text-[var(--workspace-text-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]"
+        >
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-3 w-3" aria-hidden="true">
+            <path d="M4 4l8 8M12 4 4 12" />
+          </svg>
+        </button> : null}
       </div>
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <div className="flex shrink-0 flex-wrap items-center gap-1.5" role="group" aria-label="Filter loaded messages">
           <button
             type="button"
             aria-pressed={!unreadOnly && !priorityOnly}
             onClick={() => { onUnreadOnlyChange(false); onPriorityOnlyChange(false); }}
-            className={pillBase + " " + (!unreadOnly ? selectedPill : unselectedPill)}
+            className={pillBase + " " + (!unreadOnly && !priorityOnly ? selectedPill : unselectedPill)}
           >
             All
           </button>
@@ -107,18 +134,26 @@ export function MicrosoftMessageListControls({
           </button>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          <label className="text-xs text-[var(--workspace-text-muted)]">
-            <span className="sr-only">Sort loaded Microsoft messages</span>
-            <select
-              aria-label="Sort loaded Microsoft messages"
-              value={sortOrder}
-              onChange={(event) => onSortChange(event.target.value as MicrosoftMessageSortOrder)}
-              className="h-8 max-w-[132px] rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-2 text-xs text-[var(--workspace-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]"
-            >
-              <option value="newest">Newest first</option>
-              <option value="oldest">Oldest first</option>
-            </select>
-          </label>
+          <div className="relative" ref={sortRef}>
+            <button type="button" aria-label="Sort messages" aria-expanded={sortOpen}
+              title={sortOrder === "newest" ? "Newest first" : "Oldest first"}
+              onClick={() => setSortOpen((current) => !current)}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)] transition-colors duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]">
+              <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+                <path d="M5.25 2.75v10.5M3.75 4.25 5.25 2.75l1.5 1.5M10.75 13.25V2.75M9.25 11.75 10.75 13.25l1.5-1.5" />
+              </svg>
+            </button>
+            {sortOpen ? <div role="menu" aria-label="Sort messages" className="absolute right-0 top-full z-30 mt-2 w-[172px] rounded-[18px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel">
+              {([ { value: "newest", label: "Newest first" }, { value: "oldest", label: "Oldest first" } ] as const).map((option) => (
+                <button key={option.value} type="button" role="menuitemradio" aria-checked={sortOrder === option.value}
+                  onClick={() => { onSortChange(option.value); setSortOpen(false); }}
+                  className="flex w-full items-center justify-between rounded-[14px] px-3 py-2.5 text-left text-[0.82rem] text-[var(--workspace-text-soft)] transition-colors duration-200 hover:bg-[var(--workspace-menu-hover)]">
+                  <span>{option.label}</span>
+                  {sortOrder === option.value ? <span aria-hidden="true">✓</span> : null}
+                </button>
+              ))}
+            </div> : null}
+          </div>
           {!hideRefreshButton && <button
             type="button"
             aria-label={refreshBusy ? "Refreshing Microsoft messages" : "Refresh Microsoft messages"}

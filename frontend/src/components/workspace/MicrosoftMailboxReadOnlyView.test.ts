@@ -38,12 +38,12 @@ assert.match(ready, /aria-pressed="true"[^>]*>Inbox<\/button>/);
 assert.match(ready, /aria-pressed="false"[^>]*>Sent<\/button>/);
 assert.match(ready, /aria-pressed="false"[^>]*>Archive<\/button>/);
 assert.match(ready, /aria-pressed="false"[^>]*>Drafts<\/button>/);
-assert.match(ready, /aria-pressed="false"[^>]*>Deleted Items<\/button>/);
-assert.match(ready, /aria-pressed="false"[^>]*>Junk Email<\/button>/);
+assert.match(ready, /aria-pressed="false"[^>]*>Trash<\/button>/);
+assert.match(ready, /aria-pressed="false"[^>]*>Spam<\/button>/);
 assert.match(ready, /Back to workspace/);
 assert.match(ready, /Compose/);
 assert.match(ready, /Compose message \(design preview only\)/);
-assert.doesNotMatch(ready, /Send message|Reply all|Trash/);
+assert.doesNotMatch(ready, /Send message|Reply all/);
 
 const microsoftSource = readFileSync(
   resolve(__dirname, "MicrosoftMailboxReadOnlyView.tsx"), "utf8",
@@ -118,6 +118,14 @@ assert.doesNotMatch(disconnected, /Select a message to read it/);
 const shellSource = readFileSync(resolve(__dirname, "WorkspaceShell.tsx"), "utf8");
 assert.match(shellSource, /activeMicrosoftReadMailbox =[\s\S]*?hasAuthenticatedMemberAuthority[\s\S]*?item\.provider === "microsoft"/);
 assert.match(shellSource, /\{activeMicrosoftReadMailbox \? \([\s\S]*?<MicrosoftMailboxReadOnlyView[\s\S]*?\) : \([\s\S]*?<MailboxView/);
+assert.match(shellSource, /<MicrosoftMailboxReadOnlyView[\s\S]*?focusPreferences=\{activeFocusPreferences\}/,
+  "Microsoft receives the same current mailbox-effective onboarding and Settings preferences");
+assert.match(microsoftSource, /microsoftVisibleFolderRows\([\s\S]*?microsoftFiltering\.rules, focusPreferences/,
+  "Only Microsoft virtual folder routing consumes the owner's effective focus preferences");
+assert.match(microsoftSource, /rows\.length === 0 \|\| visibleRows\.length !== 0/,
+  "An empty search/Filtered result clears any previously displayed Microsoft detail");
+assert.match(microsoftSource, /setPriorityOnly\(false\)/,
+  "Changing Microsoft folders restores the standard All list filter");
 
 const viewSource = readFileSync(resolve(__dirname, "MicrosoftMailboxReadOnlyView.tsx"), "utf8");
 assert.match(viewSource, /const MICROSOFT_READ_ONLY_PILOT = true/);

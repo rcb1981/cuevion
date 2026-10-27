@@ -11,8 +11,10 @@ export const microsoftVisualFolders = [
   { id: "Sent", label: "Sent" },
   { id: "Archive", label: "Archive" },
   { id: "Drafts", label: "Drafts" },
-  { id: "Deleted", label: "Deleted Items" },
-  { id: "Junk", label: "Junk Email" },
+  // Gmail/IMAP presentation labels; the guarded Microsoft folder IDs and
+  // Graph endpoints remain Deleted Items and Junk Email respectively.
+  { id: "Deleted", label: "Trash" },
+  { id: "Junk", label: "Spam" },
 ] as const;
 
 export type MicrosoftVisualFolder = (typeof microsoftVisualFolders)[number]["id"];
@@ -32,7 +34,7 @@ export function MicrosoftMailboxFolderRail({
 }) {
   const containerClass = compact
     ? "flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--workspace-border-soft)] px-3 py-2 xl:hidden"
-    : "hidden min-h-0 shrink-0 flex-col gap-1 border-r border-[var(--workspace-border-soft)] px-3 py-5 xl:flex";
+    : "hidden min-h-0 min-w-0 shrink-0 flex-col gap-1 overflow-y-auto border-r border-[var(--workspace-border-soft)] px-3 py-5 xl:flex";
 
   return (
     <nav
@@ -45,7 +47,7 @@ export function MicrosoftMailboxFolderRail({
         </div>
       )}
       {!compact && (
-        <p className="mb-3 px-3 text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+        <p className="mb-3 px-2 text-[0.62rem] font-semibold uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
           Folders
         </p>
       )}
@@ -61,7 +63,7 @@ export function MicrosoftMailboxFolderRail({
             className={
               (compact
                 ? "shrink-0 rounded-full px-3 py-2 text-[0.73rem] "
-                : "w-full rounded-[12px] border-l-2 pr-3 py-2.5 text-left text-[0.77rem] " + (item.id === "Filtered" ? "pl-7 " : "pl-3 ")) +
+                : "flex w-full items-center justify-between rounded-[12px] border-l-2 pr-3 py-2.5 text-left " + (item.id === "Filtered" ? "pl-7 text-[0.77rem] " : "pl-3 text-[0.79rem] ")) +
               "font-medium transition-[background-color,color,border-color] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:cursor-not-allowed disabled:opacity-45 " +
               (selected
                 ? compact
