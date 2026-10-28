@@ -42,7 +42,7 @@ export function getMicrosoftContextSubmenuPosition({
  * previously selected message.
  */
 export function MicrosoftMessageContextMenu({
-  message, x, y, busy, canChangeInbox, canLearn, canShowLess, learningRule,
+  message, x, y, busy, canChangeInbox, canLearn, learningRule,
   onOpen, onReadState, onArchive, onDelete, onSaveLearning,
 }: {
   message: LiveInboxMessageSnapshot;
@@ -51,7 +51,6 @@ export function MicrosoftMessageContextMenu({
   busy: boolean;
   canChangeInbox: boolean;
   canLearn: boolean;
-  canShowLess: boolean;
   learningRule?: MicrosoftLearningRule;
   onOpen: () => void;
   onReadState: (nextUnread: boolean) => void;
@@ -80,7 +79,7 @@ export function MicrosoftMessageContextMenu({
       triggerY: submenuTriggerY,
       viewportWidth: window.innerWidth,
       viewportHeight: window.innerHeight,
-      expectedHeight: submenu === "move" ? 154 : labelChooserOpen ? 485 : 308,
+      expectedHeight: submenu === "move" ? 154 : labelChooserOpen ? 435 : 258,
     })
     : null;
 
@@ -151,9 +150,6 @@ export function MicrosoftMessageContextMenu({
             <div className="space-y-1">
             <button type="button" role="menuitem" onClick={() => changeLearning("important")} className={smallItemClass}>Mark as important</button>
             <button type="button" role="menuitem" onClick={() => changeLearning("normal")} className={smallItemClass}>Mark as not important</button>
-            <button type="button" role="menuitem" disabled={!canShowLess}
-              title={!canShowLess ? "This message is protected from automatic filtering" : undefined}
-              onClick={() => changeLearning("show_less")} className={smallItemClass}>Show Less</button>
             <button type="button" role="menuitem" aria-expanded={labelChooserOpen} onClick={() => setLabelChooserOpen(!labelChooserOpen)} className={smallItemClass}>Change label...</button>
             {labelChooserOpen && (
               <div role="group" aria-label="Microsoft label choices" className="space-y-1 border-l border-[var(--workspace-divider)] pl-2">

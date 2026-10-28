@@ -1855,7 +1855,6 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           busy={mutationBusy}
           canChangeInbox={contextCanChangeInbox}
           canLearn={contextCanLearn}
-          canShowLess={!isMicrosoftFilteredProtectionActive(contextRow)}
           learningRule={microsoftFiltering.rules[normalizeSenderLearningKey(contextRow.from)]}
           onOpen={() => {
             const targetId = rowContext.id;
