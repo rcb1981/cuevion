@@ -1,5 +1,5 @@
 import type { LiveInboxMessageSnapshot } from "../../lib/inboxConnectionApi";
-import type { MicrosoftLearningRuleStore } from "./microsoftLearningRules";
+import type { MicrosoftLearningRuleStore, MicrosoftMessageLearningStore } from "./microsoftLearningRules";
 import { isMicrosoftPriorityMessage } from "./microsoftLearningRules";
 import type { OnboardingState } from "../../types/onboarding";
 import {
@@ -164,7 +164,11 @@ export function isMicrosoftPriorityUnderFocus(
   message: LiveInboxMessageSnapshot,
   rules: MicrosoftLearningRuleStore,
   preferences?: MicrosoftFocusPreferences,
+  messageRules: MicrosoftMessageLearningStore = {},
 ): boolean {
+  const exact = messageRules[message.providerMessageId ?? ""];
+  if (exact?.priority === "important") return true;
+  if (exact?.priority === "normal") return false;
   const senderRule = rules[normalizeSenderLearningKey(message.from)];
   if (senderRule) return isMicrosoftPriorityMessage(message, rules);
   // The user's Normal/Low level, not an older backend Priority flag, is
@@ -274,12 +278,19 @@ export function classifyMicrosoftFilteredMessage(
   placements: MicrosoftSenderPlacementStore,
   rules: MicrosoftLearningRuleStore = {},
   focusPreferences?: MicrosoftFocusPreferences,
+  messageRules: MicrosoftMessageLearningStore = {},
 ): "Inbox" | "Filtered" {
   // The owner's Low choice can supersede a stale automated Priority signal,
   // but cannot supersede a reply, uncertain identity or security protection.
   const ownerSelectedLow = microsoftFocusWantsLow(message, focusPreferences);
   if (isMicrosoftHardFilteredProtectionActive(message) ||
       (isMicrosoftFilteredProtectionActive(message) && !ownerSelectedLow)) return "Inbox";
+
+  // An explicit decision on this exact Graph message must not silently teach
+  // the whole sender, and must beat historical sender-wide Low/Show Less rules.
+  const exact = messageRules[message.providerMessageId ?? ""];
+  if (exact?.priority === "important" || exact?.placement === "inbox") return "Inbox";
+  if (exact?.placement === "filtered" && !isMicrosoftFilteredProtectionActive(message)) return "Filtered";
 
   const sender = normalizeSenderLearningKey(message.from);
   if (!EMAIL_PATTERN.test(sender)) return "Inbox";
@@ -330,10 +341,11 @@ export function microsoftVisibleFolderRows(
   ready: boolean,
   rules: MicrosoftLearningRuleStore = {},
   focusPreferences?: MicrosoftFocusPreferences,
+  messageRules: MicrosoftMessageLearningStore = {},
 ): LiveInboxMessageSnapshot[] {
   if (folder !== "Inbox" && folder !== "Filtered") return [...rows];
   if (!ready) return folder === "Filtered" ? [] : [...rows];
   return rows.filter((message) =>
-    classifyMicrosoftFilteredMessage(message, learned, placements, rules, focusPreferences) === folder
+    classifyMicrosoftFilteredMessage(message, learned, placements, rules, focusPreferences, messageRules) === folder
   );
 }

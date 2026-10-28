@@ -13,6 +13,7 @@ import {
   setMicrosoftSenderPlacement,
 } from "./microsoftVirtualFiltered";
 import { normalizeFocusPreferences } from "../../types/onboarding";
+import { parseMicrosoftMessageLearningRules, saveMicrosoftMessageLearningRule } from "./microsoftLearningRules";
 
 const message: LiveInboxMessageSnapshot = {
   id: "m1", serverMailboxId: "microsoft-A", providerMessageId: "GRAPHm1",
@@ -34,6 +35,28 @@ const learned: SenderCategoryLearningStore = {
 assert.equal(isMicrosoftFilteredProtectionActive(message), false);
 assert.equal(isMicrosoftFilteredProtectionActive({...message, signal: "Priority"}), true);
 assert.equal(classifyMicrosoftFilteredMessage(message, noLearning, {}), "Inbox");
+const firstOffer = { ...message, from: "Store <offers@retail.example>", sender: "Store",
+  subject: "October nieuwsbrief", snippet: "Shop now", providerMessageId: "AAMk-first" };
+const secondOffer = { ...firstOffer, providerMessageId: "AAMk-second", id: "second" };
+const oneMessageKept = { "AAMk-first": { placement: "inbox" as const } };
+assert.equal(classifyMicrosoftFilteredMessage(firstOffer, noLearning, {}, {}, undefined, oneMessageKept), "Inbox");
+assert.equal(classifyMicrosoftFilteredMessage(secondOffer, noLearning, {}, {}, undefined, oneMessageKept), "Filtered",
+  "A choice on one message may never quiet or promote another message from the same sender");
+assert.deepEqual(microsoftVisibleFolderRows([firstOffer, secondOffer], "Inbox", noLearning, {}, true, {},
+  undefined, oneMessageKept).map(m => m.providerMessageId), ["AAMk-first"]);
+assert.deepEqual(microsoftVisibleFolderRows([firstOffer, secondOffer], "Filtered", noLearning, {}, true, {},
+  undefined, oneMessageKept).map(m => m.providerMessageId), ["AAMk-second"]);
+const onlyFirstImportant = { "AAMk-first": { priority: "important" as const } };
+assert.equal(isMicrosoftPriorityUnderFocus(firstOffer, {}, undefined, onlyFirstImportant), true);
+assert.equal(isMicrosoftPriorityUnderFocus(secondOffer, {}, undefined, onlyFirstImportant), false);
+assert.equal(classifyMicrosoftFilteredMessage(firstOffer, noLearning, {}, {}, undefined, onlyFirstImportant), "Inbox");
+assert.equal(classifyMicrosoftFilteredMessage(firstOffer, noLearning, {}, {}, undefined,
+  { "AAMk-first": { placement: "filtered" } }), "Filtered");
+assert.equal(classifyMicrosoftFilteredMessage(secondOffer, noLearning, {}, {}, undefined,
+  { "AAMk-first": { placement: "filtered" } }), "Filtered");
+const retained = saveMicrosoftMessageLearningRule({}, "AAMk-first", { label: "Demo" });
+assert.deepEqual({ ...parseMicrosoftMessageLearningRules(JSON.stringify(retained)) }, retained);
+assert.deepEqual(parseMicrosoftMessageLearningRules('{"AAMk-first":{"priority":"show_less"}}'), {});
 const marketingCases = [
   { from: "Store <offers@retail.example>", sender: "Store", subject: "October nieuwsbrief", snippet: "De nieuwste aanbiedingen" },
   { from: "Shop <hello@retail.example>", sender: "Shop", subject: "Actie: 30% korting dit weekend", snippet: "Shop vandaag" },

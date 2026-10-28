@@ -24,11 +24,16 @@ const props = {
   busy: false,
   canChangeInbox: true,
   canLearn: true,
+  folder: "Inbox",
+  canMoveToFiltered: true,
+  onMoveToInbox: noOp,
+  onMoveToFiltered: noOp,
   onOpen: noOp,
   onReadState: noOp,
   onArchive: noOp,
   onDelete: noOp,
   onSaveLearning: noOp,
+  onKeepInInbox: noOp,
 };
 const ready = renderToStaticMarkup(createElement(MicrosoftMessageContextMenu, props));
 for (const label of [
@@ -71,6 +76,12 @@ assert.match(menuSource, /trigger\.closest\("\[data-theme\]"\)\?\.getAttribute\(
 assert.match(menuSource, /data-microsoft-context-submenu data-theme=\{submenuTheme\}/);
 assert.doesNotMatch(menuSource, /onClick=\{\(\) => changeLearning\("show_less"\)\}/,
   "Learning parity: Microsoft must not expose a sender-wide Show Less action absent from Gmail/IMAP");
+assert.match(menuSource, /onClick=\{onKeepInInbox\}/,
+  "Keep in inbox must have a separate exact-message action from Mark as not important");
+assert.match(menuSource, /changeLearning\(\{ priority: "important" \}\)/);
+assert.match(menuSource, /onClick=\{onMoveToFiltered\}/,
+  "Microsoft Move to Filtered must act on one exact message, never a sender");
+assert.match(menuSource, /onClick=\{onMoveToInbox\}/);
 assert.doesNotMatch(menuSource, /<div role="menu" aria-label="Microsoft move destinations" className="space-y-1 border-l/,
   "Moving to another folder must use a separate flyout, not push Learning down");
 
@@ -78,6 +89,8 @@ const viewSource = readFileSync(resolve(__dirname, "MicrosoftMailboxReadOnlyView
 assert.match(viewSource, /const contextRow = rowContext[\s\S]*?visibleRows\.find\(\(entry\) => entry\.providerMessageId === rowContext\.id\)/);
 assert.match(viewSource, /contextRow\.serverMailboxId === mailbox\.id/);
 assert.match(viewSource, /contextRow\.providerFolder === "INBOX"/);
+assert.match(viewSource, /saveMessageRule\(providerMessageId, update\)/);
+assert.match(viewSource, /onMoveToFiltered=\{\(\) => saveContextLearning\(rowContext\.id, \{ placement: "filtered" \}\)\}/);
 assert.doesNotMatch(viewSource, /canShowLess=\{!isMicrosoftFilteredProtectionActive\(contextRow\)\}/);
 assert.match(viewSource, /const runContextInboxAction = useCallback\(async/);
 assert.match(viewSource, /target\.serverMailboxId !== mailbox\.id \|\| target\.providerFolder !== "INBOX"/);

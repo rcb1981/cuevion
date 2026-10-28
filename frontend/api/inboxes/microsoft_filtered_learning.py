@@ -20,6 +20,7 @@ from api import user_config_store
 FIELD = "microsoftFilteredLearning"
 MAX_MAILBOXES = 12
 MAX_SENDERS = 200
+MAX_MESSAGE_RULES = 300
 MAX_ATTEMPTS = 4
 MAX_TOTAL_STATE_BYTES = 128000
 MAILBOX_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$")
@@ -66,6 +67,35 @@ def _validate_rules(value: object) -> dict:
     return deepcopy(value)
 
 
+def _valid_message_id(value: object) -> bool:
+    # Graph IDs are opaque. Bind them to the authorized mailbox, never infer
+    # authority from a client-supplied ID, and reject control characters.
+    return (type(value) is str and 1 <= len(value) <= 1024 and
+            all(33 <= ord(ch) <= 126 for ch in value))
+
+
+def _validate_message_rules(value: object) -> dict:
+    if type(value) is not dict or len(value) > MAX_MESSAGE_RULES:
+        raise MicrosoftFilteredLearningError("invalid_learning")
+    for message_id, rule in value.items():
+        if not _valid_message_id(message_id) or type(rule) is not dict or not rule:
+            raise MicrosoftFilteredLearningError("invalid_learning")
+        if not set(rule).issubset({"priority", "label", "placement"}):
+            raise MicrosoftFilteredLearningError("invalid_learning")
+        if ("priority" in rule and (type(rule["priority"]) is not str or
+                                    rule["priority"] not in ("important", "normal"))):
+            raise MicrosoftFilteredLearningError("invalid_learning")
+        if ("label" in rule and (type(rule["label"]) is not str or
+                                 rule["label"] not in LABELS)):
+            raise MicrosoftFilteredLearningError("invalid_learning")
+        if ("placement" in rule and (type(rule["placement"]) is not str or
+                                    rule["placement"] not in ("inbox", "filtered"))):
+            raise MicrosoftFilteredLearningError("invalid_learning")
+    if len(json.dumps(value, separators=(",", ":"))) > 95000:
+        raise MicrosoftFilteredLearningError("invalid_learning")
+    return deepcopy(value)
+
+
 def _read_states(config: dict) -> dict:
     states = config.get(FIELD, {})
     if type(states) is not dict or len(states) > MAX_MAILBOXES:
@@ -74,11 +104,14 @@ def _read_states(config: dict) -> dict:
         raise MicrosoftFilteredLearningError("learning_unavailable")
     for mailbox_id, state in states.items():
         if (type(mailbox_id) is not str or MAILBOX_ID.fullmatch(mailbox_id) is None or
-                type(state) is not dict or set(state) != {"placements", "rules"}):
+                type(state) is not dict or
+                set(state) not in ({"placements", "rules"},
+                                   {"placements", "rules", "messageRules"})):
             raise MicrosoftFilteredLearningError("learning_unavailable")
         try:
             _validate_placements(state["placements"])
             _validate_rules(state["rules"])
+            _validate_message_rules(state.get("messageRules", {}))
         except MicrosoftFilteredLearningError:
             raise MicrosoftFilteredLearningError("learning_unavailable") from None
     return states
@@ -91,6 +124,7 @@ def _project(states: dict, mailbox_id: str) -> dict:
         "exists": state is not None,
         "placements": deepcopy(state["placements"]) if state else {},
         "rules": deepcopy(state["rules"]) if state else {},
+        "messageRules": deepcopy(state.get("messageRules", {})) if state else {},
     }
 
 
@@ -100,6 +134,7 @@ def _validate_action(action: str, payload: dict) -> None:
         "bootstrap": {"mailboxId", "action", "placements", "rules"},
         "setPlacement": {"mailboxId", "action", "sender", "placement"},
         "setRule": {"mailboxId", "action", "sender", "rule"},
+        "setMessageRule": {"mailboxId", "action", "messageId", "rule"},
     }
     if action not in allowed or set(payload) != allowed[action]:
         raise MicrosoftFilteredLearningError("invalid_learning")
@@ -114,6 +149,10 @@ def _validate_action(action: str, payload: dict) -> None:
         raise MicrosoftFilteredLearningError("invalid_learning")
     if action == "setRule":
         _validate_rules({payload["sender"]: payload["rule"]})
+    if action == "setMessageRule":
+        if not _valid_message_id(payload["messageId"]):
+            raise MicrosoftFilteredLearningError("invalid_learning")
+        _validate_message_rules({payload["messageId"]: payload["rule"]})
 
 
 def apply_owned_learning_action(headers, payload: object) -> dict:
@@ -150,7 +189,7 @@ def apply_owned_learning_action(headers, payload: object) -> dict:
         if mailbox_id not in next_states:
             if len(next_states) >= MAX_MAILBOXES:
                 raise MicrosoftFilteredLearningError("learning_unavailable")
-            next_states[mailbox_id] = {"placements": {}, "rules": {}}
+            next_states[mailbox_id] = {"placements": {}, "rules": {}, "messageRules": {}}
         item = next_states[mailbox_id]
         if action == "bootstrap":
             item["placements"] = _validate_placements(payload["placements"])
@@ -167,6 +206,13 @@ def apply_owned_learning_action(headers, payload: object) -> dict:
                 raise MicrosoftFilteredLearningError("learning_limit_reached")
             item["rules"][payload["sender"]] = deepcopy(payload["rule"])
             _validate_rules(item["rules"])
+        elif action == "setMessageRule":
+            item.setdefault("messageRules", {})
+            if (payload["messageId"] not in item["messageRules"] and
+                    len(item["messageRules"]) >= MAX_MESSAGE_RULES):
+                raise MicrosoftFilteredLearningError("learning_limit_reached")
+            item["messageRules"][payload["messageId"]] = deepcopy(payload["rule"])
+            _validate_message_rules(item["messageRules"])
 
         if len(json.dumps(next_states, separators=(",", ":"))) > MAX_TOTAL_STATE_BYTES:
             raise MicrosoftFilteredLearningError("learning_limit_reached")

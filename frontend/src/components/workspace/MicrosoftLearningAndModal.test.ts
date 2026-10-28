@@ -18,6 +18,7 @@ const markup = renderToStaticMarkup(React.createElement(MicrosoftLearningControl
   disabled: false,
   canShowLess: true,
   onSave: () => true,
+  onKeepInInbox: () => true,
 }));
 assert.match(markup, /Learning/);
 assert.match(markup, /aria-haspopup="menu"/);
@@ -31,15 +32,17 @@ assert.match(menuSource, /"Promo", "Update", "Finance", "Business", "Demo", "Oth
 assert.doesNotMatch(menuSource, /"Reply", "Other"/);
 assert.doesNotMatch(menuSource, /⌄|⌃/);
 
-assert.match(menuSource, /if \(onSave\(next\)\)/);
+assert.match(menuSource, /finish\(onSave\(next\)\)/);
+assert.match(menuSource, /finish\(onKeepInInbox\(\)\)/);
 assert.match(menuSource, /type="button" role="menuitem" disabled/);
 assert.doesNotMatch(menuSource, /Save Learning|input type="radio"|<select/);
 
 assert.doesNotMatch(markup, /Show less from this sender/);
 const disabledMarkup = renderToStaticMarkup(React.createElement(MicrosoftLearningControls, {
   from: "invalid", disabled: false, canShowLess: true, onSave: () => true,
+  onKeepInInbox: () => true,
 }));
-assert.match(disabledMarkup, /disabled=""/);
+assert.doesNotMatch(disabledMarkup, /disabled=""/, "A single message can learn even without a parseable sender");
 const item = {
   providerFolder: "INBOX", providerMessageId: "graph-1", from: "Paul <paul@example.com>",
   categoryConfidence: "medium", signal: "Normal",
@@ -62,7 +65,8 @@ const view = readFileSync(resolve(process.cwd(), "src/components/workspace/Micro
 const row = readFileSync(resolve(process.cwd(), "src/components/workspace/MicrosoftMessageListRow.tsx"), "utf8");
 const popup = readFileSync(resolve(process.cwd(), "src/components/workspace/MicrosoftFullMessageModal.tsx"), "utf8");
 assert.match(view, /<MicrosoftLearningControls/);
-assert.match(view, /onSave=\{saveSenderLearning\}/);
+assert.match(view, /onSave=\{saveSelectedLearning\}/);
+assert.match(view, /saveMessageRule\(providerMessageId, update\)/);
 assert.match(view, /setFullMessageTargetId\(null\)/);
 assert.match(view, /selectedMessage\?\.providerMessageId === fullMessageTargetId/);
 assert.match(view, /<MicrosoftFullMessageModal/);

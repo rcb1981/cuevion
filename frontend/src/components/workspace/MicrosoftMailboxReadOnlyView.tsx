@@ -49,6 +49,7 @@ import { MicrosoftInertHtmlStage } from "./MicrosoftInertHtmlStage";
 import { filterMicrosoftLoadedMessages, type MicrosoftMessageSortOrder } from "./microsoftMailboxListFilters";
 import {
   microsoftVisibleFolderRows,
+  classifyMicrosoftFilteredMessage,
   isMicrosoftFilteredProtectionActive,
   isMicrosoftPriorityUnderFocus,
   type MicrosoftFocusPreferences,
@@ -56,7 +57,7 @@ import {
 import { useMicrosoftFilteredLearning } from "./useMicrosoftFilteredLearning";
 import { MicrosoftLearningControls } from "./MicrosoftLearningControls";
 import { normalizeSenderLearningKey } from "../../lib/learningEngine";
-import type { MicrosoftLearningRule } from "./microsoftLearningRules";
+import type { MicrosoftMessageLearningRule } from "./microsoftLearningRules";
 import {
   microsoftEffectiveListPaneWidth,
   readMicrosoftMailListPaneWidth,
@@ -263,17 +264,18 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     () => microsoftVisibleFolderRows(
       rows, folder, microsoftFiltering.learned, microsoftFiltering.placements,
       microsoftFiltering.ready, microsoftFiltering.rules, focusPreferences,
+      microsoftFiltering.messageRules,
     ),
-    [rows, folder, microsoftFiltering.learned, microsoftFiltering.placements, microsoftFiltering.ready, microsoftFiltering.rules, focusPreferences],
+    [rows, folder, microsoftFiltering.learned, microsoftFiltering.placements, microsoftFiltering.ready, microsoftFiltering.rules, microsoftFiltering.messageRules, focusPreferences],
   );
   const visibleRows = useMemo(
     () => filterMicrosoftLoadedMessages(
       priorityOnly
-        ? folderRows.filter((row) => isMicrosoftPriorityUnderFocus(row, microsoftFiltering.rules, focusPreferences))
+        ? folderRows.filter((row) => isMicrosoftPriorityUnderFocus(row, microsoftFiltering.rules, focusPreferences, microsoftFiltering.messageRules))
         : folderRows,
       { folder, search: searchQuery, unreadOnly, sortOrder },
     ),
-    [folderRows, folder, searchQuery, unreadOnly, sortOrder, priorityOnly, microsoftFiltering.rules, focusPreferences],
+    [folderRows, folder, searchQuery, unreadOnly, sortOrder, priorityOnly, microsoftFiltering.rules, microsoftFiltering.messageRules, focusPreferences],
   );
   // The right-click target is always resolved from the current visible list.
   // Never substitute the previously selected reader message.
@@ -801,16 +803,24 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     void refresh();
   }, [connected, openMessage, refresh]);
 
-  const saveSenderLearning = useCallback((rule: MicrosoftLearningRule) => {
+  const saveSelectedLearning = useCallback((update: MicrosoftMessageLearningRule) => {
     const activeFolder = folderRef.current;
     const message = selectedMessage;
     if (!connected || !microsoftFiltering.ready || mutationBusy ||
         !message?.providerMessageId || selectedIdRef.current !== message.providerMessageId ||
         (activeFolder !== "Inbox" && activeFolder !== "Filtered") ||
-        (rule.priority === "show_less" && isMicrosoftFilteredProtectionActive(message))) return false;
-    if (!microsoftFiltering.saveRule(message.from, rule)) return false;
-    const rerouted = (activeFolder === "Inbox" && rule.priority === "show_less") ||
-      (activeFolder === "Filtered" && rule.priority !== "show_less");
+        (update.placement === "filtered" && isMicrosoftFilteredProtectionActive(message))) return false;
+    const id = message.providerMessageId;
+    const nextMessageRules = {
+      ...microsoftFiltering.messageRules,
+      [id]: { ...microsoftFiltering.messageRules[id], ...update },
+    };
+    const nextFolder = classifyMicrosoftFilteredMessage(
+      message, microsoftFiltering.learned, microsoftFiltering.placements,
+      microsoftFiltering.rules, focusPreferences, nextMessageRules,
+    );
+    if (!microsoftFiltering.saveMessageRule(id, update)) return false;
+    const rerouted = activeFolder !== nextFolder;
     if (rerouted) {
       selectedIdRef.current = null;
       messageTicket.current += 1;
@@ -826,24 +836,42 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       setAttachmentDownloadError(null);
     }
     setPlacementNotice(
-      "Learning saved for this Microsoft mailbox." +
-      (rerouted ? " The sender appears under " +
-        (rule.priority === "show_less" ? "Filtered." : "Inbox.") : ""),
+      "Learning saved for this message." +
+      (rerouted ? " This message now appears under " + nextFolder + "." : ""),
     );
     return true;
-  }, [connected, microsoftFiltering, mutationBusy, selectedMessage]);
+  }, [connected, microsoftFiltering, mutationBusy, selectedMessage, focusPreferences]);
 
-  const saveContextLearning = useCallback((providerMessageId: string, rule: MicrosoftLearningRule) => {
+  const saveContextLearning = useCallback((providerMessageId: string, update: MicrosoftMessageLearningRule) => {
     const target = visibleRows.find((entry) => entry.providerMessageId === providerMessageId);
     if (!connected || !microsoftFiltering.ready || mutationInFlight.current || mutationBusy ||
         !isMicrosoftInboxProjection(folderRef.current) ||
         !target || target.serverMailboxId !== mailbox.id || target.providerFolder !== "INBOX" ||
-        (rule.priority === "show_less" && isMicrosoftFilteredProtectionActive(target))) return;
-    if (microsoftFiltering.saveRule(target.from, rule)) {
-      setPlacementNotice("Learning saved for this Microsoft mailbox.");
+        (update.placement === "filtered" && isMicrosoftFilteredProtectionActive(target))) return;
+    const nextMessageRules = {
+      ...microsoftFiltering.messageRules,
+      [providerMessageId]: { ...microsoftFiltering.messageRules[providerMessageId], ...update },
+    };
+    const nextFolder = classifyMicrosoftFilteredMessage(
+      target, microsoftFiltering.learned, microsoftFiltering.placements,
+      microsoftFiltering.rules, focusPreferences, nextMessageRules,
+    );
+    if (microsoftFiltering.saveMessageRule(providerMessageId, update)) {
+      if (selectedIdRef.current === providerMessageId && nextFolder !== folderRef.current) {
+        selectedIdRef.current = null;
+        messageTicket.current += 1;
+        attachmentTicket.current += 1;
+        attachmentDownloadTicket.current += 1;
+        setSelectedId(null);
+        setSelectedMessage(null);
+        setFullMessageTargetId(null);
+        setAttachmentRows([]);
+      }
+      setPlacementNotice("Learning saved for this message." +
+        (nextFolder !== folderRef.current ? " Now in " + nextFolder + "." : ""));
       setRowContext(null);
     }
-  }, [connected, microsoftFiltering, mutationBusy, visibleRows, mailbox.id]);
+  }, [connected, microsoftFiltering, mutationBusy, visibleRows, mailbox.id, focusPreferences]);
 
   const changeSenderPlacement = useCallback((placement: "show_less" | "keep") => {
     const activeFolder = folderRef.current;
@@ -1573,7 +1601,10 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                   message={message}
                   folder={folder}
                   selected={selectedId === message.providerMessageId}
-                  learningRule={microsoftFiltering.rules[normalizeSenderLearningKey(message.from)]}
+                  learningRule={{
+                    ...microsoftFiltering.rules[normalizeSenderLearningKey(message.from)],
+                    ...microsoftFiltering.messageRules[message.providerMessageId ?? ""],
+                  }}
                   focusPreferences={focusPreferences}
                   disabled={mutationBusy}
                   dateLabel={readableTime(message.createdAt)}
@@ -1636,10 +1667,11 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                     <MicrosoftLearningControls
                       key={selectedMessage.providerMessageId}
                       from={selectedMessage.from}
-                      rule={microsoftFiltering.rules[normalizeSenderLearningKey(selectedMessage.from)]}
+                      rule={microsoftFiltering.messageRules[selectedMessage.providerMessageId ?? ""]}
                       disabled={!microsoftFiltering.ready || mutationBusy}
                       canShowLess={!isMicrosoftFilteredProtectionActive(selectedMessage)}
-                      onSave={saveSenderLearning}
+                      onSave={saveSelectedLearning}
+                      onKeepInInbox={() => saveSelectedLearning({ placement: "inbox" })}
                       openOnRequest={learningRequestId === selectedMessage.providerMessageId}
                     />
                   )}
@@ -1855,7 +1887,11 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           busy={mutationBusy}
           canChangeInbox={contextCanChangeInbox}
           canLearn={contextCanLearn}
-          learningRule={microsoftFiltering.rules[normalizeSenderLearningKey(contextRow.from)]}
+          folder={folder}
+          canMoveToFiltered={!isMicrosoftFilteredProtectionActive(contextRow)}
+          onMoveToInbox={() => saveContextLearning(rowContext.id, { placement: "inbox" })}
+          onMoveToFiltered={() => saveContextLearning(rowContext.id, { placement: "filtered" })}
+          learningRule={microsoftFiltering.messageRules[contextRow.providerMessageId ?? ""]}
           onOpen={() => {
             const targetId = rowContext.id;
             setRowContext(null);
@@ -1867,6 +1903,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           onArchive={() => { void runContextInboxAction(rowContext.id, "archive"); }}
           onDelete={() => { void runContextInboxAction(rowContext.id, "delete"); }}
           onSaveLearning={(rule) => saveContextLearning(rowContext.id, rule)}
+          onKeepInInbox={() => saveContextLearning(rowContext.id, { placement: "inbox" })}
         />
       )}
       {connected && fullMessageTargetId && selectedId === fullMessageTargetId &&
@@ -1878,10 +1915,11 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
             folder={folder}
             attachments={attachmentRows}
             attachmentsBusy={attachmentBusy}
-            learningRule={microsoftFiltering.rules[normalizeSenderLearningKey(selectedMessage.from)]}
+            learningRule={microsoftFiltering.messageRules[selectedMessage.providerMessageId ?? ""]}
             learningDisabled={!microsoftFiltering.ready || mutationBusy}
             canShowLess={!isMicrosoftFilteredProtectionActive(selectedMessage)}
-            onSaveLearning={saveSenderLearning}
+            onSaveLearning={saveSelectedLearning}
+            onKeepInInbox={() => saveSelectedLearning({ placement: "inbox" })}
             conversationRows={conversationRows}
             onSelectConversationMessage={(id) => {
               if (conversationRows.some((row) => row.providerMessageId === id)) {

@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { createPortal } from "react-dom";
 import type { LiveInboxMessageSnapshot } from "../../lib/inboxConnectionApi";
-import type { MicrosoftLearningLabel, MicrosoftLearningRule } from "./microsoftLearningRules";
+import type { MicrosoftLearningLabel, MicrosoftMessageLearningRule } from "./microsoftLearningRules";
 
 const labels: MicrosoftLearningLabel[] = ["Promo", "Update", "Finance", "Business", "Demo", "Other"];
 const itemClass =
@@ -42,8 +42,9 @@ export function getMicrosoftContextSubmenuPosition({
  * previously selected message.
  */
 export function MicrosoftMessageContextMenu({
-  message, x, y, busy, canChangeInbox, canLearn, learningRule,
-  onOpen, onReadState, onArchive, onDelete, onSaveLearning,
+  message, x, y, busy, canChangeInbox, canLearn,
+  folder, canMoveToFiltered, onMoveToInbox, onMoveToFiltered,
+  onOpen, onReadState, onArchive, onDelete, onSaveLearning, onKeepInInbox,
 }: {
   message: LiveInboxMessageSnapshot;
   x: number;
@@ -51,21 +52,24 @@ export function MicrosoftMessageContextMenu({
   busy: boolean;
   canChangeInbox: boolean;
   canLearn: boolean;
-  learningRule?: MicrosoftLearningRule;
+  folder: string;
+  canMoveToFiltered: boolean;
+  onMoveToInbox: () => void;
+  onMoveToFiltered: () => void;
+  learningRule?: MicrosoftMessageLearningRule;
   onOpen: () => void;
   onReadState: (nextUnread: boolean) => void;
   onArchive: () => void;
   onDelete: () => void;
-  onSaveLearning: (rule: MicrosoftLearningRule) => void;
+  onSaveLearning: (rule: MicrosoftMessageLearningRule) => void;
+  onKeepInInbox: () => void;
 }) {
   const [submenu, setSubmenu] = useState<"move" | "learning" | null>(null);
   const [submenuTriggerY, setSubmenuTriggerY] = useState<number | null>(null);
   const [submenuTheme, setSubmenuTheme] = useState<string | undefined>(undefined);
   const [labelChooserOpen, setLabelChooserOpen] = useState(false);
-  const currentPriority = learningRule?.priority ?? "normal";
-  const currentLabel = learningRule?.label ?? "Other";
-  const changeLearning = (priority: MicrosoftLearningRule["priority"], label: MicrosoftLearningLabel = currentLabel) => {
-    if (canLearn && !busy) onSaveLearning({ priority, label });
+  const changeLearning = (update: MicrosoftMessageLearningRule) => {
+    if (canLearn && !busy) onSaveLearning(update);
   };
   const showSubmenu = (next: "move" | "learning", trigger: HTMLButtonElement) => {
     setSubmenu(next);
@@ -79,7 +83,7 @@ export function MicrosoftMessageContextMenu({
       triggerY: submenuTriggerY,
       viewportWidth: window.innerWidth,
       viewportHeight: window.innerHeight,
-      expectedHeight: submenu === "move" ? 154 : labelChooserOpen ? 435 : 258,
+      expectedHeight: submenu === "move" ? (folder === "Inbox" || folder === "Filtered" ? 206 : 154) : labelChooserOpen ? 435 : 258,
     })
     : null;
 
@@ -142,24 +146,33 @@ export function MicrosoftMessageContextMenu({
           onContextMenu={(event) => event.preventDefault()}>
           {submenu === "move" ? (
             <div className="space-y-1">
+              {folder === "Filtered" && (
+                <button type="button" role="menuitem" disabled={!canChangeInbox || busy}
+                  onClick={onMoveToInbox} className={smallItemClass}>Inbox</button>
+              )}
+              {folder === "Inbox" && (
+                <button type="button" role="menuitem" disabled={!canChangeInbox || !canMoveToFiltered || busy}
+                  title={!canMoveToFiltered ? "This message is protected from automatic filtering" : undefined}
+                  onClick={onMoveToFiltered} className={smallItemClass}>Filtered</button>
+              )}
               <button type="button" role="menuitem" disabled={!canChangeInbox || busy} onClick={onArchive} className={smallItemClass}>Archive</button>
               <button type="button" role="menuitem" disabled={!canChangeInbox || busy} onClick={onDelete} className={smallItemClass}>Trash</button>
               <button type="button" role="menuitem" disabled title="Moving to Spam is not yet released for Microsoft" className={smallItemClass}>Spam</button>
             </div>
           ) : canLearn && !busy ? (
             <div className="space-y-1">
-            <button type="button" role="menuitem" onClick={() => changeLearning("important")} className={smallItemClass}>Mark as important</button>
-            <button type="button" role="menuitem" onClick={() => changeLearning("normal")} className={smallItemClass}>Mark as not important</button>
+            <button type="button" role="menuitem" onClick={() => changeLearning({ priority: "important" })} className={smallItemClass}>Mark as important</button>
+            <button type="button" role="menuitem" onClick={() => changeLearning({ priority: "normal" })} className={smallItemClass}>Mark as not important</button>
             <button type="button" role="menuitem" aria-expanded={labelChooserOpen} onClick={() => setLabelChooserOpen(!labelChooserOpen)} className={smallItemClass}>Change label...</button>
             {labelChooserOpen && (
               <div role="group" aria-label="Microsoft label choices" className="space-y-1 border-l border-[var(--workspace-divider)] pl-2">
                 {labels.map((label) => (
                   <button type="button" role="menuitem" key={label}
-                    onClick={() => changeLearning(currentPriority, label)} className={smallItemClass}>{label}</button>
+                    onClick={() => changeLearning({ label })} className={smallItemClass}>{label}</button>
                 ))}
               </div>
             )}
-            <button type="button" role="menuitem" onClick={() => changeLearning("normal")} className={smallItemClass}>Keep in inbox</button>
+            <button type="button" role="menuitem" onClick={onKeepInInbox} className={smallItemClass}>Keep in inbox</button>
             <button type="button" role="menuitem" disabled title="Moving to Spam is not yet released for Microsoft" className={smallItemClass}>Move to spam</button>
             </div>
           ) : null}

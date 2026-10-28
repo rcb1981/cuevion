@@ -3,8 +3,11 @@ import {
   microsoftLearningRulesStorageKey,
   parseMicrosoftLearningRules,
   saveMicrosoftLearningRule,
+  saveMicrosoftMessageLearningRule,
   type MicrosoftLearningRule,
   type MicrosoftLearningRuleStore,
+  type MicrosoftMessageLearningRule,
+  type MicrosoftMessageLearningStore,
 } from "./microsoftLearningRules";
 import { loadStartupSession } from "../../lib/authApi";
 import { requestMicrosoftFilteredLearning } from "../../lib/microsoftFilteredLearningApi";
@@ -30,10 +33,12 @@ type ScopedMicrosoftLearning = {
   learned: SenderCategoryLearningStore;
   placements: MicrosoftSenderPlacementStore;
   rules: MicrosoftLearningRuleStore;
+  messageRules: MicrosoftMessageLearningStore;
 };
 const EMPTY_LEARNING: SenderCategoryLearningStore = {};
 const EMPTY_PLACEMENTS: MicrosoftSenderPlacementStore = {};
 const EMPTY_RULES: MicrosoftLearningRuleStore = {};
+const EMPTY_MESSAGE_RULES: MicrosoftMessageLearningStore = {};
 
 /**
  * Read existing Cuevion sender learning WITHOUT changing Gmail/IMAP.
@@ -98,7 +103,8 @@ export function useMicrosoftFilteredLearning(mailboxId: string, connected: boole
             if (!remote) throw new Error("Microsoft Learning import unavailable");
           }
           setScoped({ mailboxId, storageKey: key, learningKey, generation,
-            learned, placements: remote.placements, rules: remote.rules });
+            learned, placements: remote.placements, rules: remote.rules,
+            messageRules: remote.messageRules });
           setError(null);
         } catch {
           setScoped(null);
@@ -182,8 +188,33 @@ export function useMicrosoftFilteredLearning(mailboxId: string, connected: boole
     return true;
   }, [current]);
 
+  const saveMessageRule = useCallback((messageId: string, update: MicrosoftMessageLearningRule): boolean => {
+    if (!current) return false;
+    const rule = { ...current.messageRules[messageId], ...update };
+    const next = saveMicrosoftMessageLearningRule(current.messageRules, messageId, rule);
+    if (!next) {
+      setError("This message cannot be saved to Microsoft Learning.");
+      return false;
+    }
+    const generation = current.generation;
+    setScoped({ ...current, messageRules: next });
+    setError(null);
+    writeTail.current = writeTail.current.then(async () => {
+      const saved = await requestMicrosoftFilteredLearning({
+        mailboxId, action: "setMessageRule", messageId, rule,
+      });
+      if (activeGeneration.current !== generation) return;
+      if (!saved) {
+        setError("The message Learning choice could not be saved. Refresh before retrying.");
+      }
+    });
+    return true;
+  }, [current, mailboxId]);
+
   return {
     rules: current?.rules ?? EMPTY_RULES,
+    messageRules: current?.messageRules ?? EMPTY_MESSAGE_RULES,
+    saveMessageRule,
     saveRule,
     ready: Boolean(current),
     learned: current?.learned ?? EMPTY_LEARNING,

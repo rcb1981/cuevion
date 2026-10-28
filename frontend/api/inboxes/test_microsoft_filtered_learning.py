@@ -104,6 +104,49 @@ class LearningTests(unittest.TestCase):
         self.assertEqual(self.call("read")["placements"][SENDER], "keep")
         self.assertEqual(self.cas_count, 1)
 
+    def test_per_message_learning_is_durable_and_isolated_from_same_sender(self):
+        self.call("bootstrap", placements={}, rules={SENDER: {"priority": "normal", "label": "Other"}})
+        first = "AAMk-graph-message-001"
+        second = "AAMk-graph-message-002"
+        self.call("setMessageRule", messageId=first, rule={"priority": "important", "label": "Demo"})
+        self.assertEqual(self.call("read")["messageRules"], {
+            first: {"priority": "important", "label": "Demo"},
+        })
+        self.call("setMessageRule", messageId=second, rule={"placement": "inbox"})
+        read = self.call("read")
+        self.assertEqual(len(read["messageRules"]), 2)
+        self.assertEqual(read["messageRules"][second], {"placement": "inbox"})
+        self.assertEqual(read["rules"][SENDER]["priority"], "normal")
+        self.assertEqual(read["placements"], {})
+
+    def test_legacy_record_is_read_without_message_rules_and_upgraded_without_loss(self):
+        self.record[learning.FIELD] = {BOX: {"placements": {SENDER: "show_less"}, "rules": {}}}
+        self.assertEqual(self.call("read")["messageRules"], {})
+        self.call("setMessageRule", messageId="AAMk-graph-01", rule={"placement": "inbox"})
+        self.assertEqual(self.call("read")["placements"][SENDER], "show_less")
+        self.assertEqual(len(self.call("read")["messageRules"]), 1)
+
+    def test_invalid_message_ids_and_learning_are_denied_without_writes(self):
+        for message_id, rule in (
+            ("", {"priority": "important"}),
+            ("bad\nheader", {"priority": "important"}),
+            ("AAMk-good", {"placement": "junk"}),
+            ("AAMk-good", {"priority": "show_less"}),
+            ("AAMk-good", {"label": "Important", "unknown": True}),
+            ("AAMk-good", {}),
+        ):
+            with self.subTest(message_id=message_id, rule=rule):
+                with self.assertRaises(learning.MicrosoftFilteredLearningError):
+                    self.call("setMessageRule", messageId=message_id, rule=rule)
+        self.assertEqual(self.cas_count, 0)
+
+    def test_conflict_retry_keeps_existing_message_rule_and_settings(self):
+        self.call("setMessageRule", messageId="AAMk-first", rule={"label": "Promo"})
+        self.cas_conflict_once = True
+        self.call("setMessageRule", messageId="AAMk-second", rule={"priority": "normal"})
+        self.assertEqual(self.record["uiPreferences"]["themeMode"], "Light")
+        self.assertEqual(len(self.call("read")["messageRules"]), 2)
+
     def test_parallel_settings_edit_cas_retries_and_preserves_both(self):
         self.cas_conflict_once = True
         self.call("setRule", sender=SENDER, rule={"priority": "normal", "label": "Promo"})

@@ -5,11 +5,11 @@ import { MicrosoftInertHtmlStage } from "./MicrosoftInertHtmlStage";
 import { MicrosoftLinkifiedText } from "./MicrosoftLinkifiedText";
 import { MicrosoftLearningControls } from "./MicrosoftLearningControls";
 import { MicrosoftConversationNav } from "./MicrosoftConversationNav";
-import type { MicrosoftLearningRule } from "./microsoftLearningRules";
+import type { MicrosoftMessageLearningRule } from "./microsoftLearningRules";
 
 export function MicrosoftFullMessageModal({
   message, mailboxId, folder, attachments, attachmentsBusy, attachmentList, learningRule,
-  learningDisabled = false, canShowLess = false, onSaveLearning,
+  learningDisabled = false, canShowLess = false, onSaveLearning, onKeepInInbox,
   conversationRows = [], onSelectConversationMessage, onClose,
 }: {
   message: LiveInboxMessageSnapshot;
@@ -18,10 +18,11 @@ export function MicrosoftFullMessageModal({
   attachments?: MicrosoftAttachmentMetadata[];
   attachmentsBusy?: boolean;
   attachmentList?: React.ReactNode;
-  learningRule?: MicrosoftLearningRule;
+  learningRule?: MicrosoftMessageLearningRule;
   learningDisabled?: boolean;
   canShowLess?: boolean;
-  onSaveLearning?: (rule: MicrosoftLearningRule) => boolean;
+  onSaveLearning?: (rule: MicrosoftMessageLearningRule) => boolean;
+  onKeepInInbox?: () => boolean;
   conversationRows?: ReadonlyArray<LiveInboxMessageSnapshot>;
   onSelectConversationMessage?: (id: string) => void;
   onClose: () => void;
@@ -52,13 +53,14 @@ export function MicrosoftFullMessageModal({
               <h2 className="truncate text-base font-semibold text-[var(--workspace-text)]">{message.subject || "(No subject)"}</h2>
               <p className="truncate text-xs text-[var(--workspace-text-muted)]">{message.from}</p>
             </div>
-            {(folder === "Inbox" || folder === "Filtered") && onSaveLearning && (
+            {(folder === "Inbox" || folder === "Filtered") && onSaveLearning && onKeepInInbox && (
               <MicrosoftLearningControls
                 from={message.from}
                 rule={learningRule}
                 disabled={learningDisabled}
                 canShowLess={canShowLess}
                 onSave={onSaveLearning}
+                onKeepInInbox={onKeepInInbox}
               />
             )}
             <button type="button" ref={closeRef} onClick={onClose} aria-label="Close full message"

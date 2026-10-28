@@ -3,7 +3,8 @@ import { requestMicrosoftFilteredLearning } from "./microsoftFilteredLearningApi
 
 const BOX = "microsoft-test-01";
 const PAYLOAD = { ok: true, exists: true, placements: { "artist@example.com": "keep" },
-  rules: { "dj@example.com": { priority: "important", label: "Demo" } } };
+  rules: { "dj@example.com": { priority: "important", label: "Demo" } },
+  messageRules: { "AAMk-message-one": { priority: "important", label: "Promo" } } };
 
 async function run() {
   const original = globalThis.fetch;
@@ -16,6 +17,7 @@ async function run() {
     const read = await requestMicrosoftFilteredLearning({ mailboxId: BOX, action: "read" });
     assert.equal(read?.placements["artist@example.com"], "keep");
     assert.equal(read?.rules["dj@example.com"]?.label, "Demo");
+    assert.equal(read?.messageRules["AAMk-message-one"]?.priority, "important");
     assert.equal(requests[0].url, "/api/inboxes/microsoft-filtered-learning");
     assert.equal(requests[0].options.method, "POST");
     assert.equal(requests[0].options.credentials, "include");
@@ -24,6 +26,13 @@ async function run() {
     await requestMicrosoftFilteredLearning({ mailboxId: BOX, action: "setPlacement",
       sender: "artist@example.com", placement: "show_less" });
     assert.equal(JSON.parse(String(requests[1].options.body)).placement, "show_less");
+
+    await requestMicrosoftFilteredLearning({ mailboxId: BOX, action: "setMessageRule",
+      messageId: "AAMk-message-two", rule: { placement: "inbox" } });
+    assert.deepEqual(JSON.parse(String(requests[2].options.body)), {
+      mailboxId: BOX, action: "setMessageRule", messageId: "AAMk-message-two",
+      rule: { placement: "inbox" },
+    });
 
     globalThis.fetch = (async () => ({ ok: true,
       json: async () => ({ ...PAYLOAD, rules: { "invalid sender": { priority: "important", label: "Demo" } } }),
