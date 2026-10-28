@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import "sucrase/register/tsx.js";
 
-const { MicrosoftMessageContextMenu } = require(
+const { MicrosoftMessageContextMenu, getMicrosoftContextSubmenuPosition } = require(
   resolve(process.cwd(), "src/components/workspace/MicrosoftMessageContextMenu.tsx"),
 ) as typeof import("./MicrosoftMessageContextMenu");
 
@@ -52,6 +52,23 @@ assert.match(otherFolder, /disabled=""[^>]*>Archive/);
 assert.match(otherFolder, /disabled=""[^>]*>Delete/);
 assert.match(otherFolder, /disabled=""[^>]*>Learning/);
 
+// The flyout never expands the main menu or covers the Learning trigger.
+// Room on the right opens right; cramped right edges open to the left.
+assert.deepEqual(getMicrosoftContextSubmenuPosition({
+  mainMenuX: 100, triggerY: 220, viewportWidth: 1100, viewportHeight: 800, expectedHeight: 258,
+}), { left: 352, top: 220 });
+assert.deepEqual(getMicrosoftContextSubmenuPosition({
+  mainMenuX: 500, triggerY: 640, viewportWidth: 900, viewportHeight: 700, expectedHeight: 258,
+}), { left: 266, top: 434 });
+assert.deepEqual(getMicrosoftContextSubmenuPosition({
+  mainMenuX: 500, triggerY: 640, viewportWidth: 900, viewportHeight: 700, expectedHeight: 435,
+}), { left: 266, top: 257 });
+const menuSource = readFileSync(resolve(__dirname, "MicrosoftMessageContextMenu.tsx"), "utf8");
+assert.match(menuSource, /createPortal\(/);
+assert.match(menuSource, /data-microsoft-context-submenu/);
+assert.doesNotMatch(menuSource, /<div role="menu" aria-label="Microsoft move destinations" className="space-y-1 border-l/,
+  "Moving to another folder must use a separate flyout, not push Learning down");
+
 const viewSource = readFileSync(resolve(__dirname, "MicrosoftMailboxReadOnlyView.tsx"), "utf8");
 assert.match(viewSource, /const contextRow = rowContext[\s\S]*?visibleRows\.find\(\(entry\) => entry\.providerMessageId === rowContext\.id\)/);
 assert.match(viewSource, /contextRow\.serverMailboxId === mailbox\.id/);
@@ -65,6 +82,8 @@ assert.match(viewSource, /if \(selectedIdRef\.current === providerMessageId\)/);
 assert.match(viewSource, /onReadState=\{\(\) => \{ void runContextInboxAction\(rowContext\.id, "read"\); \}\}/);
 assert.match(viewSource, /onArchive=\{\(\) => \{ void runContextInboxAction\(rowContext\.id, "archive"\); \}\}/);
 assert.match(viewSource, /onDelete=\{\(\) => \{ void runContextInboxAction\(rowContext\.id, "delete"\); \}\}/);
+assert.match(viewSource, /\[data-microsoft-context-submenu\]/,
+  "Clicks in a portal flyout must not dismiss the context menu before the action runs");
 assert.doesNotMatch(viewSource, /onOpenContextMenu=\{[\s\S]{0,450}openMessage\(/,
   "Right-click must not open or automatically mark the target as read");
 

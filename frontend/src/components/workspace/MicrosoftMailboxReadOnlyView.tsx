@@ -301,7 +301,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     if (!rowContext) return;
     const close = (event: PointerEvent) => {
       if (event.target instanceof Element &&
-          event.target.closest('[aria-label="Microsoft message context menu"]')) return;
+          event.target.closest('[aria-label="Microsoft message context menu"], [data-microsoft-context-submenu]')) return;
       setRowContext(null);
     };
     const escape = (event: KeyboardEvent) => {

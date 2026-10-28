@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { createPortal } from "react-dom";
 import type { LiveInboxMessageSnapshot } from "../../lib/inboxConnectionApi";
 import type { MicrosoftLearningLabel, MicrosoftLearningRule } from "./microsoftLearningRules";
 
@@ -7,6 +8,32 @@ const itemClass =
   "flex w-full items-center rounded-[14px] px-3 py-2.5 text-left text-[0.82rem] text-[var(--workspace-text)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-menu-hover)] disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent";
 const smallItemClass =
   "flex w-full items-center rounded-[14px] px-3 py-[0.42rem] text-left text-[0.76rem] text-[var(--workspace-text)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-menu-hover)] disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent";
+
+const MAIN_MENU_WIDTH = 244;
+const SUBMENU_WIDTH = 226;
+const MENU_GAP = 8;
+
+/** Keep flyouts beside the main menu, never over its Learning trigger. */
+export function getMicrosoftContextSubmenuPosition({
+  mainMenuX, triggerY, viewportWidth, viewportHeight, expectedHeight,
+}: {
+  mainMenuX: number;
+  triggerY: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  expectedHeight: number;
+}) {
+  const rightX = mainMenuX + MAIN_MENU_WIDTH + MENU_GAP;
+  const leftX = mainMenuX - SUBMENU_WIDTH - MENU_GAP;
+  const rightFits = rightX + SUBMENU_WIDTH + MENU_GAP <= viewportWidth;
+  const leftFits = leftX >= MENU_GAP;
+  const preferLeft = !rightFits && (leftFits || mainMenuX > viewportWidth / 2);
+  const candidateX = preferLeft ? leftX : rightX;
+  return {
+    left: Math.max(MENU_GAP, Math.min(candidateX, viewportWidth - SUBMENU_WIDTH - MENU_GAP)),
+    top: Math.max(MENU_GAP, Math.min(triggerY, viewportHeight - Math.min(expectedHeight, viewportHeight - 16) - MENU_GAP)),
+  };
+}
 
 /**
  * Same visible menu hierarchy as the Gmail/IMAP message menu. The menu never
@@ -32,12 +59,27 @@ export function MicrosoftMessageContextMenu({
   onSaveLearning: (rule: MicrosoftLearningRule) => void;
 }) {
   const [submenu, setSubmenu] = useState<"move" | "learning" | null>(null);
+  const [submenuTriggerY, setSubmenuTriggerY] = useState<number | null>(null);
   const [labelChooserOpen, setLabelChooserOpen] = useState(false);
   const currentPriority = learningRule?.priority ?? "normal";
   const currentLabel = learningRule?.label ?? "Other";
   const changeLearning = (priority: MicrosoftLearningRule["priority"], label: MicrosoftLearningLabel = currentLabel) => {
     if (canLearn && !busy) onSaveLearning({ priority, label });
   };
+  const showSubmenu = (next: "move" | "learning", trigger: HTMLButtonElement) => {
+    setSubmenu(next);
+    setSubmenuTriggerY(trigger.getBoundingClientRect().top);
+    setLabelChooserOpen(false);
+  };
+  const flyoutPosition = submenu && submenuTriggerY !== null && typeof window !== "undefined"
+    ? getMicrosoftContextSubmenuPosition({
+      mainMenuX: x,
+      triggerY: submenuTriggerY,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+      expectedHeight: submenu === "move" ? 154 : labelChooserOpen ? 435 : 258,
+    })
+    : null;
 
   return (
     <div
@@ -80,23 +122,30 @@ export function MicrosoftMessageContextMenu({
       <div className="my-2 h-px bg-[var(--workspace-divider)]" />
       <div className="space-y-1">
         <button type="button" role="menuitem" aria-haspopup="menu" aria-expanded={submenu === "move"}
-          onClick={() => { setSubmenu(submenu === "move" ? null : "move"); setLabelChooserOpen(false); }}
-          onMouseEnter={() => { setSubmenu("move"); setLabelChooserOpen(false); }}
+          onClick={(event) => submenu === "move" ? setSubmenu(null) : showSubmenu("move", event.currentTarget)}
+          onMouseEnter={(event) => showSubmenu("move", event.currentTarget)}
           className={itemClass + " justify-between"}>Move to... <span aria-hidden="true">›</span></button>
-        {submenu === "move" && (
-          <div role="menu" aria-label="Microsoft move destinations" className="space-y-1 border-l border-[var(--workspace-divider)] pl-2">
-            <button type="button" role="menuitem" disabled={!canChangeInbox || busy} onClick={onArchive} className={smallItemClass}>Archive</button>
-            <button type="button" role="menuitem" disabled={!canChangeInbox || busy} onClick={onDelete} className={smallItemClass}>Trash</button>
-            <button type="button" role="menuitem" disabled title="Moving to Spam is not yet released for Microsoft" className={smallItemClass}>Spam</button>
-          </div>
-        )}
         <button type="button" role="menuitem" aria-haspopup="menu" aria-expanded={submenu === "learning"}
           disabled={!canLearn || busy}
-          onClick={() => { setSubmenu(submenu === "learning" ? null : "learning"); setLabelChooserOpen(false); }}
-          onMouseEnter={() => { if (canLearn && !busy) { setSubmenu("learning"); setLabelChooserOpen(false); } }}
+          onClick={(event) => submenu === "learning" ? setSubmenu(null) : showSubmenu("learning", event.currentTarget)}
+          onMouseEnter={(event) => { if (canLearn && !busy) showSubmenu("learning", event.currentTarget); }}
           className={itemClass + " justify-between"}>Learning <span aria-hidden="true">›</span></button>
-        {submenu === "learning" && canLearn && !busy && (
-          <div role="menu" aria-label="Microsoft Learning options" className="space-y-1 border-l border-[var(--workspace-divider)] pl-2">
+      </div>
+      {flyoutPosition && createPortal(
+        <div data-microsoft-context-submenu role="menu"
+          aria-label={submenu === "move" ? "Microsoft move destinations" : "Microsoft Learning options"}
+          className="cuevion-dark-scroll cuevion-soft-scroll fixed z-[331] max-h-[calc(100dvh-16px)] w-[226px] overflow-y-auto rounded-[20px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
+          style={flyoutPosition}
+          onMouseDown={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}>
+          {submenu === "move" ? (
+            <div className="space-y-1">
+              <button type="button" role="menuitem" disabled={!canChangeInbox || busy} onClick={onArchive} className={smallItemClass}>Archive</button>
+              <button type="button" role="menuitem" disabled={!canChangeInbox || busy} onClick={onDelete} className={smallItemClass}>Trash</button>
+              <button type="button" role="menuitem" disabled title="Moving to Spam is not yet released for Microsoft" className={smallItemClass}>Spam</button>
+            </div>
+          ) : canLearn && !busy ? (
+            <div className="space-y-1">
             <button type="button" role="menuitem" onClick={() => changeLearning("important")} className={smallItemClass}>Mark as important</button>
             <button type="button" role="menuitem" onClick={() => changeLearning("normal")} className={smallItemClass}>Mark as not important</button>
             <button type="button" role="menuitem" aria-expanded={labelChooserOpen} onClick={() => setLabelChooserOpen(!labelChooserOpen)} className={smallItemClass}>Change label...</button>
@@ -110,9 +159,10 @@ export function MicrosoftMessageContextMenu({
             )}
             <button type="button" role="menuitem" onClick={() => changeLearning("normal")} className={smallItemClass}>Keep in inbox</button>
             <button type="button" role="menuitem" disabled title="Moving to Spam is not yet released for Microsoft" className={smallItemClass}>Move to spam</button>
-          </div>
-        )}
-      </div>
+            </div>
+          ) : null}
+        </div>, document.body,
+      )}
     </div>
   );
 }
