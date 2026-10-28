@@ -66,6 +66,9 @@ assert.deepEqual(getMicrosoftContextSubmenuPosition({
 const menuSource = readFileSync(resolve(__dirname, "MicrosoftMessageContextMenu.tsx"), "utf8");
 assert.match(menuSource, /createPortal\(/);
 assert.match(menuSource, /data-microsoft-context-submenu/);
+assert.match(menuSource, /trigger\.closest\("\[data-theme\]"\)\?\.getAttribute\("data-theme"\)/,
+  "Portal flyouts must inherit the active mailbox theme instead of the document's light default");
+assert.match(menuSource, /data-microsoft-context-submenu data-theme=\{submenuTheme\}/);
 assert.doesNotMatch(menuSource, /<div role="menu" aria-label="Microsoft move destinations" className="space-y-1 border-l/,
   "Moving to another folder must use a separate flyout, not push Learning down");
 

@@ -60,6 +60,7 @@ export function MicrosoftMessageContextMenu({
 }) {
   const [submenu, setSubmenu] = useState<"move" | "learning" | null>(null);
   const [submenuTriggerY, setSubmenuTriggerY] = useState<number | null>(null);
+  const [submenuTheme, setSubmenuTheme] = useState<string | undefined>(undefined);
   const [labelChooserOpen, setLabelChooserOpen] = useState(false);
   const currentPriority = learningRule?.priority ?? "normal";
   const currentLabel = learningRule?.label ?? "Other";
@@ -69,6 +70,7 @@ export function MicrosoftMessageContextMenu({
   const showSubmenu = (next: "move" | "learning", trigger: HTMLButtonElement) => {
     setSubmenu(next);
     setSubmenuTriggerY(trigger.getBoundingClientRect().top);
+    setSubmenuTheme(trigger.closest("[data-theme]")?.getAttribute("data-theme") ?? undefined);
     setLabelChooserOpen(false);
   };
   const flyoutPosition = submenu && submenuTriggerY !== null && typeof window !== "undefined"
@@ -132,7 +134,7 @@ export function MicrosoftMessageContextMenu({
           className={itemClass + " justify-between"}>Learning <span aria-hidden="true">›</span></button>
       </div>
       {flyoutPosition && createPortal(
-        <div data-microsoft-context-submenu role="menu"
+        <div data-microsoft-context-submenu data-theme={submenuTheme} role="menu"
           aria-label={submenu === "move" ? "Microsoft move destinations" : "Microsoft Learning options"}
           className="cuevion-dark-scroll cuevion-soft-scroll fixed z-[331] max-h-[calc(100dvh-16px)] w-[226px] overflow-y-auto rounded-[20px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
           style={flyoutPosition}
