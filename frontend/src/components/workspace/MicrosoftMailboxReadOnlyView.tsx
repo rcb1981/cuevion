@@ -34,6 +34,7 @@ import { MicrosoftDraftEditor } from "./MicrosoftDraftEditor";
 import { MicrosoftRichDraftMetadataEditor } from "./MicrosoftRichDraftMetadataEditor";
 import { MicrosoftComposeDesignPreview } from "./MicrosoftComposeDesignPreview";
 import { MicrosoftMessageListRow } from "./MicrosoftMessageListRow";
+import { MicrosoftMessageContextMenu } from "./MicrosoftMessageContextMenu";
 import { MicrosoftFullMessageModal } from "./MicrosoftFullMessageModal";
 import { MicrosoftAttachmentList } from "./MicrosoftAttachmentList";
 import { fetchMicrosoftAttachments, downloadMicrosoftAttachmentFile } from "../../lib/microsoftAttachmentReadApi";
@@ -273,6 +274,22 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
       { folder, search: searchQuery, unreadOnly, sortOrder },
     ),
     [folderRows, folder, searchQuery, unreadOnly, sortOrder, priorityOnly, microsoftFiltering.rules, focusPreferences],
+  );
+  // The right-click target is always resolved from the current visible list.
+  // Never substitute the previously selected reader message.
+  const contextRow = rowContext
+    ? visibleRows.find((entry) => entry.providerMessageId === rowContext.id)
+    : undefined;
+  const contextCanChangeInbox = Boolean(
+    connected && isMicrosoftInboxProjection(folder) && contextRow &&
+    contextRow.serverMailboxId === mailbox.id &&
+    contextRow.providerFolder === "INBOX" && !mutationBusy,
+  );
+  const contextCanLearn = Boolean(
+    connected && isMicrosoftInboxProjection(folder) &&
+    contextRow?.serverMailboxId === mailbox.id &&
+    contextRow.providerFolder === "INBOX" &&
+    microsoftFiltering.ready && !mutationBusy,
   );
   const conversationRows = useMemo(
     () => getMicrosoftConversationRows(folderRows, selectedId, mailbox.id),
@@ -816,6 +833,18 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     return true;
   }, [connected, microsoftFiltering, mutationBusy, selectedMessage]);
 
+  const saveContextLearning = useCallback((providerMessageId: string, rule: MicrosoftLearningRule) => {
+    const target = visibleRows.find((entry) => entry.providerMessageId === providerMessageId);
+    if (!connected || !microsoftFiltering.ready || mutationInFlight.current || mutationBusy ||
+        !isMicrosoftInboxProjection(folderRef.current) ||
+        !target || target.serverMailboxId !== mailbox.id || target.providerFolder !== "INBOX" ||
+        (rule.priority === "show_less" && isMicrosoftFilteredProtectionActive(target))) return;
+    if (microsoftFiltering.saveRule(target.from, rule)) {
+      setPlacementNotice("Learning saved for this Microsoft mailbox.");
+      setRowContext(null);
+    }
+  }, [connected, microsoftFiltering, mutationBusy, visibleRows, mailbox.id]);
+
   const changeSenderPlacement = useCallback((placement: "show_less" | "keep") => {
     const activeFolder = folderRef.current;
     const message = selectedMessage;
@@ -1151,6 +1180,98 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     }
   }, [connected, mailbox.id, selectedMessage]);
 
+  // Right-clicking a different message must operate on that exact row without
+  // opening it (which would otherwise mark it read) or mutating the selected
+  // reader's message. Graph enforces the same owner-bound Inbox-only gates.
+  const runContextInboxAction = useCallback(async (
+    providerMessageId: string,
+    action: "read" | "archive" | "delete",
+  ) => {
+    const target = visibleRows.find((entry) => entry.providerMessageId === providerMessageId);
+    const activeFolder = folderRef.current;
+    if (!connected || !isMicrosoftInboxProjection(activeFolder) ||
+        !target || target.serverMailboxId !== mailbox.id || target.providerFolder !== "INBOX" ||
+        !target.providerMessageId || mutationInFlight.current) return;
+    const nextUnread = !target.unread;
+    mutationInFlight.current = true;
+    const ticket = ++mutationTicket.current;
+    inboxTicket.current += 1;
+    setListBusy(false);
+    setMutationBusy(true);
+    setMutationError(null);
+    setMutationConfirmation(null);
+    setRowContext(null);
+    try {
+      if (action === "read") {
+        const result = await setMicrosoftMessageUnread({
+          mailboxId: mailbox.id, providerMessageId, unread: nextUnread,
+        });
+        if (ticket !== mutationTicket.current || folderRef.current !== activeFolder) return;
+        if (!result.ok || result.providerMessageId !== providerMessageId ||
+            result.unread !== nextUnread) {
+          setMutationError(
+            !result.ok && result.error?.code === "microsoft_write_permission_required"
+              ? "Reconnect Microsoft to grant permission for message changes."
+              : "The change could not be confirmed. Refresh Inbox to check its status.",
+          );
+          return;
+        }
+        setRows((current) => current.map((entry) =>
+          applyConfirmedMicrosoftUnread(entry, providerMessageId, nextUnread),
+        ));
+        setSelectedMessage((current) =>
+          current?.providerMessageId === providerMessageId
+            ? applyConfirmedMicrosoftUnread(current, providerMessageId, nextUnread) : current,
+        );
+        setMutationConfirmation(nextUnread ? "Marked as unread." : "Marked as read.");
+        return;
+      }
+
+      const result = action === "archive"
+        ? await archiveMicrosoftInboxMessage({ mailboxId: mailbox.id, providerMessageId })
+        : await deleteMicrosoftInboxMessage({ mailboxId: mailbox.id, providerMessageId });
+      if (ticket !== mutationTicket.current || folderRef.current !== activeFolder) return;
+      if (!result.ok || result.providerMessageId !== providerMessageId ||
+          (action === "archive" ? !("archived" in result && result.archived === true)
+            : !("deleted" in result && result.deleted === true))) {
+        setMutationError(
+          !result.ok && result.error?.code === "microsoft_write_permission_required"
+            ? "Reconnect Microsoft to grant permission for message changes."
+            : `${action === "archive" ? "Archive" : "Delete"} could not be confirmed. Refresh Inbox before trying again.`,
+        );
+        return;
+      }
+      if (selectedIdRef.current === providerMessageId) {
+        messageTicket.current += 1;
+        attachmentTicket.current += 1;
+        attachmentDownloadTicket.current += 1;
+        selectedIdRef.current = null;
+        setSelectedId(null);
+        setSelectedMessage(null);
+        setFullMessageTargetId(null);
+        setLearningRequestId(null);
+        setAttachmentRows([]);
+        setAttachmentBusy(false);
+        setAttachmentError(null);
+        setAttachmentDownloadBusy(null);
+        setAttachmentDownloadError(null);
+      }
+      setRows((current) => current.filter((entry) => entry.providerMessageId !== providerMessageId));
+      setMutationConfirmation(action === "archive"
+        ? "Archived. The message is now in Archive."
+        : "Moved to Deleted Items.");
+    } catch {
+      if (ticket === mutationTicket.current) {
+        setMutationError("The Microsoft change could not be confirmed. Refresh Inbox to check its status.");
+      }
+    } finally {
+      if (ticket === mutationTicket.current) {
+        mutationInFlight.current = false;
+        setMutationBusy(false);
+      }
+    }
+  }, [connected, mailbox.id, visibleRows]);
+
   // Draft discard is a distinct, unreleased Microsoft-only permission. Never
   // remove the row until the owner-authorized Graph destination is verified.
   const discardSelectedDraft = useCallback(async () => {
@@ -1464,8 +1585,8 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                   onOpenContextMenu={(providerMessageId, x, y) => {
                     setRowContext({
                       id: providerMessageId,
-                      x: Math.max(8, Math.min(x, window.innerWidth - 232)),
-                      y: Math.max(8, Math.min(y, window.innerHeight - 150)),
+                      x: Math.max(8, Math.min(x, window.innerWidth - 260)),
+                      y: Math.max(8, Math.min(y, window.innerHeight - Math.min(580, window.innerHeight - 16))),
                     });
                   }}
                   onOpenFullMessage={(providerMessageId) => {
@@ -1725,35 +1846,28 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
           </div>
         </div>
       )}
-      {connected && rowContext && (
-        <div role="menu" aria-label="Microsoft message context menu"
-          className="fixed z-[330] min-w-[205px] rounded-[14px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-1.5 shadow-[0_16px_36px_rgba(20,18,16,0.28)]"
-          style={{ left: rowContext.x, top: rowContext.y }}>
-          {([
-            { label: "Open message", mode: "open" },
-            { label: "Open full message", mode: "full" },
-            { label: "Learning", mode: "learning" },
-          ] as const).map((option) => (
-            <button key={option.mode} role="menuitem" type="button"
-              className="block w-full rounded-lg px-3 py-2 text-left text-xs text-[var(--workspace-text)] hover:bg-[var(--workspace-hover-surface)]"
-              onClick={() => {
-                const targetId = rowContext.id;
-                setRowContext(null);
-                if (option.mode === "full") {
-                  setFullMessageTargetId(targetId);
-                } else if (option.mode === "learning") {
-                  setLearningRequestId(targetId);
-                  setFullMessageTargetId(null);
-                } else {
-                  setFullMessageTargetId(null);
-                  setLearningRequestId(null);
-                }
-                if (selectedIdRef.current !== targetId) void openMessage(targetId);
-              }}>
-              {option.label}
-            </button>
-          ))}
-        </div>
+      {connected && rowContext && contextRow && (
+        <MicrosoftMessageContextMenu
+          key={rowContext.id}
+          message={contextRow}
+          x={rowContext.x}
+          y={rowContext.y}
+          busy={mutationBusy}
+          canChangeInbox={contextCanChangeInbox}
+          canLearn={contextCanLearn}
+          learningRule={microsoftFiltering.rules[normalizeSenderLearningKey(contextRow.from)]}
+          onOpen={() => {
+            const targetId = rowContext.id;
+            setRowContext(null);
+            setFullMessageTargetId(null);
+            setLearningRequestId(null);
+            void openMessage(targetId);
+          }}
+          onReadState={() => { void runContextInboxAction(rowContext.id, "read"); }}
+          onArchive={() => { void runContextInboxAction(rowContext.id, "archive"); }}
+          onDelete={() => { void runContextInboxAction(rowContext.id, "delete"); }}
+          onSaveLearning={(rule) => saveContextLearning(rowContext.id, rule)}
+        />
       )}
       {connected && fullMessageTargetId && selectedId === fullMessageTargetId &&
         selectedMessage?.providerMessageId === fullMessageTargetId && !messageBusy && (
