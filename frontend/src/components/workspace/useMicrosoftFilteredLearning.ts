@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   microsoftLearningRulesStorageKey,
   parseMicrosoftLearningRules,
@@ -7,12 +7,13 @@ import {
   type MicrosoftLearningRuleStore,
 } from "./microsoftLearningRules";
 import { loadStartupSession } from "../../lib/authApi";
+import { requestMicrosoftFilteredLearning } from "../../lib/microsoftFilteredLearningApi";
 import {
   buildLearningStorageKey,
   hydrateScopedSenderCategoryLearning,
   selectScopedSenderCategoryLearning,
 } from "../../lib/learningPersistence";
-import type { SenderCategoryLearningStore } from "../../lib/learningEngine";
+import { normalizeSenderLearningKey, type SenderCategoryLearningStore } from "../../lib/learningEngine";
 import {
   microsoftFilteredStorageKey,
   parseMicrosoftSenderPlacements,
@@ -25,6 +26,7 @@ type ScopedMicrosoftLearning = {
   mailboxId: string;
   storageKey: string;
   learningKey: string;
+  generation: number;
   learned: SenderCategoryLearningStore;
   placements: MicrosoftSenderPlacementStore;
   rules: MicrosoftLearningRuleStore;
@@ -42,14 +44,18 @@ const EMPTY_RULES: MicrosoftLearningRuleStore = {};
 export function useMicrosoftFilteredLearning(mailboxId: string, connected: boolean) {
   const [scoped, setScoped] = useState<ScopedMicrosoftLearning | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const activeGeneration = useRef(0);
+  const writeTail = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     let active = true;
+    const generation = ++activeGeneration.current;
+    writeTail.current = Promise.resolve();
     setScoped(null);
     setError(null);
     if (!connected) return () => { active = false; };
 
-    void loadStartupSession().then((session) => {
+    void loadStartupSession().then(async (session) => {
       if (!active) return;
       if (
         session.status !== "authenticated" ||
@@ -69,29 +75,42 @@ export function useMicrosoftFilteredLearning(mailboxId: string, connected: boole
         setError("Microsoft Filtered preferences are unavailable. Inbox is unchanged.");
         return;
       }
-      const reload = () => {
-        if (!active) return;
+      const reload = async () => {
+        if (!active || activeGeneration.current !== generation) return;
         try {
           const storage = window.localStorage;
           const learned = selectScopedSenderCategoryLearning(
             hydrateScopedSenderCategoryLearning(storage, learningKey),
             learningKey,
           );
-          const placements = parseMicrosoftSenderPlacements(storage.getItem(key));
-          const rules = parseMicrosoftLearningRules(storage.getItem(key + ":learning-v1"));
-          setScoped({ mailboxId, storageKey: key, learningKey, learned, placements, rules });
+          let remote = await requestMicrosoftFilteredLearning({ mailboxId, action: "read" });
+          if (!active || activeGeneration.current !== generation) return;
+          if (!remote) throw new Error("Microsoft Learning storage unavailable");
+          if (!remote.exists) {
+            // One-time import of earlier browser-only decisions. CAS ensures a
+            // second browser never overwrites data already saved on the server.
+            const localPlacements = parseMicrosoftSenderPlacements(storage.getItem(key));
+            const localRules = parseMicrosoftLearningRules(storage.getItem(microsoftLearningRulesStorageKey(key) ?? ""));
+            remote = await requestMicrosoftFilteredLearning({
+              mailboxId, action: "bootstrap", placements: localPlacements, rules: localRules,
+            });
+            if (!active || activeGeneration.current !== generation) return;
+            if (!remote) throw new Error("Microsoft Learning import unavailable");
+          }
+          setScoped({ mailboxId, storageKey: key, learningKey, generation,
+            learned, placements: remote.placements, rules: remote.rules });
           setError(null);
         } catch {
           setScoped(null);
-          setError("Microsoft Filtered preferences are unavailable. Inbox is unchanged.");
+          setError("Microsoft Learning could not load. Inbox is unchanged; saved choices were not modified.");
         }
       };
-      reload();
+      void reload();
       const onStorage = (event: StorageEvent) => {
         if (event.key === null || event.key === key || event.key === learningKey ||
-            event.key === microsoftLearningRulesStorageKey(key)) reload();
+            event.key === microsoftLearningRulesStorageKey(key)) void reload();
       };
-      const onFocus = () => reload();
+      const onFocus = () => { void writeTail.current.then(reload); };
       window.addEventListener("storage", onStorage);
       window.addEventListener("focus", onFocus);
       // Replace cleanup after async session fetch, without installing any
@@ -121,15 +140,21 @@ export function useMicrosoftFilteredLearning(mailboxId: string, connected: boole
       setError("This sender cannot be added to Microsoft Filtered.");
       return false;
     }
-    try {
-      window.localStorage.setItem(current.storageKey, JSON.stringify(next));
-      setScoped({ ...current, placements: next });
-      setError(null);
-      return true;
-    } catch {
-      setError("Microsoft Filtered preference could not be saved.");
-      return false;
-    }
+    const generation = current.generation;
+    setScoped({ ...current, placements: next });
+    setError(null);
+    writeTail.current = writeTail.current.then(async () => {
+      const saved = await requestMicrosoftFilteredLearning({
+        mailboxId, action: "setPlacement", sender: normalizeSenderLearningKey(sender), placement,
+      });
+      if (activeGeneration.current !== generation) return;
+      if (!saved) {
+        setError("Microsoft Filtered preference could not be saved. Please try again.");
+        return;
+      }
+      try { window.localStorage.setItem(current.storageKey, JSON.stringify(saved.placements)); } catch { /* optional migration mirror */ }
+    });
+    return true;
   }, [current]);
 
   const saveRule = useCallback((sender: string, rule: MicrosoftLearningRule): boolean => {
@@ -140,15 +165,21 @@ export function useMicrosoftFilteredLearning(mailboxId: string, connected: boole
       setError("This sender cannot be saved to Microsoft Learning.");
       return false;
     }
-    try {
-      window.localStorage.setItem(key, JSON.stringify(next));
-      setScoped({ ...current, rules: next });
-      setError(null);
-      return true;
-    } catch {
-      setError("The Microsoft Learning rule could not be saved.");
-      return false;
-    }
+    const generation = current.generation;
+    setScoped({ ...current, rules: next });
+    setError(null);
+    writeTail.current = writeTail.current.then(async () => {
+      const saved = await requestMicrosoftFilteredLearning({
+        mailboxId, action: "setRule", sender: normalizeSenderLearningKey(sender), rule,
+      });
+      if (activeGeneration.current !== generation) return;
+      if (!saved) {
+        setError("The Microsoft Learning rule could not be saved. Please try again.");
+        return;
+      }
+      try { window.localStorage.setItem(key, JSON.stringify(saved.rules)); } catch { /* optional migration mirror */ }
+    });
+    return true;
   }, [current]);
 
   return {
