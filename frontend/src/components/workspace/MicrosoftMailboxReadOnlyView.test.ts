@@ -150,7 +150,7 @@ assert.match(viewSource, /fetchMicrosoftSentMessage\(/);
 assert.match(viewSource, /const selectFolder = useCallback/);
 assert.match(viewSource, /folderRef\.current = nextFolder/);
 assert.match(viewSource, /folderRef\.current !== requestedFolder/);
-assert.match(viewSource, /folderRef\.current !== "Inbox"/);
+assert.match(viewSource, /isMicrosoftInboxProjection\(folderRef\.current\)/);
 assert.match(viewSource, /isMicrosoftInboxProjection\(folder\) && \(/);
 assert.match(viewSource, /folder === "Sent" \|\| folder === "Drafts"/);
 assert.match(viewSource, /setMicrosoftMessageUnread\(/);
@@ -168,7 +168,7 @@ assert.ok(
 );
 assert.ok(
   viewSource.includes('{folder === "Inbox" && !MICROSOFT_READ_ONLY_PILOT && ('),
-  "Reply and manual flag actions must not become available in Filtered",
+  "The separate inline Reply and read-state buttons remain guarded; Filtered uses the main toolbar actions",
 );
 assert.match(viewSource, /Opening a message does not change its read status/);
 assert.match(viewSource, /setMutationConfirmation\(nextUnread \? "Marked as unread\." : "Marked as read\."\)/);
@@ -208,9 +208,10 @@ assert.match(viewSource, /if \(!result\.ok \|\| result\.providerMessageId !== ta
 assert.match(viewSource, /setRows\(\(current\) => current\.filter/);
 assert.match(viewSource, /onArchive=\{\(\) => \{ void archiveSelectedMessage\(\); \}\}/);
 
-// Soft Delete never acts on Filtered, Sent, Archive or Deleted Items.
+// Soft Delete acts on real Inbox items, including virtual Filtered rows,
+// but never on Sent, Archive, Deleted Items or other Graph folders.
 assert.match(viewSource, /const deleteSelectedMessage = useCallback\(async/);
-assert.match(viewSource, /folderRef\.current !== "Inbox"/);
+assert.match(viewSource, /!isMicrosoftInboxProjection\(folderRef\.current\)/);
 assert.match(viewSource, /selectedMessage\?\.serverMailboxId !== mailbox\.id/);
 assert.match(viewSource, /selectedMessage\?\.providerFolder !== "INBOX"/);
 assert.match(viewSource, /await deleteMicrosoftInboxMessage/);

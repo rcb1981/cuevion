@@ -82,3 +82,24 @@ assert.match(source, /deleteBusy = false/);
 assert.match(source, /onDelete\?: \(\) => void/);
 assert.match(source, /name === "delete" \? \(!canDelete \|\| deleteBusy \|\| !onDelete\)/);
 assert.match(source, /name === "delete" && canDelete && !deleteBusy && onDelete/);
+
+// Filtered is a virtual Inbox projection, so the same already-authorized
+// exact-ID actions must work there without allowing actions in other folders.
+for (const guard of [
+  'canChangeReadState={Boolean(',
+  'canArchive={Boolean(',
+  'canDelete={Boolean(',
+]) {
+  const start = view.indexOf(guard);
+  assert.ok(start >= 0, guard + ' must be present');
+  assert.match(view.slice(start, start + 350), /isMicrosoftInboxProjection\(folder\)/,
+    guard + ' must accept Inbox and the virtual Filtered tab');
+}
+for (const action of ['changeReadState', 'archiveSelectedMessage', 'deleteSelectedMessage']) {
+  const start = view.indexOf('const ' + action + ' = useCallback(');
+  assert.ok(start >= 0, action + ' must be present');
+  assert.match(view.slice(start, start + 750), /isMicrosoftInboxProjection\(folderRef\.current\)/,
+    action + ' must check the virtual Inbox projection at execution time');
+  assert.match(view.slice(start, start + 750), /selectedMessage\?\.providerFolder !== "INBOX"/,
+    action + ' must still require the real Graph Inbox folder');
+}

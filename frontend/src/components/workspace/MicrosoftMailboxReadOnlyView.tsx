@@ -71,8 +71,8 @@ const MICROSOFT_OUTBOUND_ACTIONS_RELEASED = false;
 const MICROSOFT_DRAFT_DISCARD_ACTIONS_RELEASED = false;
 // Independent owner approval is required before real Drafts edits.
 const MICROSOFT_DRAFT_EDIT_ACTIONS_RELEASED = false;
-// Separately approved, source-gated Inbox unread-to-read operation.
-// Reply, Forward, Archive, Delete, and Mail.Send remain disabled.
+// Separately approved, source-gated Inbox read-state operation.
+// Reply, Forward, and Mail.Send remain disabled under normal Production access.
 const MICROSOFT_AUTO_MARK_READ_RELEASED = true;
 const MICROSOFT_POLL_INTERVAL_MS = 120_000;
 const MICROSOFT_INBOX_LIMIT = 25;
@@ -938,14 +938,13 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     }
   }, [attachmentDownloadBusy, attachmentRows, connected, mailbox.id, selectedMessage]);
 
-  // Manual Inbox read-state changes reuse the owner-bound, exact-ID Graph
-  // transport. Production currently rejects nextUnread=true at the server
-  // source-only policy gate until a separately approved release.
+  // Filtered is a virtual view of Inbox. Both tabs use the same exact-ID,
+  // owner-bound Graph read-state transport and confirmed result handling.
   const changeReadState = useCallback(async (nextUnread: boolean) => {
     const targetId = selectedMessage?.providerMessageId;
     if (
       !connected ||
-      folderRef.current !== "Inbox" ||
+      !isMicrosoftInboxProjection(folderRef.current) ||
       selectedMessage?.serverMailboxId !== mailbox.id ||
       selectedMessage?.providerFolder !== "INBOX" ||
       mutationInFlight.current ||
@@ -1028,7 +1027,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
   // has a dedicated source-only release gate; other Microsoft writes stay denied.
   const archiveSelectedMessage = useCallback(async () => {
     const targetId = selectedMessage?.providerMessageId;
-    if (!connected || folderRef.current !== "Inbox" || mutationInFlight.current ||
+    if (!connected || !isMicrosoftInboxProjection(folderRef.current) || mutationInFlight.current ||
         !targetId || selectedIdRef.current !== targetId ||
         selectedMessage?.serverMailboxId !== mailbox.id ||
         selectedMessage?.providerFolder !== "INBOX") return;
@@ -1045,7 +1044,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
         mailboxId: mailbox.id, providerMessageId: targetId,
       });
       if (ticket !== mutationTicket.current ||
-          folderRef.current !== "Inbox" ||
+          !isMicrosoftInboxProjection(folderRef.current) ||
           selectedIdRef.current !== targetId) return;
       if (!result.ok || result.providerMessageId !== targetId || result.archived !== true) {
         setMutationError(
@@ -1088,11 +1087,11 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
     }
   }, [connected, mailbox.id, selectedMessage]);
 
-  // Soft-delete moves only the selected real Inbox item into Deleted Items.
-  // Production denies this new mutation independently of released Archive.
+  // Soft-delete moves only the selected real Inbox item into Deleted Items,
+  // including when that Inbox item is shown in the virtual Filtered tab.
   const deleteSelectedMessage = useCallback(async () => {
     const targetId = selectedMessage?.providerMessageId;
-    if (!connected || folderRef.current !== "Inbox" || mutationInFlight.current ||
+    if (!connected || !isMicrosoftInboxProjection(folderRef.current) || mutationInFlight.current ||
         !targetId || selectedIdRef.current !== targetId ||
         selectedMessage?.serverMailboxId !== mailbox.id ||
         selectedMessage?.providerFolder !== "INBOX") return;
@@ -1109,7 +1108,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
         mailboxId: mailbox.id, providerMessageId: targetId,
       });
       if (ticket !== mutationTicket.current ||
-          folderRef.current !== "Inbox" ||
+          !isMicrosoftInboxProjection(folderRef.current) ||
           selectedIdRef.current !== targetId) return;
       if (!result.ok || result.providerMessageId !== targetId || result.deleted !== true) {
         setMutationError(
@@ -1339,7 +1338,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                   unread={selectedMessage?.unread === true}
                   hasMessage={Boolean(selectedId && selectedMessage && !messageBusy)}
                   canChangeReadState={Boolean(
-                    connected && folder === "Inbox" && selectedId &&
+                    connected && isMicrosoftInboxProjection(folder) && selectedId &&
                     !messageBusy && selectedMessage?.serverMailboxId === mailbox.id &&
                     selectedMessage?.providerFolder === "INBOX" &&
                     selectedMessage.providerMessageId === selectedId
@@ -1347,7 +1346,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                   changeReadStateBusy={mutationBusy}
                   onChangeReadState={(nextUnread) => { void changeReadState(nextUnread); }}
                   canArchive={Boolean(
-                    connected && folder === "Inbox" && selectedId && !messageBusy &&
+                    connected && isMicrosoftInboxProjection(folder) && selectedId && !messageBusy &&
                     selectedMessage?.serverMailboxId === mailbox.id &&
                     selectedMessage?.providerFolder === "INBOX" &&
                     selectedMessage.providerMessageId === selectedId
@@ -1355,7 +1354,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                   archiveBusy={mutationBusy}
                   onArchive={() => { void archiveSelectedMessage(); }}
                   canDelete={Boolean(
-                    connected && folder === "Inbox" && selectedId && !messageBusy &&
+                    connected && isMicrosoftInboxProjection(folder) && selectedId && !messageBusy &&
                     selectedMessage?.serverMailboxId === mailbox.id &&
                     selectedMessage?.providerFolder === "INBOX" &&
                     selectedMessage.providerMessageId === selectedId
@@ -1697,7 +1696,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
                           ? "Deleted Items are read-only. Restoring and permanently deleting messages are disabled."
                           : folder === "Junk"
                             ? "Junk Email is read-only. Spam reporting, moving, and deleting are disabled."
-                            : "Replies and other mailbox changes are not enabled yet."}
+                            : "Replying, forwarding and sending are not enabled yet. Read status, Archive and Trash are available from the message actions."}
                 </p>
               </article>
             )}
