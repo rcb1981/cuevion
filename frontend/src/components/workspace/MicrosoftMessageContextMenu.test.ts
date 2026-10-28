@@ -24,6 +24,7 @@ const props = {
   busy: false,
   canChangeInbox: true,
   canLearn: true,
+  canShowLess: true,
   onOpen: noOp,
   onReadState: noOp,
   onArchive: noOp,
@@ -63,12 +64,17 @@ assert.deepEqual(getMicrosoftContextSubmenuPosition({
 assert.deepEqual(getMicrosoftContextSubmenuPosition({
   mainMenuX: 500, triggerY: 640, viewportWidth: 900, viewportHeight: 700, expectedHeight: 435,
 }), { left: 266, top: 257 });
+assert.deepEqual(getMicrosoftContextSubmenuPosition({
+  mainMenuX: 500, triggerY: 640, viewportWidth: 900, viewportHeight: 700, expectedHeight: 308,
+}), { left: 266, top: 384 });
 const menuSource = readFileSync(resolve(__dirname, "MicrosoftMessageContextMenu.tsx"), "utf8");
 assert.match(menuSource, /createPortal\(/);
 assert.match(menuSource, /data-microsoft-context-submenu/);
 assert.match(menuSource, /trigger\.closest\("\[data-theme\]"\)\?\.getAttribute\("data-theme"\)/,
   "Portal flyouts must inherit the active mailbox theme instead of the document's light default");
 assert.match(menuSource, /data-microsoft-context-submenu data-theme=\{submenuTheme\}/);
+assert.match(menuSource, /disabled=\{!canShowLess\}[\s\S]*?onClick=\{\(\) => changeLearning\("show_less"\)\}[\s\S]*?>Show Less<\/button>/,
+  "Microsoft Learning must expose Show Less and protect important messages");
 assert.doesNotMatch(menuSource, /<div role="menu" aria-label="Microsoft move destinations" className="space-y-1 border-l/,
   "Moving to another folder must use a separate flyout, not push Learning down");
 
@@ -76,6 +82,7 @@ const viewSource = readFileSync(resolve(__dirname, "MicrosoftMailboxReadOnlyView
 assert.match(viewSource, /const contextRow = rowContext[\s\S]*?visibleRows\.find\(\(entry\) => entry\.providerMessageId === rowContext\.id\)/);
 assert.match(viewSource, /contextRow\.serverMailboxId === mailbox\.id/);
 assert.match(viewSource, /contextRow\.providerFolder === "INBOX"/);
+assert.match(viewSource, /canShowLess=\{!isMicrosoftFilteredProtectionActive\(contextRow\)\}/);
 assert.match(viewSource, /const runContextInboxAction = useCallback\(async/);
 assert.match(viewSource, /target\.serverMailboxId !== mailbox\.id \|\| target\.providerFolder !== "INBOX"/);
 assert.match(viewSource, /const activeFolder = folderRef\.current/);
