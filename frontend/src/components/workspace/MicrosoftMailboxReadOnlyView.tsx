@@ -1382,7 +1382,7 @@ export const MicrosoftMailboxReadOnlyView = memo(function MicrosoftMailboxReadOn
               openComposer("new");
             }
           }}
-          className="inline-flex h-9 items-center justify-center gap-2 rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] px-3.5 text-[0.69rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-accent-text)] transition hover:brightness-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:cursor-not-allowed disabled:opacity-50"
+          className="inline-flex h-8 items-center justify-center rounded-full px-3.5 text-[0.66rem] font-medium uppercase tracking-[0.16em] border border-[color:rgba(66,99,69,0.52)] bg-[linear-gradient(180deg,rgba(103,141,103,0.98),rgba(69,103,72,0.98))] text-[color:rgba(251,248,242,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_8px_18px_rgba(66,99,69,0.12)] transition-[background-image,border-color,transform,box-shadow] duration-150 hover:border-[color:rgba(58,88,62,0.6)] hover:bg-[linear-gradient(180deg,rgba(93,130,95,0.98),rgba(61,95,65,0.98))] active:scale-[0.99] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
         >
           <svg aria-hidden="true" viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
             <path d="M8 3v10M3 8h10" />
