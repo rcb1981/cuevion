@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "npm run test:collaboration-owner-read && npm run test:mailbox-title && npm run test:gmail-oauth && npm run test:waiting && npm run test:base && npm run test:team-roster && npm run test:trash-client && npm run test:trash-action && npm run test:trash-workspace",
+    "test": "npm run test:mailbox-snapshot-isolation && npm run test:collaboration-owner-read && npm run test:mailbox-title && npm run test:gmail-oauth && npm run test:waiting && npm run test:base && npm run test:team-roster && npm run test:trash-client && npm run test:trash-action && npm run test:trash-workspace",
     "test:collaboration-owner-read": "node -e \"require('./node_modules/sucrase/register/ts.js'); require('./src/lib/collaborationOwnerSourceLocator.test.ts'); require('./src/lib/collaborationOwnerReadApi.test.ts'); require('./src/components/workspace/WorkspaceShell.collaborationOwnerRead.test.ts')\" && node -e \"require('./node_modules/sucrase/register/ts.js'); require('./src/lib/collaborationOwnerWriteApi.test.ts')\"",
     "test:mailbox-title": "node -e \"require('./node_modules/sucrase/register/ts.js'); require('./src/components/workspace/MailboxTitleEditor.test.ts')\"",
     "test:gmail-oauth": "python3 api/inboxes/gmail_oauth_lifecycle_test.py && node -e \"require('./node_modules/sucrase/register/ts.js'); require('./src/gmailOAuthReconnect.test.ts')\"",
@@ -16,7 +16,8 @@
     "test:team-roster": "node -e \"require('./node_modules/sucrase/register/ts.js'); require('./src/lib/teamInviteApi.roster.test.ts'); require('./src/lib/teamInviteApi.lifecycle.test.ts'); require('./src/lib/teamAuthorityUi.test.ts')\" && node -e \"require('./node_modules/sucrase/register/ts.js'); require('./src/components/workspace/WorkspaceShell.teamRosterAuthority.test.ts'); require('./src/components/workspace/WorkspaceShell.teamLifecycleAuthority.test.ts')\" && node -e \"require('./node_modules/sucrase/register/ts.js'); require('./src/App.teamInviteRoute.test.ts')\"",
     "test:trash-client": "node -e \"require('./node_modules/sucrase/register/ts.js'); require('./src/lib/inboxConnectionApi.trash.test.ts')\" && node -e \"require('./node_modules/sucrase/register/ts.js'); require('./src/lib/imapFolderMappingApi.test.ts')\"",
     "test:trash-action": "node -e \"require('./node_modules/sucrase/register/ts.js'); require('./src/lib/providerTrashAction.test.ts')\" && node -e \"require('./node_modules/sucrase/register/ts.js'); require('./src/lib/providerImapTrashAction.test.ts')\"",
-    "test:trash-workspace": "node -e \"require('./node_modules/sucrase/register/ts.js'); require('./src/lib/providerTrashWorkspace.test.ts'); require('./src/lib/mailboxRefreshSemantics.imapTrash.test.ts'); require('./src/lib/liveInboxSnapshots.trashAuthority.test.ts')\" && node -e \"require('./node_modules/sucrase/register/ts.js'); require('./src/lib/imapFolderMappingWorkspace.test.ts')\""
+    "test:trash-workspace": "node -e \"require('./node_modules/sucrase/register/ts.js'); require('./src/lib/providerTrashWorkspace.test.ts'); require('./src/lib/mailboxRefreshSemantics.imapTrash.test.ts'); require('./src/lib/liveInboxSnapshots.trashAuthority.test.ts')\" && node -e \"require('./node_modules/sucrase/register/ts.js'); require('./src/lib/imapFolderMappingWorkspace.test.ts')\"",
+    "test:mailbox-snapshot-isolation": "node -e \"require('./node_modules/sucrase/register/ts.js'); require('./node_modules/sucrase/register/tsx.js'); require('./src/lib/mailboxSnapshotSession.test.ts')\""
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -28,6 +29,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
+    "react-test-renderer": "18.3.1",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.6.3",
     "vite": "^5.4.10"

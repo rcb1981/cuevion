@@ -1,3 +1,4 @@
+import { readOwnedSnapshotFixture as readLiveInboxSnapshots, serializeOwnedSnapshotFixture } from "../../lib/liveInboxSnapshots.testSupport";
 import assert from "node:assert/strict";
 import "sucrase/register/tsx.js";
 import type { MessageNoiseAssessment } from "../../lib/messageNoiseGate";
@@ -16,7 +17,6 @@ const {
   hydrateLiveInboxSnapshot,
   LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION,
   MUSIC_CLASSIFIER_VERSION,
-  readLiveInboxSnapshots,
   upconvertLegacyPromoReminderSnapshotMessage,
 } = require("../../lib/liveInboxSnapshots") as typeof import("../../lib/liveInboxSnapshots");
 
@@ -1085,12 +1085,12 @@ const legacyProductionAlxbImapSnapshotMessage = {
   imapUid: "42",
   uidValidity: "9001",
 };
-const liveSnapshotStorageKey = "cuevion-live-inbox-snapshots";
+const liveSnapshotStorageKey = "cuevion-live-inbox-snapshots:v1";
 assert.equal(LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION, 6);
 const liveSnapshotStorage = new Map<string, string>();
 liveSnapshotStorage.set(
   liveSnapshotStorageKey,
-  JSON.stringify({
+  serializeOwnedSnapshotFixture({
     main: {
       schemaVersion: 5,
       classifierVersion: MUSIC_CLASSIFIER_VERSION,
@@ -1124,6 +1124,7 @@ Object.defineProperty(globalThis, "window", {
   value: {
     localStorage: {
       getItem: (key: string) => liveSnapshotStorage.get(key) ?? null,
+      removeItem: (key: string) => { liveSnapshotStorage.delete(key); },
       setItem: (key: string, value: string) => {
         liveSnapshotStorage.set(key, value);
       },
@@ -1338,7 +1339,7 @@ try {
 
   const persistedMigratedSnapshots = JSON.parse(
     liveSnapshotStorage.get(liveSnapshotStorageKey) ?? "{}",
-  ) as Record<string, {
+  ).snapshots as Record<string, {
     schemaVersion?: number;
     messages?: Array<{ internalClassification?: string }>;
   }>;
@@ -1374,7 +1375,7 @@ try {
 
   liveSnapshotStorage.set(
     liveSnapshotStorageKey,
-    JSON.stringify({
+    serializeOwnedSnapshotFixture({
       main: {
         schemaVersion: LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION,
         classifierVersion: MUSIC_CLASSIFIER_VERSION,

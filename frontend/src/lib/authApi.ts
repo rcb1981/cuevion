@@ -1,3 +1,9 @@
+import {
+  activateMailboxSnapshotSession,
+  captureMailboxSessionCheck,
+  clearMailboxSnapshotSession,
+} from "./mailboxSnapshotSession";
+
 export const AUTH0_LOGIN_ENDPOINT = "/api/auth/login";
 export const AUTH0_TESTER_LOGIN_ENDPOINT = "/api/auth/tester-login";
 export const AUTH0_SESSION_ENDPOINT = "/api/auth/session";
@@ -134,9 +140,15 @@ async function probeAuth0Session(
 export async function loadStartupSession(
   fetchImplementation: FetchImplementation = fetch,
 ): Promise<StartupSessionResult> {
+  const isCurrentCheck = captureMailboxSessionCheck();
   const auth0Session = await probeAuth0Session(fetchImplementation);
+  if (!isCurrentCheck()) return { status: "unavailable", authSource: null, user: null };
 
   if (auth0Session.status === "authenticated") {
+    activateMailboxSnapshotSession({
+      userId: auth0Session.user.userId!,
+      workspaceId: auth0Session.user.workspaceId!,
+    });
     return {
       status: "authenticated",
       authSource: "auth0",
@@ -144,6 +156,7 @@ export async function loadStartupSession(
     };
   }
 
+  if (auth0Session.status === "unauthenticated") clearMailboxSnapshotSession();
   return { status: auth0Session.status, authSource: null, user: null };
 }
 
@@ -287,6 +300,7 @@ export function isAllowedAuth0LogoutUrl(value: unknown): value is string {
 export async function logoutAuth0Session(
   fetchImplementation: FetchImplementation = fetch,
 ): Promise<LogoutResult> {
+  clearMailboxSnapshotSession();
   try {
     const response = await fetchImplementation(AUTH0_LOGOUT_ENDPOINT, {
       method: "POST",

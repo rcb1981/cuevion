@@ -816,8 +816,8 @@ assert.match(
 );
 
 const trashHydration = section(
-  "const storedValue = window.localStorage.getItem(trashMessagesStorageKey);",
-  "const storedValue = window.localStorage.getItem(spamMessagesStorageKey);",
+  "const storedValue = mailboxSnapshots.readFolderSnapshot(trashMessagesStorageKey);",
+  "const storedValue = mailboxSnapshots.readFolderSnapshot(spamMessagesStorageKey);",
 );
 assert.match(
   trashHydration,

@@ -185,6 +185,7 @@ function createHarness(
     applyCachedLiveInboxSnapshotToMailboxStore: (id: string) => snapshots[id].messages.length,
     buildTrustedLiveInboxSnapshotContexts: () => ({}), readLiveInboxSnapshots: () => snapshots,
     mailboxStore,
+    mailboxStoreRef: { current: mailboxStore },
     saveLiveInboxSnapshot: (snapshot: any) => {
       events.push(`persist:${snapshot.inboxId}`);
       if (persistenceFailure) throw persistenceFailure;

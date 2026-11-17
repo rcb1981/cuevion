@@ -1,3 +1,4 @@
+import { readOwnedSnapshotFixture as readLiveInboxSnapshots, saveOwnedSnapshotFixture as saveLiveInboxSnapshot, serializeOwnedSnapshotFixture } from "../../lib/liveInboxSnapshots.testSupport";
 import assert from "node:assert/strict";
 import "sucrase/register/tsx.js";
 
@@ -37,8 +38,6 @@ const {
   LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION,
   LIVE_INBOX_THREAD_IDENTITY_VERSION,
   MUSIC_CLASSIFIER_VERSION,
-  readLiveInboxSnapshots,
-  saveLiveInboxSnapshot,
 } = require("../../lib/liveInboxSnapshots") as typeof import("../../lib/liveInboxSnapshots");
 
 const folders = [

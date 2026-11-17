@@ -46,7 +46,7 @@ assert.match(view, /folder: currentFolder === "Filtered" \? "Inbox" : currentFol
 // The existing mailbox view now uses the unified Learning control. Keep the
 // folder reachability assertion against that actual integration, not the old tag.
 assert.match(view, /<MicrosoftLearningControls/);
-assert.match(view, /onSave=\{saveSenderLearning\}/);
+assert.match(view, /onSave=\{saveSelectedLearning\}/);
 
 // Integration guard: the return-to-Inbox action must not be nested inside
 // an Inbox-only JSX guard. The component's own test cannot catch this.

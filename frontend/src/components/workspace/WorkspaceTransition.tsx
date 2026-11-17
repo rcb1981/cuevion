@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { readLiveInboxSnapshots } from "../../lib/liveInboxSnapshots";
+import { useMailboxSnapshots } from "../../lib/MailboxSnapshotContext";
 import type { InboxId } from "../../types/onboarding";
 
 const transitionStatuses = [
@@ -16,7 +16,10 @@ interface WorkspaceTransitionProps {
   onComplete: () => void;
 }
 
-function haveSnapshotsForConnectedInboxes(connectedInboxIds: InboxId[]) {
+function haveSnapshotsForConnectedInboxes(
+  connectedInboxIds: InboxId[],
+  readLiveInboxSnapshots: ReturnType<typeof useMailboxSnapshots>["readLiveInboxSnapshots"],
+) {
   if (connectedInboxIds.length === 0) {
     return true;
   }
@@ -29,6 +32,7 @@ export function WorkspaceTransition({
   connectedInboxIds,
   onComplete,
 }: WorkspaceTransitionProps) {
+  const { readLiveInboxSnapshots } = useMailboxSnapshots();
   const [statusIndex, setStatusIndex] = useState(0);
   const [attemptCount, setAttemptCount] = useState(0);
   const [transitionStatus, setTransitionStatus] =
@@ -51,7 +55,7 @@ export function WorkspaceTransition({
 
     const interval = window.setInterval(() => {
       const hasCompletedInitialSync =
-        haveSnapshotsForConnectedInboxes(connectedInboxIds);
+        haveSnapshotsForConnectedInboxes(connectedInboxIds, readLiveInboxSnapshots);
 
       setStatusIndex((current) =>
         current < transitionStatuses.length - 1 ? current + 1 : current,
@@ -72,7 +76,7 @@ export function WorkspaceTransition({
     }, 700);
 
     return () => window.clearInterval(interval);
-  }, [attemptCount, connectedInboxIds, onComplete, transitionStatus]);
+  }, [attemptCount, connectedInboxIds, onComplete, readLiveInboxSnapshots, transitionStatus]);
 
   const handleRetry = () => {
     setStatusIndex(0);

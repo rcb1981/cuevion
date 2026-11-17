@@ -1,3 +1,5 @@
+import { useMailboxSnapshots } from "../../lib/MailboxSnapshotContext";
+import { clearMailboxSnapshotSession } from "../../lib/mailboxSnapshotSession";
 import {
   Suspense,
   lazy,
@@ -118,10 +120,8 @@ import {
 } from "../../lib/newInboxProviderFlow";
 import {
   hydrateLiveInboxSnapshot,
-  readLiveInboxSnapshots,
   removeAndPersistCustomImapInboxMessageFromSnapshot,
   removeAndPersistGmailInboxProviderMessageFromSnapshot,
-  saveLiveInboxSnapshot,
   type LiveInboxSnapshot,
   type TrustedLiveInboxSnapshotContexts,
 } from "../../lib/liveInboxSnapshots";
@@ -14106,6 +14106,7 @@ function createInitialMailboxStore(
   currentUserId: string,
   workspaceDataMode: WorkspaceDataMode,
   managedInboxes: ManagedWorkspaceInbox[] = [],
+  readLiveInboxSnapshots: ReturnType<typeof useMailboxSnapshots>["readLiveInboxSnapshots"] = () => ({}),
 ): MailboxStore {
   const orderedMailboxMap = new Map(
     orderedMailboxes.map((mailbox) => [mailbox.id, mailbox] as const),
@@ -17387,6 +17388,7 @@ function MailboxView({
   workspaceDataMode: WorkspaceDataMode;
   hasAuthenticatedMemberAuthority: boolean;
 }) {
+  const { readLiveInboxSnapshots, saveLiveInboxSnapshot } = useMailboxSnapshots();
   const collaborationLastSeenStorageKey = buildCollaborationLastSeenStorageKey(
     currentViewerPersistenceKey,
   );
@@ -36704,6 +36706,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
   ) => void;
   onConsumeNavigationRequest?: (requestKey: number) => void;
 }) {
+  const { saveLiveInboxSnapshot } = useMailboxSnapshots();
   const [draftManagedInboxes, setDraftManagedInboxes] = useState<ManagedWorkspaceInbox[]>(
     savedManagedInboxes.map(cloneManagedWorkspaceInbox),
   );
@@ -42907,6 +42910,8 @@ export function WorkspaceShell({
   collaborationInviteRoute?: CollaborationInviteRoute | null;
   workspaceDataMode?: WorkspaceDataMode;
 }) {
+  const mailboxSnapshots = useMailboxSnapshots();
+  const { readLiveInboxSnapshots, saveLiveInboxSnapshot } = mailboxSnapshots;
   const isDemoWorkspace = workspaceDataMode === "demo";
   const isMobileWorkspaceViewport = useIsMobileWorkspaceViewport();
   const [workspaceMode, setWorkspaceMode] = useState<SettingsMode>(() => {
@@ -44033,6 +44038,7 @@ export function WorkspaceShell({
         currentWorkspaceUserId,
         workspaceDataMode,
         savedManagedInboxes,
+        readLiveInboxSnapshots,
       ),
       orderedMailboxes,
       learningStore,
@@ -44066,9 +44072,11 @@ export function WorkspaceShell({
   const mailboxStore = activeScopedMailboxStoreState.store;
   const setMailboxStore: Dispatch<SetStateAction<MailboxStore>> = useCallback(
     (update) => {
+      if (authenticationContext === "auth0" && !mailboxSnapshots.isActive()) return;
       const expectedStorageKey = learningStorageKey;
 
       setScopedMailboxStoreState((current) => {
+        if (authenticationContext === "auth0" && !mailboxSnapshots.isActive()) return current;
         if (current.learningStorageKey !== expectedStorageKey) {
           return current;
         }
@@ -44081,13 +44089,22 @@ export function WorkspaceShell({
           : { learningStorageKey: expectedStorageKey, store: nextStore };
       });
     },
-    [learningStorageKey],
+    [learningStorageKey, authenticationContext, mailboxSnapshots],
   );
   const exactNotificationMessageIndex = useMemo(() => buildExactNotificationMessageIndex(mailboxStore), [mailboxStore]);
   const exactNotificationMessageIndexRef = useRef(exactNotificationMessageIndex);
   exactNotificationMessageIndexRef.current = exactNotificationMessageIndex;
   const mailboxStoreRef = useRef(mailboxStore);
   mailboxStoreRef.current = mailboxStore;
+  useLayoutEffect(() => {
+    // Also restore the initial refs during StrictMode's setup/cleanup probe.
+    mailboxStoreRef.current = mailboxStore;
+    exactNotificationMessageIndexRef.current = exactNotificationMessageIndex;
+    return () => {
+      mailboxStoreRef.current = {};
+      exactNotificationMessageIndexRef.current = buildExactNotificationMessageIndex({});
+    };
+  }, []);
   const providerArchiveFetchMailboxIdsRef = useRef<Set<InboxId>>(new Set());
   const providerArchiveSnapshotMailboxIdsRef = useRef<Set<InboxId>>(new Set());
   const providerTrashFetchMailboxIdsRef = useRef<Set<InboxId>>(new Set());
@@ -54758,7 +54775,7 @@ export function WorkspaceShell({
       return;
     }
 
-    const storedValue = window.localStorage.getItem(sentMessagesStorageKey);
+    const storedValue = mailboxSnapshots.readFolderSnapshot(sentMessagesStorageKey);
 
     if (!storedValue) {
       return;
@@ -54810,7 +54827,7 @@ export function WorkspaceShell({
       return;
     }
 
-    const storedValue = window.localStorage.getItem(trashMessagesStorageKey);
+    const storedValue = mailboxSnapshots.readFolderSnapshot(trashMessagesStorageKey);
 
     if (!storedValue) {
       return;
@@ -54866,7 +54883,7 @@ export function WorkspaceShell({
       return;
     }
 
-    const storedValue = window.localStorage.getItem(spamMessagesStorageKey);
+    const storedValue = mailboxSnapshots.readFolderSnapshot(spamMessagesStorageKey);
 
     if (!storedValue) {
       return;
@@ -54918,7 +54935,7 @@ export function WorkspaceShell({
       return;
     }
 
-    const storedValue = window.localStorage.getItem(archiveMessagesStorageKey);
+    const storedValue = mailboxSnapshots.readFolderSnapshot(archiveMessagesStorageKey);
 
     if (!storedValue) {
       setHydratedArchiveMessagesStorageKey(archiveMessagesStorageKey);
@@ -55327,7 +55344,7 @@ export function WorkspaceShell({
       ]),
     );
 
-    window.localStorage.setItem(
+    mailboxSnapshots.saveFolderSnapshot(
       sentMessagesStorageKey,
       JSON.stringify(sentMessagesByMailbox),
     );
@@ -55349,7 +55366,7 @@ export function WorkspaceShell({
       ),
     );
 
-    window.localStorage.setItem(
+    mailboxSnapshots.saveFolderSnapshot(
       trashMessagesStorageKey,
       JSON.stringify(trashMessagesByMailbox),
     );
@@ -55372,7 +55389,7 @@ export function WorkspaceShell({
       ]),
     );
 
-    window.localStorage.setItem(
+    mailboxSnapshots.saveFolderSnapshot(
       spamMessagesStorageKey,
       JSON.stringify(spamMessagesByMailbox),
     );
@@ -55387,7 +55404,7 @@ export function WorkspaceShell({
     }
 
     let storedArchiveMessages: unknown = {};
-    const storedValue = window.localStorage.getItem(archiveMessagesStorageKey);
+    const storedValue = mailboxSnapshots.readFolderSnapshot(archiveMessagesStorageKey);
     if (storedValue) {
       try {
         storedArchiveMessages = JSON.parse(storedValue);
@@ -55408,7 +55425,7 @@ export function WorkspaceShell({
       providerAuthoritativeArchiveMailboxIds,
     );
 
-    window.localStorage.setItem(
+    mailboxSnapshots.saveFolderSnapshot(
       archiveMessagesStorageKey,
       JSON.stringify(archiveMessagesByMailbox),
     );
@@ -55874,6 +55891,7 @@ export function WorkspaceShell({
 
   const handleConfirmLogout = async () => {
     if (authenticationContext === "collaboration") {
+      clearMailboxSnapshotSession();
       window.localStorage.removeItem(CUEVION_AUTH_STORAGE_KEY);
       setIsLogoutConfirmationOpen(false);
       window.location.reload();

@@ -82,6 +82,7 @@ async function run() {
       mailboxId: "gmail-1",
       focusPreferences: { promo: "low" },
       limit: 25,
+      knownBodyProviderMessageIds: [],
     });
     assertCredentialed();
     assert.deepEqual(

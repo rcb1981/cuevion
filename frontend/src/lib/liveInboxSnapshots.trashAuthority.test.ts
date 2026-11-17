@@ -1,16 +1,15 @@
+import { readOwnedSnapshotFixture as readLiveInboxSnapshots, saveOwnedSnapshotFixture as saveLiveInboxSnapshot, serializeOwnedSnapshotFixture } from "./liveInboxSnapshots.testSupport";
 import assert from "node:assert/strict";
 import {
   MUSIC_CLASSIFIER_VERSION,
   hydrateLiveInboxSnapshot,
-  readLiveInboxSnapshots,
   removeAndPersistCustomImapInboxMessageFromSnapshot,
   removeCustomImapInboxMessageFromSnapshot,
-  saveLiveInboxSnapshot,
   type LiveInboxSnapshot,
   type TrustedLiveInboxSnapshotContexts,
 } from "./liveInboxSnapshots";
 
-const STORAGE_KEY = "cuevion-live-inbox-snapshots";
+const STORAGE_KEY = "cuevion-live-inbox-snapshots:v1";
 
 function message(
   overrides: Partial<LiveInboxSnapshot["messages"][number]> = {},
@@ -65,6 +64,7 @@ function withMemoryLocalStorage(run: (store: Map<string, string>) => void) {
   (globalThis as { window?: unknown }).window = {
     localStorage: {
       getItem: (key: string) => store.get(key) ?? null,
+      removeItem: (key: string) => { store.delete(key); },
       setItem: (key: string, value: string) => {
         if (rejectWrites) {
           throw new Error("localStorage unavailable");
@@ -153,7 +153,7 @@ function testTrustedInboxAuthority() {
 
     store.set(
       STORAGE_KEY,
-      JSON.stringify({
+      serializeOwnedSnapshotFixture({
         "gmail-inbox": gmailInbox,
         "imap-inbox": customInbox,
         "legacy-inbox": legacyInbox,
@@ -242,7 +242,7 @@ function testTrustedInboxAuthority() {
     assert.equal(stored["legacy-inbox"].provider, "custom_imap");
     assert.equal(stored["legacy-inbox"].folder, "INBOX");
     assert.deepEqual(
-      Object.keys(JSON.parse(store.get(STORAGE_KEY) ?? "{}")).sort(),
+      Object.keys(JSON.parse(store.get(STORAGE_KEY) ?? "{}").snapshots).sort(),
       ["gmail-inbox", "imap-inbox", "legacy-inbox"],
     );
 
@@ -296,7 +296,7 @@ function testInboxOnlyPersistence() {
     saveLiveInboxSnapshot(snapshot("google", " invalid-mailbox "));
 
     assert.equal(store.get(STORAGE_KEY), beforePoisonedWrites);
-    const persisted = JSON.parse(store.get(STORAGE_KEY) ?? "{}");
+    const persisted = JSON.parse(store.get(STORAGE_KEY) ?? "{}").snapshots;
     assert.deepEqual(Object.keys(persisted).sort(), [
       "gmail-inbox",
       "imap-inbox",

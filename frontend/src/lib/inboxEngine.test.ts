@@ -1,3 +1,4 @@
+import { readOwnedSnapshotFixture as readLiveInboxSnapshots, saveOwnedSnapshotFixture as saveLiveInboxSnapshot, serializeOwnedSnapshotFixture } from "./liveInboxSnapshots.testSupport";
 /**
  * Tests for inboxEngine.ts — pruneInboxSnapshot, thread recovery, and helpers.
  *
@@ -34,10 +35,8 @@ import {
   hydrateLiveInboxSnapshot,
   LIVE_INBOX_THREAD_IDENTITY_VERSION,
   MUSIC_CLASSIFIER_VERSION,
-  readLiveInboxSnapshots,
   removeAndPersistGmailInboxProviderMessageFromSnapshot,
   removeGmailInboxProviderMessageFromSnapshot,
-  saveLiveInboxSnapshot,
 } from "./liveInboxSnapshots";
 import { createGmailInboxAuthority } from "./mailboxRefreshSemantics";
 
@@ -101,6 +100,7 @@ function withMemoryLocalStorage(fn: (store: Map<string, string>) => void) {
   (globalThis as { window?: unknown }).window = {
     localStorage: {
       getItem: (key: string) => store.get(key) ?? null,
+      removeItem: (key: string) => { store.delete(key); },
       setItem: (key: string, value: string) => store.set(key, value),
     },
   };
@@ -1602,6 +1602,7 @@ test("drops stale snapshots without current classifier version", () => {
   (globalThis as { window?: unknown }).window = {
     localStorage: {
       getItem: (key: string) => store.get(key) ?? null,
+      removeItem: (key: string) => { store.delete(key); },
       setItem: (key: string, value: string) => {
         store.set(key, value);
       },
@@ -1610,8 +1611,8 @@ test("drops stale snapshots without current classifier version", () => {
 
   try {
     store.set(
-      "cuevion-live-inbox-snapshots",
-      JSON.stringify({
+      "cuevion-live-inbox-snapshots:v1",
+      serializeOwnedSnapshotFixture({
         promo: {
           schemaVersion: 5,
           inboxId: "promo",
@@ -1711,6 +1712,7 @@ test("migrates stale custom-IMAP subject thread IDs without losing message state
   (globalThis as { window?: unknown }).window = {
     localStorage: {
       getItem: (key: string) => store.get(key) ?? null,
+      removeItem: (key: string) => { store.delete(key); },
       setItem: (key: string, value: string) => {
         store.set(key, value);
       },
@@ -1742,8 +1744,8 @@ test("migrates stale custom-IMAP subject thread IDs without losing message state
 
   try {
     store.set(
-      "cuevion-live-inbox-snapshots",
-      JSON.stringify({
+      "cuevion-live-inbox-snapshots:v1",
+      serializeOwnedSnapshotFixture({
         demo: {
           schemaVersion: 5,
           classifierVersion: MUSIC_CLASSIFIER_VERSION,
@@ -1793,8 +1795,8 @@ test("migrates stale custom-IMAP subject thread IDs without losing message state
     const reloaded = readLiveInboxSnapshots().demo;
     assert.equal(reloaded?.messages[1]?.threadId, persistedFallback);
     const rawSavedSnapshot = JSON.parse(
-      store.get("cuevion-live-inbox-snapshots") ?? "{}",
-    ).demo;
+      store.get("cuevion-live-inbox-snapshots:v1") ?? "{}",
+    ).snapshots.demo;
     assert.equal(rawSavedSnapshot.provider, "custom_imap");
     assert.equal(rawSavedSnapshot.folder, "INBOX");
     assert.equal(rawSavedSnapshot.uidValidity, "900");
@@ -1813,6 +1815,7 @@ test("legacy snapshot migration requires trusted provider context", () => {
   (globalThis as { window?: unknown }).window = {
     localStorage: {
       getItem: (key: string) => store.get(key) ?? null,
+      removeItem: (key: string) => { store.delete(key); },
       setItem: (key: string, value: string) => store.set(key, value),
     },
   };
@@ -1842,12 +1845,12 @@ test("legacy snapshot migration requires trusted provider context", () => {
   });
 
   try {
-    store.set("cuevion-live-inbox-snapshots", legacyStore);
+    store.set("cuevion-live-inbox-snapshots:v1", serializeOwnedSnapshotFixture(JSON.parse(legacyStore)));
     const ambiguous = readLiveInboxSnapshots().legacy;
     assert.equal(ambiguous.provider, undefined);
     assert.equal(ambiguous.messages[0]?.threadId, "same subject");
 
-    store.set("cuevion-live-inbox-snapshots", legacyStore);
+    store.set("cuevion-live-inbox-snapshots:v1", serializeOwnedSnapshotFixture(JSON.parse(legacyStore)));
     const customImap = readLiveInboxSnapshots({
       legacy: { mailboxId: "legacy", provider: "custom_imap", folder: "Archive" },
     }).legacy;
@@ -1855,7 +1858,7 @@ test("legacy snapshot migration requires trusted provider context", () => {
     assert.equal(customImap.folder, "Archive");
     assert.match(customImap.messages[0]?.threadId ?? "", /^imap:uid:legacy:Archive:900:42$/);
 
-    store.set("cuevion-live-inbox-snapshots", legacyStore);
+    store.set("cuevion-live-inbox-snapshots:v1", serializeOwnedSnapshotFixture(JSON.parse(legacyStore)));
     const google = readLiveInboxSnapshots({
       legacy: { mailboxId: "legacy", provider: "google", folder: "INBOX" },
     }).legacy;
@@ -1872,6 +1875,7 @@ test("thread migration promotes Gmail provider snapshots to canonical identity",
   (globalThis as { window?: unknown }).window = {
     localStorage: {
       getItem: (key: string) => store.get(key) ?? null,
+      removeItem: (key: string) => { store.delete(key); },
       setItem: (key: string, value: string) => {
         store.set(key, value);
       },
@@ -1880,8 +1884,8 @@ test("thread migration promotes Gmail provider snapshots to canonical identity",
 
   try {
     store.set(
-      "cuevion-live-inbox-snapshots",
-      JSON.stringify({
+      "cuevion-live-inbox-snapshots:v1",
+      serializeOwnedSnapshotFixture({
         gmail: {
           schemaVersion: 5,
           classifierVersion: MUSIC_CLASSIFIER_VERSION,
@@ -2186,6 +2190,7 @@ test("confirmed Gmail Archive blocks unread-clear rehydration of the last stale 
   (globalThis as { window?: unknown }).window = {
     localStorage: {
       getItem: (key: string) => store.get(key) ?? null,
+      removeItem: (key: string) => { store.delete(key); },
       setItem: (key: string, value: string) => store.set(key, value),
     },
   };

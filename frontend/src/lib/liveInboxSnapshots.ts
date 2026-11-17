@@ -8,7 +8,12 @@ import {
 } from "./inboxEngine";
 import { resolveMessageNoisePolicy } from "./messageNoiseGate";
 
-const LIVE_INBOX_SNAPSHOTS_STORAGE_KEY = "cuevion-live-inbox-snapshots";
+import {
+  MAILBOX_SNAPSHOT_KEY,
+  readOwnedMailboxCache,
+  writeOwnedMailboxCache,
+  type MailboxSnapshotSession,
+} from "./mailboxSnapshotSession";
 export const LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION = 6;
 export const LIVE_INBOX_THREAD_IDENTITY_VERSION = 1;
 export const MUSIC_CLASSIFIER_VERSION = "2026-07-01-universal-music-subject-v3";
@@ -538,17 +543,13 @@ function normalizeSnapshot(
 
 function normalizeSnapshotStore(
   store: LiveInboxSnapshotStore,
-  trustedContexts: TrustedLiveInboxSnapshotContexts,
+  trustedContexts?: TrustedLiveInboxSnapshotContexts,
 ): LiveInboxSnapshotStore {
   return Object.fromEntries(
     Object.entries(store)
       .map(([inboxId, snapshot]): [string, LiveInboxSnapshot | null] => [
         inboxId,
-        normalizeSnapshot(
-          inboxId,
-          snapshot as LiveInboxSnapshot,
-          trustedContexts[inboxId],
-        ),
+        normalizeSnapshot(inboxId, snapshot, trustedContexts?.[inboxId]),
       ])
       .filter(
         (entry): entry is [string, LiveInboxSnapshot] =>
@@ -559,56 +560,36 @@ function normalizeSnapshotStore(
   ) as LiveInboxSnapshotStore;
 }
 
-function writeSnapshotStore(store: LiveInboxSnapshotStore) {
-  window.localStorage.setItem(
-    LIVE_INBOX_SNAPSHOTS_STORAGE_KEY,
-    JSON.stringify(store),
-  );
+function writeSnapshotStore(store: LiveInboxSnapshotStore, session: MailboxSnapshotSession) {
+  writeOwnedMailboxCache(MAILBOX_SNAPSHOT_KEY, { snapshots: store }, session);
 }
 
 export function readLiveInboxSnapshots(
-  trustedContexts: TrustedLiveInboxSnapshotContexts = {},
+  trustedContexts: TrustedLiveInboxSnapshotContexts | undefined,
+  session: MailboxSnapshotSession | null,
 ): LiveInboxSnapshotStore {
-  if (typeof window === "undefined") {
-    return {};
-  }
-
-  const storedValue = window.localStorage.getItem(LIVE_INBOX_SNAPSHOTS_STORAGE_KEY);
-
-  if (!storedValue) {
-    return {};
-  }
-
+  if (typeof window === "undefined" || !session?.persistent || !session.isActive()) return {};
   try {
-    const parsed = JSON.parse(storedValue) as LiveInboxSnapshotStore;
-    const sourceSnapshots = parsed && typeof parsed === "object" ? parsed : {};
-    const nextSnapshots = normalizeSnapshotStore(
-      sourceSnapshots as LiveInboxSnapshotStore,
-      trustedContexts,
-    );
-    const nextStoredValue = JSON.stringify(nextSnapshots);
-
-    if (
-      Object.keys(nextSnapshots).length !== Object.keys(sourceSnapshots).length ||
-      nextStoredValue !== storedValue
-    ) {
-      try {
-        window.localStorage.setItem(LIVE_INBOX_SNAPSHOTS_STORAGE_KEY, nextStoredValue);
-      } catch {
-        // Snapshot cleanup is best-effort; callers can use the sanitized in-memory copy.
-      }
+    const parsed = readOwnedMailboxCache(MAILBOX_SNAPSHOT_KEY, session);
+    if (!parsed?.snapshots || typeof parsed.snapshots !== "object" || Array.isArray(parsed.snapshots)) {
+      return {};
     }
-
-    return nextSnapshots;
+    const normalized = normalizeSnapshotStore(parsed.snapshots as LiveInboxSnapshotStore, trustedContexts);
+    if (JSON.stringify(normalized) !== JSON.stringify(parsed.snapshots)) {
+      try { writeSnapshotStore(normalized, session); } catch { /* Cache cleanup is best effort. */ }
+    }
+    const snapshots = trustedContexts
+      ? Object.fromEntries(Object.entries(normalized).filter(([id]) =>
+          Object.prototype.hasOwnProperty.call(trustedContexts, id)))
+      : normalized;
+    return session.isActive() ? snapshots : {};
   } catch {
     return {};
   }
 }
 
-export function saveLiveInboxSnapshot(snapshot: LiveInboxSnapshot) {
-  if (typeof window === "undefined") {
-    return;
-  }
+export function saveLiveInboxSnapshot(snapshot: LiveInboxSnapshot, session: MailboxSnapshotSession | null) {
+  if (typeof window === "undefined" || !session?.persistent || !session.isActive()) return;
 
   if (
     !isLiveInboxProvider(snapshot.provider) ||
@@ -623,8 +604,7 @@ export function saveLiveInboxSnapshot(snapshot: LiveInboxSnapshot) {
     provider: snapshot.provider,
     folder: snapshot.folder,
   };
-  const trustedContexts = { [snapshot.inboxId]: trustedContext };
-  const currentSnapshots = readLiveInboxSnapshots(trustedContexts);
+  const currentSnapshots = readLiveInboxSnapshots(undefined, session);
   const nextSnapshot = normalizeSnapshot(snapshot.inboxId, {
     ...snapshot,
     schemaVersion: LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION,
@@ -648,7 +628,7 @@ export function saveLiveInboxSnapshot(snapshot: LiveInboxSnapshot) {
   };
 
   try {
-    writeSnapshotStore(nextSnapshots);
+    writeSnapshotStore(nextSnapshots, session);
   } catch {
     // Persistence is best-effort. Never strip message bodies to satisfy quota.
   }

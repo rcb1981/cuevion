@@ -12,7 +12,7 @@ import {
   getProviderConnectionMethod,
   usesEmailAsImapUsername,
 } from "../../lib/inboxProviderDefaults";
-import { saveLiveInboxSnapshot } from "../../lib/liveInboxSnapshots";
+import { useMailboxSnapshots } from "../../lib/MailboxSnapshotContext";
 import {
   doesCustomImapOnboardingSnapshotMatchState,
   isCustomImapOnboardingInteractionLocked,
@@ -249,6 +249,7 @@ export function OnboardingFlow({
   isPreviewMode = false,
   previewControls,
 }: OnboardingFlowProps) {
+  const { saveLiveInboxSnapshot } = useMailboxSnapshots();
   const [showWorkspaceBlockedMessage, setShowWorkspaceBlockedMessage] =
     useState(false);
   const [

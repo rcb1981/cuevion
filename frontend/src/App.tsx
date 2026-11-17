@@ -1,3 +1,5 @@
+import { MailboxSnapshotBoundary, useMailboxSnapshots } from "./lib/MailboxSnapshotContext";
+import { clearMailboxSnapshotSession } from "./lib/mailboxSnapshotSession";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Auth0LoginView } from "./components/auth/Auth0LoginView";
 import {
@@ -4301,6 +4303,7 @@ function OnboardingPreviewRoute({ onExit }: { onExit: () => void }) {
 }
 
 function CuevionApp({ startupSession }: { startupSession?: StartupSessionResult } = {}) {
+  const mailboxSnapshots = useMailboxSnapshots();
   const shouldShowLandingPage = isPublicLandingHost();
 
   if (shouldShowLandingPage) {
@@ -4586,6 +4589,7 @@ function CuevionApp({ startupSession }: { startupSession?: StartupSessionResult 
     }
     if (outcome.status === "unauthorized") {
       setWorkspaceCompletionStatus("idle");
+      mailboxSnapshots.clear();
       setSessionUser(null);
       setSessionStatus("unauthenticated");
       return;
@@ -4930,6 +4934,7 @@ function CuevionApp({ startupSession }: { startupSession?: StartupSessionResult 
         setHydratedMemberAccountKey("");
         setAccountConfigErrorStatus(null);
         setAccountConfigHydrationStatus("idle");
+        mailboxSnapshots.clear();
         setSessionUser(null);
         setSessionStatus("unauthenticated");
         return;
@@ -5415,7 +5420,14 @@ function Auth0SessionBoundary({
     };
   }, [session?.status]);
 
-  return <Auth0SessionRoute session={session} appRoute={appRoute} onExitPreview={onExitPreview} />;
+  const cacheOwner = session?.status === "authenticated" && appRoute !== "preview" &&
+    !parseCollaborationInviteRoute()
+    ? { userId: session.user.userId!, workspaceId: session.user.workspaceId! } : null;
+  return (
+    <MailboxSnapshotBoundary owner={cacheOwner} fallback={<Auth0LoginView />}>
+      <Auth0SessionRoute session={session} appRoute={appRoute} onExitPreview={onExitPreview} />
+    </MailboxSnapshotBoundary>
+  );
 }
 
 export default function App() {
@@ -5454,6 +5466,12 @@ export default function App() {
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
+
+  useEffect(() => {
+    if (appRoute === "login" || testerInviteRoute || teamInviteContinuationRoute || collaborationGuestRoute) {
+      clearMailboxSnapshotSession();
+    }
+  }, [appRoute, testerInviteRoute, teamInviteContinuationRoute, collaborationGuestRoute]);
 
   if (testerInviteRoute) {
     return <TesterInviteRouteView route={testerInviteRoute} />;
