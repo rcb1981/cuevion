@@ -1,3 +1,4 @@
+import { mailboxFolderRailClass, mailboxFolderHeadingClass, mailboxFolderListClass, mailboxFolderRowClass, mailboxFolderSelectedClass, mailboxFolderIdleClass } from "./mailboxFolderStyles";
 import { useMailboxSnapshots } from "../../lib/MailboxSnapshotContext";
 import { clearMailboxSnapshotSession } from "../../lib/mailboxSnapshotSession";
 import {
@@ -28924,9 +28925,9 @@ function MailboxView({
             }
           >
             {!activeSmartFolder ? (
-              <div className="flex min-h-0 min-w-0 flex-col overflow-hidden border-r border-[var(--workspace-border-soft)] px-3 py-5">
-                <div className="shrink-0 px-2 pb-3 text-[0.62rem] font-semibold uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">Folders</div>
-                <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
+              <div className={mailboxFolderRailClass}>
+                <div className={mailboxFolderHeadingClass}>Folders</div>
+                <div className={mailboxFolderListClass}>
                   {(["Inbox", "Sent", "Archive", "Drafts", "Trash", "Spam"] as MailFolder[]).map(
                     (folder) => {
                       const active =
@@ -28964,12 +28965,12 @@ function MailboxView({
                               handleDropToTarget({ type: "folder", folder });
                             }}
                             onClick={() => switchToFolder(folder)}
-                            className={`flex w-full items-center justify-between rounded-[12px] border-l-2 px-3 py-2.5 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
+                            className={`${mailboxFolderRowClass} px-3 transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
                               active
-                                ? "border-l-[var(--workspace-accent-border)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text)]"
+                                ? mailboxFolderSelectedClass
                                 : isDragTargetActive
                                   ? "border border-[var(--workspace-border-hover)] bg-[linear-gradient(180deg,var(--workspace-selected-surface-start),var(--workspace-selected-surface-end))] text-[var(--workspace-text)] shadow-[0_10px_24px_rgba(31,42,36,0.08),inset_0_1px_0_rgba(255,255,255,0.08)]"
-                                  : "border-l-transparent text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-card-subtle)]"
+                                  : mailboxFolderIdleClass
                             } focus-visible:outline-none`}
                           >
                             <span className="block min-w-0 truncate text-[0.79rem] font-medium">
@@ -29002,14 +29003,14 @@ function MailboxView({
                                   handleDropToTarget({ type: "folder", folder: "Filtered" });
                                 }}
                                 onClick={() => switchToFolder("Filtered")}
-                                className={`flex w-full items-center justify-between rounded-[12px] border-l-2 py-2.5 pl-7 pr-3 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
+                                className={`${mailboxFolderRowClass} pl-7 pr-3 transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
                                   !isSharedView &&
                                   !activeSmartFolder &&
                                   activeFolder === "Filtered"
-                                    ? "border-l-[var(--workspace-accent-border)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text)]"
+                                    ? mailboxFolderSelectedClass
                                     : dragTargetKey === "folder-Filtered"
                                       ? "border-l-[var(--workspace-border-hover)] bg-[var(--workspace-hover-surface)] text-[var(--workspace-text)]"
-                                      : "border-l-transparent text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-card-subtle)] hover:text-[var(--workspace-text)]"
+                                      : `${mailboxFolderIdleClass} hover:text-[var(--workspace-text)]`
                                 } focus-visible:outline-none`}
                               >
                                 <span
@@ -29040,10 +29041,10 @@ function MailboxView({
                               <button
                                 type="button"
                                 onClick={switchToSharedView}
-                                className={`flex w-full items-center justify-between rounded-[12px] border-l-2 px-3 py-2.5 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
+                                className={`${mailboxFolderRowClass} px-3 transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
                                   isSharedView
-                                    ? "border-l-[var(--workspace-accent-border)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text)]"
-                                    : "border-l-transparent text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-card-subtle)]"
+                                    ? mailboxFolderSelectedClass
+                                    : mailboxFolderIdleClass
                                 } focus-visible:outline-none`}
                               >
                                 <span className="text-[0.77rem] font-medium">

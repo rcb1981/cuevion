@@ -1,4 +1,5 @@
 import { isTrustedMicrosoftInertHtmlTransport } from "./microsoftInertHtmlTransport";
+import { isEmailRequestTooLarge, EMAIL_REQUEST_TOO_LARGE_MESSAGE } from "./emailRequestSize";
 import {
   applyProviderDefaults,
   getProviderConnectionMethod,
@@ -3428,6 +3429,15 @@ export async function sendGmailMessage(
     };
   }
 
+  const requestBody = JSON.stringify(buildSendInboxWireRequest(request));
+  if (isEmailRequestTooLarge(requestBody)) {
+    return {
+      ok: false,
+      sendOutcome: "not_sent",
+      error: { code: "request_too_large", message: EMAIL_REQUEST_TOO_LARGE_MESSAGE },
+    };
+  }
+
   const abortController = new AbortController();
   const timeoutId = window.setTimeout(() => {
     abortController.abort();
@@ -3441,7 +3451,7 @@ export async function sendGmailMessage(
         "Content-Type": "application/json",
       },
       signal: abortController.signal,
-      body: JSON.stringify(buildSendInboxWireRequest(request)),
+      body: requestBody,
     });
     let rawPayload: string;
     try {

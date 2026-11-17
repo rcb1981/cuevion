@@ -10,6 +10,7 @@ import {
   prepareMicrosoftDraftFiles, validMicrosoftDraftFileMetadata,
 } from "../../lib/microsoftDraftAttachmentPolicy";
 import { microsoftAttachmentPresentation } from "./MicrosoftAttachmentList";
+import { isEmailRequestTooLarge, EMAIL_REQUEST_TOO_LARGE_MESSAGE } from "../../lib/emailRequestSize";
 
 type Props = {
   mailboxId: string; providerMessageId: string; disabled: boolean;
@@ -22,7 +23,7 @@ type Props = {
 };
 type Phase = "loading" | "ready" | "preparing" | "uploading" | "removing" | "checking" | "blocked";
 const uncertain = "The attachment outcome is uncertain. Do not repeat it. Check status or verify the draft in Outlook.";
-const selectionError = "Select at most 10 files, 2 MiB each and 8 MiB in total, with valid file names and types.";
+const selectionError = "Select at most 10 files, 2 MiB each, with valid file names and types. The combined upload must also fit the supported request size.";
 const actionStyle = "rounded-xl border border-[var(--workspace-border)] px-4 py-2 text-sm disabled:opacity-50";
 const removeStyle = "absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[0.78rem] leading-none text-[var(--workspace-text-faint)] transition hover:border-[var(--workspace-border-hover)] hover:text-[var(--workspace-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:opacity-50 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100";
 const cardStyle = "group relative flex min-w-[168px] max-w-full items-center gap-3 rounded-[18px] border border-[var(--workspace-border)] bg-[var(--workspace-card-subtle)] pl-3.5 pr-11 py-3 text-left";
@@ -125,16 +126,33 @@ function DraftAttachmentSession({ mailboxId, providerMessageId, disabled, onBloc
     }
     try {
       const requestId = newMicrosoftAttachmentRequestId();
+      const common = { ...context, requestId, snapshotHash: snapshot.snapshotHash };
+      const request = attachmentId
+        ? { ...common, action: "remove" as const, attachmentId }
+        : { ...common, action: "add" as const, files: prepared! };
+      // Validate the full request before clearing selection or starting an operation.
+      if (isEmailRequestTooLarge(JSON.stringify(request))) {
+        setError(EMAIL_REQUEST_TOO_LARGE_MESSAGE);
+        setPhase("ready");
+        ready.current = true;
+        return;
+      }
       submitted.current = requestId;
       onOperationStart?.();
       setSnapshot(null); // Potentially obsolete inventory must disappear before any write.
       setFiles([]); // File contents exist only in this operation's memory.
       setPhase(attachmentId ? "removing" : "uploading");
-      const common = { ...context, requestId, snapshotHash: snapshot.snapshotHash };
-      const result = await mutateMicrosoftDraftAttachments(attachmentId
-        ? { ...common, action: "remove", attachmentId }
-        : { ...common, action: "add", files: prepared! });
+      const result = await mutateMicrosoftDraftAttachments(request);
       if (!alive.current) return;
+      if (!result.ok && result.outcome === "confirmed_not_performed" && result.error.code === "request_too_large") {
+        submitted.current = null;
+        setSnapshot(snapshot);
+        setFiles(files);
+        setError(result.error.message);
+        setPhase("ready");
+        ready.current = true;
+        return;
+      }
       if (!result.ok) { setPhase("blocked"); setError(`${result.error.message} ${uncertain}`); return; }
       setReceipts([result]);
       if (result.blocked) { setPhase("blocked"); setError(uncertain); return; }

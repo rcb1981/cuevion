@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { transform } from "sucrase";
+import { sendGmailMessage } from "../../lib/inboxConnectionApi";
+import { EMAIL_REQUEST_TOO_LARGE_MESSAGE } from "../../lib/emailRequestSize";
 
 const source = readFileSync(resolve(process.cwd(), "src/components/workspace/WorkspaceShell.tsx"), "utf8");
 // Execute the actual compose callback with mocked dependencies; no mounted app,
@@ -98,6 +100,24 @@ async function run() {
   assert.equal(preparation.requests.length, 0);
   assert.equal(preparation.scope.composeSendAttemptRef.current, "idle");
   assert(preparation.effects.some(([name, value]) => name === "error" && value === "Attachment unavailable."));
+
+  // Exercise the actual API preflight from the real compose callback. The
+  // selection, including Bcc/signature, must survive without a fetch or reset.
+  for (const provider of ["google", "custom_imap"]) {
+    const oversized = harness({ ok: true });
+    oversized.scope.managedInboxes[0].provider = provider;
+    oversized.compose.composeAttachments[0].contentBase64 = "eHh4".repeat(1_000_000);
+    oversized.scope.sendGmailMessage = sendGmailMessage;
+    const before = JSON.stringify(oversized.compose);
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => { calls += 1; throw Error("Network forbidden"); }) as typeof fetch;
+    try { await oversized.send(); } finally { globalThis.fetch = originalFetch; }
+    assert.equal(calls, 0);
+    assert.equal(JSON.stringify(oversized.compose), before);
+    assert.equal(oversized.scope.composeSendAttemptRef.current, "idle");
+    assert.deepEqual(oversized.effects, [["error", null], ["sending", true], ["error", EMAIL_REQUEST_TOO_LARGE_MESSAGE], ["sending", false]]);
+  }
 
   assert.equal((source.match(/disabled=\{isSendingCompose \|\| composeSendUncertain\}/g) ?? []).length, 3);
   assert.equal((source.match(/\{composeSendFeedback\}/g) ?? []).length, 3);

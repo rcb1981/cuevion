@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { mailboxFolderSelectedClass } from "./mailboxFolderStyles";
 
 const path = resolve(process.cwd(), "src/components/workspace/WorkspaceShell.tsx");
 const source = readFileSync(path, "utf8");
@@ -36,14 +37,15 @@ const filteredRegion = view.slice(
   view.indexOf('onClick={() => switchToFolder("Filtered")}'),
   view.indexOf("onClick={switchToSharedView}"),
 );
-assert.match(filteredRegion, /border-l-\[var\(--workspace-accent-border\)\]/);
+assert.match(filteredRegion, /mailboxFolderSelectedClass/);
+assert.match(mailboxFolderSelectedClass, /border-l-\[var\(--workspace-accent-border\)\]/);
 assert.match(filteredRegion, /activeFolder === "Filtered"/);
 assert.match(filteredRegion, /dragTargetKey === "folder-Filtered"/);
 const sharedRegion = view.slice(
   view.indexOf("onClick={switchToSharedView}"),
   view.indexOf("</button>", view.indexOf("onClick={switchToSharedView}")),
 );
-assert.match(sharedRegion, /border-l-\[var\(--workspace-accent-border\)\]/);
+assert.match(sharedRegion, /mailboxFolderSelectedClass/);
 assert.match(sharedRegion, /isSharedView/);
 
 
@@ -53,7 +55,7 @@ for (const region of [
   "data-mailbox-toolbar-actions",
 ]) assert.ok(view.includes(region), "Missing unified toolbar region: " + region);
 assert.match(view, /xl:grid-cols-\[152px_minmax\(275px,37%\)_minmax\(0,1fr\)\]/);
-assert.match(view, /border-l-\[var\(--workspace-accent-border\)\] bg-\[var\(--workspace-card-subtle\)\]/);
+assert.match(mailboxFolderSelectedClass, /border-l-\[var\(--workspace-accent-border\)\] bg-\[var\(--workspace-card-subtle\)\]/);
 assert.match(view, /data-single-message=\{threadMessages\.length === 1 && density === "split"\}/);
 assert.match(view, /\[&_\[data-thread-message-id\]\]:rounded-none/);
 assert.match(view, /\[&_\[data-thread-message-actions\]\]:hidden/);

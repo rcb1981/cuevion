@@ -30,9 +30,12 @@ from authenticated_imap import (
 )
 from smtp_connection import SmtpConnectionError, send_public_smtp_message
 from api.inboxes.imap_snapshot import read_imap_reply_source
+from api.inboxes.email_request_size import (
+    MAX_EMAIL_REQUEST_BYTES,
+    EMAIL_REQUEST_TOO_LARGE_MESSAGE,
+)
 from authenticated_gmail import (
     MAX_GMAIL_RESPONSE_BYTES,
-    MAX_SEND_REQUEST_BODY_BYTES,
     error_payload,
     gmail_http_error_code,
     read_bounded_response,
@@ -1111,8 +1114,10 @@ class handler(BaseHTTPRequestHandler):
             )
 
     def _handle_post(self):
-        payload, request_error = read_json_body(self, max_bytes=MAX_SEND_REQUEST_BODY_BYTES)
+        payload, request_error = read_json_body(self, max_bytes=MAX_EMAIL_REQUEST_BYTES)
         if request_error:
+            if request_error["error"]["code"] == "request_too_large":
+                request_error = error_payload("request_too_large", EMAIL_REQUEST_TOO_LARGE_MESSAGE)
             send_json(self, 413 if request_error["error"]["code"] == "request_too_large" else 400, request_error)
             return
 

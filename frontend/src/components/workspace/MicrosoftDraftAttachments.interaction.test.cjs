@@ -108,6 +108,32 @@ test('drop adds multiple files; every limit rejects before upload',async()=>{
   }
  }finally{await s.close();}
 });
+test('encoded upload overflow preserves both selected files without starting an operation',async()=>{
+ const s=await setup();try {
+  await choose(s.tree,[file('one.bin',1500000),file('two.bin',1500000)]);
+  await start(s.tree);
+  assert.equal(s.f.writes().length,0);
+  assert.match(shown(s.tree),/exceed the supported size/);
+  assert.match(shown(s.tree),/one.bin.*Not uploaded.*two.bin.*Not uploaded/s);
+  assert.equal(button(s.tree,'Upload 2 attachment(s)').props.disabled,false);
+  // Reducing the selection allows one ordinary upload through the existing path.
+  await act(async()=>byLabel(s.tree,'Remove selected two.bin').props.onClick());
+  await start(s.tree);assert.equal(s.f.writes().length,1);
+  await act(async()=>s.f.complete());assert.equal(s.f.confirmed,1);
+ }finally{await s.close();}
+});
+test('explicit server size rejection restores selection without claiming an uncertain upload',async()=>{
+ const s=await setup();try {
+  globalThis.fetch=async(url,init)=>JSON.parse(init.body).action==='add'
+   ? response({ok:false,outcome:'confirmed_not_performed',blocked:false,error:{code:'request_too_large'}},413)
+   : s.f.fetch(url,init);
+  await choose(s.tree,[file('kept.txt')]);await start(s.tree);
+  assert.match(shown(s.tree),/kept.txt.*Not uploaded/s);
+  assert.match(shown(s.tree),/exceed the supported size/);
+  assert.doesNotMatch(shown(s.tree),/outcome is uncertain/);
+  assert.equal(button(s.tree,'Upload 1 attachment(s)').props.disabled,false);
+ }finally{await s.close();}
+});
 test('upload status blocks double clicks during preparation and writes, then refreshes on confirmation',async()=>{
  const s=await setup();try {
   const bytes=deferred();await choose(s.tree,[{...file(),arrayBuffer:()=>bytes.promise},file('two.txt')]);

@@ -1,4 +1,5 @@
 import React from "react";
+import { mailboxFolderRailClass, mailboxFolderHeadingClass, mailboxFolderListClass, mailboxFolderRowClass, mailboxFolderSelectedClass, mailboxFolderIdleClass } from "./mailboxFolderStyles";
 
 /**
  * Provider-neutral visual treatment, Microsoft-only wiring.
@@ -34,7 +35,7 @@ export function MicrosoftMailboxFolderRail({
 }) {
   const containerClass = compact
     ? "flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--workspace-border-soft)] px-3 py-2 xl:hidden"
-    : "hidden min-h-0 min-w-0 shrink-0 flex-col gap-1 overflow-y-auto border-r border-[var(--workspace-border-soft)] px-3 py-5 xl:flex";
+    : `${mailboxFolderRailClass} hidden xl:flex`;
 
   return (
     <nav
@@ -47,10 +48,11 @@ export function MicrosoftMailboxFolderRail({
         </div>
       )}
       {!compact && (
-        <p className="mb-3 px-2 text-[0.62rem] font-semibold uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+        <p className={mailboxFolderHeadingClass}>
           Folders
         </p>
       )}
+      <div className={compact ? "contents" : mailboxFolderListClass}>
       {microsoftVisualFolders.map((item) => {
         const selected = folder === item.id;
         return (
@@ -63,21 +65,28 @@ export function MicrosoftMailboxFolderRail({
             className={
               (compact
                 ? "shrink-0 rounded-full px-3 py-2 text-[0.73rem] "
-                : "flex w-full items-center justify-between rounded-[12px] border-l-2 pr-3 py-2.5 text-left " + (item.id === "Filtered" ? "pl-7 text-[0.77rem] " : "pl-3 text-[0.79rem] ")) +
+                : mailboxFolderRowClass + (item.id === "Filtered" ? " pl-7 pr-3 " : " px-3 ")) +
               "font-medium transition-[background-color,color,border-color] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] disabled:cursor-not-allowed disabled:opacity-45 " +
               (selected
                 ? compact
                   ? "bg-[var(--workspace-card-subtle)] text-[var(--workspace-text)]"
-                  : "border-l-[var(--workspace-accent-border)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text)]"
+                  : mailboxFolderSelectedClass
                 : compact
                   ? "text-[var(--workspace-text-muted)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)]"
-                  : "border-l-transparent text-[var(--workspace-text-muted)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)]")
+                  : mailboxFolderIdleClass + (item.id === "Filtered" ? " hover:text-[var(--workspace-text)]" : ""))
             }
           >
-            {item.label}
+            {compact ? item.label : (
+              <span className={item.id === "Filtered"
+                ? `text-[0.77rem] font-medium ${selected ? "" : "opacity-95"}`
+                : "block min-w-0 truncate text-[0.79rem] font-medium"}>
+                {item.label}
+              </span>
+            )}
           </button>
         );
       })}
+      </div>
     </nav>
   );
 }

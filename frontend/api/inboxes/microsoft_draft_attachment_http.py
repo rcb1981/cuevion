@@ -10,8 +10,9 @@ from api.inboxes import microsoft_draft_attachment_ledger as ledger
 from api.inboxes import microsoft_draft_attachment_snapshot as snapshots
 from api.inboxes import microsoft_mailbox_access as owned
 from api.inboxes.microsoft_graph import MicrosoftGraphError, _required_message_id
+from api.inboxes.email_request_size import MAX_EMAIL_REQUEST_BYTES, EMAIL_REQUEST_TOO_LARGE_MESSAGE
 
-MAX_REQUEST_BYTES = 12 * 1024 * 1024
+MAX_REQUEST_BYTES = MAX_EMAIL_REQUEST_BYTES
 _FIELDS = {
     'load': {'action', 'mailboxId', 'providerMessageId'},
     'draft_status': {'action', 'mailboxId', 'providerMessageId'},
@@ -24,7 +25,7 @@ _FIELDS = {
 def _error(status, code):
     messages = {
         'microsoft_attachment_disabled': 'Microsoft draft attachment changes are not enabled.',
-        'microsoft_attachment_selection_invalid': 'Select at most 10 files, 2 MiB each and 8 MiB in total.',
+        'microsoft_attachment_selection_invalid': 'Select at most 10 files, 2 MiB each. The combined upload must also fit the supported request size.',
         'microsoft_attachment_intent_invalid': 'Check the attachment name, type and size.',
         'microsoft_attachment_attachment_protected': 'This attachment cannot safely be removed. Inline images are protected.',
         'microsoft_attachment_ledger_full': 'Attachment safety storage is full. No new operation can start.',
@@ -34,14 +35,15 @@ def _error(status, code):
         'microsoft_attachment_operation_conflict': 'This operation ID is already bound to another request or version.',
         'microsoft_reconnect_required': 'Reconnect the Microsoft mailbox before continuing.',
         'microsoft_unauthorized': 'Sign in again before continuing.',
-        'request_too_large': 'This attachment request is too large.',
+        'request_too_large': EMAIL_REQUEST_TOO_LARGE_MESSAGE,
         'invalid_request': 'Invalid Microsoft attachment request.',
         'method_not_allowed': 'Use POST for Microsoft draft attachments.',
     }
     safe = code if code in messages else 'microsoft_attachment_outcome_uncertain'
     return json_response(status, {'ok': False, 'error': {'code': safe, 'message': messages.get(safe,
         'The attachment outcome could not be confirmed. Check its status; do not repeat the operation.')},
-        'outcome': 'uncertain', 'blocked': True})
+        'outcome': 'confirmed_not_performed' if safe == 'request_too_large' else 'uncertain',
+        'blocked': safe != 'request_too_large'})
 
 
 def _payload(request, headers):

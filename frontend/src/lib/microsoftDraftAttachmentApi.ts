@@ -1,5 +1,6 @@
 import { MICROSOFT_DRAFT_ATTACHMENTS_RELEASED, validateMicrosoftDraftFiles, type MicrosoftNewDraftFile } from "./microsoftDraftAttachmentPolicy";
 import { trustedMicrosoftAttachment, type MicrosoftAttachmentMetadata } from "./microsoftAttachmentReadApi";
+import { isEmailRequestTooLarge, EMAIL_REQUEST_TOO_LARGE_MESSAGE } from "./emailRequestSize";
 
 export type MicrosoftAttachmentOutcome = "confirmed_performed" | "confirmed_not_performed" | "uncertain";
 type Context = { mailboxId: string; providerMessageId: string };
@@ -11,8 +12,10 @@ export type MicrosoftDraftAttachmentReceipt = {
   outcome: MicrosoftAttachmentOutcome; count: number; completed: number; blocked: boolean;
 };
 export type MicrosoftDraftAttachmentFailure = {
-  ok: false; outcome: "uncertain"; blocked: true; error: { code: string; message: string };
-};
+  ok: false; error: { code: string; message: string };
+} & ({ outcome: "uncertain"; blocked: true } | {
+  outcome: "confirmed_not_performed"; blocked: false;
+});
 export type MicrosoftDraftAttachmentSnapshot = {
   ok: true; mailboxId: string; providerMessageId: string; snapshotHash: string; complete: true;
   attachments: (MicrosoftAttachmentMetadata & { removable: boolean })[];
@@ -23,9 +26,13 @@ const validContext = (r: Context) => /^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(r
 const validOperation = (id: unknown): id is string => typeof id === "string" && /^[A-Za-z0-9_-]{43}$/.test(id);
 
 function failure(code = "microsoft_attachment_outcome_uncertain"): MicrosoftDraftAttachmentFailure {
+  if (code === "request_too_large") return {
+    ok: false, outcome: "confirmed_not_performed", blocked: false,
+    error: { code, message: EMAIL_REQUEST_TOO_LARGE_MESSAGE },
+  };
   const messages: Record<string, string> = {
     microsoft_attachment_disabled: "Microsoft draft attachment changes are not enabled.",
-    microsoft_attachment_selection_invalid: "Select at most 10 files, 2 MiB each and 8 MiB in total.",
+    microsoft_attachment_selection_invalid: "Select at most 10 files, 2 MiB each. The combined upload must also fit the supported request size.",
     microsoft_attachment_draft_blocked: "An earlier attachment operation needs verification. Do not repeat it.",
     microsoft_attachment_snapshot_conflict: "The draft changed. Reload it before choosing a new operation.",
     microsoft_attachment_attachment_protected: "This attachment cannot safely be removed. Inline images are protected.",
@@ -44,9 +51,11 @@ export function newMicrosoftAttachmentRequestId(): string {
 }
 
 async function post(body: object): Promise<Record<string, unknown>> {
+  const requestBody = JSON.stringify(body);
+  if (isEmailRequestTooLarge(requestBody)) return failure("request_too_large");
   try {
     const response = await fetch("/api/inboxes/mutate-microsoft-draft-attachments", {
-      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: requestBody,
     });
     if (response.status === 401 && typeof window !== "undefined") {
       try { window.dispatchEvent(new Event("cuevion:auth-session-recheck")); } catch { /* Keep the operation blocked. */ }
@@ -56,6 +65,8 @@ async function post(body: object): Promise<Record<string, unknown>> {
     const r = data as Record<string, unknown>;
     if (!response.ok || r.ok !== true) {
       const error = r.error as { code?: unknown } | undefined;
+      if (error?.code === "request_too_large" &&
+          (response.status !== 413 || r.outcome !== "confirmed_not_performed" || r.blocked !== false)) return failure();
       return failure(error && typeof error.code === "string" ? error.code : undefined);
     }
     return r;
