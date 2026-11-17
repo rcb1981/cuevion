@@ -972,12 +972,29 @@ def _build_message(payload: dict, *, require_password: bool = True):
     if not all(_is_valid_address(address) for address in all_recipients):
         raise ValueError("One or more recipient addresses are invalid.")
 
+    if provider == "google":
+        # Gmail derives its envelope from MIME headers. Keep each exact address
+        # in its first explicit field (To, then Cc, then Bcc).
+        seen_recipients = set()
+        for recipients in (to_recipients, cc_recipients, bcc_recipients):
+            unique_recipients = []
+            for address in recipients:
+                if address not in seen_recipients:
+                    unique_recipients.append(address)
+                    seen_recipients.add(address)
+            recipients[:] = unique_recipients
+        all_recipients = [*to_recipients, *cc_recipients, *bcc_recipients]
+
     message = EmailMessage()
     message["From"] = from_address
     if to_recipients:
         message["To"] = ", ".join(to_recipients)
     if cc_recipients:
         message["Cc"] = ", ".join(cc_recipients)
+    if provider == "google" and bcc_recipients:
+        # Submission-only routing header: Gmail removes Bcc for delivery.
+        # SMTP continues to receive Bcc only through its separate envelope.
+        message["Bcc"] = ", ".join(bcc_recipients)
     message["Subject"] = subject
     message.set_content(body_text)
 
