@@ -41,7 +41,7 @@ from authenticated_gmail import (
     reject_unknown_fields,
     resolve_gmail_context,
     resolve_owned_mailbox,
-    send_json,
+    send_json as _send_json,
     send_method_not_allowed,
     valid_identifier,
 )
@@ -95,6 +95,26 @@ _MAX_IMAP_FOLDER_BYTES = 16_384
 
 class _CustomImapAuthenticationError(Exception):
     pass
+
+
+def send_json(handler, status_code, payload, **kwargs):
+    # Only this send endpoint classifies its failures. Unstructured gateway
+    # responses cannot provide this assurance to the client.
+    if status_code >= 400:
+        code = (payload.get("error") or {}).get("code")
+        payload = {
+            **payload,
+            "sendOutcome": "uncertain" if code in {"send_uncertain", "internal_error"} else "not_sent",
+        }
+    return _send_json(handler, status_code, payload, **kwargs)
+
+
+def _send_uncertain_response(handler):
+    send_json(handler, 502, error_payload(
+        "send_uncertain",
+        "We couldn't confirm whether your message was sent. It may already have been delivered. "
+        "Check your Sent folder or contact the recipient before sending again.",
+    ))
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status_code: int, payload: dict):
@@ -717,11 +737,13 @@ def _gmail_api_send(
                 return None, None
             return payload, None
     except HTTPError as error:
+        if error.code >= 500 or error.code == 408:
+            return None, {"code": "send_uncertain"}
         return None, {"code": gmail_http_error_code(error.code, "gmail_send_failed")}
     except (IncompleteRead, OSError, URLError, TimeoutError):
         if response_received:
             return None, None
-        return None, {"code": "gmail_unavailable"}
+        return None, {"code": "send_uncertain"}
 
 
 def _send_with_gmail_oauth(
@@ -1243,7 +1265,9 @@ class handler(BaseHTTPRequestHandler):
                 return
             if send_error:
                 code = (send_error or {}).get("code")
-                if code == "gmail_token_invalid":
+                if code == "send_uncertain":
+                    _send_uncertain_response(self)
+                elif code == "gmail_token_invalid":
                     send_json(self, 401, error_payload("reconnect_required", "Reconnect this Gmail inbox to continue."))
                 elif code == "gmail_permission_denied":
                     send_json(self, 403, error_payload("gmail_permission_denied", "Gmail did not permit this operation."))
@@ -1401,7 +1425,9 @@ class handler(BaseHTTPRequestHandler):
                 timeout=30,
             )
         except SmtpConnectionError as error:
-            if error.code == "smtp_authentication_failed":
+            if error.code == "smtp_send_uncertain":
+                _send_uncertain_response(self)
+            elif error.code == "smtp_authentication_failed":
                 send_json(self, 401, error_payload("invalid_credentials", "Stored SMTP credentials were rejected."))
             elif error.code == "smtp_send_failed":
                 send_json(self, 502, error_payload("send_failed", "SMTP could not send this message."))

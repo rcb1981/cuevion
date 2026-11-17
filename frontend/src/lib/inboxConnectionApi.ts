@@ -990,6 +990,7 @@ export type InboxMessageActionResponse = {
 
 export type SendGmailMessageResponse = {
   ok: boolean;
+  sendOutcome?: "uncertain" | "not_sent";
   providerMessageId?: string;
   providerThreadId?: string;
   labelIds?: string[];
@@ -1007,6 +1008,18 @@ export type SendGmailMessageResponse = {
 };
 
 export const PRIORITY_SEMANTIC_ASSESSMENT_TIMEOUT_MS = 60_000;
+
+export const SEND_UNCERTAIN_MESSAGE =
+  "We couldn't confirm whether your message was sent. It may already have been delivered. " +
+  "Check your Sent folder or contact the recipient before sending again.";
+
+function uncertainSendResponse(): SendGmailMessageResponse {
+  return {
+    ok: false,
+    sendOutcome: "uncertain",
+    error: { code: "send_uncertain", message: SEND_UNCERTAIN_MESSAGE },
+  };
+}
 
 function sentIdentityUnconfirmedResponse(): SendGmailMessageResponse {
   return {
@@ -3433,11 +3446,8 @@ export async function sendGmailMessage(
     let rawPayload: string;
     try {
       rawPayload = await response.text();
-    } catch (error) {
-      if (response.ok) {
-        return sentIdentityUnconfirmedResponse();
-      }
-      throw error;
+    } catch {
+      return uncertainSendResponse();
     }
     let payload: unknown = null;
 
@@ -3460,8 +3470,19 @@ export async function sendGmailMessage(
         !Array.isArray(payload.error)
           ? payload.error as { code?: string; message?: string }
           : null;
+      // A status code alone (including a gateway 5xx) cannot tell us whether
+      // the provider accepted the message. Require the send route's verdict.
+      if (
+        !payload || typeof payload !== "object" ||
+        (payload as Record<string, unknown>).sendOutcome !== "not_sent" ||
+        typeof responseError?.code !== "string" ||
+        typeof responseError?.message !== "string"
+      ) {
+        return uncertainSendResponse();
+      }
       return {
         ok: false,
+        sendOutcome: "not_sent",
         error: responseError ?? {
           code: "send_failed",
           message: `Could not send email${response.status ? ` (${response.status})` : ""}.`,
@@ -3470,12 +3491,12 @@ export async function sendGmailMessage(
     }
 
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-      return sentIdentityUnconfirmedResponse();
+      return uncertainSendResponse();
     }
 
     const successPayload = payload as Record<string, unknown>;
     if (successPayload.ok !== true) {
-      return sentIdentityUnconfirmedResponse();
+      return uncertainSendResponse();
     }
     if (request.imapReplyContext !== undefined) {
       // Generic SMTP has no Gmail-authoritative sent identity or semantic
@@ -3552,21 +3573,9 @@ export async function sendGmailMessage(
         : {}),
       ...(safeWarning ? { warning: safeWarning } : {}),
     };
-  } catch (error) {
-    return {
-      ok: false,
-      error: {
-        code: error instanceof DOMException && error.name === "AbortError"
-          ? "timeout"
-          : "send_failed",
-        message:
-          error instanceof DOMException && error.name === "AbortError"
-            ? "Sending timed out. Please try again."
-            : error instanceof Error
-              ? error.message
-              : "Could not send email.",
-      },
-    };
+  } catch {
+    // Never automatically repeat an outbound POST after losing its response.
+    return uncertainSendResponse();
   } finally {
     window.clearTimeout(timeoutId);
   }

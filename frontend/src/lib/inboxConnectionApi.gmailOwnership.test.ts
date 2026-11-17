@@ -392,10 +392,12 @@ async function run() {
       bodyText: "Message",
     });
     sendGmailTextFailure = false;
-    assert.equal(unreadableSuccessResponse.ok, true);
-    assert.equal(unreadableSuccessResponse.providerIdentityConfirmed, false);
-    assert.equal(unreadableSuccessResponse.threadContinuityConfirmed, false);
-    assert.equal(unreadableSuccessResponse.error, undefined);
+    // HTTP headers alone are not a readable acknowledgement from our send route.
+    assert.equal(unreadableSuccessResponse.ok, false);
+    assert.equal(unreadableSuccessResponse.sendOutcome, "uncertain");
+    assert.equal(unreadableSuccessResponse.providerIdentityConfirmed, undefined);
+    assert.equal(unreadableSuccessResponse.threadContinuityConfirmed, undefined);
+    assert.equal(unreadableSuccessResponse.error?.code, "send_uncertain");
 
     await downloadAttachment({
       mailboxId: "gmail-1",

@@ -293,11 +293,20 @@ def send_public_smtp_message(
         timeout=timeout,
     ) as client:
         try:
-            client.send_message(message, to_addrs=recipients)
+            refused = client.send_message(message, to_addrs=recipients)
+            if refused:
+                # Some recipients have already been accepted. Resending the
+                # entire envelope could duplicate delivery to those recipients.
+                raise SmtpConnectionError("smtp_send_uncertain")
         except SmtpConnectionError:
             raise
-        except Exception:
+        except (smtplib.SMTPRecipientsRefused, smtplib.SMTPResponseException,
+                smtplib.SMTPNotSupportedError, ValueError):
             raise SmtpConnectionError("smtp_send_failed") from None
+        except Exception:
+            # Once submission starts, a lost connection/acknowledgement does
+            # not establish that the server rejected the message.
+            raise SmtpConnectionError("smtp_send_uncertain") from None
 
 
 def test_smtp_authentication(

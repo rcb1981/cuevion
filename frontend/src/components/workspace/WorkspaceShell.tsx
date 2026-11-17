@@ -161,6 +161,7 @@ import {
   requestPrioritySemanticNewInboundDismissal,
   requestPrioritySemanticNewInboundHydration,
   sendGmailMessage,
+  SEND_UNCERTAIN_MESSAGE,
   GMAIL_OAUTH_RECONNECT_REQUIRED_CONNECTION_MESSAGE,
   type ArchiveFolderSnapshot,
   type ArchiveMutationResponse,
@@ -17684,6 +17685,8 @@ function MailboxView({
   const replyModeSessionRef = useRef<ReplyModeSession | null>(null);
   const [composeSendError, setComposeSendError] = useState<string | null>(null);
   const [isSendingCompose, setIsSendingCompose] = useState(false);
+  const [composeSendUncertain, setComposeSendUncertain] = useState(false);
+  const composeSendAttemptRef = useRef<"idle" | "sending" | "uncertain">("idle");
   // Plain-text body typed by the user in the mobile compose overlay.
   // Prepended as HTML to the pre-filled composeBody (quote + signature) on send.
   const [mobileReplyBodyText, setMobileReplyBodyText] = useState("");
@@ -17959,6 +17962,10 @@ function MailboxView({
     replyModeSessionRef.current = null;
     pendingComposeInitialFocusRef.current = null;
     setComposeSendError(null);
+    setComposeSendUncertain(false);
+    if (composeSendAttemptRef.current !== "sending") {
+      composeSendAttemptRef.current = "idle";
+    }
     setIsSendingCompose(false);
   };
 
@@ -21963,7 +21970,7 @@ function MailboxView({
   };
 
   const sendMessage = async (options?: { bodyHtml?: string }) => {
-    if (isSendingCompose) {
+    if (composeSendAttemptRef.current !== "idle") {
       return;
     }
     // Mobile reply passes an override body (user text prepended to the pre-filled
@@ -22016,6 +22023,8 @@ function MailboxView({
       return;
     }
 
+    // A ref closes the same-render double-click window before React updates.
+    composeSendAttemptRef.current = "sending";
     setComposeSendError(null);
     setIsSendingCompose(true);
 
@@ -22051,6 +22060,11 @@ function MailboxView({
         ...(imapReplyContext ? { imapReplyContext } : {}),
       });
 
+      if (sendResponse.sendOutcome === "uncertain") {
+        composeSendAttemptRef.current = "uncertain";
+        setComposeSendUncertain(true);
+        return;
+      }
       if (!sendResponse.ok) {
         setComposeSendError(sendResponse.error?.message ?? "Could not send email.");
         return;
@@ -22229,9 +22243,32 @@ function MailboxView({
         error instanceof Error ? error.message : "Could not prepare email for sending.",
       );
     } finally {
+      if (composeSendAttemptRef.current === "sending") {
+        composeSendAttemptRef.current = "idle";
+      }
       setIsSendingCompose(false);
     }
   };
+
+  const composeSendFeedback = composeSendUncertain ? (
+    <div role="status" aria-live="polite">
+      <p className="font-medium">Sending not confirmed</p>
+      <p>{SEND_UNCERTAIN_MESSAGE} Your message is still open here.</p>
+      <button
+        type="button"
+        className="mt-2 underline underline-offset-2"
+        onClick={() => {
+          // Acknowledgement only unlocks the button; it never sends a request.
+          if (composeSendAttemptRef.current === "uncertain") {
+            composeSendAttemptRef.current = "idle";
+            setComposeSendUncertain(false);
+          }
+        }}
+      >
+        I've checked; enable sending
+      </button>
+    </div>
+  ) : composeSendError;
 
   const closeMenus = () => {
     setIsSortMenuOpen(false);
@@ -27966,7 +28003,7 @@ function MailboxView({
       // waiting for the useEffect render cycle.
       onComposeOpenChange?.(false);
     }
-    // result === undefined → send failed; composeSendError is set; keep overlay open.
+    // An unconfirmed or failed send keeps the mobile body and overlay open.
   };
 
   const composeCloseConfirmation = (
@@ -28714,15 +28751,15 @@ function MailboxView({
                     </label>
                   ) : null}
                   <div className="ml-auto flex min-w-0 items-center gap-3">
-                    {composeSendError ? (
+                    {composeSendFeedback ? (
                       <div className="max-w-[24rem] text-right text-[0.8rem] leading-5 text-[color:rgba(148,63,38,0.96)]">
-                        {composeSendError}
+                        {composeSendFeedback}
                       </div>
                     ) : null}
                     <button
                       type="button"
                       onClick={() => void sendMessage()}
-                      disabled={isSendingCompose}
+                      disabled={isSendingCompose || composeSendUncertain}
                       className="inline-flex h-10 min-w-[7.4rem] items-center justify-center rounded-full bg-pine px-6 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-white transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none disabled:cursor-not-allowed disabled:bg-[color:rgba(101,124,103,0.72)] disabled:hover:bg-[color:rgba(101,124,103,0.72)]"
                     >
                       {isSendingCompose ? "Sending..." : "Send"}
@@ -28804,7 +28841,7 @@ function MailboxView({
               <button
                 type="button"
                 onClick={() => void sendMessage()}
-                disabled={isSendingCompose}
+                disabled={isSendingCompose || composeSendUncertain}
                 className="inline-flex h-8 flex-none items-center justify-center gap-1.5 rounded-full bg-pine px-3 text-[0.68rem] font-medium text-white transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.98] focus-visible:outline-none disabled:cursor-not-allowed disabled:bg-[color:rgba(101,124,103,0.72)] disabled:hover:bg-[color:rgba(101,124,103,0.72)]"
               >
                 <DesktopMessageActionIcon name="send" />
@@ -28844,13 +28881,13 @@ function MailboxView({
                       </button>
                     }
                   />
-                  {composeSendError ? (
+                  {composeSendFeedback ? (
                     <div
-                      data-desktop-compose-error
-                      role="alert"
+                      data-desktop-compose-error={!composeSendUncertain || undefined}
+                      role={composeSendUncertain ? undefined : "alert"}
                       className="flex-none border-b border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 py-2 text-[0.78rem] leading-5 text-[color:rgba(148,63,38,0.96)] md:px-6"
                     >
-                      {composeSendError}
+                      {composeSendFeedback}
                     </div>
                   ) : null}
                 </>
@@ -31553,7 +31590,7 @@ function MailboxView({
               </span>
               <button
                 type="button"
-                disabled={isSendingCompose}
+                disabled={isSendingCompose || composeSendUncertain}
                 onClick={() => void handleMobileComposeSend()}
                 className="rounded-full px-3 py-2 text-[0.92rem] font-semibold text-[color:#e7c783] disabled:opacity-40"
               >
@@ -31680,9 +31717,9 @@ function MailboxView({
           </div>
 
           {/* Send error */}
-          {composeSendError ? (
+          {composeSendFeedback ? (
             <div className="shrink-0 border-t border-[color:rgba(143,82,48,0.2)] bg-[color:rgba(255,248,243,0.9)] px-5 py-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] text-[0.82rem] text-[color:rgba(143,82,48,0.92)] dark:border-[color:rgba(235,174,138,0.2)] dark:bg-[color:rgba(42,24,15,0.9)] dark:text-[color:rgba(235,174,138,0.86)]">
-              {composeSendError}
+              {composeSendFeedback}
             </div>
           ) : (
             <div className="shrink-0 h-[env(safe-area-inset-bottom,0px)]" />
