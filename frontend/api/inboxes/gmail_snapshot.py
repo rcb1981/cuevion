@@ -6,6 +6,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from email import message_from_bytes
 from email.errors import MessageError
 from enum import Enum
@@ -249,8 +250,18 @@ def _base64url_decode(value: str) -> bytes:
     return decoded
 
 
-def _list_path(provider_folder: str, limit: int) -> str:
-    if provider_folder == "Inbox":
+def valid_sent_page_token(value: object) -> bool:
+    # Opaque provider data, never a URL or a Gmail search expression.
+    return (isinstance(value, str) and 1 <= len(value) <= 4096
+            and value.isascii() and all(33 <= ord(c) <= 126 for c in value))
+
+
+def _list_path(provider_folder: str, limit: int, page_token: str | None = None) -> str:
+    if provider_folder == "Sent":
+        query = {"labelIds": "SENT", "maxResults": limit}
+        if page_token is not None:
+            query["pageToken"] = page_token
+    elif provider_folder == "Inbox":
         query = {"labelIds": "INBOX", "maxResults": limit}
     elif provider_folder == "Trash":
         query = {
@@ -270,6 +281,8 @@ def _strict_labels_match_folder(
     normalized = {label_id.upper() for label_id in label_ids}
     if provider_folder == "Inbox":
         return "INBOX" in normalized
+    if provider_folder == "Sent":
+        return "SENT" in label_ids and not {"TRASH", "SPAM", "DRAFT"}.intersection(label_ids)
     if provider_folder == "Trash":
         return "TRASH" in normalized and "INBOX" not in normalized
     return not normalized.intersection(_ARCHIVE_EXCLUDED_LABELS)
@@ -319,7 +332,7 @@ def _parse_gmail_message_detail_with_candidate_source(
     """
 
     if (
-        provider_folder not in {"Inbox", "Archive", "Trash"}
+        provider_folder not in {"Inbox", "Archive", "Trash", "Sent"}
         or not valid_identifier(requested_message_id)
         or not isinstance(index, int)
         or isinstance(index, bool)
@@ -368,16 +381,39 @@ def _parse_gmail_message_detail_with_candidate_source(
 
     unread = "UNREAD" in label_ids
     flagged = "STARRED" in label_ids
-    preview = imap_connect_preview.to_message_preview(
-        parsed_message,
-        index,
-        context["mailbox_email"],
-        unread,
-        None,
-        flagged,
-        internal_role=None,
-        focus_preferences=focus_preferences,
-    )
+    if provider_folder == "Sent":
+        # Reuse MIME extraction only. Sent reads must never classify messages or
+        # produce inputs for Priority, Learning, Filtered, or Inbox ingestion.
+        mime = imap_connect_preview
+        html_body = mime.get_html_body(parsed_message)
+        body = mime.get_message_body(parsed_message, html_body=html_body)
+        created_at, timestamp = mime.format_timestamp(parsed_message.get("Date", ""))
+        from_header = mime.decode_mime_words(parsed_message.get("From", "Unknown sender"))
+        preview = {
+            "id": provider_message_id,
+            "sender": from_header,
+            "from": from_header,
+            "to": mime.decode_mime_words(parsed_message.get("To", "")),
+            "cc": mime.decode_mime_words(parsed_message.get("Cc", "")),
+            "subject": mime.decode_mime_words(parsed_message.get("Subject", "Untitled message")),
+            "snippet": mime.clean_text(body.replace("\n", " "))[:220],
+            "body": body.split("\n\n") if body else ["No message preview available."],
+            "attachments": mime.get_message_attachments(parsed_message),
+            "createdAt": created_at, "timestamp": timestamp,
+            "unread": unread, "flagged": flagged,
+            **({"bodyHtml": html_body} if html_body else {}),
+        }
+    else:
+        preview = imap_connect_preview.to_message_preview(
+            parsed_message,
+            index,
+            context["mailbox_email"],
+            unread,
+            None,
+            flagged,
+            internal_role=None,
+            focus_preferences=focus_preferences,
+        )
     preview.pop("imapUid", None)
     preview["providerMessageId"] = provider_message_id
 
@@ -390,6 +426,16 @@ def _parse_gmail_message_detail_with_candidate_source(
     preview["labelIds"] = label_ids
     preview["providerFolder"] = provider_folder
     preview["serverMailboxId"] = context["mailbox_id"]
+    if provider_folder == "Sent":
+        # Keep the shared MIME parser and all other folder timestamp contracts.
+        internal_date = detail_payload.get("internalDate")
+        if isinstance(internal_date, str) and internal_date.isascii() and internal_date.isdigit():
+            try:
+                stamp = datetime.fromtimestamp(int(internal_date) / 1000, timezone.utc).isoformat()
+                preview["createdAt"] = stamp
+                preview["timestamp"] = stamp
+            except (ValueError, OverflowError, OSError):
+                pass
 
     rfc_message_id = parsed_message.get("Message-Id")
     if isinstance(rfc_message_id, str):
@@ -398,6 +444,9 @@ def _parse_gmail_message_detail_with_candidate_source(
         )
         if valid_identifier(normalized_rfc_message_id):
             preview["rfcMessageId"] = normalized_rfc_message_id
+
+    if provider_folder == "Sent":
+        return preview, {}
 
     candidate_source = {
         "provider": "google",
@@ -666,6 +715,7 @@ def read_gmail_folder_snapshot(
     strict: bool = False,
     required_message_id: str | None = None,
     authoritative_message_ids: tuple[str, ...] | None = None,
+    page_token: str | None = None,
     message_parser=message_from_bytes,
     gmail_request: GmailRawRequest | None = None,
     refresh_context: GmailContextRefresh | None = None,
@@ -682,7 +732,8 @@ def read_gmail_folder_snapshot(
     """
 
     if (
-        provider_folder not in {"Inbox", "Archive", "Trash"}
+        provider_folder not in {"Inbox", "Archive", "Trash", "Sent"}
+        or (page_token is not None and (provider_folder != "Sent" or not valid_sent_page_token(page_token)))
         or not isinstance(limit, int)
         or isinstance(limit, bool)
         or limit < 1
@@ -726,7 +777,10 @@ def read_gmail_folder_snapshot(
 
     if authoritative_message_ids is None:
         list_payload, list_error, context, refresh_failure = (
-            requests.sequential_request(_list_path(provider_folder, limit))
+            requests.sequential_request(
+                _list_path(provider_folder, limit, page_token) if provider_folder == "Sent"
+                else _list_path(provider_folder, limit)
+            )
         )
         if refresh_failure is not None:
             return _result(
@@ -757,6 +811,14 @@ def read_gmail_folder_snapshot(
     else:
         message_ids = list(authoritative_message_ids)
 
+    next_page_token = None
+    if provider_folder == "Sent":
+        next_page_token = list_payload.get("nextPageToken")
+        if next_page_token is not None and (
+            not valid_sent_page_token(next_page_token) or next_page_token == page_token
+        ):
+            return _invalid_response(context)
+
     messages: list[dict] = []
     priority_candidate_sources: list[dict] = []
     snapshot = {
@@ -765,6 +827,8 @@ def read_gmail_folder_snapshot(
         "messages": messages,
         "uidValidity": GMAIL_API_UID_VALIDITY,
     }
+    if provider_folder == "Sent":
+        snapshot["nextPageToken"] = next_page_token
     snapshot_size: int | None = None
     message_separator_size = len(
         json.JSONEncoder().item_separator.encode("utf-8")
@@ -779,7 +843,19 @@ def read_gmail_folder_snapshot(
                     refresh_failure=refresh_failure,
                 )
             if detail_error is not None:
+                if provider_folder == "Sent" and detail_error.get("code") == "gmail_message_not_found":
+                    continue
                 return _result(context, error=detail_error)
+            if provider_folder == "Sent" and isinstance(detail_payload, dict):
+                labels = detail_payload.get("labelIds")
+                # A valid exact message can move between list and detail reads.
+                # Skip only proven membership changes; malformed data fails closed.
+                if (detail_payload.get("id") == requested_message_id
+                    and isinstance(labels, list)
+                    and all(valid_identifier(label) for label in labels)
+                    and len(set(labels)) == len(labels)
+                    and not _strict_labels_match_folder(labels, "Sent")):
+                    continue
             parsed = _parse_gmail_message_detail_with_candidate_source(
                 detail_payload,
                 context=context,

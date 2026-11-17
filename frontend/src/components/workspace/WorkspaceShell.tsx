@@ -1,3 +1,5 @@
+import { mergeGmailSentDisplay } from "../../lib/gmailSentState";
+import { useGmailSent } from "../../lib/useGmailSent";
 import { mailboxFolderRailClass, mailboxFolderHeadingClass, mailboxFolderListClass, mailboxFolderRowClass, mailboxFolderSelectedClass, mailboxFolderIdleClass } from "./mailboxFolderStyles";
 import { useMailboxSnapshots } from "../../lib/MailboxSnapshotContext";
 import { clearMailboxSnapshotSession } from "../../lib/mailboxSnapshotSession";
@@ -2814,7 +2816,10 @@ export function resolveInitialComposeAttachments(
         : {
             mailboxId: sourceLocation.mailboxId,
             messageId: sourceMessage.id,
-            messageUid: sourceMessage.imapUid,
+            messageUid: sourceMessage.imapUid ?? (
+              sourceMessage.providerFolder === "Sent" && sourceMessage.threadIdentityContext?.provider === "google"
+                ? sourceMessage.providerMessageId : undefined
+            ),
             folder: sourceLocation.folder,
             providerFolder: sourceMessage.providerFolder,
             uidValidity: sourceMessage.uidValidity,
@@ -17190,6 +17195,7 @@ function MailboxView({
   isProviderArchiveCapabilityUnavailable,
   onArchiveFolderOpen,
   archiveFolderStatusMessage,
+  gmailSentConnectionKey,
   onTrashFolderOpen,
   trashFolderStatusMessage,
   onApplyConfirmedProviderTrashSourceRemoval,
@@ -17324,6 +17330,7 @@ function MailboxView({
   isProviderArchiveCapabilityUnavailable: (mailboxId: InboxId) => boolean;
   onArchiveFolderOpen: () => void;
   archiveFolderStatusMessage: string | null;
+  gmailSentConnectionKey: string | null;
   onTrashFolderOpen: () => void;
   trashFolderStatusMessage: string | null;
   onApplyConfirmedProviderTrashSourceRemoval: (
@@ -17398,6 +17405,28 @@ function MailboxView({
   const [sortOrder, setSortOrder] = useState<MailSortOrder>("desc");
   const [activeFolder, setActiveFolder] = useState<MailFolder>("Inbox");
   const [isSharedView, setIsSharedView] = useState(false);
+  const isGmailSentView = Boolean(gmailSentConnectionKey) && activeFolder === "Sent" && !isSharedView && !activeSmartFolderId;
+  const gmailSent = useGmailSent(mailbox.id, gmailSentConnectionKey, isGmailSentView);
+  // Render-only mapping. No normalization/classification or shared-store writes.
+  const gmailSentMessages = useMemo<MailMessage[]>(() => gmailSent.messages.map((message) =>
+    applyLiveThreadIdentity({
+      id: `gmail-sent:${encodeURIComponent(mailbox.id)}:${encodeURIComponent(message.providerMessageId!)}`,
+      serverMailboxId: message.serverMailboxId, providerFolder: "Sent",
+      providerMessageId: message.providerMessageId, providerThreadId: message.providerThreadId,
+      rfcMessageId: message.rfcMessageId, labelIds: message.labelIds,
+      sender: message.sender, from: message.from, to: message.to, cc: message.cc,
+      subject: message.subject, snippet: message.snippet, body: message.body, bodyHtml: message.bodyHtml,
+      createdAt: message.createdAt, timestamp: message.timestamp, time: resolveDesktopThreadTimestamp(message).label,
+      unread: message.unread, flagged: message.flagged,
+      attachments: message.attachments?.map((attachment) => ({ ...attachment, receivedSource: {
+        mailboxId: mailbox.id, messageId: message.id, messageUid: message.providerMessageId,
+        folder: "Sent" as const, providerFolder: "Sent",
+      } })),
+      signal: "Sent", category: "Primary" as const, categorySource: "system" as const,
+      categoryConfidence: "low" as const, priorityScore: "low" as const,
+    }, { mailboxId: mailbox.id, provider: "google", folder: "SENT", uidValidity: "gmail-api" }),
+  ), [gmailSent.messages, mailbox.id]);
+
   const [revealedRemoteImageMessageIds, setRevealedRemoteImageMessageIds] = useState<string[]>([]);
   const setActiveSmartFolderId = onActiveSmartFolderChange;
   const [preferredMailListPaneWidth, setPreferredMailListPaneWidth] = useState(() => {
@@ -19059,7 +19088,9 @@ function MailboxView({
       },
     ),
     Drafts: mailboxCollections.Drafts,
-    Sent: mailboxCollections.Sent,
+    Sent: isGmailSentView
+      ? mergeGmailSentDisplay(mailbox.id, gmailSentMessages, mailboxCollections.Sent, gmailSent.observed)
+      : mailboxCollections.Sent,
     Archive: mailboxCollections.Archive,
     Filtered: dedupeMessagesByCanonicalIdentity([
       ...mailboxCollections.Filtered,
@@ -19758,13 +19789,13 @@ function MailboxView({
     selectedMessageFromCurrentId ??
     selectedMessageFallbackTop ??
     null;
-  const fullWidthMessage = selectedMessageFromFolder ?? selectedMessage;
+  const fullWidthMessage = isGmailSentView ? selectedMessage : selectedMessageFromFolder ?? selectedMessage;
   const fullMessageModalInteractionState: FullMessageModalInteractionState = {
     isOpen: isFullMessageOpen,
     selectedMessageId,
   };
   const fullMessageModalResolvedMessage =
-    selectedMessageFromFolder ?? selectedMessageFromCurrentId;
+    isGmailSentView ? selectedMessageFromCurrentId : selectedMessageFromFolder ?? selectedMessageFromCurrentId;
   const fullMessageModalMessageId = resolveFullMessageModalMessageId(
     fullMessageModalInteractionState,
     fullMessageModalResolvedMessage?.id ?? null,
@@ -20171,7 +20202,9 @@ function MailboxView({
           ),
         )
       : null;
-    const threadSourceMessages = scopedContext?.threadMessages ?? mailboxThreadMessages;
+    const threadSourceMessages = isGmailSentView
+      ? mergeGmailSentDisplay(mailbox.id, gmailSentMessages, mailboxThreadMessages, gmailSent.observed)
+      : scopedContext?.threadMessages ?? mailboxThreadMessages;
     const chronologyNow = new Date();
 
     return [
@@ -23042,13 +23075,21 @@ function MailboxView({
     });
   };
 
+  const resolveSentComposeSourceEntry = () => {
+    if (!isGmailSentView || modalComposeSourceSelection?.mailboxId !== mailbox.id) return null;
+    const message = messageCollections.Sent.find((candidate) =>
+      buildMailboxScopedMessageSelection(mailbox.id, candidate, "Sent").key === modalComposeSourceSelection.key,
+    );
+    return message ? { mailboxId: mailbox.id, folder: "Sent" as const, message } : null;
+  };
+
   function restoreFullMessageModalAfterCompose() {
-    const sourceEntry = modalComposeSourceSelection
+    const sourceEntry = (modalComposeSourceSelection
       ? resolveMailboxScopedSelectionEntries(
           latestMailboxStoreRef.current,
           [modalComposeSourceSelection],
         )[0] ?? null
-      : null;
+      : null) ?? resolveSentComposeSourceEntry();
     const returnMessageId = sourceEntry
       ? sourceEntry.message.id
       : resolveModalComposeReturnMessageId(
@@ -28139,9 +28180,9 @@ function MailboxView({
           </div>
           <div data-mailbox-toolbar-sync className="flex min-h-[60px] min-w-0 items-center gap-3 border-r border-[var(--workspace-border-soft)] px-3">
           <MailToolbarIconButton
-            label={mailboxSyncPresentation.inboxRefreshing ? "Syncing…" : "Sync"}
-            onClick={onSyncMailbox}
-            disabled={isSyncingMailbox}
+            label={(isGmailSentView ? gmailSent.loading : mailboxSyncPresentation.inboxRefreshing) ? "Syncing…" : "Sync"}
+            onClick={isGmailSentView ? () => { void gmailSent.refresh(); } : onSyncMailbox}
+            disabled={isGmailSentView ? gmailSent.loading : isSyncingMailbox}
           >
             <svg
               aria-hidden="true"
@@ -28496,6 +28537,19 @@ function MailboxView({
           </div>
           </div>
         </div>
+
+        {isGmailSentView ? (
+          <div data-gmail-sent-status role="status" aria-live="polite"
+            className="mb-4 flex flex-none items-center justify-between gap-3 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.8rem] leading-5 text-[var(--workspace-text-soft)]">
+            <span>{gmailSent.error ?? (gmailSent.loading ? "Loading Sent from Gmail…"
+              : gmailSent.loaded && gmailSent.messages.length === 0 ? "No sent messages returned by Gmail."
+              : "Sent from Gmail and locally saved sends.")}</span>
+            {gmailSent.nextPageToken ? (
+              <button type="button" disabled={gmailSent.loading} onClick={() => { void gmailSent.loadMore(); }}
+                className="shrink-0 rounded-lg border border-[var(--workspace-border-soft)] px-3 py-1 disabled:opacity-50">Load more</button>
+            ) : null}
+          </div>
+        ) : null}
 
         {activeFolder === "Archive" && archiveFolderStatusMessage ? (
           <div
@@ -57121,6 +57175,11 @@ export function WorkspaceShell({
                     readCurrentProviderArchiveKnowledge(mailboxId)
                       .capability === "unavailable"
                   }
+                  gmailSentConnectionKey={hasAuthenticatedMemberAuthority &&
+                    savedManagedInboxes.some((candidate) => candidate.id === activeMailbox.id && candidate.provider === "google") &&
+                    providerArchiveConnectionKeys[activeMailbox.id]
+                      ? `${providerArchiveConnectionKeys[activeMailbox.id]}:${providerArchiveConnectionEpochsRef.current[activeMailbox.id] ?? 0}`
+                      : null}
                   onArchiveFolderOpen={handleOpenActiveMailboxArchive}
                   archiveFolderStatusMessage={
                     providerArchiveFolderStatusMessages[activeMailbox.id] ?? null

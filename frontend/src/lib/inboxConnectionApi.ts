@@ -6221,3 +6221,65 @@ export async function fetchMicrosoftJunkMessage(
     }};
   }
 }
+
+// Gmail Sent is an independent read surface; never routes through Inbox sync.
+export type GmailSentPage = {
+  messages: LiveInboxMessageSnapshot[];
+  nextPageToken: string | null;
+};
+export type GmailSentResponse =
+  | { ok: true; page: GmailSentPage }
+  | { ok: false; error: { code: string; message: string } };
+
+export function isGmailSentPageToken(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 4096 && /^[\x21-\x7e]+$/.test(value);
+}
+
+export async function fetchGmailSent(
+  mailboxId: string,
+  pageToken?: string,
+  signal?: AbortSignal,
+): Promise<GmailSentResponse> {
+  const failure = (code = "gmail_sent_fetch_failed", message = "Sent could not be refreshed from Gmail. Try again."): GmailSentResponse =>
+    ({ ok: false, error: { code, message } });
+  if (!isArchiveIdentifier(mailboxId) || (pageToken !== undefined && !isGmailSentPageToken(pageToken))) {
+    return failure("invalid_request", "Invalid Sent page parameters.");
+  }
+  try {
+    const response = await fetchProtectedApi("/api/inboxes/fetch-gmail-sent", {
+      method: "POST", credentials: "include", cache: "no-store", signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mailboxId, limit: 50, ...(pageToken === undefined ? {} : { pageToken }) }),
+    });
+    const raw = await response.text();
+    if (new TextEncoder().encode(raw).byteLength > 10 * 1024 * 1024) return failure();
+    const value: unknown = JSON.parse(raw);
+    if (response.status !== 200) {
+      if (response.status === 401) return failure("reconnect_required", "Sign in or reconnect Gmail to load Sent.");
+      if (response.status === 400) return failure("invalid_page_token", "Sent pagination expired. Refresh Sent to continue.");
+      return failure();
+    }
+    if (!isArchiveRecord(value) || !hasExactArchiveKeys(value, ["ok", "mailboxId", "folder"]) ||
+        value.ok !== true || value.mailboxId !== mailboxId || !isArchiveRecord(value.folder)) return failure();
+    const folder = value.folder;
+    if (!hasExactArchiveKeys(folder, ["serverMailboxId", "providerFolder", "uidValidity", "messages", "nextPageToken"]) ||
+        folder.serverMailboxId !== mailboxId || folder.providerFolder !== "Sent" || folder.uidValidity !== "gmail-api" ||
+        !Array.isArray(folder.messages) || folder.messages.length > 50 ||
+        !(folder.nextPageToken === null || isGmailSentPageToken(folder.nextPageToken)) ||
+        (pageToken !== undefined && folder.nextPageToken === pageToken)) return failure();
+    const seen = new Set<string>();
+    for (const message of folder.messages) {
+      if (!isArchiveRecord(message) || !hasOnlyArchiveKeys(message, GMAIL_ARCHIVE_MESSAGE_FIELDS) ||
+          !archivePreviewFieldsAreValid(message) || message.serverMailboxId !== mailboxId || message.providerFolder !== "Sent" ||
+          !isArchiveIdentifier(message.providerMessageId) || !isArchiveIdentifier(message.providerThreadId) ||
+          seen.has(message.providerMessageId) || !Array.isArray(message.labelIds) || message.labelIds.length > 1000 ||
+          !message.labelIds.every(isArchiveIdentifier) || new Set(message.labelIds).size !== message.labelIds.length ||
+          !message.labelIds.includes("SENT") || ["TRASH", "SPAM", "DRAFT"].some((label) => (message.labelIds as unknown[]).includes(label)) ||
+          (message.rfcMessageId !== undefined && !isArchiveIdentifier(message.rfcMessageId))) return failure();
+      seen.add(message.providerMessageId);
+    }
+    return { ok: true, page: { messages: folder.messages as LiveInboxMessageSnapshot[], nextPageToken: folder.nextPageToken } };
+  } catch {
+    return failure();
+  }
+}
