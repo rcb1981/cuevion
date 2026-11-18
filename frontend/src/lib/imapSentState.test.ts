@@ -36,7 +36,7 @@ async function run() {
     const result = deferred<ImapSentResponse>(); requests.push({ token, choice, signal, result }); return result.promise;
   });
   let pending = controller.refresh(); requests[0].result.resolve(page(["30", "20"], "p1", 20, 30)); await pending;
-  pending = controller.loadMore(); requests[1].result.resolve(page(["20", "10"], "p2", 10, 20)); await pending;
+  pending = controller.loadMore(); assert.deepEqual(requests[1].choice, { providerFolder: "Sent Messages", scope }, "automatic choice is pinned for pagination without another count scan"); requests[1].result.resolve(page(["20", "10"], "p2", 10, 20)); await pending;
   assert.deepEqual(controller.getSnapshot().messages.map(m => m.imapUid), ["30", "20", "10"]);
   pending = controller.refresh(); requests[2].result.resolve(page(["40", "30"], "p3", 30, 40)); await pending;
   assert.deepEqual(controller.getSnapshot().messages.map(m => m.imapUid), ["40", "30", "20", "10"], "refresh cannot infer deletion below its scan range");
@@ -61,6 +61,12 @@ async function run() {
   controller.reset(); requests[10].result.resolve(page(["99"])); await pending;
   assert.equal(controller.getSnapshot().messages.length, 0);
 
+  const warningController = createImapSentController("box", () => true, async () => ({ ...page(["1"]), preferenceSaved: false } as ImapSentResponse));
+  await warningController.refresh();
+  assert.equal(warningController.getSnapshot().messages.length, 1);
+  assert.match(warningController.getSnapshot().error!, /could not be saved/);
+  assert.equal(parseImapSentResponse({ ...page(["1"]), preferenceSaved: false }, "box").ok, true);
+  assert.equal(parseImapSentResponse({ ...page(["1"]), preferenceSaved: "yes" }, "box").ok, false);
   assert.equal(parseImapSentResponse(page(["1"]), "box").ok, true);
   for (const mutate of [
     (x: any) => { x.mailboxId = "other"; }, (x: any) => { x.scope = "invalid"; },

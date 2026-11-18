@@ -7,8 +7,8 @@ import { useImapSent } from "./useImapSent";
 
 async function run() {
   const original = globalThis.fetch;
-  const requests: Array<{ resolve: (r: Response) => void; signal: AbortSignal }> = [];
-  globalThis.fetch = (_url, init) => new Promise(resolve => requests.push({ resolve, signal: init!.signal as AbortSignal }));
+  const requests: Array<{ resolve: (r: Response) => void; signal: AbortSignal; body: any }> = [];
+  globalThis.fetch = (_url, init) => new Promise(resolve => requests.push({ resolve, signal: init!.signal as AbortSignal, body: JSON.parse(init!.body as string) }));
   const scope = "a".repeat(64);
   const response = () => new Response(JSON.stringify({ ok: true, mailboxId: "box", scope,
     discovery: { mode: "ready", providerFolder: "Sent", folders: [{ providerFolder: "Sent", displayName: "Sent", suggested: true }] },
@@ -27,9 +27,10 @@ async function run() {
   await act(async () => root.update(tree("a"))); assert.equal(latest.loaded, false, "ABA reconnection gets fresh state");
   await act(async () => { clearMailboxSnapshotSession(); requests[2].resolve(response()); });
   assert.equal(latest.loaded, false); assert.equal(latest.scope, null); assert.equal(requests[2].signal.aborted, true);
-  for (const owner of [{ userId: "other", workspaceId: "w" }, { userId: "other", workspaceId: "other-workspace" }]) {
+  for (const owner of [{ userId: "u", workspaceId: "w" }, { userId: "other", workspaceId: "w" }, { userId: "other", workspaceId: "other-workspace" }]) {
     await act(async () => { activateMailboxSnapshotSession(owner); root.update(tree("a")); });
     assert.equal(latest.loaded, false);
+    assert.deepEqual(requests.at(-1)!.body, { mailboxId: "box", limit: 20 }, "a new login restores through server authority, not a previous session choice");
     await act(async () => requests.at(-1)!.resolve(response())); assert.equal(latest.loaded, true);
   }
   await act(async () => { root.unmount(); clearMailboxSnapshotSession(); });

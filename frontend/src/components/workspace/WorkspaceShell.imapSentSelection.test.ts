@@ -93,6 +93,26 @@ const Harness = new Function(...Object.keys(helpers), ts.transpileModule(compone
   compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS },
 }).outputText)(...Object.values(helpers));
 
+let sentStatus: ts.JsxElement | undefined;
+function findStatus(node: ts.Node) {
+  if (ts.isJsxElement(node) && node.openingElement.attributes.properties.some((p) => ts.isJsxAttribute(p) && p.name.getText(parsed) === "data-imap-sent-status")) sentStatus = node;
+  ts.forEachChild(node, findStatus);
+}
+findStatus(view);
+assert.ok(sentStatus);
+const pickerEffect = view.body!.statements.find(n => ts.isExpressionStatement(n) && n.getText(parsed).includes("setChangingImapSentFolder(false)"));
+assert.ok(pickerEffect);
+const pickerSource = `function Picker(props) {
+  const mailbox = { id: props.mailboxId ?? "box" };
+  const imapSent = props.sent, imapSentConnectionKey = props.connection ?? "a", isImapSentView = true;
+  ${variable("[changingImapSentFolder, setChangingImapSentFolder]")}
+  ${pickerEffect.getText(parsed)}
+  return (${sentStatus.getText(parsed)});
+} return Picker;`;
+const Picker = new Function("React", "useState", "useEffect", ts.transpileModule(pickerSource, {
+  compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React },
+}).outputText)(React, React.useState, React.useEffect);
+
 const folders = ["Inbox", "Drafts", "Sent", "Archive", "Filtered", "Spam", "Trash"];
 const emptyCollections = () => Object.fromEntries(folders.map((folder) => [folder, []]));
 function message(uid: string, order: number, mailboxId = "box", thread = uid, scope = "connection-a", uv = "101") {
@@ -151,6 +171,20 @@ async function run() {
   assert.equal(forwarded[0].receivedSource.providerFolder, "Sent Messages");
   assert.equal(forwarded[0].receivedSource.messageUid, "30");
   assert.equal(forwarded[0].receivedSource.uidValidity, "101");
+  await act(async () => root.unmount());
+  const chosen: string[] = [];
+  const sent = { error: null, loading: false, loaded: true, messages: [first], scope: "scope", folder: "Sent Messages", nextPageToken: null,
+    discovery: { mode: "ready", folders: [{ providerFolder: "Sent", displayName: "Sent" }, { providerFolder: "Sent Messages", displayName: "Sent Messages" }] },
+    choose: (folder: string) => chosen.push(folder) };
+  await act(async () => { root = create(React.createElement(Picker, { sent })); });
+  assert.equal(root.root.findAllByType("select").length, 0, "automatic or restored choice hides the chooser");
+  await act(async () => root.root.findByType("button").props.onClick());
+  assert.equal(root.root.findByType("select").props.value, "Sent Messages");
+  await act(async () => root.root.findByType("select").props.onChange({ target: { value: "Sent" } }));
+  assert.deepEqual(chosen, ["Sent"]);
+  assert.equal(root.root.findAllByType("select").length, 0);
+  await act(async () => root.update(React.createElement(Picker, { sent: { ...sent, folder: null, discovery: { ...sent.discovery, mode: "choose" } } })));
+  assert.equal(root.root.findAllByType("select").length, 1, "ambiguous evidence retains the manual fallback");
   await act(async () => root.unmount());
   console.log("IMAP Sent component selection, conversations, reconnect, UIDVALIDITY and attachments passed");
 }

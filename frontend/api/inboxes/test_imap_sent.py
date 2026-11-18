@@ -1,5 +1,7 @@
 """Synthetic protocol/HTTP tests. Network access is forbidden in this suite."""
 import importlib
+from copy import deepcopy
+from dataclasses import replace
 import imaplib
 import io
 import json
@@ -15,6 +17,8 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from api.inboxes import imap_sent as discovery, imap_sent_snapshot as reader
 from api.inboxes.imap_network_policy import _PreconnectedIMAP4SSL
+from api.inboxes import imap_sent_preferences as preferences
+from api.auth.runtime import AuthenticatedMemberContext
 import imap_connect_preview as preview
 route = importlib.import_module('api.inboxes.fetch-imap-sent')
 attachment = importlib.import_module('api.inboxes.download-attachment')
@@ -118,11 +122,20 @@ CONTEXT = {'mailboxId': 'box', 'ownerEmail': 'owner@example.test', 'email': 'sel
 with patch.object(reader, '_resolve_encryption_key', return_value=(b'k' * 32, None)):
     SCOPE, KEY = reader.connection_scope(CONTEXT, 'generation-1')
 
+MEMBER = AuthenticatedMemberContext(user_id='user-1', workspace_id='workspace-1', email=CONTEXT['ownerEmail'], name='Fixture', membership_role='owner')
+OWNED = {'status': 'ok', 'memberAuthority': MEMBER, 'user': {'email': CONTEXT['ownerEmail']},
+         'inbox': {'id': 'box', 'credentialVersion': 'generation-1'},
+         'config': {'v': 1, 'email': CONTEXT['ownerEmail'], 'managedInboxes': [{'id': 'box', 'credentialVersion': 'generation-1'}]}}
+
 
 class SyntheticOnly(unittest.TestCase):
     def setUp(self):
         key = patch.object(reader, '_resolve_encryption_key', return_value=(b'k' * 32, None))
         key.start(); self.addCleanup(key.stop)
+        store = patch.object(preferences.config_store, 'resolve_user_config_store', return_value=(None, {'code': 'offline'}))
+        store.start(); self.addCleanup(store.stop)
+        connect = patch.object(socket.socket, 'connect', side_effect=AssertionError('real network forbidden'))
+        connect.start(); self.addCleanup(connect.stop)
         for name in ('create_connection', 'getaddrinfo'):
             p = patch.object(socket, name, side_effect=AssertionError('real network forbidden'))
             p.start(); self.addCleanup(p.stop)
@@ -330,7 +343,7 @@ class ReaderTests(SyntheticOnly):
 class RouteTests(SyntheticOnly):
     def invoke(self, payload, contexts=None, mailbox=None):
         h = Handler(payload); m = mailbox or Mailbox()
-        with patch.object(route, 'resolve_context', side_effect=contexts or [(CONTEXT, SCOPE, KEY)] * 2) as auth, patch.object(route, 'connect_mailbox_with_settings', return_value=m) as connect:
+        with patch.object(route, 'resolve_context', side_effect=contexts or [(CONTEXT, SCOPE, KEY, OWNED)] * 2) as auth, patch.object(route, 'connect_mailbox_with_settings', return_value=m) as connect:
             route.handler.do_POST(h)
         return h, m, auth, connect
 
@@ -363,16 +376,17 @@ class RouteTests(SyntheticOnly):
                         + unsolicited + b'T1 OK ' + login_code + b'authenticated\r\n'
                         b'* CAPABILITY ' + capabilities + b'\r\nT2 OK capability\r\n'
                         b'* LIST ' + listing + b' "/" "Sent Messages"\r\nT3 OK list\r\n')
+                wire += examined(b'T4')
                 if special:
-                    wire += examined(b'T4') + examined(b'T5')
-                wire += b'* BYE logout\r\n' + (b'T6' if special else b'T4') + b' OK logout\r\n'
+                    wire += examined(b'T5')
+                wire += b'* BYE logout\r\n' + (b'T6' if special else b'T5') + b' OK logout\r\n'
                 sock = Mock(); sock.makefile.return_value = io.BufferedReader(io.BytesIO(wire))
                 with patch.object(imaplib, 'Int2AP', return_value=b'T'):
                     mailbox = _PreconnectedIMAP4SSL('synthetic.invalid', 993, sock,
                         ssl_context=ssl.create_default_context(), timeout=5)
                 h = Handler({'mailboxId': 'box'})
                 with patch.object(preview, 'open_public_imap_connection', return_value=mailbox), \
-                        patch.object(route, 'resolve_context', return_value=(CONTEXT, SCOPE, KEY)):
+                        patch.object(route, 'resolve_context', return_value=(CONTEXT, SCOPE, KEY, OWNED)):
                     route.handler.do_POST(h)
                 self.assertEqual(h.status, 200, h.body())
                 self.assertEqual(h.body()['discovery']['mode'], 'ready' if special else 'choose')
@@ -381,7 +395,7 @@ class RouteTests(SyntheticOnly):
                 self.assertIn(expected_list, commands)
                 self.assertEqual([c.split()[1] for c in commands],
                     [b'CAPABILITY', b'LOGIN', b'CAPABILITY', b'LIST']
-                    + ([b'EXAMINE', b'EXAMINE'] if special else []) + [b'LOGOUT'])
+                    + ([b'EXAMINE', b'EXAMINE'] if special else [b'EXAMINE']) + [b'LOGOUT'])
 
     def test_untrusted_request_fields_never_connect(self):
         for extra in [{'host': 'bad'}, {'password': 'bad'}, {'provider': 'google'}, {'limit': True}, {'limit': 21}, {'limit': 0}, {'folderChoice': None}, {'folderChoice': 'bad\r\n'}, {'pageToken': None}]:
@@ -389,14 +403,23 @@ class RouteTests(SyntheticOnly):
             self.assertEqual(h.status, 400, extra); auth.assert_not_called(); connect.assert_not_called()
 
     def test_ownership_change_and_failure_never_publish_history(self):
-        h, m, _, _ = self.invoke({'mailboxId': 'box'}, [(CONTEXT, SCOPE, KEY), (CONTEXT, 'changed', KEY)])
+        h, m, _, _ = self.invoke({'mailboxId': 'box'}, [(CONTEXT, SCOPE, KEY, OWNED), (CONTEXT, 'changed', KEY, OWNED)])
         self.assertEqual(h.status, 409); self.assertNotIn('messages', json.dumps(h.body()))
         self.assertEqual(m.calls[-1][0], 'LOGOUT')
         h, _, _, connect = self.invoke({'mailboxId': 'box'}, [discovery.SentError('unauthorized', 'Sign in.', 401)])
         self.assertEqual(h.status, 401); connect.assert_not_called()
 
+    def test_workspace_change_during_read_never_publishes_or_saves(self):
+        changed = {**OWNED, 'memberAuthority': replace(MEMBER, workspace_id='other-workspace')}
+        with patch.object(route, 'remember_folder') as save:
+            h, m, _, _ = self.invoke({'mailboxId': 'box'},
+                [(CONTEXT, SCOPE, KEY, OWNED), (CONTEXT, SCOPE, KEY, changed)])
+        self.assertEqual(h.status, 409)
+        self.assertNotIn('messages', json.dumps(h.body()))
+        self.assertEqual(m.calls[-1][0], 'LOGOUT'); save.assert_not_called()
+
     def test_choice_without_persisting_and_response_limit(self):
-        m = Mailbox(special=False, folders=[b'() "/" "Sent"'])
+        m = Mailbox(rows={}, special=False, folders=[b'() "/" "Sent"'])
         h, _, _, _ = self.invoke({'mailboxId': 'box'}, mailbox=m)
         self.assertEqual(h.body()['discovery']['mode'], 'choose'); self.assertIsNone(h.body()['page'])
         h, _, _, _ = self.invoke({'mailboxId': 'box', 'folderChoice': {'providerFolder': 'Sent', 'scope': SCOPE}}, mailbox=m)
@@ -408,10 +431,10 @@ class RouteTests(SyntheticOnly):
         self.assertEqual(h.status, 502)
 
     def test_real_boundary_generation_is_read_without_schema_changes(self):
-        owned = {'status': 'ok', 'user': {'email': CONTEXT['ownerEmail']}, 'inbox': {'credentialVersion': 'generation-1'}}
+        owned = deepcopy(OWNED)
         with patch.object(route, 'resolve_owned_managed_inbox_record', return_value=owned), patch.object(route, 'resolve_authenticated_imap_mailbox', return_value={'status': 'ok', 'mailbox': CONTEXT}) as auth:
-            context, scope, key = route.resolve_context({}, 'box')
-        self.assertEqual((context, scope, key), (CONTEXT, SCOPE, KEY)); auth.assert_called_once_with({}, 'box')
+            context, scope, key, authority = route.resolve_context({}, 'box')
+        self.assertEqual((context, scope, key, authority), (CONTEXT, SCOPE, KEY, OWNED)); auth.assert_called_once_with({}, 'box')
 
     def test_attachment_folder_is_quoted_without_identity_changes(self):
         raw = mail(1, attachment=True)
@@ -423,6 +446,168 @@ class RouteTests(SyntheticOnly):
             m.select.assert_called_once_with(discovery.quote_folder(folder), readonly=True)
             m.uid.assert_called_once_with('fetch', '1', '(BODY.PEEK[])')
             output.assert_called_once()
+
+
+class IntelligentDiscoveryTests(SyntheticOnly):
+    def mailbox(self, counts, special=False):
+        folders = [f'({chr(92) + "Sent" if special else ""}) "/" {discovery.quote_folder(name)}'.encode() for name in counts]
+        m = Mailbox(folders=folders, special=special)
+        def select(folder, readonly=False):
+            self.assertTrue(readonly)
+            m.calls.append(('EXAMINE', folder))
+            name = next(n for n in counts if discovery.quote_folder(n) == folder)
+            value = counts[name]
+            if isinstance(value, Exception): raise value
+            return value if isinstance(value, tuple) else ('OK', [str(value).encode()])
+        m.select = select
+        return m
+
+    def test_one_populated_candidate_and_empty_alternatives(self):
+        m = self.mailbox({'Sent': 0, 'Sent Messages': 19})
+        self.assertEqual(discovery.discover_sent(m)['providerFolder'], 'Sent Messages')
+        self.assertEqual([c[0] for c in m.calls], ['CAPABILITY', 'LIST', 'EXAMINE', 'EXAMINE'])
+        m = self.mailbox({'Enviados': 19, 'Verzonden': 0}, special=True)
+        self.assertEqual(discovery.discover_sent(m)['providerFolder'], 'Enviados')
+
+    def test_ambiguous_empty_unknown_and_malformed_counts(self):
+        for counts in [{'Sent': 1, 'Sent Messages': 19}, {'Sent': 0, 'Sent Messages': 0},
+                       {'Sent': 0, 'Sent Messages': ('NO', [b'unsupported'])},
+                       {'Sent': 0, 'Sent Messages': ('OK', [None])},
+                       {'Sent': 0, 'Sent Messages': ('OK', [b'19', b'0'])},
+                       {'Sent': 0, 'Sent Messages': ('OK', [b'-1'])},
+                       {'Sent': 0, 'Sent Messages': imaplib.IMAP4.error('unsupported')},
+                       {'Sent': 0, 'Sent Messages': TimeoutError()}]:
+            with self.subTest(counts=counts):
+                result = discovery.discover_sent(self.mailbox(counts))
+                self.assertEqual(result['mode'], 'choose'); self.assertIsNone(result['providerFolder'])
+        self.assertEqual(discovery.discover_sent(self.mailbox({'Projects': 19}))['mode'], 'choose')
+
+    def test_authority_saved_choice_and_explicit_choice_skip_counts(self):
+        for kwargs in [{'choice': 'Sent'}, {'remembered': 'Sent'}]:
+            m = self.mailbox({'Sent': 0, 'Sent Messages': 19})
+            self.assertEqual(discovery.discover_sent(m, **kwargs)['providerFolder'], 'Sent')
+            self.assertFalse(any(c[0] == 'EXAMINE' for c in m.calls))
+        m = self.mailbox({'Envoyes': 0}, special=True)
+        self.assertEqual(discovery.discover_sent(m)['providerFolder'], 'Envoyes')
+        self.assertFalse(any(c[0] == 'EXAMINE' for c in m.calls))
+        m = self.mailbox({'Sent': 19})
+        self.assertEqual(discovery.discover_sent(m, remembered='Deleted folder')['mode'], 'choose')
+        self.assertFalse(any(c[0] == 'EXAMINE' for c in m.calls))
+
+    def test_count_probe_bound_and_exact_folder_quoting(self):
+        m = self.mailbox({f'Sent {n}': 0 for n in range(5)}, special=True)
+        self.assertEqual(discovery.discover_sent(m)['mode'], 'choose')
+        self.assertFalse(any(c[0] == 'EXAMINE' for c in m.calls))
+        m = self.mailbox({'Team "Sent"\\2026': 19, 'Other Sent': 0}, special=True)
+        self.assertEqual(discovery.discover_sent(m)['providerFolder'], 'Team "Sent"\\2026')
+        with self.assertRaises(discovery.SentError):
+            discovery.discover_sent(self.mailbox({'Sent': 0}), check=lambda: (_ for _ in ()).throw(discovery.SentError('sent_timeout', 'deadline')))
+
+
+class PreferenceTests(SyntheticOnly):
+    def test_conditional_save_reload_login_and_no_repeated_write(self):
+        owned = deepcopy(OWNED); persisted = {}
+        def save(store, owner, expected, replacement):
+            self.assertEqual(owner, MEMBER.email)
+            self.assertEqual(expected, OWNED['config'])
+            persisted.update(deepcopy(replacement))
+            return {'status': 'ok'}
+        with patch.object(preferences.config_store, 'resolve_user_config_store', return_value=({'fixture': True}, None)), \
+             patch.object(preferences.config_store, 'write_user_config_record_if_unchanged', side_effect=save) as write:
+            self.assertTrue(preferences.remember_folder(owned, 'box', SCOPE, 'Team "Sent"\\2026'))
+            reloaded = deepcopy(OWNED); reloaded['config'] = deepcopy(persisted)
+            reloaded['memberAuthority'] = replace(MEMBER)  # New login, same authority.
+            self.assertEqual(preferences.remembered_folder(reloaded, 'box', SCOPE), 'Team "Sent"\\2026')
+            self.assertTrue(preferences.remember_folder(reloaded, 'box', SCOPE, 'Team "Sent"\\2026'))
+            self.assertEqual(write.call_count, 1)
+            self.assertEqual(persisted['managedInboxes'], OWNED['config']['managedInboxes'])
+
+    def test_user_workspace_mailbox_connection_and_generation_isolation(self):
+        owned = deepcopy(OWNED)
+        owned['config'][preferences.FIELD] = {preferences.preference_id(owned, 'box'): {'scope': SCOPE, 'folder': 'Sent Messages'}}
+        for member in [replace(MEMBER, user_id='other'), replace(MEMBER, workspace_id='other')]:
+            changed = {**owned, 'memberAuthority': member}
+            self.assertIsNone(preferences.remembered_folder(changed, 'box', SCOPE))
+            self.assertNotEqual(preferences.preference_id(changed, 'box'), preferences.preference_id(owned, 'box'))
+        self.assertIsNone(preferences.remembered_folder(owned, 'other-box', SCOPE))
+        for mailbox, generation in [(CONTEXT, 'generation-2'), ({**CONTEXT, 'imap': {**CONTEXT['imap'], 'host': 'new.invalid'}}, 'generation-1')]:
+            scope, _ = reader.connection_scope(mailbox, generation)
+            self.assertIsNone(preferences.remembered_folder(owned, 'box', scope))
+
+    def test_conflict_outage_capacity_and_server_only_configuration(self):
+        for result in ['conflict', 'missing', 'unavailable']:
+            with patch.object(preferences.config_store, 'resolve_user_config_store', return_value=({'fixture': True}, None)), \
+                 patch.object(preferences.config_store, 'write_user_config_record_if_unchanged', return_value={'status': result}) as write:
+                self.assertFalse(preferences.remember_folder(OWNED, 'box', SCOPE, 'Sent'))
+                self.assertEqual(write.call_count, 1)
+        owned = deepcopy(OWNED)
+        owned['config'][preferences.FIELD] = {str(i): {} for i in range(preferences.MAX_PREFERENCES)}
+        with patch.object(preferences.config_store, 'write_user_config_record_if_unchanged') as write:
+            self.assertFalse(preferences.remember_folder(owned, 'box', SCOPE, 'Sent')); write.assert_not_called()
+        api = importlib.import_module('api.user.config')
+        stored = deepcopy(OWNED['config'])
+        stored[preferences.FIELD] = {'fixture': {'scope': SCOPE, 'folder': 'Private folder'}}
+        self.assertNotIn(preferences.FIELD, api._sanitize_stored_user_config(stored))
+        update = {'v': 1, 'email': MEMBER.email, 'updatedAt': 'fixture'}
+        self.assertEqual(api._merge_user_config(stored, update)[preferences.FIELD], stored[preferences.FIELD])
+        attempted = api._sanitize_user_config({'config': {preferences.FIELD: {'injected': True}}}, MEMBER.email)
+        self.assertNotIn(preferences.FIELD, attempted)
+
+    def test_automatic_choice_survives_a_new_login_without_count_probes(self):
+        current = deepcopy(OWNED['config'])
+        writes = []
+        def save(store, owner, expected, replacement):
+            nonlocal current
+            self.assertEqual(expected, current)
+            self.assertEqual(m.calls[-1][0], 'LOGOUT')
+            current = deepcopy(replacement); writes.append(owner)
+            return {'status': 'ok'}
+        def fresh_mailbox():
+            m = Mailbox(rows={n: mail(n) for n in range(1, 20)}, special=False,
+                folders=[b'() "/" "Sent"', b'() "/" "Sent Messages"'])
+            original = m.select
+            def select(folder, readonly=False):
+                status, data = original(folder, readonly=readonly)
+                return status, [b'0'] if folder == '"Sent"' else data
+            m.select = select
+            return m
+        with patch.object(preferences.config_store, 'resolve_user_config_store', return_value=({'fixture': True}, None)), \
+             patch.object(preferences.config_store, 'write_user_config_record_if_unchanged', side_effect=save):
+            for login in range(2):
+                owned = deepcopy(OWNED); owned['config'] = deepcopy(current)
+                owned['memberAuthority'] = replace(MEMBER)
+                m = fresh_mailbox(); h = Handler({'mailboxId': 'box'})
+                with patch.object(route, 'resolve_context', return_value=(CONTEXT, SCOPE, KEY, owned)), \
+                     patch.object(route, 'connect_mailbox_with_settings', return_value=m):
+                    route.handler.do_POST(h)
+                self.assertEqual(h.status, 200, h.body())
+                self.assertEqual(h.body()['page']['providerFolder'], 'Sent Messages')
+                self.assertEqual(len(h.body()['page']['messages']), 19)
+                self.assertTrue(h.body()['preferenceSaved'])
+                self.assertEqual(sum(c[0] == 'EXAMINE' for c in m.calls), 4 if login == 0 else 2)
+            self.assertEqual(writes, [MEMBER.email])
+
+    def test_route_saves_only_verified_choice_after_logout_and_restores_it(self):
+        owned = deepcopy(OWNED); owned['config'][preferences.FIELD] = {preferences.preference_id(owned, 'box'): {'scope': SCOPE, 'folder': 'Sent Messages'}}
+        m = Mailbox(rows={1: mail()}, special=False, folders=[b'() "/" "Sent"', b'() "/" "Sent Messages"'])
+        def remember(*args):
+            self.assertEqual(m.calls[-1][0], 'LOGOUT')
+            self.assertEqual(args[3], 'Sent Messages'); return False
+        h = Handler({'mailboxId': 'box'})
+        with patch.object(route, 'resolve_context', return_value=(CONTEXT, SCOPE, KEY, owned)), \
+             patch.object(route, 'connect_mailbox_with_settings', return_value=m), \
+             patch.object(route, 'remember_folder', side_effect=remember):
+            route.handler.do_POST(h)
+        self.assertEqual(h.status, 200, h.body())
+        self.assertEqual(h.body()['page']['providerFolder'], 'Sent Messages')
+        self.assertFalse(h.body()['preferenceSaved'])
+        self.assertEqual(sum(c[0] == 'EXAMINE' for c in m.calls), 2)  # Page identity checks only.
+        m = Mailbox(folders=[b'() "/" "Sent"'], special=False)
+        with patch.object(route, 'resolve_context', return_value=(CONTEXT, SCOPE, KEY, owned)), \
+             patch.object(route, 'connect_mailbox_with_settings', return_value=m), \
+             patch.object(route, 'remember_folder') as save:
+            h = Handler({'mailboxId': 'box'}); route.handler.do_POST(h)
+            self.assertEqual(h.body()['discovery']['mode'], 'choose'); save.assert_not_called()
 
 
 if __name__ == '__main__': unittest.main()

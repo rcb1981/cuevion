@@ -745,6 +745,7 @@ def _sanitize_stored_user_config(record: dict) -> dict:
     )
     if not isinstance(sanitized, dict):
         return {}
+    sanitized.pop("imapSentFolderPreferences", None)  # Server-only, workspace-bound Sent choice.
     if "onboardingSession" in sanitized:
         sanitized["onboardingSession"] = _normalize_stored_onboarding_session(
             record.get("onboardingSession")

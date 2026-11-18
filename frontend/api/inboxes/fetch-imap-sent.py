@@ -1,4 +1,4 @@
-"""On-demand IMAP Sent reads only. No sends, sync ingestion or persistence."""
+"""On-demand IMAP Sent reads only. No sends or sync ingestion; only the chosen folder preference is saved."""
 import json
 import sys
 import time
@@ -14,11 +14,12 @@ from api.inboxes.authenticated_imap import resolve_authenticated_imap_mailbox
 from api.user_config_store import resolve_owned_managed_inbox_record
 from api.inboxes.imap_sent import SentError, discover_sent, quote_folder
 from api.inboxes.imap_sent_snapshot import connection_scope, decode_cursor, read_page, ReadBudget, MAX_RESPONSE, MAX_TOKEN
+from api.inboxes.imap_sent_preferences import preference_id, remembered_folder, remember_folder
 from imap_connect_preview import connect_mailbox_with_settings
 
 
 def resolve_context(headers, mailbox_id):
-    owned = resolve_owned_managed_inbox_record(headers, mailbox_id)
+    owned = resolve_owned_managed_inbox_record(headers, mailbox_id, include_member_authority=True)
     resolved = resolve_authenticated_imap_mailbox(headers, mailbox_id)
     if resolved['status'] != 'ok':
         error = resolved['error']
@@ -26,7 +27,10 @@ def resolve_context(headers, mailbox_id):
     if owned.get('status') != 'ok' or owned['user']['email'] != resolved['mailbox']['ownerEmail']:
         raise SentError('mailbox_connection_changed', 'The mailbox connection changed. Refresh Sent.', 409)
     scope, key = connection_scope(resolved['mailbox'], owned['inbox']['credentialVersion'])
-    return resolved['mailbox'], scope, key
+    member = owned.get('memberAuthority')
+    if member is None or member.email != resolved['mailbox']['ownerEmail']:
+        raise SentError('mailbox_connection_changed', 'The mailbox connection changed. Refresh Sent.', 409)
+    return resolved['mailbox'], scope, key, owned
 
 
 class handler(BaseHTTPRequestHandler):
@@ -55,7 +59,7 @@ class handler(BaseHTTPRequestHandler):
                 raise SentError('invalid_request', 'Invalid Sent folder choice.', 400)
             quote_folder(choice['providerFolder'])
         mailbox_id = payload['mailboxId']
-        resolved, scope, key = resolve_context(self.headers, mailbox_id)
+        resolved, scope, key, owned = resolve_context(self.headers, mailbox_id)
         if choice is not None:
             if choice['scope'] != scope:
                 raise SentError('mailbox_connection_changed', 'Choose Sent again for the current connection.', 409)
@@ -70,18 +74,16 @@ class handler(BaseHTTPRequestHandler):
                 username=imap['username'], password=imap['password'], ssl_enabled=imap['ssl'], timeout=5)
             budget = ReadBudget(mailbox, deadline)
             budget.check()
-            discovery = discover_sent(mailbox, cursor['folder'] if cursor else choice)
+            discovery = discover_sent(mailbox, cursor['folder'] if cursor else choice,
+                remembered=remembered_folder(owned, mailbox_id, scope), check=budget.check)
             page = (read_page(mailbox, mailbox_id, discovery['providerFolder'], scope, key,
                               payload.get('limit', 20), cursor, budget.check)
                     if discovery['mode'] == 'ready' else None)
-            _, final_scope, _ = resolve_context(self.headers, mailbox_id)
-            if final_scope != scope:
+            _, final_scope, _, final_owned = resolve_context(self.headers, mailbox_id)
+            if final_scope != scope or preference_id(final_owned, mailbox_id) != preference_id(owned, mailbox_id):
                 raise SentError('mailbox_connection_changed', 'The mailbox connection changed. Refresh Sent.', 409)
             budget.check()
             response = {'ok': True, 'mailboxId': mailbox_id, 'scope': scope, 'discovery': discovery, 'page': page}
-            if len(json.dumps(response).encode()) > MAX_RESPONSE:
-                raise SentError('sent_response_too_large', 'The Sent page is too large to display safely.')
-            send_json(self, 200, response)
         finally:
             if mailbox is not None:
                 try:
@@ -92,6 +94,16 @@ class handler(BaseHTTPRequestHandler):
                         mailbox.shutdown()
                     except Exception:
                         pass
+
+        # Release the IMAP connection before optional configuration I/O.
+        if discovery['mode'] == 'ready' and cursor is None:
+            try:
+                response['preferenceSaved'] = remember_folder(owned, mailbox_id, scope, discovery['providerFolder'])
+            except Exception:
+                response['preferenceSaved'] = False
+        if len(json.dumps(response).encode()) > MAX_RESPONSE:
+            raise SentError('sent_response_too_large', 'The Sent page is too large to display safely.')
+        send_json(self, 200, response)
 
     def do_GET(self):
         send_method_not_allowed(self, 'Use POST for IMAP Sent reads.', write_body=self.command != 'HEAD')

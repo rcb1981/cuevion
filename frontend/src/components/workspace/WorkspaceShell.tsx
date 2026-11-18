@@ -17436,6 +17436,8 @@ function MailboxView({
 
   const isImapSentView = Boolean(imapSentConnectionKey) && activeFolder === "Sent" && !isSharedView && !activeSmartFolderId;
   const imapSent = useImapSent(mailbox.id, imapSentConnectionKey, isImapSentView);
+  const [changingImapSentFolder, setChangingImapSentFolder] = useState(false);
+  useEffect(() => { setChangingImapSentFolder(false); }, [mailbox.id, imapSentConnectionKey, imapSent.scope, imapSent.folder, isImapSentView]);
   // Display only: do not normalize, classify, persist or ingest provider Sent.
   const imapSentMessages = useMemo<MailMessage[]>(() => imapSent.messages.map((message) =>
     applyLiveThreadIdentity({
@@ -28628,20 +28630,23 @@ function MailboxView({
 
         {isImapSentView ? (
           <div data-imap-sent-status role="status" aria-live="polite"
-            className="mb-4 flex flex-none items-center justify-between gap-3 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.8rem] leading-5 text-[var(--workspace-text-soft)]">
+            className="mb-4 flex flex-wrap flex-none items-center justify-between gap-3 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.8rem] leading-5 text-[var(--workspace-text-soft)]">
             <span>{imapSent.error ?? (imapSent.loading ? "Loading Sent from your mail provider…"
-              : imapSent.discovery?.mode === "choose" ? "Choose the folder your mail provider uses for sent messages."
+              : imapSent.discovery?.mode === "choose" ? "Choose where your sent emails are saved."
               : imapSent.discovery?.mode === "unavailable" ? "No usable Sent folder was found. Locally saved sends are still available."
               : imapSent.loaded && imapSent.messages.length === 0 && !imapSent.nextPageToken ? "No provider Sent messages found. Locally saved sends are still available."
               : "Sent from your mail provider and locally saved sends.")}</span>
-            {imapSent.discovery?.mode === "choose" ? (
-              <select aria-label="Sent folder" value="" disabled={imapSent.loading}
+            {imapSent.discovery?.mode === "choose" || (changingImapSentFolder && imapSent.discovery) ? (
+              <select aria-label="Folder for sent emails" value={imapSent.folder ?? ""} disabled={imapSent.loading}
                 className="min-w-0 max-w-[50%] rounded-lg border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-1"
-                onChange={(event) => { if (event.target.value) void imapSent.choose(event.target.value); }}>
-                <option value="" disabled>Select Sent folder</option>
+                onChange={(event) => { if (event.target.value) { setChangingImapSentFolder(false); void imapSent.choose(event.target.value); } }}>
+                <option value="" disabled>Choose a folder</option>
                 {imapSent.discovery.folders.map((folder) => <option key={folder.providerFolder} value={folder.providerFolder}>{folder.displayName}{folder.suggested ? " (suggested)" : ""}</option>)}
               </select>
             ) : null}
+            {imapSent.discovery?.mode === "ready" && imapSent.discovery.folders.length > 1 ? <button type="button" disabled={imapSent.loading}
+              onClick={() => { setChangingImapSentFolder((value) => !value); }}
+              className="shrink-0 rounded-lg border border-[var(--workspace-border-soft)] px-3 py-1 disabled:opacity-50">{changingImapSentFolder ? "Cancel" : "Change folder"}</button> : null}
             {imapSent.nextPageToken ? <button type="button" disabled={imapSent.loading} onClick={() => { void imapSent.loadMore(); }}
               className="shrink-0 rounded-lg border border-[var(--workspace-border-soft)] px-3 py-1 disabled:opacity-50">Load more</button> : null}
           </div>

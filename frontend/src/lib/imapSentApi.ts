@@ -10,7 +10,7 @@ export type ImapSentPage = {
   messages: LiveInboxMessageSnapshot[]; scanLow: number; scanHigh: number; nextPageToken: string | null;
 };
 export type ImapSentResponse =
-  | { ok: true; mailboxId: string; scope: string; discovery: ImapSentDiscovery; page: ImapSentPage | null }
+  | { ok: true; mailboxId: string; scope: string; discovery: ImapSentDiscovery; page: ImapSentPage | null; preferenceSaved?: boolean }
   | { ok: false; error: { code: string; message: string } };
 export type ImapSentChoice = { providerFolder: string; scope: string };
 const record = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -23,7 +23,8 @@ const token = (v: unknown): v is string => typeof v === "string" && v.length <= 
 const failure = (code = "imap_sent_unavailable", message = "IMAP Sent could not be loaded. Try again."): ImapSentResponse => ({ ok: false, error: { code, message } });
 
 export function parseImapSentResponse(v: unknown, mailboxId: string, previousToken?: string): ImapSentResponse {
-  if (!record(v) || !exact(v, ["ok", "mailboxId", "scope", "discovery", "page"]) || v.ok !== true || v.mailboxId !== mailboxId || !scopeId(v.scope)) return failure();
+  if (!record(v) || !exact(v, ["ok", "mailboxId", "scope", "discovery", "page", ...("preferenceSaved" in v ? ["preferenceSaved"] : [])]) || v.ok !== true || v.mailboxId !== mailboxId || !scopeId(v.scope)) return failure();
+  if (v.preferenceSaved !== undefined && typeof v.preferenceSaved !== "boolean") return failure();
   const d = v.discovery;
   if (!record(d) || !exact(d, ["mode", "providerFolder", "folders"]) || !["ready", "choose", "unavailable"].includes(d.mode) || !Array.isArray(d.folders) || d.folders.length > 256) return failure();
   const names = new Set<string>();

@@ -42,6 +42,7 @@ export function createImapSentController(mailboxId: string, isActive: () => bool
         return;
       }
       const p = result.page;
+      if (p) choice = { providerFolder: p.providerFolder, scope: result.scope };
       const same = state.scope === result.scope && state.folder === p?.providerFolder && state.uidValidity === p?.uidValidity;
       if (!more || !same) consumed = new Set();
       if (token) consumed.add(token);
@@ -52,7 +53,7 @@ export function createImapSentController(mailboxId: string, isActive: () => bool
       p?.messages.forEach((m) => rows.set(imapSentIdentity(m), m));
       publish({ messages: [...rows.values()].sort((a, b) => Date.parse(b.createdAt!) - Date.parse(a.createdAt!) || Number(b.imapUid) - Number(a.imapUid)),
         scope: result.scope, folder: p?.providerFolder ?? null, uidValidity: p?.uidValidity ?? null,
-        discovery: result.discovery, nextPageToken: p?.nextPageToken ?? null, loading: false, loaded: true, error: null });
+        discovery: result.discovery, nextPageToken: p?.nextPageToken ?? null, loading: false, loaded: true, error: result.preferenceSaved === false ? "Sent loaded, but your folder choice could not be saved. Try refreshing to save it." : null });
     } catch {
       if (isActive() && !controller.signal.aborted && requestGeneration === generation) publish({ ...state, loading: false, error: "IMAP Sent could not be loaded. Try again." });
     }

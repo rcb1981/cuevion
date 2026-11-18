@@ -1,5 +1,6 @@
 """Read-only Sent discovery. Wire names are opaque; labels are display-only."""
 import base64
+import imaplib
 import re
 
 from .imap_folder_inventory import (
@@ -34,7 +35,31 @@ def folder_label(wire):
     return re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', label)
 
 
-def discover_sent(mailbox, choice=None):
+def populated_candidate(mailbox, candidates, check):
+    # EXAMINE is already supported by this reader. It returns EXISTS metadata
+    # without fetching bodies or setting flags. Bound the extra work tightly.
+    if not 1 <= len(candidates) <= 4:
+        return None
+    populated = []
+    for folder in candidates:
+        check()
+        try:
+            status, data = mailbox.select(quote_folder(folder), readonly=True)
+        except (imaplib.IMAP4.error, OSError):
+            return None
+        check()
+        if (status != 'OK' or type(data) is not list or len(data) != 1
+                or type(data[0]) is not bytes or not re.fullmatch(rb'0|[1-9][0-9]{0,9}', data[0])
+                or int(data[0]) > 4294967295):
+            return None
+        if int(data[0]) > 0:
+            populated.append(folder)
+        if len(populated) > 1:
+            return None
+    return populated[0] if len(populated) == 1 else None
+
+
+def discover_sent(mailbox, choice=None, *, remembered=None, check=lambda: None):
     # LOGIN may cache a CAPABILITY response code. Consume it before asking for
     # fresh capabilities so imaplib does not combine the two response lists.
     mailbox.response('CAPABILITY')
@@ -90,6 +115,13 @@ def discover_sent(mailbox, choice=None):
         leaf = label.rsplit(entry.delimiter, 1)[-1] if entry.delimiter else label
         folders.append({"providerFolder": entry.mailbox, "displayName": label,
                         "suggested": r'\sent' in entry.attributes or leaf.casefold() in suggestions})
+    if selected is None and choice is None:
+        if remembered is not None:
+            # A deleted/changed saved folder requires a new explicit decision.
+            selected = remembered if remembered in {e.mailbox for e in candidates} else None
+        else:
+            plausible = [f['providerFolder'] for f in folders if f['suggested']]
+            selected = populated_candidate(mailbox, plausible, check)
     folders.sort(key=lambda item: (not item['suggested'], item['displayName'], item['providerFolder']))
     return {"mode": "ready" if selected else "choose" if folders else "unavailable",
             "providerFolder": selected, "folders": folders}
