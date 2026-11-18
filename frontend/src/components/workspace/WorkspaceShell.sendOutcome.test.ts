@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { transform } from "sucrase";
+import { captureDraftComposition, createComposeSafety, mobileComposeBodyHtml } from "../../lib/composeSafety";
 import { sendGmailMessage } from "../../lib/inboxConnectionApi";
 import { EMAIL_REQUEST_TOO_LARGE_MESSAGE } from "../../lib/emailRequestSize";
 
@@ -27,6 +28,10 @@ function harness(response: unknown) {
   const requests: unknown[] = [];
   const scope: any = {
     ...compose, composeSendAttemptRef: { current: "idle" },
+    composeSafety: createComposeSafety({
+      owner: { userId: "owner", workspaceId: "workspace" }, epoch: "session", persistent: false,
+      signal: new AbortController().signal, isActive: () => true,
+    }, () => scope.connectionIdentity), connectionIdentity: "connection",
     activeComposeMailbox: { id: "mailbox", email: "sender@example.com" },
     managedInboxes: [{ id: "mailbox", provider: "google" }], credentialStatuses: {},
     canSendFromManagedMailbox: () => true,
@@ -46,6 +51,15 @@ function harness(response: unknown) {
     setComposePresentation: capture("presentation"), setModalComposeSourceSelection: capture("selection"),
     resetComposeState: capture("reset"),
   };
+  scope.captureCurrentComposition = (bodyHtml: string) => captureDraftComposition(
+    scope.composeSafety.identity(), scope.composeSafety.scope("mailbox"), {
+      to: compose.composeTo, cc: compose.composeCc, bcc: compose.composeBcc, subject: compose.composeSubject,
+      bodyHtml, bodyText: "Body and signature", mobileBodyText: "", baseBodyHtml: bodyHtml,
+      signatureSelection: "none", signature: null, mode: "new", source: null, replyAnchor: null,
+      attachments: compose.composeAttachments,
+    },
+  );
+  scope.resetComposeState = () => { scope.composeSafety.edit(); capture("reset")(); capture("sending")(false); };
   return { scope, compose, effects, requests, send: createSend(scope) };
 }
 
@@ -124,12 +138,60 @@ async function run() {
   const mobile = source.slice(source.indexOf("  const handleMobileComposeSend ="), source.indexOf("  const composeCloseConfirmation ="));
   let mobileCloses = 0;
   const mobileScope = { mobileReplyBodyText: "Mobile body", composeBody: "<p>Signature and quote</p>",
-    mailbox: { id: "mailbox" }, sendMessage: async () => undefined,
+    mailbox: { id: "mailbox" }, mobileComposeBodyHtml, sendMessage: async () => undefined,
     onMobileComposeSent: () => { mobileCloses += 1; }, onComposeOpenChange: () => { mobileCloses += 1; } };
   const mobileFn = new Function("scope", `with(scope) { ${transform(mobile, { transforms: ["typescript"] }).code}; return handleMobileComposeSend; }`)(mobileScope);
   await mobileFn();
   assert.equal(mobileCloses, 0);
   assert.equal(mobileScope.mobileReplyBodyText, "Mobile body");
+  for (const response of [{ ok: true }, { ok: false, sendOutcome: "uncertain" }, { ok: false, error: { message: "old failure" } }]) {
+    const stale = harness(response);
+    let finish!: (value: unknown) => void;
+    stale.scope.sendGmailMessage = () => new Promise(resolve => { finish = resolve; });
+    const task = stale.send();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(stale.scope.composeSafety.edit(), false, "Pending operation locks editor changes");
+    stale.scope.composeSafety.invalidate();
+    stale.scope.composeSafety.activate();
+    stale.scope.composeSafety.startComposition();
+    const effectsBeforeResponse = [...stale.effects];
+    finish(response);
+    await task;
+    assert.deepEqual(stale.effects, effectsBeforeResponse, "Old result/finally cannot touch the new composition");
+  }
+  const reconnected = harness({ ok: true });
+  let finishReconnected!: (value: unknown) => void;
+  reconnected.scope.sendGmailMessage = () => new Promise(resolve => { finishReconnected = resolve; });
+  const reconnectTask = reconnected.send();
+  await new Promise(resolve => setImmediate(resolve));
+  reconnected.scope.connectionIdentity = "new-connection";
+  finishReconnected({ ok: true });
+  await reconnectTask;
+  assert.equal(reconnected.scope.composeSafety.isPending(), false, "A connection change cannot leave the editor permanently locked");
+  assert.equal(reconnected.scope.composeSendAttemptRef.current, "uncertain");
+  assert.equal(reconnected.effects.some(([name]) => name === "reset" || name === "sentProjection"), false);
+  assert(reconnected.effects.some(([name, value]) => name === "uncertain" && value === true));
+
+  const changedBeforeSend = harness({ ok: true });
+  let prepared!: (value: unknown) => void;
+  changedBeforeSend.scope.serializeComposeAttachment = () => new Promise(resolve => { prepared = resolve; });
+  const prepareTask = changedBeforeSend.send();
+  changedBeforeSend.scope.connectionIdentity = "new-connection";
+  prepared({ name: "file" });
+  await prepareTask;
+  assert.equal(changedBeforeSend.requests.length, 0);
+  assert.equal(changedBeforeSend.scope.composeSafety.isPending(), false);
+  assert.equal(changedBeforeSend.scope.composeSendAttemptRef.current, "idle");
+  assert(changedBeforeSend.effects.some(([name, value]) => name === "error" && String(value).includes("connection changed before sending")));
+  const revokedDuringAttachments = harness({ ok: true });
+  let finishAttachment!: (value: unknown) => void;
+  revokedDuringAttachments.scope.serializeComposeAttachment = () => new Promise(resolve => { finishAttachment = resolve; });
+  const task = revokedDuringAttachments.send();
+  revokedDuringAttachments.scope.composeSafety.invalidate();
+  finishAttachment({ name: "sample.txt" });
+  await task;
+  assert.equal(revokedDuringAttachments.requests.length, 0, "Session revocation before attachment completion prevents sending");
+
   console.log("Compose send outcomes, preservation, mobile and repeated interaction checks passed");
 }
 void run().catch(error => { console.error(error); process.exitCode = 1; });

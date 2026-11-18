@@ -631,7 +631,7 @@ const mobileSendSource = workspaceShellSource.slice(
 );
 assert.match(
   mobileSendSource,
-  /sendMessage\(\{ bodyHtml: userHtml \+ composeBody \}\)/,
+  /bodyHtml: mobileComposeBodyHtml\(mobileReplyBodyText, composeBody\)/,
   "mobile typed paragraphs must remain prepended to the normalized stored quote",
 );
 

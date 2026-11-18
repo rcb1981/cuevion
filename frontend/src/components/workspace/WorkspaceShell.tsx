@@ -4,6 +4,8 @@ import { mergeGmailSentDisplay } from "../../lib/gmailSentState";
 import { useGmailSent } from "../../lib/useGmailSent";
 import { mailboxFolderRailClass, mailboxFolderHeadingClass, mailboxFolderListClass, mailboxFolderRowClass, mailboxFolderSelectedClass, mailboxFolderIdleClass } from "./mailboxFolderStyles";
 import { useMailboxSnapshots } from "../../lib/MailboxSnapshotContext";
+import { captureDraftComposition, mobileComposeBodyHtml } from "../../lib/composeSafety";
+import { useComposeSafety, useComposeField } from "../../lib/useComposeSafety";
 import { clearMailboxSnapshotSession } from "../../lib/mailboxSnapshotSession";
 import {
   Suspense,
@@ -17227,6 +17229,7 @@ function MailboxView({
   onComposeOpenChange,
   onMobileComposeSent,
   isMobileViewport = false,
+  getComposeConnectionIdentity,
   workspaceDataMode,
   hasAuthenticatedMemberAuthority,
 }: {
@@ -17401,6 +17404,7 @@ function MailboxView({
   /** True when rendered inside a mobile viewport — swaps the full desktop
    *  mailbox chrome for a native-feeling mobile compose overlay. */
   isMobileViewport?: boolean;
+  getComposeConnectionIdentity: (mailboxId: string) => string | null;
   workspaceDataMode: WorkspaceDataMode;
   hasAuthenticatedMemberAuthority: boolean;
 }) {
@@ -17705,9 +17709,11 @@ function MailboxView({
     ]);
   };
   const dragPreviewCleanupRef = useRef<(() => void) | null>(null);
-  const [composeTo, setComposeTo] = useState("");
-  const [composeCc, setComposeCc] = useState("");
-  const [composeBcc, setComposeBcc] = useState("");
+  const composeSafety = useComposeSafety(getComposeConnectionIdentity);
+  const [composeLocalCopyNotice, setComposeLocalCopyNotice] = useState<string | null>(null);
+  const [composeTo, setComposeTo] = useComposeField(composeSafety, "");
+  const [composeCc, setComposeCc] = useComposeField(composeSafety, "");
+  const [composeBcc, setComposeBcc] = useComposeField(composeSafety, "");
   const [rememberedRecipients, setRememberedRecipients] = useState<string[]>(() => {
     if (typeof window === "undefined") {
       return [];
@@ -17730,18 +17736,18 @@ function MailboxView({
   const [activeRecipientSuggestionField, setActiveRecipientSuggestionField] =
     useState<ComposeRecipientField | null>(null);
   const [showComposeBcc, setShowComposeBcc] = useState(false);
-  const [composeSubject, setComposeSubject] = useState("");
-  const [composeBody, setComposeBody] = useState("");
+  const [composeSubject, setComposeSubject] = useComposeField(composeSafety, "");
+  const [composeBody, setComposeBody] = useComposeField(composeSafety, "");
   const [composeQuoteExpanded, setComposeQuoteExpanded] = useState(false);
-  const [composeSignatureSelection, setComposeSignatureSelection] = useState<string>("none");
-  const [composeMailboxId, setComposeMailboxId] = useState<InboxId>(mailbox.id);
-  const [composeMode, setComposeMode] = useState<ComposeMode>("new");
-  const [composeSourceMessage, setComposeSourceMessage] = useState<MailMessage | null>(null);
+  const [composeSignatureSelection, setComposeSignatureSelection] = useComposeField<string>(composeSafety, "none");
+  const [composeMailboxId, setComposeMailboxId] = useComposeField<InboxId>(composeSafety, mailbox.id);
+  const [composeMode, setComposeMode] = useComposeField<ComposeMode>(composeSafety, "new");
+  const [composeSourceMessage, setComposeSourceMessage] = useComposeField<MailMessage | null>(composeSafety, null);
   // The visible source owns quote/recipients; this separate source owns only
   // provider-verified reply metadata for the current compose session.
   const [composeReplyAnchorMessage, setComposeReplyAnchorMessage] =
-    useState<MailMessage | null>(null);
-  const [composeAttachments, setComposeAttachments] = useState<MailAttachment[]>([]);
+    useComposeField<MailMessage | null>(composeSafety, null);
+  const [composeAttachments, setComposeAttachments] = useComposeField<MailAttachment[]>(composeSafety, []);
   const replyModeSessionRef = useRef<ReplyModeSession | null>(null);
   const [composeSendError, setComposeSendError] = useState<string | null>(null);
   const [isSendingCompose, setIsSendingCompose] = useState(false);
@@ -17749,7 +17755,7 @@ function MailboxView({
   const composeSendAttemptRef = useRef<"idle" | "sending" | "uncertain">("idle");
   // Plain-text body typed by the user in the mobile compose overlay.
   // Prepended as HTML to the pre-filled composeBody (quote + signature) on send.
-  const [mobileReplyBodyText, setMobileReplyBodyText] = useState("");
+  const [mobileReplyBodyText, setMobileReplyBodyText] = useComposeField(composeSafety, "");
   const [pendingComposeAttachmentPickerOpen, setPendingComposeAttachmentPickerOpen] =
     useState(false);
   const composeToInputRef = useRef<HTMLInputElement | null>(null);
@@ -18004,7 +18010,16 @@ function MailboxView({
     .filter((option): option is { id: InboxId; email: string; signature: InboxSignatureSettings } =>
       option !== null,
     );
+  const requestComposeClose = () => {
+    if (composeSafety.isPending() || composeSendAttemptRef.current === "sending") return;
+    setIsCloseModalOpen(true);
+  };
+
   const resetComposeState = () => {
+    if (composeSafety.isPending()) return;
+    composeSafety.clearLocalCopy();
+    setComposeLocalCopyNotice(null);
+    setMobileReplyBodyText("");
     setComposeTo("");
     setComposeCc("");
     setComposeBcc("");
@@ -18364,6 +18379,9 @@ function MailboxView({
   };
 
   const openCompose = () => {
+    if (composeSafety.isPending() || composeSendAttemptRef.current === "sending") return;
+    if (isComposeOpen) { setIsCloseModalOpen(true); return; }
+    composeSafety.startComposition();
     resetComposeState();
     pendingComposeInitialFocusRef.current = "to";
     const nextMailboxId = mailbox.id;
@@ -18502,6 +18520,9 @@ function MailboxView({
     mode: Exclude<ComposeMode, "new">,
     originPresentation: ComposePresentation = "workspace",
   ) => {
+    if (composeSafety.isPending() || composeSendAttemptRef.current === "sending") return;
+    if (isComposeOpen) { setIsCloseModalOpen(true); return; }
+    composeSafety.startComposition();
     const composePlan = planMessageComposeAction(
       message.id,
       mode,
@@ -18676,6 +18697,7 @@ function MailboxView({
   };
 
   const handleReplyModeSwitch = (targetMode: "reply" | "reply_all") => {
+    if (composeSafety.isPending()) return;
     const replyModeSession = replyModeSessionRef.current;
 
     if (
@@ -18796,6 +18818,7 @@ function MailboxView({
   }, [composeMode, isComposeOpen]);
 
   const handleComposeSignatureSelectionChange = (nextValue: string) => {
+    if (composeSafety.isPending()) return;
     const nextSignature =
       nextValue === "none"
         ? null
@@ -20119,8 +20142,7 @@ function MailboxView({
   useEffect(() => {
     if (
       !isComposeOpen ||
-      composePresentation !== "modal" ||
-      isMobileViewport
+      (composePresentation !== "modal" && !isMobileViewport)
     ) {
       return;
     }
@@ -20138,7 +20160,7 @@ function MailboxView({
         if (isCloseModalOpen) {
           continueEditingCompose();
         } else {
-          setIsCloseModalOpen(true);
+          requestComposeClose();
         }
         return;
       }
@@ -22002,62 +22024,79 @@ function MailboxView({
   };
 
   const getCurrentComposeBodyHtml = () =>
-    composeBodyEditorRef.current?.getBodyHtml() ?? composeBody;
+    isMobileViewport
+      ? mobileComposeBodyHtml(mobileReplyBodyText, composeBody)
+      : composeBodyEditorRef.current?.getBodyHtml() ?? composeBody;
 
-  const saveDraftAndClose = () => {
-    const draftId = `${activeComposeMailbox.id}-draft-${Date.now()}`;
-    const currentComposeBodyHtml = getCurrentComposeBodyHtml();
-    const bodyPreview = extractComposePlainText(currentComposeBodyHtml);
-    const bodyParagraphs = extractComposeParagraphs(currentComposeBodyHtml);
-    const draftMessage = normalizeMailMessage({
-      id: draftId,
-      sender: "Draft",
-      subject: composeSubject.trim() || "Untitled draft",
-      snippet:
-        bodyPreview.length > 0
-          ? bodyPreview.replace(/\s+/g, " ").slice(0, 96)
-          : "Draft message",
-      time: "Just now",
-      createdAt: new Date().toISOString(),
-      signal: "Draft",
-      from: activeComposeMailbox.email,
-      to: composeTo.trim() || "No recipient yet",
-      timestamp: "Saved just now",
-      body: bodyParagraphs.length > 0 ? bodyParagraphs : ["Draft message"],
-      bodyHtml: currentComposeBodyHtml,
-      signature: undefined,
+  const captureCurrentComposition = (bodyHtml = getCurrentComposeBodyHtml()) => {
+    const scope = composeSafety.scope(activeComposeMailbox.id);
+    if (!scope) return null;
+    return captureDraftComposition(composeSafety.identity(), scope, {
+      to: composeTo, cc: composeCc, bcc: composeBcc, subject: composeSubject,
+      bodyHtml, bodyText: extractComposePlainText(bodyHtml),
+      mobileBodyText: mobileReplyBodyText, baseBodyHtml: composeBody,
+      signatureSelection: composeSignatureSelection, mode: composeMode,
+      signature: composeSignatureSelection === "none" ? null
+        : normalizeInboxSignatureSettings(inboxSignatures[composeSignatureSelection as InboxId]),
+      source: composeSourceMessage, replyAnchor: composeReplyAnchorMessage,
       attachments: composeAttachments,
-      cc: composeCc.trim() || undefined,
-    }, activeComposeMailbox.id, senderCategoryLearning, messageOwnershipInteractions, currentUserId, mailboxStore);
-
-    setMailboxStore((currentStore) => ({
-      ...currentStore,
-      [activeComposeMailbox.id]: {
-        ...currentStore[activeComposeMailbox.id],
-        Drafts: [draftMessage, ...currentStore[activeComposeMailbox.id].Drafts],
-      },
-    }));
-    if (activeComposeMailbox.id === mailbox.id) {
-      setActiveFolder("Drafts");
-    }
-    setSelectionState([draftId], draftId, draftId, {
-      sourceMailboxId: activeComposeMailbox.id,
-      sourceMessage: draftMessage,
-      sourceFolder: "Drafts",
     });
-    setIsFullMessageOpen(false);
-    setIsCloseModalOpen(false);
-    setIsComposeOpen(false);
-    setComposePresentation("workspace");
-    setModalComposeSourceSelection(null);
-    resetComposeState();
+  };
+
+  // Preserve the existing temporary Drafts preview, but never clear the editor
+  // or describe this memory-only copy as a provider-confirmed save.
+  const saveDraftAndClose = () => {
+    if (composeSafety.isPending() || composeSendAttemptRef.current === "sending") return;
+    const currentComposeBodyHtml = getCurrentComposeBodyHtml();
+    const snapshot = captureCurrentComposition(currentComposeBodyHtml);
+    if (!snapshot) {
+      setComposeLocalCopyNotice("Local copy unavailable: the mailbox session changed. Your message has not been saved.");
+      return;
+    }
+    const operation = composeSafety.begin("local_copy", snapshot);
+    if (!operation) return;
+    try {
+      const draftId = `${activeComposeMailbox.id}-draft-${snapshot.compositionId}`;
+      const draftMessage: MailMessage = {
+        id: draftId, sender: "Draft", subject: snapshot.subject,
+        snippet: snapshot.bodyText.replace(/\s+/g, " ").slice(0, 96),
+        time: "Just now", createdAt: new Date().toISOString(), signal: "Draft",
+        from: activeComposeMailbox.email, to: snapshot.to, cc: snapshot.cc,
+        timestamp: "Local copy · not saved at provider",
+        body: extractComposeParagraphs(snapshot.bodyHtml), bodyHtml: snapshot.bodyHtml,
+        attachments: composeAttachments,
+        category: "Primary", categorySource: "system", categoryConfidence: "low",
+        priorityScore: "low", focusSignal: null,
+      };
+      // Bcc and reply metadata stay in the private editor snapshot, outside the
+      // mailbox projection and its classification/collaboration consumers.
+      if (!composeSafety.keepLocalCopy(operation, snapshot)) return;
+      setMailboxStore((currentStore) => {
+        if (composeSafety.readLocalCopy()?.operation !== operation || !currentStore[snapshot.scope.mailboxId]) return currentStore;
+        return {
+          ...currentStore,
+          [snapshot.scope.mailboxId]: {
+            ...currentStore[snapshot.scope.mailboxId],
+            Drafts: [draftMessage, ...currentStore[snapshot.scope.mailboxId].Drafts.filter((draft) => draft.id !== draftId)],
+          },
+        };
+      });
+      setComposeLocalCopyNotice("Local copy only — not saved at your email provider. Keep this editor open; leaving or reloading may lose the message and attachments.");
+      setIsCloseModalOpen(false);
+    } catch {
+      setComposeLocalCopyNotice("Could not keep a local copy. Your message and attachments are still open; nothing has been saved at your email provider.");
+    } finally {
+      composeSafety.finish(operation);
+    }
   };
 
   const discardCompose = () => {
+    if (composeSafety.isPending() || composeSendAttemptRef.current === "sending") return;
     const shouldRestoreFullMessage = composePresentation === "modal";
     setIsCloseModalOpen(false);
     setIsComposeOpen(false);
     resetComposeState();
+    if (isMobileViewport) onComposeOpenChange?.(false);
     if (shouldRestoreFullMessage) {
       restoreFullMessageModalAfterCompose();
     } else {
@@ -22066,8 +22105,8 @@ function MailboxView({
     }
   };
 
-  const sendMessage = async (options?: { bodyHtml?: string }) => {
-    if (composeSendAttemptRef.current !== "idle") {
+  const sendMessage = async (options?: { bodyHtml?: string; onSent?: () => void }) => {
+    if (composeSendAttemptRef.current !== "idle" || composeSafety.isPending()) {
       return;
     }
     // Mobile reply passes an override body (user text prepended to the pre-filled
@@ -22120,6 +22159,15 @@ function MailboxView({
       return;
     }
 
+    const snapshot = captureCurrentComposition(activeBodyHtml);
+    if (!snapshot) {
+      setComposeSendError("The mailbox session changed. Your message is still open; reconnect before sending.");
+      return;
+    }
+    const operation = composeSafety.begin("send", snapshot);
+    if (!operation) return;
+    let sendRequestStarted = false;
+
     // A ref closes the same-render double-click window before React updates.
     composeSendAttemptRef.current = "sending";
     setComposeSendError(null);
@@ -22131,6 +22179,9 @@ function MailboxView({
         composeAttachments.map(serializeComposeAttachment),
       );
 
+      // An account, connection or composition change during attachment loading
+      // must not authorize a later send from this obsolete editor.
+      if (!composeSafety.isCurrent(operation)) return;
       attachmentPayloads.forEach((attachment) => {
         if (attachment) {
           serializedAttachments.push(attachment);
@@ -22144,6 +22195,7 @@ function MailboxView({
         mailboxId: managedMailbox.id,
         sourceMessage: composeSourceMessage,
       });
+      sendRequestStarted = true;
       const sendResponse = await sendGmailMessage({
         mailboxId: managedMailbox.id,
         to: toRecipients,
@@ -22157,6 +22209,7 @@ function MailboxView({
         ...(imapReplyContext ? { imapReplyContext } : {}),
       });
 
+      if (!composeSafety.isCurrent(operation)) return;
       if (sendResponse.sendOutcome === "uncertain") {
         composeSendAttemptRef.current = "uncertain";
         setComposeSendUncertain(true);
@@ -22295,10 +22348,15 @@ function MailboxView({
         );
       }
 
+      // Only the exact acknowledged revision can release and clear this editor.
+      if (!composeSafety.isCurrent(operation)) return;
+      composeSafety.finish(operation);
+      composeSendAttemptRef.current = "idle";
       if (composePresentation === "modal") {
         setIsComposeOpen(false);
         restoreFullMessageModalAfterCompose();
         resetComposeState();
+        options?.onSent?.();
         return "sent" as const;
       }
 
@@ -22325,6 +22383,7 @@ function MailboxView({
         setComposePresentation("workspace");
         setModalComposeSourceSelection(null);
         resetComposeState();
+        options?.onSent?.();
         return "sent" as const;
       }
 
@@ -22334,16 +22393,27 @@ function MailboxView({
       setComposePresentation("workspace");
       setModalComposeSourceSelection(null);
       resetComposeState();
+      options?.onSent?.();
       return "sent" as const;
     } catch (error) {
+      if (!composeSafety.isCurrent(operation)) return;
       setComposeSendError(
         error instanceof Error ? error.message : "Could not prepare email for sending.",
       );
     } finally {
-      if (composeSendAttemptRef.current === "sending") {
-        composeSendAttemptRef.current = "idle";
+      if (composeSafety.finish(operation)) {
+        if (composeSendAttemptRef.current === "sending") {
+          composeSendAttemptRef.current = "idle";
+        }
+        setIsSendingCompose(false);
+      } else if (composeSafety.releaseAfterConnectionChange(operation)) {
+        // Do not apply an old connection's result to this editor. After a
+        // request was started, retain the existing check-before-retry barrier.
+        composeSendAttemptRef.current = sendRequestStarted ? "uncertain" : "idle";
+        if (sendRequestStarted) setComposeSendUncertain(true);
+        else setComposeSendError("The mailbox connection changed before sending. Your message is still open; review the connection before trying again.");
+        setIsSendingCompose(false);
       }
-      setIsSendingCompose(false);
     }
   };
 
@@ -22365,7 +22435,7 @@ function MailboxView({
         I've checked; enable sending
       </button>
     </div>
-  ) : composeSendError;
+  ) : composeSendError ?? composeLocalCopyNotice;
 
   const closeMenus = () => {
     setIsSortMenuOpen(false);
@@ -28009,7 +28079,7 @@ function MailboxView({
 
   const handleMailboxBack = () => {
     if (isComposeOpen) {
-      setIsCloseModalOpen(true);
+      requestComposeClose();
       return;
     }
 
@@ -28081,48 +28151,16 @@ function MailboxView({
     }
   }, [isComposeOpen]);
 
-  // Mobile-specific send wrapper.
-  //
-  // Problem: the mobile Send button previously used `void sendMessage({ bodyHtml })`
-  // (fire-and-forget). sendMessage calls setIsComposeOpen(false) on success, which
-  // triggers the onComposeOpenChange useEffect asynchronously on the NEXT render.
-  // Between "compose overlay gone" and "useEffect fires → isMobileComposeActive
-  // cleared → MobileWorkspaceShell mounts", the desktop MailboxView layout is
-  // visible on a mobile-sized screen — perceived as a blank/broken screen.
-  //
-  // Fix: await sendMessage and, on success (return value "sent"), call
-  // onComposeOpenChange?.(false) directly here. This releases the mobile layout
-  // lock synchronously in the same microtask as the successful send, exactly
-  // matching what Cancel does with setIsComposeOpen(false) in a click handler.
-  //
-  // On failure (sendMessage returns undefined and sets composeSendError), we do
-  // nothing — the overlay stays open and shows the error strip.
-  //
-  // sendMessage's internal setIsComposeOpen(false) + the onComposeOpenChange
-  // useEffect still run; the second setIsMobileComposeActive(false) call from the
-  // effect is a no-op since the state is already false.
+  // Notify the mobile shell inside the guarded send completion, before another
+  // composition can open; no post-await callback can close a newer overlay.
   const handleMobileComposeSend = async () => {
-    const userHtml = mobileReplyBodyText
-      .split("\n")
-      .map((line) =>
-        line.trim() === ""
-          ? "<p><br></p>"
-          : `<p>${line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</p>`,
-      )
-      .join("");
-    const result = await sendMessage({ bodyHtml: userHtml + composeBody });
-    if (result === "sent") {
-      // Notify WorkspaceShell so it can update mobileNavRestoreContext to the
-      // inbox list (mailboxId only, no messageId). This must happen BEFORE
-      // onComposeOpenChange so the context is already correct when
-      // MobileWorkspaceShell mounts in the same batched render.
-      onMobileComposeSent?.(mailbox.id);
-      // sendMessage already called setIsComposeOpen(false). Additionally call
-      // onComposeOpenChange directly to clear isMobileComposeActive without
-      // waiting for the useEffect render cycle.
-      onComposeOpenChange?.(false);
-    }
-    // An unconfirmed or failed send keeps the mobile body and overlay open.
+    await sendMessage({
+      bodyHtml: mobileComposeBodyHtml(mobileReplyBodyText, composeBody),
+      onSent: () => {
+        onMobileComposeSent?.(mailbox.id);
+        onComposeOpenChange?.(false);
+      },
+    });
   };
 
   const composeCloseConfirmation = (
@@ -28131,7 +28169,7 @@ function MailboxView({
       data-theme={themeMode}
       style={{ colorScheme: themeMode }}
       className={`${
-        composePresentation === "modal"
+        composePresentation === "modal" || isMobileViewport
           ? "fixed z-[340] rounded-none"
           : "absolute rounded-[30px]"
       } inset-0 flex items-center justify-center bg-[color:rgba(83,67,54,0.22)] p-6 backdrop-blur-[3px]`}
@@ -28162,23 +28200,26 @@ function MailboxView({
             id="compose-close-confirmation-title"
             className="text-[1.18rem] font-medium tracking-tight text-[var(--workspace-text)]"
           >
-            Save draft before closing?
+            Keep this message open?
           </h3>
           <p className="text-[0.88rem] leading-6 text-[var(--workspace-text-soft)]">
-            Keep this message in Drafts, discard it, or continue editing.
+            Provider draft saving is not available yet. A local copy is temporary and keeps this editor open. Discard closes it and loses unsaved content.
           </p>
         </div>
+        {composeLocalCopyNotice ? <p role="status" className="mt-3 text-[0.88rem] text-[var(--workspace-text-soft)]">{composeLocalCopyNotice}</p> : null}
         <div className="mt-6 flex flex-wrap items-center gap-1.5">
           <button
             type="button"
             onClick={saveDraftAndClose}
+            disabled={isSendingCompose}
             className={draftClosePrimaryActionButtonClass}
           >
-            Save to Drafts
+            Keep local copy
           </button>
           <button
             type="button"
             onClick={discardCompose}
+            disabled={isSendingCompose}
             className={draftCloseDiscardActionButtonClass}
           >
             Discard
@@ -28703,7 +28744,7 @@ function MailboxView({
                     <button
                       ref={composeModalCloseButtonRef}
                       type="button"
-                      onClick={() => setIsCloseModalOpen(true)}
+                      onClick={requestComposeClose}
                       className={navigationCloseBackButtonClass}
                     >
                       Close
@@ -28720,6 +28761,7 @@ function MailboxView({
                     <input
                       ref={composeToInputRef}
                       value={composeTo}
+                      readOnly={isSendingCompose}
                       onChange={(event) => {
                         handleComposeRecipientChange("to", event.target.value);
                       }}
@@ -28742,6 +28784,7 @@ function MailboxView({
                   <div className="relative">
                     <input
                       value={composeCc}
+                      readOnly={isSendingCompose}
                       onChange={(event) => {
                         handleComposeRecipientChange("cc", event.target.value);
                       }}
@@ -28765,6 +28808,7 @@ function MailboxView({
                     <div className="relative">
                       <input
                         value={composeBcc}
+                        readOnly={isSendingCompose}
                         onChange={(event) => {
                           handleComposeRecipientChange("bcc", event.target.value);
                         }}
@@ -28795,6 +28839,7 @@ function MailboxView({
                   </span>
                   <input
                     value={composeSubject}
+                    readOnly={isSendingCompose}
                     onChange={(event) => setComposeSubject(event.target.value)}
                     placeholder="Subject"
                     autoCorrect="on"
@@ -28812,6 +28857,8 @@ function MailboxView({
                   <DesktopComposeBodyEditor
                     ref={composeBodyEditorRef}
                     bodyHtml={composeBody}
+                    readOnly={isSendingCompose}
+                    onBeforeBodyChange={composeSafety.edit}
                     quoteExpanded={composeQuoteExpanded}
                     setQuoteExpanded={setComposeQuoteExpanded}
                     showQuoteDisclosure={
@@ -29032,7 +29079,7 @@ function MailboxView({
                         type="button"
                         aria-label="Close compose"
                         title="Close compose"
-                        onClick={() => setIsCloseModalOpen(true)}
+                        onClick={requestComposeClose}
                         className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-transparent text-[var(--workspace-text-faint)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border-soft)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] active:scale-[0.98] focus-visible:border-[var(--workspace-border-hover)] focus-visible:bg-[var(--workspace-hover-surface)] focus-visible:text-[var(--workspace-text)] focus-visible:outline-none"
                       >
                         <DesktopMessageActionIcon name="close" />
@@ -31686,7 +31733,7 @@ function MailboxView({
         />
 
         {isCloseModalOpen
-          ? composePresentation === "modal" && typeof document !== "undefined"
+          ? (composePresentation === "modal" || isMobileViewport) && typeof document !== "undefined"
             ? createPortal(composeCloseConfirmation, document.body)
             : composeCloseConfirmation
           : null}
@@ -31725,14 +31772,8 @@ function MailboxView({
             <div className="flex min-h-10 items-center justify-between gap-3">
               <button
                 type="button"
-                onClick={() => {
-                  setIsComposeOpen(false);
-                  resetComposeState();
-                  // Clear isMobileComposeActive in the same synchronous batch so
-                  // the desktop MailboxView never flashes between overlay-gone and
-                  // MobileWorkspaceShell re-mounting (blank-screen regression fix).
-                  onComposeOpenChange?.(false);
-                }}
+                onClick={requestComposeClose}
+                disabled={isSendingCompose}
                 className="rounded-full px-1 py-2 text-[0.92rem] font-medium text-[color:#fff8ec]"
               >
                 Cancel
@@ -31781,6 +31822,7 @@ function MailboxView({
               </span>
               <input
                 value={composeTo}
+                readOnly={isSendingCompose}
                 onChange={(e) => setComposeTo(e.target.value)}
                 placeholder="Add recipient"
                 autoCapitalize="none"
@@ -31799,6 +31841,7 @@ function MailboxView({
                   </span>
                   <input
                     value={composeCc}
+                    readOnly={isSendingCompose}
                     onChange={(e) => setComposeCc(e.target.value)}
                     placeholder="Add recipient"
                     autoCapitalize="none"
@@ -31814,6 +31857,7 @@ function MailboxView({
                   </span>
                   <input
                     value={composeBcc}
+                    readOnly={isSendingCompose}
                     onChange={(e) => setComposeBcc(e.target.value)}
                     placeholder="Add recipient"
                     autoCapitalize="none"
@@ -31843,6 +31887,7 @@ function MailboxView({
               {composeMode === "new" || composeMode === "forward" ? (
                 <input
                   value={composeSubject}
+                  readOnly={isSendingCompose}
                   onChange={(e) => setComposeSubject(e.target.value)}
                   placeholder="Subject"
                   autoCapitalize="sentences"
@@ -31864,6 +31909,7 @@ function MailboxView({
               // eslint-disable-next-line jsx-a11y/no-autofocus
               autoFocus
               value={mobileReplyBodyText}
+              readOnly={isSendingCompose}
               onChange={(e) => setMobileReplyBodyText(e.target.value)}
               placeholder={
                 composeMode === "new" || composeMode === "forward"
@@ -43703,6 +43749,10 @@ export function WorkspaceShell({
   const providerArchiveConnectionEpochsRef = useRef<
     Partial<Record<InboxId, number>>
   >({});
+  const getComposeConnectionIdentity = useCallback((mailboxId: string) => {
+    const key = providerArchiveCurrentConnectionKeysRef.current[mailboxId as InboxId];
+    return key ? `${key}:${providerArchiveConnectionEpochsRef.current[mailboxId as InboxId] ?? 0}` : null;
+  }, []);
   const providerImapTrashInboxMutationPublicationEpochsRef = useRef<
     Partial<Record<InboxId, number>>
   >({});
@@ -57154,6 +57204,7 @@ export function WorkspaceShell({
                   />
                 ) : (
 	                <MailboxView
+                      getComposeConnectionIdentity={getComposeConnectionIdentity}
                       collaborationSummaryScopeKey={collaborationSummaries.scopeKey}
                       getCollaborationSummary={getCollaborationSummary}
                       onCanonicalCollaborationMutation={collaborationSummaries.acceptMutation}

@@ -24,6 +24,8 @@ export type DesktopComposeBodyEditorHandle = {
 
 type DesktopComposeBodyEditorProps = {
   bodyHtml: string;
+  readOnly?: boolean;
+  onBeforeBodyChange?: () => boolean;
   className: string;
   quoteExpanded: boolean;
   setQuoteExpanded: Dispatch<SetStateAction<boolean>>;
@@ -41,6 +43,8 @@ export const DesktopComposeBodyEditor = memo(
     function DesktopComposeBodyEditor(
       {
         bodyHtml,
+        readOnly = false,
+        onBeforeBodyChange,
         className,
         quoteExpanded,
         setQuoteExpanded,
@@ -91,9 +95,14 @@ export const DesktopComposeBodyEditor = memo(
         }
 
         const nextBodyHtml = editor.innerHTML;
+        if (nextBodyHtml === draft.getBodyHtml()) return;
+        if (readOnly || onBeforeBodyChange?.() === false) {
+          editor.innerHTML = draft.getBodyHtml();
+          return;
+        }
         draft.recordInput(nextBodyHtml);
         publishMarkerChanges(nextBodyHtml, editor);
-      }, [publishMarkerChanges]);
+      }, [onBeforeBodyChange, publishMarkerChanges, readOnly]);
 
       useLayoutEffect(() => {
         const editor = editorRef.current;
@@ -116,6 +125,7 @@ export const DesktopComposeBodyEditor = memo(
           applyBodyTransform: (transform) => {
             const editor = editorRef.current;
             const draft = draftRef.current;
+            if (readOnly || onBeforeBodyChange?.() === false) return draft?.getBodyHtml() ?? bodyHtml;
             const nextBodyHtml = transform(draft?.getBodyHtml() ?? bodyHtml);
 
             draft?.replaceBodyHtml(nextBodyHtml);
@@ -147,12 +157,18 @@ export const DesktopComposeBodyEditor = memo(
             selection.removeAllRanges();
             selection.addRange(range);
           },
-          getBodyHtml: () => draftRef.current?.getBodyHtml() ?? bodyHtml,
+          getBodyHtml: () => {
+            // Read the DOM at the action boundary as well as onInput. This
+            // includes the final edit even before a deferred React update.
+            recordEditorInput();
+            return draftRef.current?.getBodyHtml() ?? bodyHtml;
+          },
         }),
-        [bodyHtml, publishMarkerChanges],
+        [bodyHtml, onBeforeBodyChange, publishMarkerChanges, readOnly, recordEditorInput],
       );
 
       const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+        if (readOnly) return;
         if (!(event.metaKey || event.ctrlKey)) {
           return;
         }
@@ -168,6 +184,7 @@ export const DesktopComposeBodyEditor = memo(
 
       const handlePaste = (event: ReactClipboardEvent<HTMLDivElement>) => {
         event.preventDefault();
+        if (readOnly) return;
         const pastedText = event.clipboardData.getData("text/plain");
 
         if (!pastedText) {
@@ -192,7 +209,8 @@ export const DesktopComposeBodyEditor = memo(
           <div
             id="desktop-compose-body"
             ref={editorRef}
-            contentEditable
+            contentEditable={!readOnly}
+            aria-readonly={readOnly}
             suppressContentEditableWarning
             role="textbox"
             aria-multiline="true"

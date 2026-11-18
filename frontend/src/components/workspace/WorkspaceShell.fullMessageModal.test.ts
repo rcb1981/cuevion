@@ -584,7 +584,7 @@ recordCorrectionExpectation("modal compose toolbar actions", () => {
   );
   assert.match(
     workspaceShellSource,
-    /ref=\{composeModalCloseButtonRef\}[\s\S]{0,220}aria-label="Close compose"[\s\S]{0,220}onClick=\{\(\) => setIsCloseModalOpen\(true\)\}[\s\S]{0,900}<DesktopMessageActionIcon name="close"/,
+    /ref=\{composeModalCloseButtonRef\}[\s\S]{0,220}aria-label="Close compose"[\s\S]{0,220}onClick=\{requestComposeClose\}[\s\S]{0,900}<DesktopMessageActionIcon name="close"/,
     "fixed Close must retain the established ref and confirmation handler",
   );
   assert.match(
@@ -707,12 +707,12 @@ recordCorrectionExpectation("modal compose close confirmation layer", () => {
 
   assert.match(
     workspaceShellSource,
-    /ref=\{composeModalCloseButtonRef\}[\s\S]{0,150}setIsCloseModalOpen\(true\)/,
+    /ref=\{composeModalCloseButtonRef\}[\s\S]{0,150}onClick=\{requestComposeClose\}/,
     "clicking Close must request the established compose confirmation",
   );
   assert.match(
     workspaceShellSource,
-    /isCloseModalOpen\s*\?\s*composePresentation === "modal"\s*&&\s*typeof document !== "undefined"[\s\S]{0,160}createPortal\(composeCloseConfirmation, document\.body\)/,
+    /isCloseModalOpen\s*\?\s*\(composePresentation === "modal" \|\| isMobileViewport\)\s*&&\s*typeof document !== "undefined"[\s\S]{0,160}createPortal\(composeCloseConfirmation, document\.body\)/,
     "modal compose confirmation must be portalled above the active workspace modal layer",
   );
   assert.match(
@@ -727,8 +727,8 @@ recordCorrectionExpectation("modal compose close confirmation layer", () => {
   );
   assert.match(
     workspaceShellSource,
-    /data-compose-close-confirmation-layer[\s\S]{0,500}role="alertdialog"[\s\S]{0,1600}Save to Drafts[\s\S]{0,800}Discard[\s\S]{0,800}Cancel/,
-    "the visible confirmation must retain Save, Discard, and Cancel",
+    /data-compose-close-confirmation-layer[\s\S]{0,500}role="alertdialog"[\s\S]{0,2300}Keep local copy[\s\S]{0,800}Discard[\s\S]{0,800}Cancel/,
+    "the visible confirmation must offer an honest local copy, Discard, and Cancel",
   );
 });
 
@@ -838,7 +838,7 @@ recordCorrectionExpectation("modal compose completion wiring", () => {
   );
   assert.match(
     workspaceShellSource,
-    /ref=\{composeModalCloseButtonRef\}[\s\S]{0,150}setIsCloseModalOpen\(true\)/,
+    /ref=\{composeModalCloseButtonRef\}[\s\S]{0,150}onClick=\{requestComposeClose\}/,
     "Close must retain the established save/discard confirmation",
   );
   assert.match(
