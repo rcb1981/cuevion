@@ -6,7 +6,7 @@ export function GmailDraftsView({ drafts, localPreviews, connected, mobile, rend
   drafts: ReturnType<typeof useGmailDrafts>;
   localPreviews: readonly LocalPreview[];
   connected: boolean; mobile: boolean;
-  renderHtml: (html: string) => ReactNode;
+  renderHtml: (html: string, origin: "local" | "provider") => ReactNode;
 }) {
   const [localId, setLocalId] = useState<string | null>(null);
   const [showText, setShowText] = useState(false);
@@ -59,8 +59,8 @@ export function GmailDraftsView({ drafts, localPreviews, connected, mobile, rend
           </div>
           {detail?.previewStatus === "unavailable" ? <p role="status">Preview unavailable ({detail.unavailableReason?.replace(/_/g, " ")}). View this draft in Gmail. Its content has not been changed.</p> : <>
             {detail?.bodyHtml !== null && detail?.bodyText !== null && detail ? <button type="button" className={button} onClick={() => setShowText(value => !value)}>{showText ? "Show HTML" : "Show plain text"}</button> : null}
-            {local ? local.bodyHtml ? renderHtml(local.bodyHtml) : <div className="whitespace-pre-wrap break-words">{local.body.join("\n\n")}</div>
-              : detail && detail.bodyHtml !== null && (!showText || detail.bodyText === null) ? renderHtml(detail.bodyHtml)
+            {local ? local.bodyHtml ? renderHtml(local.bodyHtml, "local") : <div className="whitespace-pre-wrap break-words">{local.body.join("\n\n")}</div>
+              : detail && detail.bodyHtml !== null && (!showText || detail.bodyText === null) ? renderHtml(detail.bodyHtml, "provider")
                 : <div className="whitespace-pre-wrap break-words">{detail?.bodyText ?? (detail?.bodyHtml ? "Select Show HTML to view this draft." : "This draft has an empty body.")}</div>}
           </>}
           {detail?.attachments.length ? <div className="space-y-2">

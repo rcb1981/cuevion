@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { transform } from "sucrase";
 import React from "react";
 import { act, create } from "react-test-renderer";
 import { GmailDraftsView } from "./GmailDraftsView";
@@ -18,7 +19,8 @@ const draft = (id: string) => ({ draftId: id, messageId: `message-${id}`, thread
   to: "to@example.test", cc: "cc@example.test", bcc: "private@example.test", subject: id, internalDate: null, headers: [] });
 const full = (id: string) => ({ ...draft(id), previewStatus: "available", unavailableReason: null, bodyText: "Plain draft body", bodyHtml: "<p>HTML draft body</p>",
   inventoryComplete: true, attachments: [], mimeParts: [] });
-const local = [{ id: "local", subject: "My temporary copy", to: "local@example.test", body: ["Keep this local preview"] }];
+const local = [{ id: "local", subject: "My temporary copy", to: "local@example.test", body: ["Keep this local preview"],
+  bodyHtml: '<p><strong>Keep this local preview</strong></p><p data-compose-signature="true">Synthetic signature</p>' }];
 const unchangedLocal = JSON.stringify(local);
 let mailbox = "box"; let connection = "connected-1"; let visible = true; let mobile = false;
 let latest!: ReturnType<typeof useGmailDrafts>; let root: ReturnType<typeof create>;
@@ -37,7 +39,7 @@ globalThis.fetch = (async (url, init) => {
 function Harness() {
   latest = useGmailDrafts(mailbox, connection, visible);
   return React.createElement(GmailDraftsView, { drafts: latest, localPreviews: local, connected: !!connection, mobile,
-    renderHtml: html => React.createElement("iframe", { title: "Synthetic HTML preview", sandbox: "", srcDoc: html }) });
+    renderHtml: (html, origin) => React.createElement("iframe", { title: "Synthetic HTML preview", sandbox: "", srcDoc: html, "data-html-origin": origin }) });
 }
 const tree = () => React.createElement(MailboxSnapshotContext.Provider, { value: getMailboxSnapshotSession() }, React.createElement(Harness));
 const settle = (action: () => void) => act(async () => { action(); await new Promise(done => setImmediate(done)); });
@@ -50,6 +52,7 @@ async function run() {
     await click("middle"); assert.equal(latest.selectedId, "middle");
     assert.equal(root.root.findByProps({ "data-gmail-draft-bcc": true }).children.join(""), "Bcc: private@example.test");
     assert.equal(root.root.findByType("iframe").props.srcDoc, "<p>HTML draft body</p>");
+    assert.equal(root.root.findByType("iframe").props["data-html-origin"], "provider");
     await settle(() => root.root.findAllByType("button").find(b => b.children.join("") === "Show plain text")!.props.onClick());
     assert.equal(root.root.findAllByType("iframe").length, 0);
     assert(JSON.stringify(root.toJSON()).includes("Plain draft body"));
@@ -61,6 +64,8 @@ async function run() {
     await settle(() => root.root.findByProps({ "data-local-draft-id": "local" }).props.onClick());
     assert.equal(calls.length, beforeLocal); assert(JSON.stringify(root.toJSON()).includes("Not saved to Gmail"));
     assert(JSON.stringify(root.toJSON()).includes("Keep this local preview"));
+    assert.equal(root.root.findByType("iframe").props["data-html-origin"], "local");
+    assert.equal(root.root.findByType("iframe").props.srcDoc, local[0].bodyHtml);
     mobile = true; await settle(() => root.update(tree())); await click("first");
     assert.equal(root.root.findByProps({ "data-gmail-drafts-list": true }).props.className, "hidden");
     await settle(() => root.root.findAllByType("button").find(b => b.children.join("") === "Back to drafts")!.props.onClick());
@@ -97,6 +102,43 @@ async function run() {
     assert.match(source, /Drafts: mailboxCollections.Drafts/);
     assert.match(source, /localPreviews=\{mailboxCollections.Drafts\}/);
     assert.match(source, /sanitizeMessageBodyHtml\(html, \{ allowRemoteImages: false, themeMode, attachments: \[\] \}\)/);
+    // Exercise the actual Drafts render callback and existing stage document builder.
+    // The sanitizer is an identity fixture here; its production implementation and tests remain unchanged.
+    const callbackStart = source.indexOf("renderHtml={(html, origin) => {");
+    assert(callbackStart >= 0);
+    const callback = source.slice(callbackStart + "renderHtml={".length, source.indexOf("\n              }}", callbackStart)) + "}";
+    const buildSource = source.slice(source.indexOf("function buildEmailStageDocument("), source.indexOf("type RgbColor ="));
+    const quoteSource = source.slice(source.indexOf("function buildReliableQuoteVisibilityStyle("), source.indexOf("type DesktopThreadDisclosureState ="));
+    const buildDocument = new Function(transform(quoteSource + buildSource, { transforms: ["typescript"] }).code + "; return buildEmailStageDocument;")();
+    const createRender = (theme: "light" | "dark") => new Function("React", "sanitizeMessageBodyHtml", "EmailHtmlStage", "themeMode",
+      transform("return (" + callback + ");", { transforms: ["typescript", "jsx"] }).code)(React,
+      (html: string, options: { allowRemoteImages: boolean }) => { assert.equal(options.allowRemoteImages, false); return { html, emailStyles: "" }; },
+      "stage-fixture", theme);
+    const external = '<table style="background:#ffffff;color:#111111"><tbody><tr><td>Intentional external design</td></tr></tbody></table>';
+    for (const theme of ["light", "dark"] as const) {
+      const render = createRender(theme);
+      const localStage = render(local[0].bodyHtml, "local").props;
+      assert.equal(localStage.html, local[0].bodyHtml, "local content must remain byte-identical");
+      assert.equal(localStage.isExternalHtml, false);
+      assert.equal(localStage.isProviderHtml, false);
+      const localDocument = buildDocument(localStage.html, theme, { emailStyles: localStage.emailStyles, isExternalHtml: localStage.isExternalHtml, isProviderHtmlEmail: localStage.isProviderHtml });
+      assert(localDocument.includes(`:root { color-scheme: ${theme}; background: transparent; }`), "iframe canvas must match the host theme");
+      assert(localDocument.includes(`class="email-stage email-stage--${theme}"`));
+      assert(!localDocument.includes("data-cuevion-provider-email-html"), "local previews must not acquire the forced white provider wrapper");
+      assert(localDocument.includes("background: transparent;"));
+      assert(localDocument.includes(theme === "dark" ? "rgba(229, 236, 230, 0.96)" : "rgba(34, 38, 36, 0.99)"));
+      assert(localDocument.includes(local[0].bodyHtml), "formatting and signature must remain in the preview");
+      const providerStage = render(external, "provider").props;
+      assert.equal(providerStage.html, external);
+      assert.equal(providerStage.isExternalHtml, true);
+      assert.equal(providerStage.isProviderHtml, true);
+      assert.equal(providerStage.emailStyles, "", "provider styles must not acquire local theme overrides");
+      const providerDocument = buildDocument(external, theme, { isExternalHtml: true, isProviderHtmlEmail: true });
+      assert(providerDocument.includes('class="email-stage email-stage--light"'));
+      assert(providerDocument.includes(external), "intentional external colours must remain intact");
+    }
+    assert.equal(JSON.stringify(local), unchangedLocal);
+    console.log("Draft preview visual isolation: local light/dark themes, unchanged stored HTML/signature, unchanged external presentation and remote-image policy passed");
     for (const file of ["gmailDraftsState.ts", "useGmailDrafts.ts", "gmailDraftsApi.ts"]) {
       const code = readFileSync(resolve(process.cwd(), "src/lib", file), "utf8");
       assert.doesNotMatch(code, /localStorage|sessionStorage|indexedDB|setMailboxStore|classify|sendGmail|priorityRuntime/i);

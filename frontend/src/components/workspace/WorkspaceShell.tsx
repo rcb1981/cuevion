@@ -29255,10 +29255,15 @@ function MailboxView({
               key={`${mailbox.id}:${gmailSentConnectionKey ?? "disconnected"}`}
               drafts={gmailDrafts} localPreviews={mailboxCollections.Drafts}
               connected={Boolean(gmailSentConnectionKey)} mobile={isMobileViewport}
-              renderHtml={(html) => {
+              renderHtml={(html, origin) => {
                 const safe = sanitizeMessageBodyHtml(html, { allowRemoteImages: false, themeMode, attachments: [] });
-                return safe.html ? <EmailHtmlStage html={safe.html} emailStyles={safe.emailStyles}
-                  themeMode={themeMode} isExternalHtml isProviderHtml /> : <p>This draft has an empty body.</p>;
+                // Cuevion local previews use the existing Compose theme; provider HTML retains its original presentation.
+                // Match the iframe root colour scheme too, so its transparent canvas does not default to white.
+                const previewStyles = origin === "local"
+                  ? `${safe.emailStyles}\n:root { color-scheme: ${themeMode}; background: transparent; }`
+                  : safe.emailStyles;
+                return safe.html ? <EmailHtmlStage html={safe.html} emailStyles={previewStyles}
+                  themeMode={themeMode} isExternalHtml={origin === "provider"} isProviderHtml={origin === "provider"} /> : <p>This draft has an empty body.</p>;
               }}
             /> : <>
             {isWideSplitView && effectiveMailListPaneWidth !== null ? (
