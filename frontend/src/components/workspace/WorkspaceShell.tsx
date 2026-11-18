@@ -4,6 +4,8 @@ import { mergeGmailSentDisplay } from "../../lib/gmailSentState";
 import { useGmailSent } from "../../lib/useGmailSent";
 import { mailboxFolderRailClass, mailboxFolderHeadingClass, mailboxFolderListClass, mailboxFolderRowClass, mailboxFolderSelectedClass, mailboxFolderIdleClass } from "./mailboxFolderStyles";
 import { useMailboxSnapshots } from "../../lib/MailboxSnapshotContext";
+import { useRecipientMemory } from "../../lib/useRecipientMemory";
+import { extractRecipientEmails, normalizeRememberedRecipient } from "../../lib/recipientMemory";
 import { captureDraftComposition, mobileComposeBodyHtml } from "../../lib/composeSafety";
 import { useComposeSafety, useComposeField } from "../../lib/useComposeSafety";
 import { clearMailboxSnapshotSession } from "../../lib/mailboxSnapshotSession";
@@ -3577,7 +3579,6 @@ const MAILBOX_FOCUS_PREFERENCE_OVERRIDES_STORAGE_KEY =
 const OUT_OF_OFFICE_SUPPRESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
 const SMART_FOLDERS_STORAGE_KEY = "cuevion-smart-folders";
 const MAIL_LIST_PANE_WIDTH_STORAGE_KEY = "cuevion-mail-list-pane-width";
-const COMPOSE_RECIPIENT_MEMORY_STORAGE_KEY = "cuevion-compose-recipient-memory";
 const ACTIVE_MAILBOX_AUTO_REFRESH_INTERVAL_MS = 3 * 60 * 1000;
 const MAIL_FOLDER_COLUMN_WIDTH = 152;
 const MAIL_SPLIT_GAP = 0;
@@ -17714,25 +17715,7 @@ function MailboxView({
   const [composeTo, setComposeTo] = useComposeField(composeSafety, "");
   const [composeCc, setComposeCc] = useComposeField(composeSafety, "");
   const [composeBcc, setComposeBcc] = useComposeField(composeSafety, "");
-  const [rememberedRecipients, setRememberedRecipients] = useState<string[]>(() => {
-    if (typeof window === "undefined") {
-      return [];
-    }
-
-    const storedValue = window.localStorage.getItem(COMPOSE_RECIPIENT_MEMORY_STORAGE_KEY);
-
-    if (!storedValue) {
-      return [];
-    }
-
-    try {
-      const parsed = JSON.parse(storedValue) as string[];
-
-      return parsed.filter((value) => typeof value === "string");
-    } catch {
-      return [];
-    }
-  });
+  const { getRecipients: getRememberedRecipients, remember: rememberSentRecipients } = useRecipientMemory();
   const [activeRecipientSuggestionField, setActiveRecipientSuggestionField] =
     useState<ComposeRecipientField | null>(null);
   const [showComposeBcc, setShowComposeBcc] = useState(false);
@@ -18044,30 +18027,6 @@ function MailboxView({
     setIsSendingCompose(false);
   };
 
-  const normalizeRememberedRecipient = (value: string) => value.trim().toLowerCase();
-
-  const extractRecipientEmails = (value: string) =>
-    value
-      .split(/[,;]+/)
-      .map((entry) => normalizeRememberedRecipient(entry))
-      .filter((entry) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(entry));
-
-  const rememberSentRecipients = (values: Array<string | undefined>) => {
-    const nextRecipients = values.flatMap((value) => extractRecipientEmails(value ?? ""));
-
-    if (nextRecipients.length === 0) {
-      return;
-    }
-
-    setRememberedRecipients((current) => {
-      const merged = [...nextRecipients, ...current].filter(
-        (value, index, array) => array.indexOf(value) === index,
-      );
-
-      return merged.slice(0, 50);
-    });
-  };
-
   const getComposeRecipientValue = (field: ComposeRecipientField) => {
     if (field === "to") {
       return composeTo;
@@ -18126,7 +18085,7 @@ function MailboxView({
 
     const existingRecipients = new Set(extractRecipientEmails(value));
 
-    return rememberedRecipients
+    return getRememberedRecipients()
       .filter(
         (recipient) =>
           !existingRecipients.has(recipient) &&
@@ -18136,6 +18095,7 @@ function MailboxView({
   };
 
   const applyRecipientSuggestion = (field: ComposeRecipientField, recipient: string) => {
+    if (!getRememberedRecipients().includes(recipient)) return;
     const currentValue = getComposeRecipientValue(field);
     const lastCommaIndex = currentValue.lastIndexOf(",");
     const lastSemicolonIndex = currentValue.lastIndexOf(";");
@@ -18187,17 +18147,6 @@ function MailboxView({
       </div>
     );
   };
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem(
-      COMPOSE_RECIPIENT_MEMORY_STORAGE_KEY,
-      JSON.stringify(rememberedRecipients),
-    );
-  }, [rememberedRecipients]);
 
   const clampMailListPaneWidth = (nextWidth: number) => {
     if (!splitPaneWidth) {
