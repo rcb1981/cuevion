@@ -2,6 +2,15 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Match the desktop split-pane breakpoint and normalize provider title heights. */
+@media (min-width: 1280px) {
+  [data-cuevion-mailbox-visual="unified"] > header {
+    min-height: 50px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+  }
+}
+
 :root {
   color: #1f2a24;
   background:
