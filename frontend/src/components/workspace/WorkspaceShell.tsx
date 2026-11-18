@@ -28644,11 +28644,13 @@ function MailboxView({
                 {imapSent.discovery.folders.map((folder) => <option key={folder.providerFolder} value={folder.providerFolder}>{folder.displayName}{folder.suggested ? " (suggested)" : ""}</option>)}
               </select>
             ) : null}
-            {imapSent.discovery?.mode === "ready" && imapSent.discovery.folders.length > 1 ? <button type="button" disabled={imapSent.loading}
-              onClick={() => { setChangingImapSentFolder((value) => !value); }}
-              className="shrink-0 rounded-lg border border-[var(--workspace-border-soft)] px-3 py-1 disabled:opacity-50">{changingImapSentFolder ? "Cancel" : "Change folder"}</button> : null}
-            {imapSent.nextPageToken ? <button type="button" disabled={imapSent.loading} onClick={() => { void imapSent.loadMore(); }}
-              className="shrink-0 rounded-lg border border-[var(--workspace-border-soft)] px-3 py-1 disabled:opacity-50">Load more</button> : null}
+            <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-3">
+              {imapSent.discovery?.mode === "ready" && imapSent.discovery.folders.length > 1 ? <button type="button" disabled={imapSent.loading}
+                onClick={() => { setChangingImapSentFolder((value) => !value); }}
+                className="shrink-0 rounded-lg border border-[var(--workspace-border-soft)] px-3 py-1 disabled:opacity-50">{changingImapSentFolder ? "Cancel" : "Change folder"}</button> : null}
+              {imapSent.nextPageToken ? <button type="button" disabled={imapSent.loading} onClick={() => { void imapSent.loadMore(); }}
+                className="shrink-0 rounded-lg border border-[var(--workspace-border-soft)] px-3 py-1 disabled:opacity-50">Load more</button> : null}
+            </div>
           </div>
         ) : null}
 
