@@ -19780,10 +19780,32 @@ function MailboxView({
     selectableMessageRows.find(({ selection }) =>
       visibleSelectedMessageKeys.includes(selection.key),
     )?.message ?? null;
+  const resolveGmailSentSelection = (
+    selection: MailboxScopedMessageSelection | null,
+    messages: MailMessage[],
+  ) => {
+    if (!selection || selection.mailboxId !== mailbox.id || selection.folder !== "Sent") return null;
+    const exact = messages.find((message) => buildCurrentMessageSelection(message).key === selection.key);
+    if (exact) return exact;
+
+    // A local send can be replaced in the display by its exact provider copy,
+    // whose UI ID differs. Require the original Gmail connection identity.
+    const local = mailboxCollections.Sent.find((message) => buildCurrentMessageSelection(message).key === selection.key);
+    if (!local?.providerMessageId || local.threadIdentityContext?.provider !== "google" ||
+        local.threadIdentityContext.mailboxId !== mailbox.id ||
+        (local.serverMailboxId && local.serverMailboxId !== mailbox.id)) return null;
+    return messages.find((message) => message.serverMailboxId === mailbox.id &&
+      message.providerMessageId === local.providerMessageId) ?? null;
+  };
+  // A Sent refresh can replace a thread's representative row while the exact
+  // selected message is still present in the visible conversation messages.
   const selectedMessageFromCurrentId =
-    sortedMessages.find(matchesPrimarySelection) ?? null;
+    isGmailSentView
+      ? resolveGmailSentSelection(primaryMessageSelection, visibleMessages)
+      : sortedMessages.find(matchesPrimarySelection) ?? null;
   const selectedMessageFallbackTop = sortedMessages[0] ?? null;
   const selectedMessage =
+    (isGmailSentView ? selectedMessageFromCurrentId : null) ??
     selectedMessageFromVisiblePrimary ??
     selectedMessageFromVisibleSelection ??
     selectedMessageFromCurrentId ??
@@ -22413,21 +22435,30 @@ function MailboxView({
     );
 
     setMailboxScopedSelectionState((current) => {
-      const resolvedSelections = resolveMailboxScopedSelectionEntries(
-        mailboxStore,
-        current.selected,
-      )
-        .map((entry) => entry.selection)
-        .filter((selection) => availableSelectionKeys.has(selection.key));
+      // Provider-backed Sent exists only in this display projection. Looking it
+      // up in mailboxStore incorrectly clears every provider-only selection.
+      const resolvedSentSelections = isGmailSentView
+        ? new Map(current.selected.flatMap((selection) => {
+            const message = resolveGmailSentSelection(selection, folderMessages);
+            return message ? [[selection.key, buildCurrentMessageSelection(message)] as const] : [];
+          }))
+        : null;
+      const resolvedSelections = resolvedSentSelections
+        ? [...resolvedSentSelections.values()]
+        : resolveMailboxScopedSelectionEntries(mailboxStore, current.selected)
+            .map((entry) => entry.selection)
+            .filter((selection) => availableSelectionKeys.has(selection.key));
+      const retainedPrimaryKey = resolvedSentSelections?.get(current.primaryKey ?? "")?.key ?? current.primaryKey;
+      const retainedAnchorKey = resolvedSentSelections?.get(current.anchorKey ?? "")?.key ?? current.anchorKey;
       const primaryKey = resolvedSelections.some(
-        (selection) => selection.key === current.primaryKey,
+        (selection) => selection.key === retainedPrimaryKey,
       )
-        ? current.primaryKey
+        ? retainedPrimaryKey
         : resolvedSelections[0]?.key ?? null;
       const anchorKey = resolvedSelections.some(
-        (selection) => selection.key === current.anchorKey,
+        (selection) => selection.key === retainedAnchorKey,
       )
-        ? current.anchorKey
+        ? retainedAnchorKey
         : primaryKey;
       const didChange =
         primaryKey !== current.primaryKey ||
@@ -22443,7 +22474,7 @@ function MailboxView({
         ? { selected: resolvedSelections, primaryKey, anchorKey }
         : current;
     });
-  }, [folderMessages, mailboxStore]);
+  }, [folderMessages, mailboxStore, isGmailSentView]);
 
   useEffect(() => {
     if (!isCollaborationParticipantPickerOpen) {
