@@ -50,7 +50,7 @@ async function run() {
   assert.ok(mapping.includes("message.providerMessageId"));
   assert.ok(!/normalizeMailMessage|setMailboxStore|senderCategoryLearning|priorityRuntime/.test(mapping));
   assert.ok(view.includes("? mergeGmailSentDisplay(mailbox.id, gmailSentMessages, mailboxCollections.Sent, gmailSent.observed)"));
-  assert.ok(view.includes('onClick={isGmailSentView ? () => { void gmailSent.refresh(); } : onSyncMailbox}'));
+  assert.ok(view.includes('onClick={isGmailSentView ? () => { void gmailSent.refresh(); } : isImapSentView ? () => { void imapSent.refresh(); } : onSyncMailbox}'));
   assert.ok(source.includes('return [mailboxId, collections.Sent];'));
   const readGuard = view.slice(view.indexOf("const markInboxMessageReadOnOpen"), view.indexOf("const markInboxMessageReadOnOpen") + 450);
   assert.ok(readGuard.includes('(activeFolder !== "Inbox" && activeFolder !== "Filtered")'));

@@ -1,0 +1,361 @@
+"""Synthetic protocol/HTTP tests. Network access is forbidden in this suite."""
+import importlib
+import imaplib
+import io
+import json
+import socket
+import sys
+import time
+import unittest
+from email.message import EmailMessage
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from api.inboxes import imap_sent as discovery, imap_sent_snapshot as reader
+route = importlib.import_module('api.inboxes.fetch-imap-sent')
+attachment = importlib.import_module('api.inboxes.download-attachment')
+
+
+def mail(uid=1, message_id=None, references=None, attachment=False):
+    m = EmailMessage()
+    m['From'], m['To'], m['Subject'] = 'self@example.test', 'other@example.test', 'Same subject'
+    m['Date'], m['Message-ID'] = 'Wed, 18 Nov 2026 10:00:00 +0000', message_id or f'<{uid}@example.test>'
+    if references:
+        m['References'] = references
+    m.set_content('Synthetic message ' + str(uid))
+    if attachment:
+        m.add_attachment(b'synthetic attachment', maintype='application', subtype='octet-stream', filename='fixture.bin')
+    return m.as_bytes()
+
+
+class Mailbox:
+    def __init__(self, rows=None, folders=None, special=True, ceiling=None):
+        self.rows = rows if rows is not None else {n: mail(n) for n in range(1, 26)}
+        self.folders = folders if folders is not None else [b'(\\Sent) "/" "Sent Messages"']
+        self.capabilities = (b'IMAP4rev1', b'SPECIAL-USE') if special else (b'IMAP4rev1',)
+        self.uv, self.ceiling = '101', ceiling if ceiling is not None else max(self.rows, default=0)
+        self.calls, self.sock, self.file = [], Mock(), io.BytesIO()
+        self.flags, self.disappear, self.bad_uid, self.bad_literal, self.size_override = {}, set(), False, False, None
+        self.select_count, self.changed_uv = 0, False
+
+    def list(self, *args):
+        self.calls.append(('LIST', *args)); return 'OK', self.folders
+
+    def _simple_command(self, command, *args):
+        assert (command, *args) == ('LIST', '""', '"*"', 'RETURN', '(SPECIAL-USE)')
+        self.calls.append((command, *args)); return 'OK', [b'complete']
+
+    def _untagged_response(self, status, data, name):
+        assert name == 'LIST'
+        return status, self.folders
+
+    def capability(self):
+        self.calls.append(('CAPABILITY',)); return 'OK', [b' '.join(self.capabilities)]
+
+    def select(self, folder, readonly=False):
+        if readonly is not True:
+            raise AssertionError('writable selection')
+        self.select_count += 1
+        self.calls.append(('EXAMINE', folder))
+        return 'OK', [str(len(self.rows)).encode()]
+
+    def response(self, name):
+        if name == 'UIDVALIDITY':
+            return name, [str(int(self.uv) + (1 if self.changed_uv and self.select_count > 1 else 0)).encode()]
+        if name == 'UIDNEXT':
+            return name, [str(self.ceiling + 1).encode()]
+        raise AssertionError(name)
+
+    def uid(self, command, *args):
+        self.calls.append((command, *args))
+        if command == 'SEARCH':
+            assert args[0:2] == (None, 'UID')
+            low, high = map(int, args[2].split(':'))
+            assert 0 < low <= high and high - low < reader.WINDOW
+            return 'OK', [' '.join(str(u) for u in sorted(self.rows) if low <= u <= high).encode()]
+        if command != 'FETCH':
+            raise AssertionError('mutating command ' + command)
+        uid, fields = int(args[0]), args[1]
+        assert 'BODY.PEEK[' in fields
+        if uid in self.disappear or uid not in self.rows:
+            return 'OK', [None]
+        full = self.rows[uid]
+        raw = full.split(b'\n\n')[0] + b'\n\n' if 'HEADER' in fields else full
+        metadata = f'1 (UID {uid + 1 if self.bad_uid else uid}'
+        if 'HEADER' in fields:
+            metadata += f' FLAGS ({self.flags.get(uid, "")}) RFC822.SIZE {self.size_override if self.size_override is not None else len(full)} INTERNALDATE "18-Nov-2026 09:00:00 +0000" BODY[HEADER]<0>'
+        else:
+            metadata += ' BODY[]<0>'
+        metadata += f' {{{len(raw) + int(self.bad_literal)}}}'
+        return 'OK', [(metadata.encode(), raw), b')']
+
+    def read(self, size): return b'x' * size
+    def readline(self): return b'line\r\n'
+    def logout(self): self.calls.append(('LOGOUT',))
+    def shutdown(self): self.calls.append(('SHUTDOWN',))
+
+
+class Handler:
+    def __init__(self, payload):
+        raw = json.dumps(payload).encode()
+        self.headers, self.rfile, self.wfile = {'content-length': str(len(raw))}, io.BytesIO(raw), io.BytesIO()
+        self.response_headers, self.status, self.command = [], None, 'POST'
+    def send_response(self, status): self.status = status
+    def send_header(self, k, v): self.response_headers.append((k, v))
+    def end_headers(self): pass
+    def _handle_post(self): route.handler._handle_post(self)
+    def body(self): return json.loads(self.wfile.getvalue())
+
+
+CONTEXT = {'mailboxId': 'box', 'ownerEmail': 'owner@example.test', 'email': 'self@example.test',
+           'imap': {'host': 'imap.example.invalid', 'port': 993, 'ssl': True, 'username': 'self', 'password': 'fixture-secret'}}
+with patch.object(reader, '_resolve_encryption_key', return_value=(b'k' * 32, None)):
+    SCOPE, KEY = reader.connection_scope(CONTEXT, 'generation-1')
+
+
+class SyntheticOnly(unittest.TestCase):
+    def setUp(self):
+        key = patch.object(reader, '_resolve_encryption_key', return_value=(b'k' * 32, None))
+        key.start(); self.addCleanup(key.stop)
+        for name in ('create_connection', 'getaddrinfo'):
+            p = patch.object(socket, name, side_effect=AssertionError('real network forbidden'))
+            p.start(); self.addCleanup(p.stop)
+
+    def read(self, mailbox=None, **kwargs):
+        return reader.read_page(mailbox or Mailbox(), 'box', 'Sent Messages', SCOPE, KEY, **kwargs)
+
+
+class DiscoveryTests(SyntheticOnly):
+    def test_special_use_icloud_dovecot_and_generic(self):
+        for folder in ['Sent Messages', 'INBOX.Sent', 'Sent Items']:
+            m = Mailbox(folders=[f'(\\Sent) "." "{folder}"'.encode()])
+            result = discovery.discover_sent(m)
+            self.assertEqual(result['providerFolder'], folder)
+            self.assertEqual(m.calls, [('CAPABILITY',), ('LIST', '""', '"*"', 'RETURN', '(SPECIAL-USE)')])
+
+    def test_names_are_only_suggestions_and_choice_is_exact(self):
+        m = Mailbox(special=False, folders=[b'() "." "INBOX.Sent"', b'() "/" "Sent Items"', b'() "/" "INBOX"'])
+        result = discovery.discover_sent(m)
+        self.assertEqual(result['mode'], 'choose')
+        self.assertTrue(all(x['suggested'] for x in result['folders']))
+        self.assertEqual(discovery.discover_sent(m, 'INBOX.Sent')['providerFolder'], 'INBOX.Sent')
+        with self.assertRaises(discovery.SentError): discovery.discover_sent(m, 'inbox.sent')
+
+    def test_multiple_special_roles_need_choice(self):
+        m = Mailbox(folders=[b'(\\Sent) "/" "Sent"', b'(\\Sent) "/" "Other Sent"', b'() "/" "Other"'])
+        self.assertEqual(discovery.discover_sent(m)['mode'], 'choose')
+        with self.assertRaises(discovery.SentError): discovery.discover_sent(m, 'Other')
+
+    def test_wire_encoding_quotes_literals_and_delimiters(self):
+        name = 'Team "Sent"\\2026'
+        wire = name.encode()
+        m = Mailbox(folders=[(f'(\\Sent) NIL {{{len(wire)}}}'.encode(), wire), b''])
+        result = discovery.discover_sent(m)
+        self.assertEqual(result['providerFolder'], name)
+        self.assertEqual(discovery.quote_folder(name), '"Team \\"Sent\\"\\\\2026"')
+        self.assertEqual(discovery.folder_label('&AMk-l&AOk-ments &- Sent'), 'Éléments & Sent')
+        self.assertEqual(discovery.folder_label('&AAk-Sent'), ' Sent')
+        self.assertEqual(discovery.discover_sent(Mailbox(folders=[b'(\\Sent) NIL &AMk-l&AOk-ments']))['providerFolder'], '&AMk-l&AOk-ments')
+
+    def test_unusable_missing_malformed_and_duplicate_inventory(self):
+        self.assertEqual(discovery.discover_sent(Mailbox(folders=[]))['mode'], 'unavailable')
+        for flag in ['\\Noselect', '\\NonExistent', '\\Trash', '\\Junk', '\\Drafts', '\\All', '\\Archive']:
+            self.assertEqual(discovery.discover_sent(Mailbox(folders=[f'(\\Sent {flag}) "/" "Sent"'.encode()]))['mode'], 'unavailable')
+        for folders in [[b'malformed'], [b'() "/" "Sent"'] * 2]:
+            with self.assertRaises(discovery.SentError): discovery.discover_sent(Mailbox(folders=folders))
+
+
+class ReaderTests(SyntheticOnly):
+    def test_cursor_signing_uses_server_secret_and_fails_closed(self):
+        token = self.read()['nextPageToken']
+        with patch.object(reader, '_resolve_encryption_key', return_value=(b'z' * 32, None)):
+            scope, key = reader.connection_scope(CONTEXT, 'generation-1')
+        self.assertNotEqual(scope, SCOPE)
+        with self.assertRaises(discovery.SentError): reader.decode_cursor(token, key, scope)
+        with patch.object(reader, '_resolve_encryption_key', return_value=(None, {'code': 'missing'})):
+            with self.assertRaises(discovery.SentError): reader.connection_scope(CONTEXT, 'generation-1')
+
+    def test_uid_pages_and_readonly_commands(self):
+        m = Mailbox(); first = self.read(m)
+        self.assertEqual([int(x['imapUid']) for x in first['messages']], list(range(25, 5, -1)))
+        cursor = reader.decode_cursor(first['nextPageToken'], KEY, SCOPE)
+        second = self.read(m, cursor=cursor)
+        self.assertEqual([x['imapUid'] for x in second['messages']], ['5', '4', '3', '2', '1'])
+        self.assertIsNone(second['nextPageToken'])
+        self.assertTrue(all(c[0] in {'EXAMINE', 'SEARCH', 'FETCH'} for c in m.calls))
+        self.assertTrue(all(c[1] == '"Sent Messages"' for c in m.calls if c[0] == 'EXAMINE'))
+        self.assertTrue(first['messages'][0]['unread'])
+
+    def test_sparse_empty_window_keeps_progress(self):
+        m = Mailbox(rows={1: mail()}, ceiling=10000)
+        p = self.read(m)
+        self.assertEqual(p['messages'], []); self.assertIsNotNone(p['nextPageToken'])
+        seen = set()
+        while p['nextPageToken']:
+            self.assertNotIn(p['nextPageToken'], seen); seen.add(p['nextPageToken'])
+            p = self.read(m, cursor=reader.decode_cursor(p['nextPageToken'], KEY, SCOPE))
+        self.assertEqual(p['messages'][0]['imapUid'], '1')
+        self.assertEqual(self.read(Mailbox(rows={}))['messages'], [])
+
+    def test_new_messages_expunge_and_deleted_flags(self):
+        m = Mailbox(); p = self.read(m)
+        m.rows[26] = mail(26); m.ceiling = 26; m.disappear.add(3); m.flags[4] = '\\Deleted'; m.flags[2] = '\\Draft'
+        p = self.read(m, cursor=reader.decode_cursor(p['nextPageToken'], KEY, SCOPE))
+        self.assertEqual([x['imapUid'] for x in p['messages']], ['5', '1'])
+
+    def test_uidvalidity_changes_before_and_during_read(self):
+        m = Mailbox(); p = self.read(m); cursor = reader.decode_cursor(p['nextPageToken'], KEY, SCOPE)
+        m.uv = '102'
+        with self.assertRaisesRegex(discovery.SentError, 'Sent changed'): self.read(m, cursor=cursor)
+        m = Mailbox(); m.changed_uv = True
+        with self.assertRaisesRegex(discovery.SentError, 'Sent changed'): self.read(m)
+        m = Mailbox(); m.uv = '0'
+        with self.assertRaises(discovery.SentError): self.read(m)
+
+    def test_cursor_signature_expiry_scope_generation_and_bounds(self):
+        p = self.read(); t = p['nextPageToken']; cursor = reader.decode_cursor(t, KEY, SCOPE)
+        for value in [t[:-1], 'x', '!' * 100, t + 'x']:
+            with self.assertRaises(discovery.SentError): reader.decode_cursor(value, KEY, SCOPE)
+        for field, value in [('before', 0), ('before', cursor['ceiling']), ('expires', 0), ('scope', 'wrong')]:
+            with self.assertRaises(discovery.SentError): reader.decode_cursor(reader.encode_cursor({**cursor, field: value}, KEY), KEY, SCOPE)
+        for context, generation in [(CONTEXT, 'generation-2'), ({**CONTEXT, 'ownerEmail': 'other@example.test'}, 'generation-1')]:
+            scope, key = reader.connection_scope(context, generation)
+            with self.assertRaises(discovery.SentError): reader.decode_cursor(t, key, scope)
+
+    def test_oversized_and_malformed_mime_remain_visible(self):
+        m = Mailbox(rows={1: mail()}); m.size_override = reader.MAX_BODY + 1
+        row = self.read(m)['messages'][0]
+        self.assertIn('too large', row['body'][0]); self.assertEqual(row['attachments'], [])
+        self.assertFalse(any('BODY.PEEK[]' in str(c) for c in m.calls))
+        row = self.read(Mailbox(rows={1: b'not a valid message'}))['messages'][0]
+        self.assertIn('could not be displayed', row['body'][0])
+        for field in ['bad_uid', 'bad_literal']:
+            m = Mailbox(rows={1: mail()}); setattr(m, field, True)
+            with self.assertRaises(discovery.SentError): self.read(m)
+
+    def test_threads_duplicates_and_attachments_do_not_classify(self):
+        import imap_connect_preview as mime
+        m = Mailbox(rows={1: mail(1, '<root@example.test>'), 2: mail(2, references='<root@example.test>', attachment=True), 3: mail(3, '<duplicate@example.test>'), 4: mail(4, '<duplicate@example.test>')})
+        with patch.object(mime, 'to_message_preview', side_effect=AssertionError('classification')), patch.object(mime, 'build_priority_candidate_render_source', side_effect=AssertionError('priority')):
+            p = self.read(m)
+        rows = {x['imapUid']: x for x in p['messages']}
+        self.assertEqual(rows['1']['threadId'], rows['2']['threadId'])
+        self.assertNotEqual(rows['3']['threadId'], rows['4']['threadId'])
+        self.assertEqual(rows['2']['attachments'][0]['name'], 'fixture.bin')
+        self.assertEqual(len(rows), 4)
+
+    def test_transport_and_execution_budget(self):
+        m = Mailbox(); budget = reader.ReadBudget(m, time.monotonic() + 10)
+        with self.assertRaises(discovery.SentError): m.read(reader.MAX_BODY + 2)
+        budget.deadline = 0
+        with self.assertRaises(discovery.SentError): m.readline()
+        with self.assertRaises(discovery.SentError): self.read(check=budget.check)
+
+    def test_chunked_wire_reads_preserve_buffering_and_bound_slow_servers(self):
+        m = Mailbox(); m.file = io.BytesIO(b'header\r\nabcde)\r\nnext\r\n')
+        budget = reader.ReadBudget(m, time.monotonic() + 10)
+        self.assertEqual(m.readline(), b'header\r\n')
+        self.assertEqual(m.read(5), b'abcde')
+        self.assertEqual(m.readline(), b')\r\n')
+        self.assertEqual(m.readline(), b'next\r\n')
+        self.assertEqual(m.readline(), b'')
+        for line in [b'x' * 65537, b'x' * 65536 + b'\n']:
+            m = Mailbox(); m.file = io.BytesIO(line)
+            reader.ReadBudget(m, time.monotonic() + 10)
+            with self.assertRaises(discovery.SentError): m.readline()
+        m = Mailbox(); m.file = Mock(); m.file.read1.return_value = b'x'
+        with patch.object(reader.time, 'monotonic', side_effect=range(20)):
+            reader.ReadBudget(m, 5)
+            with self.assertRaisesRegex(discovery.SentError, 'too long'): m.read(100)
+        self.assertLess(m.file.read1.call_count, 5)
+        m = Mailbox(); m.file = None
+        with self.assertRaises(discovery.SentError): reader.ReadBudget(m, time.monotonic() + 10)
+        m = Mailbox(); m._readbuf = [b'header\r\nab']; m.sock.recv.side_effect = io.BytesIO(b'cde)\r\n').read
+        reader.ReadBudget(m, time.monotonic() + 10)
+        self.assertEqual(m.readline(), b'header\r\n')
+        self.assertEqual(m.read(5), b'abcde')
+        self.assertEqual(m.readline(), b')\r\n')
+        self.assertEqual(m._readbuf, [])
+
+    def test_real_imaplib_parser_on_in_memory_protocol_transcript(self):
+        raw = mail(1); header = raw.split(b'\n\n')[0] + b'\n\n'
+        def examined(tag):
+            return b'* 1 EXISTS\r\n* OK [UIDVALIDITY 101] stable\r\n* OK [UIDNEXT 2] next\r\n' + tag + b' OK examined\r\n'
+        wire = (b'* PREAUTH IMAP4rev1\r\n* CAPABILITY IMAP4rev1 SPECIAL-USE\r\nT0 OK capability\r\n'
+                b'* CAPABILITY IMAP4rev1 SPECIAL-USE\r\nT1 OK capability\r\n'
+                b'* LIST (\\Sent) "/" "Sent Messages"\r\nT2 OK list\r\n' + examined(b'T3') +
+                b'* SEARCH 1\r\nT4 OK search\r\n' +
+                f'* 1 FETCH (UID 1 FLAGS () RFC822.SIZE {len(raw)} INTERNALDATE "18-Nov-2026 09:00:00 +0000" BODY[HEADER]<0> {{{len(header)}}}\r\n'.encode() + header + b')\r\nT5 OK fetched\r\n' +
+                f'* 1 FETCH (UID 1 BODY[]<0> {{{len(raw)}}}\r\n'.encode() + raw + b')\r\nT6 OK fetched\r\n' + examined(b'T7'))
+        sock = Mock(); sock.makefile.return_value = io.BytesIO(wire)
+        with patch.object(imaplib.IMAP4, '_create_socket', return_value=sock), patch.object(imaplib, 'Int2AP', return_value=b'T'):
+            m = imaplib.IMAP4('synthetic.invalid')
+        reader.ReadBudget(m, time.monotonic() + 10)
+        self.assertEqual(discovery.discover_sent(m)['providerFolder'], 'Sent Messages')
+        self.assertEqual(self.read(m)['messages'][0]['imapUid'], '1')
+        commands = [c.args[0] for c in sock.sendall.call_args_list]
+        self.assertIn(b'T2 LIST "" "*" RETURN (SPECIAL-USE)\r\n', commands)
+        self.assertIn(b'T3 EXAMINE "Sent Messages"\r\n', commands)
+        self.assertTrue(all(b'BODY.PEEK[' in c for c in commands if b' FETCH ' in c))
+
+
+class RouteTests(SyntheticOnly):
+    def invoke(self, payload, contexts=None, mailbox=None):
+        h = Handler(payload); m = mailbox or Mailbox()
+        with patch.object(route, 'resolve_context', side_effect=contexts or [(CONTEXT, SCOPE, KEY)] * 2) as auth, patch.object(route, 'connect_mailbox_with_settings', return_value=m) as connect:
+            route.handler.do_POST(h)
+        return h, m, auth, connect
+
+    def test_authenticated_endpoint_boundaries_and_cleanup(self):
+        h, m, auth, connect = self.invoke({'mailboxId': 'box'})
+        self.assertEqual(h.status, 200, h.body())
+        self.assertIn(('Cache-Control', 'no-store'), h.response_headers)
+        self.assertEqual(auth.call_count, 2)
+        self.assertEqual(connect.call_args.kwargs['host'], 'imap.example.invalid')
+        self.assertNotIn('fixture-secret', json.dumps(h.body()))
+        self.assertEqual(m.calls[-1][0], 'LOGOUT')
+
+    def test_untrusted_request_fields_never_connect(self):
+        for extra in [{'host': 'bad'}, {'password': 'bad'}, {'provider': 'google'}, {'limit': True}, {'limit': 21}, {'limit': 0}, {'folderChoice': None}, {'folderChoice': 'bad\r\n'}, {'pageToken': None}]:
+            h, _, auth, connect = self.invoke({'mailboxId': 'box', **extra})
+            self.assertEqual(h.status, 400, extra); auth.assert_not_called(); connect.assert_not_called()
+
+    def test_ownership_change_and_failure_never_publish_history(self):
+        h, m, _, _ = self.invoke({'mailboxId': 'box'}, [(CONTEXT, SCOPE, KEY), (CONTEXT, 'changed', KEY)])
+        self.assertEqual(h.status, 409); self.assertNotIn('messages', json.dumps(h.body()))
+        self.assertEqual(m.calls[-1][0], 'LOGOUT')
+        h, _, _, connect = self.invoke({'mailboxId': 'box'}, [discovery.SentError('unauthorized', 'Sign in.', 401)])
+        self.assertEqual(h.status, 401); connect.assert_not_called()
+
+    def test_choice_without_persisting_and_response_limit(self):
+        m = Mailbox(special=False, folders=[b'() "/" "Sent"'])
+        h, _, _, _ = self.invoke({'mailboxId': 'box'}, mailbox=m)
+        self.assertEqual(h.body()['discovery']['mode'], 'choose'); self.assertIsNone(h.body()['page'])
+        h, _, _, _ = self.invoke({'mailboxId': 'box', 'folderChoice': {'providerFolder': 'Sent', 'scope': SCOPE}}, mailbox=m)
+        self.assertEqual(h.body()['page']['providerFolder'], 'Sent')
+        h, _, _, connect = self.invoke({'mailboxId': 'box', 'folderChoice': {'providerFolder': 'Sent', 'scope': 'old-connection'}}, mailbox=m)
+        self.assertEqual(h.status, 409); connect.assert_not_called()
+        with patch.object(route, 'MAX_RESPONSE', 1):
+            h, _, _, _ = self.invoke({'mailboxId': 'box'})
+        self.assertEqual(h.status, 502)
+
+    def test_real_boundary_generation_is_read_without_schema_changes(self):
+        owned = {'status': 'ok', 'user': {'email': CONTEXT['ownerEmail']}, 'inbox': {'credentialVersion': 'generation-1'}}
+        with patch.object(route, 'resolve_owned_managed_inbox_record', return_value=owned), patch.object(route, 'resolve_authenticated_imap_mailbox', return_value={'status': 'ok', 'mailbox': CONTEXT}) as auth:
+            context, scope, key = route.resolve_context({}, 'box')
+        self.assertEqual((context, scope, key), (CONTEXT, SCOPE, KEY)); auth.assert_called_once_with({}, 'box')
+
+    def test_attachment_folder_is_quoted_without_identity_changes(self):
+        raw = mail(1, attachment=True)
+        for folder in ['Sent Messages', 'Team "Sent"\\2026', 'INBOX.Sent', '&AMk-l&AOk-ments']:
+            m = Mock(); m.select.return_value = ('OK', [b'1']); m.uid.return_value = ('OK', [(b'1 (BODY[] {1}', raw), b')'])
+            h = Handler({})
+            with patch.object(attachment, 'resolve_authenticated_imap_mailbox', return_value={'status': 'ok', 'mailbox': CONTEXT}), patch.object(attachment, 'connect_mailbox_with_settings', return_value=m), patch.object(attachment, '_read_uid_validity', return_value='101'), patch.object(attachment, '_binary_response') as output:
+                attachment._download_imap_attachment(h, {'mailboxId': 'box', 'folder': folder, 'uid': '1', 'uidValidity': '101', 'attachmentId': 'attachment-2'})
+            m.select.assert_called_once_with(discovery.quote_folder(folder), readonly=True)
+            m.uid.assert_called_once_with('fetch', '1', '(BODY.PEEK[])')
+            output.assert_called_once()
+
+
+if __name__ == '__main__': unittest.main()

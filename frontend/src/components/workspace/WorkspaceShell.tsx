@@ -1,3 +1,5 @@
+import { mergeImapSentDisplay } from "../../lib/imapSentState";
+import { useImapSent } from "../../lib/useImapSent";
 import { mergeGmailSentDisplay } from "../../lib/gmailSentState";
 import { useGmailSent } from "../../lib/useGmailSent";
 import { mailboxFolderRailClass, mailboxFolderHeadingClass, mailboxFolderListClass, mailboxFolderRowClass, mailboxFolderSelectedClass, mailboxFolderIdleClass } from "./mailboxFolderStyles";
@@ -2458,6 +2460,9 @@ export function getMailboxScopedWorkspaceMessageIdentity(
 ) {
   const context = resolveWorkspaceMessageIdentityContext(mailboxId, message);
 
+  if (context?.provider === "custom_imap" && message.id.startsWith("imap-sent:")) {
+    return JSON.stringify([mailboxId, message.id]);
+  }
   if (context) {
     return resolveMailboxScopedMessageIdentity(message, context);
   }
@@ -17196,6 +17201,7 @@ function MailboxView({
   onArchiveFolderOpen,
   archiveFolderStatusMessage,
   gmailSentConnectionKey,
+  imapSentConnectionKey = null,
   onTrashFolderOpen,
   trashFolderStatusMessage,
   onApplyConfirmedProviderTrashSourceRemoval,
@@ -17331,6 +17337,7 @@ function MailboxView({
   onArchiveFolderOpen: () => void;
   archiveFolderStatusMessage: string | null;
   gmailSentConnectionKey: string | null;
+  imapSentConnectionKey?: string | null;
   onTrashFolderOpen: () => void;
   trashFolderStatusMessage: string | null;
   onApplyConfirmedProviderTrashSourceRemoval: (
@@ -17426,6 +17433,27 @@ function MailboxView({
       categoryConfidence: "low" as const, priorityScore: "low" as const,
     }, { mailboxId: mailbox.id, provider: "google", folder: "SENT", uidValidity: "gmail-api" }),
   ), [gmailSent.messages, mailbox.id]);
+
+  const isImapSentView = Boolean(imapSentConnectionKey) && activeFolder === "Sent" && !isSharedView && !activeSmartFolderId;
+  const imapSent = useImapSent(mailbox.id, imapSentConnectionKey, isImapSentView);
+  // Display only: do not normalize, classify, persist or ingest provider Sent.
+  const imapSentMessages = useMemo<MailMessage[]>(() => imapSent.messages.map((message) =>
+    applyLiveThreadIdentity({
+      id: `imap-sent:${imapSent.scope}:${encodeURIComponent(message.providerFolder!)}:${message.uidValidity}:${message.imapUid}`,
+      serverMailboxId: message.serverMailboxId, providerFolder: message.providerFolder,
+      imapUid: message.imapUid, uidValidity: message.uidValidity, rfcMessageId: message.rfcMessageId,
+      threadId: message.threadId, sender: message.sender, from: message.from, to: message.to, cc: message.cc,
+      subject: message.subject, snippet: message.snippet, body: message.body, bodyHtml: message.bodyHtml,
+      createdAt: message.createdAt, timestamp: message.timestamp, time: resolveDesktopThreadTimestamp(message).label,
+      unread: message.unread, flagged: message.flagged,
+      attachments: message.attachments?.map((attachment) => ({ ...attachment, receivedSource: {
+        mailboxId: mailbox.id, messageId: message.id, messageUid: message.imapUid,
+        folder: "Sent" as const, providerFolder: message.providerFolder, uidValidity: message.uidValidity,
+      } })),
+      signal: "Sent", category: "Primary" as const, categorySource: "system" as const,
+      categoryConfidence: "low" as const, priorityScore: "low" as const,
+    }, { mailboxId: mailbox.id, provider: "custom_imap", folder: message.providerFolder!, uidValidity: message.uidValidity! }),
+  ), [imapSent.messages, imapSent.scope, mailbox.id]);
 
   const [revealedRemoteImageMessageIds, setRevealedRemoteImageMessageIds] = useState<string[]>([]);
   const setActiveSmartFolderId = onActiveSmartFolderChange;
@@ -19090,7 +19118,9 @@ function MailboxView({
     Drafts: mailboxCollections.Drafts,
     Sent: isGmailSentView
       ? mergeGmailSentDisplay(mailbox.id, gmailSentMessages, mailboxCollections.Sent, gmailSent.observed)
-      : mailboxCollections.Sent,
+      : isImapSentView
+        ? mergeImapSentDisplay(mailbox.id, imapSentMessages, mailboxCollections.Sent)
+        : mailboxCollections.Sent,
     Archive: mailboxCollections.Archive,
     Filtered: dedupeMessagesByCanonicalIdentity([
       ...mailboxCollections.Filtered,
@@ -19797,27 +19827,34 @@ function MailboxView({
     return messages.find((message) => message.serverMailboxId === mailbox.id &&
       message.providerMessageId === local.providerMessageId) ?? null;
   };
+  const resolveImapSentSelection = (
+    selection: MailboxScopedMessageSelection | null, messages: MailMessage[],
+  ) => selection?.mailboxId === mailbox.id && selection.folder === "Sent"
+    ? messages.find((message) => buildCurrentMessageSelection(message).key === selection.key) ?? null
+    : null;
   // A Sent refresh can replace a thread's representative row while the exact
   // selected message is still present in the visible conversation messages.
   const selectedMessageFromCurrentId =
     isGmailSentView
       ? resolveGmailSentSelection(primaryMessageSelection, visibleMessages)
-      : sortedMessages.find(matchesPrimarySelection) ?? null;
+      : isImapSentView
+        ? resolveImapSentSelection(primaryMessageSelection, visibleMessages)
+        : sortedMessages.find(matchesPrimarySelection) ?? null;
   const selectedMessageFallbackTop = sortedMessages[0] ?? null;
   const selectedMessage =
-    (isGmailSentView ? selectedMessageFromCurrentId : null) ??
+    ((isGmailSentView || isImapSentView) ? selectedMessageFromCurrentId : null) ??
     selectedMessageFromVisiblePrimary ??
     selectedMessageFromVisibleSelection ??
     selectedMessageFromCurrentId ??
     selectedMessageFallbackTop ??
     null;
-  const fullWidthMessage = isGmailSentView ? selectedMessage : selectedMessageFromFolder ?? selectedMessage;
+  const fullWidthMessage = (isGmailSentView || isImapSentView) ? selectedMessage : selectedMessageFromFolder ?? selectedMessage;
   const fullMessageModalInteractionState: FullMessageModalInteractionState = {
     isOpen: isFullMessageOpen,
     selectedMessageId,
   };
   const fullMessageModalResolvedMessage =
-    isGmailSentView ? selectedMessageFromCurrentId : selectedMessageFromFolder ?? selectedMessageFromCurrentId;
+    (isGmailSentView || isImapSentView) ? selectedMessageFromCurrentId : selectedMessageFromFolder ?? selectedMessageFromCurrentId;
   const fullMessageModalMessageId = resolveFullMessageModalMessageId(
     fullMessageModalInteractionState,
     fullMessageModalResolvedMessage?.id ?? null,
@@ -20226,7 +20263,9 @@ function MailboxView({
       : null;
     const threadSourceMessages = isGmailSentView
       ? mergeGmailSentDisplay(mailbox.id, gmailSentMessages, mailboxThreadMessages, gmailSent.observed)
-      : scopedContext?.threadMessages ?? mailboxThreadMessages;
+      : isImapSentView
+        ? mergeImapSentDisplay(mailbox.id, imapSentMessages, mailboxThreadMessages)
+        : scopedContext?.threadMessages ?? mailboxThreadMessages;
     const chronologyNow = new Date();
 
     return [
@@ -22442,7 +22481,12 @@ function MailboxView({
             const message = resolveGmailSentSelection(selection, folderMessages);
             return message ? [[selection.key, buildCurrentMessageSelection(message)] as const] : [];
           }))
-        : null;
+        : isImapSentView
+          ? new Map(current.selected.flatMap((selection) => {
+              const message = resolveImapSentSelection(selection, folderMessages);
+              return message ? [[selection.key, buildCurrentMessageSelection(message)] as const] : [];
+            }))
+          : null;
       const resolvedSelections = resolvedSentSelections
         ? [...resolvedSentSelections.values()]
         : resolveMailboxScopedSelectionEntries(mailboxStore, current.selected)
@@ -22474,7 +22518,7 @@ function MailboxView({
         ? { selected: resolvedSelections, primaryKey, anchorKey }
         : current;
     });
-  }, [folderMessages, mailboxStore, isGmailSentView]);
+  }, [folderMessages, mailboxStore, isGmailSentView, isImapSentView]);
 
   useEffect(() => {
     if (!isCollaborationParticipantPickerOpen) {
@@ -23107,7 +23151,7 @@ function MailboxView({
   };
 
   const resolveSentComposeSourceEntry = () => {
-    if (!isGmailSentView || modalComposeSourceSelection?.mailboxId !== mailbox.id) return null;
+    if ((!isGmailSentView && !isImapSentView) || modalComposeSourceSelection?.mailboxId !== mailbox.id) return null;
     const message = messageCollections.Sent.find((candidate) =>
       buildMailboxScopedMessageSelection(mailbox.id, candidate, "Sent").key === modalComposeSourceSelection.key,
     );
@@ -28211,9 +28255,9 @@ function MailboxView({
           </div>
           <div data-mailbox-toolbar-sync className="flex min-h-[60px] min-w-0 items-center gap-3 border-r border-[var(--workspace-border-soft)] px-3">
           <MailToolbarIconButton
-            label={(isGmailSentView ? gmailSent.loading : mailboxSyncPresentation.inboxRefreshing) ? "Syncing…" : "Sync"}
-            onClick={isGmailSentView ? () => { void gmailSent.refresh(); } : onSyncMailbox}
-            disabled={isGmailSentView ? gmailSent.loading : isSyncingMailbox}
+            label={(isGmailSentView ? gmailSent.loading : isImapSentView ? imapSent.loading : mailboxSyncPresentation.inboxRefreshing) ? "Syncing…" : "Sync"}
+            onClick={isGmailSentView ? () => { void gmailSent.refresh(); } : isImapSentView ? () => { void imapSent.refresh(); } : onSyncMailbox}
+            disabled={isGmailSentView ? gmailSent.loading : isImapSentView ? imapSent.loading : isSyncingMailbox}
           >
             <svg
               aria-hidden="true"
@@ -28579,6 +28623,27 @@ function MailboxView({
               <button type="button" disabled={gmailSent.loading} onClick={() => { void gmailSent.loadMore(); }}
                 className="shrink-0 rounded-lg border border-[var(--workspace-border-soft)] px-3 py-1 disabled:opacity-50">Load more</button>
             ) : null}
+          </div>
+        ) : null}
+
+        {isImapSentView ? (
+          <div data-imap-sent-status role="status" aria-live="polite"
+            className="mb-4 flex flex-none items-center justify-between gap-3 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.8rem] leading-5 text-[var(--workspace-text-soft)]">
+            <span>{imapSent.error ?? (imapSent.loading ? "Loading Sent from your mail provider…"
+              : imapSent.discovery?.mode === "choose" ? "Choose the folder your mail provider uses for sent messages."
+              : imapSent.discovery?.mode === "unavailable" ? "No usable Sent folder was found. Locally saved sends are still available."
+              : imapSent.loaded && imapSent.messages.length === 0 && !imapSent.nextPageToken ? "No provider Sent messages found. Locally saved sends are still available."
+              : "Sent from your mail provider and locally saved sends.")}</span>
+            {imapSent.discovery?.mode === "choose" ? (
+              <select aria-label="Sent folder" value="" disabled={imapSent.loading}
+                className="min-w-0 max-w-[50%] rounded-lg border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-1"
+                onChange={(event) => { if (event.target.value) void imapSent.choose(event.target.value); }}>
+                <option value="" disabled>Select Sent folder</option>
+                {imapSent.discovery.folders.map((folder) => <option key={folder.providerFolder} value={folder.providerFolder}>{folder.displayName}{folder.suggested ? " (suggested)" : ""}</option>)}
+              </select>
+            ) : null}
+            {imapSent.nextPageToken ? <button type="button" disabled={imapSent.loading} onClick={() => { void imapSent.loadMore(); }}
+              className="shrink-0 rounded-lg border border-[var(--workspace-border-soft)] px-3 py-1 disabled:opacity-50">Load more</button> : null}
           </div>
         ) : null}
 
@@ -57208,6 +57273,11 @@ export function WorkspaceShell({
                   }
                   gmailSentConnectionKey={hasAuthenticatedMemberAuthority &&
                     savedManagedInboxes.some((candidate) => candidate.id === activeMailbox.id && candidate.provider === "google") &&
+                    providerArchiveConnectionKeys[activeMailbox.id]
+                      ? `${providerArchiveConnectionKeys[activeMailbox.id]}:${providerArchiveConnectionEpochsRef.current[activeMailbox.id] ?? 0}`
+                      : null}
+                  imapSentConnectionKey={hasAuthenticatedMemberAuthority &&
+                    savedManagedInboxes.some((candidate) => candidate.id === activeMailbox.id && candidate.provider === "custom_imap" && candidate.connected) &&
                     providerArchiveConnectionKeys[activeMailbox.id]
                       ? `${providerArchiveConnectionKeys[activeMailbox.id]}:${providerArchiveConnectionEpochsRef.current[activeMailbox.id] ?? 0}`
                       : null}

@@ -275,7 +275,7 @@ def _download_imap_attachment(handler: BaseHTTPRequestHandler, payload: dict):
             ssl_enabled=imap["ssl"],
         )
 
-        select_status, _ = mailbox.select(folder, readonly=True)
+        select_status, _ = mailbox.select('"' + folder.replace('\\', '\\\\').replace('"', '\\"') + '"', readonly=True)
         if select_status != "OK":
             _json_response(
                 handler,

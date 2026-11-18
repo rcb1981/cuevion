@@ -41,6 +41,7 @@ const componentSource = `
   function SelectionHarness(props) {
     const mailbox = { id: props.mailboxId ?? "box" };
     const activeFolder = props.folder ?? "Sent";
+    const isImapSentView = false;
     const isGmailSentView = props.provider === "google" && activeFolder === "Sent" && props.connected !== false;
     const mailboxStore = props.store;
     const mailboxCollections = mailboxStore[mailbox.id];
@@ -62,7 +63,7 @@ const componentSource = `
       "selectableMessageRows", "selectableMessageSelections", "matchesPrimarySelection",
       "selectedMessageFromFolder", "visibleSelectedMessageKeys", "visibleSelectedMessageIds",
       "selectedMessageFromVisiblePrimary", "selectedMessageFromVisibleSelection",
-      "resolveGmailSentSelection",
+      "resolveGmailSentSelection", "resolveImapSentSelection",
       "selectedMessageFromCurrentId", "selectedMessageFallbackTop", "selectedMessage", "fullWidthMessage",
       "fullMessageModalInteractionState", "fullMessageModalResolvedMessage",
       "handleSelectMessage",
