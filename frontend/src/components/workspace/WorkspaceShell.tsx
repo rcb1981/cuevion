@@ -2,6 +2,8 @@ import { mergeImapSentDisplay } from "../../lib/imapSentState";
 import { useImapSent } from "../../lib/useImapSent";
 import { mergeGmailSentDisplay } from "../../lib/gmailSentState";
 import { useGmailSent } from "../../lib/useGmailSent";
+import { useGmailDrafts } from "../../lib/useGmailDrafts";
+import { GmailDraftsView } from "./GmailDraftsView";
 import { mailboxFolderRailClass, mailboxFolderHeadingClass, mailboxFolderListClass, mailboxFolderRowClass, mailboxFolderSelectedClass, mailboxFolderIdleClass } from "./mailboxFolderStyles";
 import { useMailboxSnapshots } from "../../lib/MailboxSnapshotContext";
 import { useRecipientMemory } from "../../lib/useRecipientMemory";
@@ -17204,6 +17206,7 @@ function MailboxView({
   onArchiveFolderOpen,
   archiveFolderStatusMessage,
   gmailSentConnectionKey,
+  isGmailDraftsMailbox,
   imapSentConnectionKey = null,
   onTrashFolderOpen,
   trashFolderStatusMessage,
@@ -17341,6 +17344,7 @@ function MailboxView({
   onArchiveFolderOpen: () => void;
   archiveFolderStatusMessage: string | null;
   gmailSentConnectionKey: string | null;
+  isGmailDraftsMailbox: boolean;
   imapSentConnectionKey?: string | null;
   onTrashFolderOpen: () => void;
   trashFolderStatusMessage: string | null;
@@ -17417,6 +17421,8 @@ function MailboxView({
   const [sortOrder, setSortOrder] = useState<MailSortOrder>("desc");
   const [activeFolder, setActiveFolder] = useState<MailFolder>("Inbox");
   const [isSharedView, setIsSharedView] = useState(false);
+  const isGmailDraftsView = isGmailDraftsMailbox && activeFolder === "Drafts" && !isSharedView && !activeSmartFolderId;
+  const gmailDrafts = useGmailDrafts(mailbox.id, gmailSentConnectionKey, isGmailDraftsView);
   const isGmailSentView = Boolean(gmailSentConnectionKey) && activeFolder === "Sent" && !isSharedView && !activeSmartFolderId;
   const gmailSent = useGmailSent(mailbox.id, gmailSentConnectionKey, isGmailSentView);
   // Render-only mapping. No normalization/classification or shared-store writes.
@@ -27929,6 +27935,7 @@ function MailboxView({
     };
 
     const handleMailboxKeydown = (event: KeyboardEvent) => {
+      if (isGmailDraftsView) return;
       if (
         isTypingTarget(event.target) ||
         isComposeOpen ||
@@ -28011,6 +28018,7 @@ function MailboxView({
       window.removeEventListener("keydown", handleMailboxKeydown);
     };
   }, [
+    isGmailDraftsView,
     activeFolder,
     activeSmartFolder,
     deleteSelectedMessages,
@@ -28246,6 +28254,27 @@ function MailboxView({
           </button>
           </div>
           <div data-mailbox-toolbar-sync className="flex min-h-[60px] min-w-0 items-center gap-3 border-r border-[var(--workspace-border-soft)] px-3">
+          {isGmailDraftsView ? <MailToolbarIconButton
+            label={gmailDrafts.loading ? "Syncing…" : "Sync"}
+            onClick={() => { void gmailDrafts.refresh(); }}
+            disabled={!gmailSentConnectionKey || gmailDrafts.loading}
+          >
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 16 16"
+              className={`h-4 w-4 ${gmailDrafts.loading ? "animate-spin [animation-direction:reverse]" : ""}`}
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.7"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M13 5.5A5 5 0 0 0 4.5 3L3 4.5" />
+              <path d="M3.5 2.5v2h2" />
+              <path d="M3 10.5A5 5 0 0 0 11.5 13L13 11.5" />
+              <path d="M12.5 13.5v-2h-2" />
+            </svg>
+          </MailToolbarIconButton> : (
           <MailToolbarIconButton
             label={(isGmailSentView ? gmailSent.loading : isImapSentView ? imapSent.loading : mailboxSyncPresentation.inboxRefreshing) ? "Syncing…" : "Sync"}
             onClick={isGmailSentView ? () => { void gmailSent.refresh(); } : isImapSentView ? () => { void imapSent.refresh(); } : onSyncMailbox}
@@ -28267,11 +28296,12 @@ function MailboxView({
               <path d="M12.5 13.5v-2h-2" />
             </svg>
           </MailToolbarIconButton>
+          )}
           <div className="min-w-0 flex-1">
             <h2 className="truncate text-[0.8rem] font-semibold text-[var(--workspace-text)]">
               {displayedFolderTitle}{" "}
               <span className="font-normal text-[var(--workspace-text-muted)]">
-                ({displayedConversationCount}, {displayedUnreadConversationCount} unread shown)
+                {isGmailDraftsView ? `(${gmailDrafts.drafts.length} Gmail drafts, ${mailboxCollections.Drafts.length} local previews)` : <>({displayedConversationCount}, {displayedUnreadConversationCount} unread shown)</>}
               </span>
             </h2>
             {mailboxSyncPresentation.message ? (
@@ -28282,6 +28312,7 @@ function MailboxView({
           </div>
           </div>
           <div data-mailbox-toolbar-actions className="relative z-20 flex min-h-[60px] flex-wrap items-center justify-end gap-2 px-4 sm:px-6">
+          {isGmailDraftsView ? <span className="text-[0.8rem] text-[var(--workspace-text-faint)]">Drafts · View only</span> : <>
           <MailToolbarIconButton
             label="Reply"
             disabled={!hasSingleSelection}
@@ -28602,6 +28633,7 @@ function MailboxView({
               </div>
             ) : null}
           </div>
+          </>}
           </div>
         </div>
 
@@ -29219,6 +29251,16 @@ function MailboxView({
               </div>
             ) : null}
 
+            {isGmailDraftsView ? <GmailDraftsView
+              key={`${mailbox.id}:${gmailSentConnectionKey ?? "disconnected"}`}
+              drafts={gmailDrafts} localPreviews={mailboxCollections.Drafts}
+              connected={Boolean(gmailSentConnectionKey)} mobile={isMobileViewport}
+              renderHtml={(html) => {
+                const safe = sanitizeMessageBodyHtml(html, { allowRemoteImages: false, themeMode, attachments: [] });
+                return safe.html ? <EmailHtmlStage html={safe.html} emailStyles={safe.emailStyles}
+                  themeMode={themeMode} isExternalHtml isProviderHtml /> : <p>This draft has an empty body.</p>;
+              }}
+            /> : <>
             {isWideSplitView && effectiveMailListPaneWidth !== null ? (
               <button
                 type="button"
@@ -29976,6 +30018,7 @@ function MailboxView({
                 )}
               </div>
             </div>
+            </>}
           </div>
               )}
 
@@ -57278,6 +57321,8 @@ export function WorkspaceShell({
                     readCurrentProviderArchiveKnowledge(mailboxId)
                       .capability === "unavailable"
                   }
+                  isGmailDraftsMailbox={hasAuthenticatedMemberAuthority &&
+                    savedManagedInboxes.some((candidate) => candidate.id === activeMailbox.id && candidate.provider === "google")}
                   gmailSentConnectionKey={hasAuthenticatedMemberAuthority &&
                     savedManagedInboxes.some((candidate) => candidate.id === activeMailbox.id && candidate.provider === "google") &&
                     providerArchiveConnectionKeys[activeMailbox.id]
