@@ -4,6 +4,7 @@ import imaplib
 import io
 import json
 import socket
+import ssl
 import sys
 import time
 import unittest
@@ -13,6 +14,8 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from api.inboxes import imap_sent as discovery, imap_sent_snapshot as reader
+from api.inboxes.imap_network_policy import _PreconnectedIMAP4SSL
+import imap_connect_preview as preview
 route = importlib.import_module('api.inboxes.fetch-imap-sent')
 attachment = importlib.import_module('api.inboxes.download-attachment')
 
@@ -61,6 +64,8 @@ class Mailbox:
         return 'OK', [str(len(self.rows)).encode()]
 
     def response(self, name):
+        if name == 'CAPABILITY':
+            return name, [None]
         if name == 'UIDVALIDITY':
             return name, [str(int(self.uv) + (1 if self.changed_uv and self.select_count > 1 else 0)).encode()]
         if name == 'UIDNEXT':
@@ -127,6 +132,28 @@ class SyntheticOnly(unittest.TestCase):
 
 
 class DiscoveryTests(SyntheticOnly):
+    def test_fresh_capability_validation_still_fails_closed(self):
+        valid = b'IMAP4rev1 SPECIAL-USE'
+        for status, data in [('NO', [valid]), ('BAD', [valid]), ('OK', None),
+                             ('OK', []), ('OK', [None]), ('OK', ['IMAP4rev1']),
+                             ('OK', [valid, valid]), ('OK', [b'x' * 16385]),
+                             ('OK', [b'IMAP4rev1 \xff'])]:
+            with self.subTest(status=status, data=data):
+                m = Mailbox()
+                with patch.object(m, 'capability', return_value=(status, data)), \
+                        self.assertRaises(discovery.SentError) as raised:
+                    discovery.discover_sent(m)
+                self.assertEqual(raised.exception.code, 'sent_inventory_unavailable')
+                self.assertEqual(raised.exception.message, 'IMAP folder capabilities could not be verified.')
+                self.assertEqual(raised.exception.status, 502)
+                self.assertEqual(m.calls, [])  # No LIST or mailbox read after rejection.
+
+    def test_capability_case_and_unknown_extensions_preserve_special_use(self):
+        m = Mailbox()
+        m.capabilities = (b'imap4rev1', b'special-use', b'AUTH=PLAIN', b'X-SYNTHETIC')
+        self.assertEqual(discovery.discover_sent(m)['providerFolder'], 'Sent Messages')
+        self.assertEqual(m.calls[-1], ('LIST', '""', '"*"', 'RETURN', '(SPECIAL-USE)'))
+
     def test_special_use_icloud_dovecot_and_generic(self):
         for folder in ['Sent Messages', 'INBOX.Sent', 'Sent Items']:
             m = Mailbox(folders=[f'(\\Sent) "." "{folder}"'.encode()])
@@ -315,6 +342,46 @@ class RouteTests(SyntheticOnly):
         self.assertEqual(connect.call_args.kwargs['host'], 'imap.example.invalid')
         self.assertNotIn('fixture-secret', json.dumps(h.body()))
         self.assertEqual(m.calls[-1][0], 'LOGOUT')
+
+    def test_login_capability_cache_does_not_break_fresh_discovery(self):
+        # Use the production TLS IMAP class and real login/parser, without sockets.
+        # LOGIN's optional capability response is cached separately by imaplib.
+        automatic = b'* CAPABILITY IMAP4rev1 SPECIAL-USE\r\n'
+        for unsolicited, cached, special in [
+                (b'', None, True), (b'', b'IMAP4rev1 SPECIAL-USE', True),
+                (automatic, None, True), (automatic, b'IMAP4rev1 SPECIAL-USE', True),
+                (b'', b'IMAP4rev1', True), (b'', b'IMAP4rev1 SPECIAL-USE', False),
+                (automatic, b'IMAP4rev1 SPECIAL-USE', False)]:
+            with self.subTest(unsolicited=bool(unsolicited), cached=cached, special=special):
+                capabilities = b'IMAP4rev1 SPECIAL-USE' if special else b'IMAP4rev1'
+                login_code = b'[CAPABILITY ' + cached + b'] ' if cached else b''
+                listing = b'(\\Sent)' if special else b'()'
+                def examined(tag):
+                    return (b'* 0 EXISTS\r\n* OK [UIDVALIDITY 101] stable\r\n'
+                            b'* OK [UIDNEXT 1] next\r\n' + tag + b' OK [READ-ONLY] examined\r\n')
+                wire = (b'* OK synthetic ready\r\n* CAPABILITY IMAP4rev1 AUTH=PLAIN\r\nT0 OK capability\r\n'
+                        + unsolicited + b'T1 OK ' + login_code + b'authenticated\r\n'
+                        b'* CAPABILITY ' + capabilities + b'\r\nT2 OK capability\r\n'
+                        b'* LIST ' + listing + b' "/" "Sent Messages"\r\nT3 OK list\r\n')
+                if special:
+                    wire += examined(b'T4') + examined(b'T5')
+                wire += b'* BYE logout\r\n' + (b'T6' if special else b'T4') + b' OK logout\r\n'
+                sock = Mock(); sock.makefile.return_value = io.BufferedReader(io.BytesIO(wire))
+                with patch.object(imaplib, 'Int2AP', return_value=b'T'):
+                    mailbox = _PreconnectedIMAP4SSL('synthetic.invalid', 993, sock,
+                        ssl_context=ssl.create_default_context(), timeout=5)
+                h = Handler({'mailboxId': 'box'})
+                with patch.object(preview, 'open_public_imap_connection', return_value=mailbox), \
+                        patch.object(route, 'resolve_context', return_value=(CONTEXT, SCOPE, KEY)):
+                    route.handler.do_POST(h)
+                self.assertEqual(h.status, 200, h.body())
+                self.assertEqual(h.body()['discovery']['mode'], 'ready' if special else 'choose')
+                commands = [c.args[0] for c in sock.sendall.call_args_list]
+                expected_list = b'T3 LIST "" "*"' + (b' RETURN (SPECIAL-USE)' if special else b'') + b'\r\n'
+                self.assertIn(expected_list, commands)
+                self.assertEqual([c.split()[1] for c in commands],
+                    [b'CAPABILITY', b'LOGIN', b'CAPABILITY', b'LIST']
+                    + ([b'EXAMINE', b'EXAMINE'] if special else []) + [b'LOGOUT'])
 
     def test_untrusted_request_fields_never_connect(self):
         for extra in [{'host': 'bad'}, {'password': 'bad'}, {'provider': 'google'}, {'limit': True}, {'limit': 21}, {'limit': 0}, {'folderChoice': None}, {'folderChoice': 'bad\r\n'}, {'pageToken': None}]:

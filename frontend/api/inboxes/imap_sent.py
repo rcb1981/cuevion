@@ -35,6 +35,9 @@ def folder_label(wire):
 
 
 def discover_sent(mailbox, choice=None):
+    # LOGIN may cache a CAPABILITY response code. Consume it before asking for
+    # fresh capabilities so imaplib does not combine the two response lists.
+    mailbox.response('CAPABILITY')
     status, data = mailbox.capability()
     if status != 'OK' or type(data) is not list or len(data) != 1 or type(data[0]) is not bytes or len(data[0]) > 16384:
         raise SentError('sent_inventory_unavailable', 'IMAP folder capabilities could not be verified.')
